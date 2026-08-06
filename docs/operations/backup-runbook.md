@@ -102,6 +102,29 @@ failure logs accumulate until pruned deliberately.
 | `Refusing to restore into the active working repository` | `-RestoreTestsRoot` points inside the live repo | Correct the path. This guard prevents destroying live work |
 | `expected 11 passing tests, observed …` | The restored clone does not verify | **Investigate before trusting any backup.** Do not record success |
 
+## Do not pipe the script's output
+
+Run the scripts **directly**. Do not pipe them through `Select-String`, `Tee-Object`,
+`Out-File`, or any other command:
+
+```powershell
+.\scripts\backup-aion.ps1                          # correct
+.\scripts\backup-aion.ps1 | Select-String 'SUCCESS' # WRONG - will fail the run
+```
+
+Piping causes Windows PowerShell 5.1 to merge the native `git` command's stderr into the
+success stream. Git writes ordinary progress there — `From C:\...`, `Cloning into...` — and
+under `$ErrorActionPreference = 'Stop'` those lines become terminating errors. The run aborts
+partway with a message like `FAIL: From C:\Users\...` and is recorded as FAILURE.
+
+Observed on 2026-08-06: a piped run of commit `d3ec67c` failed at the mirror-update step; the
+identical unpiped run immediately afterwards succeeded with a passing restore test. The script
+behaved correctly — it recorded FAILURE, retained the evidence, and did not relabel — but the
+failure was an artefact of invocation, not of the backup.
+
+If you need the output saved, redirect the whole invocation from outside PowerShell, or read
+`logs\backup-<UTC>.log` afterwards.
+
 ## Reading `git fsck` output
 
 The mirror integrity check prints `dangling blob …` lines. These are **informational**,
