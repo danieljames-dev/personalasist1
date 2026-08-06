@@ -1,0 +1,140 @@
+# AION Backup Runbook
+
+Status: Operational, on-demand only  
+Owner: Project AION CTO  
+Approved backup root: `D:\AION-backups` (WD easystore, USB)  
+Approved canonical remote: `https://github.com/danieljames-dev/personalasist1.git`  
+Scheduling: **Not approved.** Run these procedures manually.
+
+Authority: [backup strategy](backup-strategy.md). This runbook is the operator
+procedure; the strategy is the design and the standing gaps.
+
+## The one rule
+
+**A backup is SUCCESS only after its restore test passes.** Artifacts plus checksums do
+not make a recovery point. If the restore test fails, the run is FAILURE, the evidence is
+kept, and the previous known-good backup remains the current recovery point.
+
+## Before you start
+
+1. Connect the WD easystore drive and confirm it mounts as `D:`.
+2. Confirm the working tree is clean, or know exactly which untracked files you intend to
+   include. The script refuses to run otherwise — that refusal is deliberate.
+3. Confirm `git remote get-url origin` matches the approved remote. The script also
+   checks this and aborts on mismatch.
+
+## Procedure — dry run
+
+Always dry run first after any change to the scripts, the drive, or the remote.
+
+```powershell
+.\scripts\backup-aion.ps1 -DryRun
+```
+
+With untracked files you intend to archive:
+
+```powershell
+.\scripts\backup-aion.ps1 -DryRun -IncludeUntracked 'docs/operations/notes.md'
+```
+
+A dry run writes **nothing** — no directories, no logs, no evidence file. It reports the
+paths it would create and exits 0. If it exits non-zero, fix the cause before proceeding.
+
+## Procedure — real backup
+
+```powershell
+.\scripts\backup-aion.ps1
+```
+
+Expected output ends with:
+
+```
+  [restore] RESTORE TEST PASSED
+  [backup] BACKUP SUCCESS - restore test passed
+```
+
+Exit code 0 means the run is a valid recovery point. Any other exit code means it is not.
+
+The run takes a few minutes; most of it is `npm ci` in the restored clone, which
+downloads dependencies from the network.
+
+## Procedure — standalone restore test
+
+To re-prove an existing mirror without creating new artifacts:
+
+```powershell
+.\scripts\restore-test-aion.ps1 -ExpectedCommit <full-40-char-sha>
+```
+
+Each run creates a **new** timestamped directory under `restore-tests\`. It never
+restores over the active working repository, and it refuses if the target already exists.
+
+## What gets written
+
+```
+D:\AION-backups\
+    repository-mirror\AION.git                  bare mirror, updated in place
+    working-snapshots\AION-<UTC>.bundle         immutable point-in-time bundle
+    working-snapshots\AION-<UTC>-untracked.zip  declared untracked files only
+    manifests\backup-<UTC>.json                 machine-readable run record
+    logs\backup-<UTC>.log                       run log
+    logs\restore-<UTC>.result.json              restore-test verdict
+    logs\restore-<UTC>.{npm-ci,verify}.*.log    captured tool output
+    restore-tests\restore-<UTC>\                isolated proof clone
+    releases\                                   reserved, see strategy §5
+    databases\                                  reserved, no engine approved
+```
+
+Nothing is ever deleted automatically. Prior backups, restore-test directories, and
+failure logs accumulate until pruned deliberately.
+
+## Refusals and what they mean
+
+| Message | Cause | Action |
+|---|---|---|
+| `Not a Git repository root` | `-RepositoryPath` is wrong | Point at the repository root |
+| `Repository root mismatch` | Running from a subdirectory or a symlinked path | Run from the true root |
+| `Remote mismatch` | `origin` is not the approved canonical remote | Do not override. Confirm which repository is canonical first |
+| `Refusing to back up a dirty working tree` | Staged or modified tracked files | Commit or revert. A backup of half-finished work is not a recovery point |
+| `Undeclared untracked files present` | Untracked files exist that were not named | Name them with `-IncludeUntracked`, or remove them |
+| `matches forbidden pattern` | A declared file is a secret, dependency, build output, or editor state | Do not archive it. Fix the declaration |
+| `Restore directory already exists` | Timestamp collision | Re-run; the timestamp advances |
+| `Refusing to restore into the active working repository` | `-RestoreTestsRoot` points inside the live repo | Correct the path. This guard prevents destroying live work |
+| `expected 11 passing tests, observed …` | The restored clone does not verify | **Investigate before trusting any backup.** Do not record success |
+
+## Reading `git fsck` output
+
+The mirror integrity check prints `dangling blob …` lines. These are **informational**,
+not errors — they are unreferenced objects left by ordinary Git operations. The check
+fails only on a non-zero exit code, which aborts the run. Missing or corrupt objects
+would appear as `missing`, `broken link`, or `error`, and those are real.
+
+## After a successful run
+
+Record in the drive log or asset register: date, commit hash, manifest path, and restore
+result. Then safely eject the drive through **Safely Remove Hardware** before
+disconnecting. Do not leave the drive permanently mounted — a permanently attached backup
+drive is reachable by the same ransomware that reaches the workstation.
+
+## After a failed run
+
+1. Do **not** record success anywhere.
+2. Keep every log and the manifest — the failure evidence is the point.
+3. Confirm the previous known-good backup is still present and still passes a standalone
+   restore test.
+4. Diagnose from `logs\restore-<UTC>.verify.err.log` and `…npm-ci.err.log`.
+5. A restore-test failure with a healthy working repository usually means the backup is
+   bad. A failure that also reproduces in the working repository means the *repository*
+   is bad — treat it as repository corruption per the strategy, and do not update the
+   mirror, which would carry the fault forward.
+
+## Standing gaps
+
+- **No off-site copy and no offline rotated copy.** One drive is approved, so
+  single-site loss remains unmitigated. Strategy §3 requires a second drive.
+- **Scheduling is not approved.** Every run is manual, so the real RPO is "time since
+  someone last ran this," not 24 hours.
+- **No encryption is enforced by the tooling.** BitLocker To Go on the drive is an
+  operator responsibility; the scripts do not verify it.
+- **`databases\` is empty and reserved.** No database engine is approved, so no
+  application data is protected by this procedure yet.
