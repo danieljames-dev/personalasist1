@@ -1,0 +1,34 @@
+{
+  "name": "@aion/kernel",
+  "version": "0.1.0",
+  "description": "The versioned lifecycle kernel for Project AION",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./kernel/v1": {
+      "types": "./dist/kernel/v1/index.d.ts",
+      "import": "./dist/kernel/v1/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED"
+}
