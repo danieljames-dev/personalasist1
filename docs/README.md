@@ -83,8 +83,23 @@ design and fixture authoring only. Nothing below authorizes implementation.
 - [Acceptance criteria](sprints/sprint-2.6-canonical-serialization/acceptance-criteria.md)
 - [Risk register](sprints/sprint-2.6-canonical-serialization/risks.md)
 
+## Sprint 2.7 proposal: Contract fixture corpus
+
+ADR-009 is **Proposed**. It targets deferred gate **DG-3**, which **remains open** —
+specification alone does not close it. The readiness review returned APPROVE WITH CHANGES
+with three blocking findings. No fixture, loader, or harness exists or is authorized.
+
+- [ADR-009: Contract fixture corpus](decisions/ADR-009-contract-fixture-corpus.md) — Proposed
+- [CTO-DECISION-004: Sprint 2.7 authorization and timestamp precision](decisions/CTO-DECISION-004-sprint-2.7-authorization.md)
+- [Contract Fixture Corpus — AFX-1](contracts/contract-fixture-corpus.md)
+- [Contract Fixture Corpus Threat Model](security/contract-fixture-corpus-threat-model.md)
+- [Sprint specification](sprints/sprint-2.7-fixture-corpus/specification.md)
+- [Acceptance criteria](sprints/sprint-2.7-fixture-corpus/acceptance-criteria.md)
+- [Risk register](sprints/sprint-2.7-fixture-corpus/risks.md)
+
 ## Reviews
 
+- [Contract fixture corpus readiness review](reviews/contract-fixture-corpus-readiness-review.md)
 - [Canonical serialization readiness review](reviews/canonical-serialization-readiness-review.md)
 
 - [Sprint 2.5 Object Model Review](reviews/sprint-2.5-object-model-review.md)

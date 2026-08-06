@@ -110,7 +110,7 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 |---|---|
 | DG-1 Identity bootstrap | **Open** |
 | DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
-| DG-3 Representative fixtures | **Open**; unblocked for design and fixture authoring only |
+| DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Proposed); no fixture, loader, or harness exists. Three coverage areas BLOCKED on open gates |
 | DG-4 Measurable limits | **Open** |
 
 ### DG-1 — Identity bootstrap
@@ -152,7 +152,8 @@ subordinate decisions carry forward — see
 | Risk | Premature v1 freeze; a domain that cannot conform without violating its responsibility; unbounded envelope growth discovered after commitment. |
 | Affected components | Universal Object Contract, all future domain schemas, export format, migration graph |
 | Blocking gate | **Still open.** Must exist and pass before the Object Contract can be designated stable v1. |
-| Status | **Unblocked for design and fixture authoring only.** DG-2's closure supplies the canonicalization profile and framing needed to compute an expected digest, so fixtures can now be specified and authored. **Implementation remains unauthorized**, and no fixture has been produced. |
+| Status | **Open.** Specification authorized and delivered by [ADR-009](../../decisions/ADR-009-contract-fixture-corpus.md) (Proposed) and the [AFX-1 corpus contract](../../contracts/contract-fixture-corpus.md), 2026-08-06. **Specification alone does not close DG-3.** No fixture, loader, or harness exists or is authorized. Three coverage areas remain BLOCKED on open gates: maximum-member rejection (DG-4), invalid decimal representation (decimal decision), and cross-runtime agreement (no second runtime selected). |
+| Closure conditions | Fixture schema accepted; ADR-009 accepted; required initial corpus created; positive **and** negative cases present; timestamp precision decision reflected; canonical, framed, and digest expectations recorded; **cross-runtime conformance demonstrated**; release manifest produced; artifacts checksummed; corpus security review passed; no private data or secrets present; `npm run verify` and future corpus checks pass; Object Contract stability gate satisfied. |
 | Required evidence | Language-neutral fixtures modelling at least Owner record, Document, Project, Task, Memory, Capability, Workflow, Relationship, Version, and Event Objects, demonstrating bounded size, round-trip export, migration, and domain-boundary conformance. Each carries source value, expected canonical bytes, expected framed digest input and digest, expected validation outcome, applicable versions, and rationale. Rejection fixtures are mandatory. |
 | Review trigger | Any proposal to label the contract stable v1, publish golden schemas, or begin a domain schema that depends on a frozen envelope. |
 

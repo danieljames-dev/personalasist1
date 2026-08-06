@@ -169,8 +169,9 @@ it duplicates it.
 - `CanonicalContractValidatorV1` must exist before any string can be accepted as a
   contract value. It does not exist, so NFC and several threat-model controls are
   specified rather than active.
-- Framing adds 28 bytes of fixed overhead per digest input. Negligible, and the price of
-  injectivity that does not depend on field content.
+- Framing adds 32 bytes of fixed length-prefix overhead per digest input — six `u32`
+  textual-field lengths (24 bytes) plus one `u64` payload length (8 bytes). Negligible, and
+  the price of injectivity that does not depend on field content.
 - Base64url encoding of binary inflates payloads by roughly one third; large artifacts
   must stay out of canonical envelopes and use content-addressed references.
 - Profile migration re-canonicalizes and re-digests every retained Object, Version, Event,

@@ -312,6 +312,47 @@ digits**, always present: `2026-08-06T05:20:19.000Z`.
 Fixed precision is required because `…:19Z`, `…:19.0Z`, and `…:19.000Z` denote one instant
 but produce three digests. Leap seconds are rejected. Year is exactly four digits.
 
+### Higher-precision sources — conversion is explicit and lossy
+
+Recorded by [CTO-DECISION-004](../decisions/CTO-DECISION-004-sprint-2.7-authorization.md),
+resolving readiness finding NB-7. The syntax and UTC rules above are unchanged; this states
+what happens to a source that carries more precision than the canonical position admits.
+
+A microsecond or nanosecond source timestamp is **not directly representable** in a
+canonical position. Converting it is:
+
+- **explicit** — a declared conversion step, never an implicit coercion;
+- **intentional** — the producer chooses it;
+- **potentially lossy** — and must be treated as such;
+- **performed before canonical contract validation**; and
+- **never performed silently by the canonicalizer.**
+
+When a source timestamp carries precision beyond three fractional digits:
+
+1. Excess fractional digits are **truncated, never rounded.**
+2. Truncation **must not move the represented instant forward.** Truncation is therefore
+   toward **negative infinity (floor)**, never toward zero. The two coincide only at or
+   after the epoch; §14 permits any four-digit year, so pre-epoch instants are representable
+   and truncating a negative epoch offset toward zero would move the instant forward.
+3. The conversion boundary **must declare that precision was lost.**
+4. The original source representation and its precision **must remain available through
+   provenance** when operationally, legally, scientifically, or historically material.
+5. The resulting three-digit value is then validated normally.
+6. `CanonicalContractValidatorV1` **rejects** canonical-position timestamp values carrying
+   excess fractional digits. It does not truncate them.
+7. The canonicalizer **never** truncates, rounds, repairs, normalizes, or infers timestamp
+   precision.
+
+Rounding is prohibited because it can move an instant forward past an event that has not
+occurred, and because two implementations rounding half-to-even versus half-away-from-zero
+would produce different digests for one source value. Truncation is deterministic in every
+runtime.
+
+This mirrors §15: a producer holding a local time converts before the value becomes a
+contract value, and the original offset survives as a separate declared field if it carries
+meaning. Precision is handled the same way — converted at the producer, declared as lost,
+preserved in provenance where it matters.
+
 ## 15. Time zone
 
 UTC only. `Z`, never `+00:00`, never a local offset. A producer holding a local time
@@ -551,7 +592,7 @@ for the same stated reason. Error categories:
 | `duplicate-member` | Repeated member name |
 | `invalid-key` | Non-string, empty, or malformed key |
 | `limit-exceeded` | §29–§31 |
-| `invalid-timestamp` | Wrong precision, offset, or leap second |
+| `invalid-timestamp` | Wrong precision, offset, or leap second — including a canonical-position value carrying more than three fractional digits, which is rejected and never truncated (§14) |
 | `invalid-identifier` | Identifier fails §16 |
 | `unvalidated-input` | Canonicalization attempted on a value not validated against a named schema and profile (§0) |
 | `missing-frame` | Digest or signature attempted without AION Frame domain separation (§23) |
