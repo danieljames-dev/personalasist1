@@ -2,11 +2,20 @@
 
 Review subject: AFX-1 fixture corpus profile and ADR-009  
 Reviewer role: Principal Architect / CTO design authority  
-Date: 2026-08-06  
+First review: 2026-08-06 — APPROVE WITH CHANGES (B-1, B-2, B-3)  
+Second review: 2026-08-06, after corrections — **APPROVE**  
 Decision scope: Architecture readiness only. No implementation authorization is requested,
-granted, or implied. **ADR-009 remains Proposed regardless of this recommendation.**
+granted, or implied.
 
-Posture: this review attempts to **reject** the design.
+Posture: this review attempts to **reject** the design, in both passes.
+
+> **Disposition — 2026-08-06.** The Founder/CTO resolved B-1, B-2, and B-3 by directive and
+> ADR-009 is now **Accepted** — see
+> [CTO-DECISION-005](../decisions/CTO-DECISION-005-fixture-corpus-architecture.md).
+> Normative fixtures remain **unauthorized** behind a seven-condition gate. DG-3 remains
+> open, the Object Contract remains pre-stable, and the implementation freeze remains in
+> effect. Part 5 below records the second pass; Parts 1–4 are retained as written, as the
+> evidence behind the decision.
 
 ## Method, and an honest account of it
 
@@ -372,7 +381,154 @@ error the contract most fears.
 | 17 | No personal or owner data authorized | **Confirmed** — hard prohibition, no exception path |
 | 18 | No implementation freeze lifted | **Confirmed** |
 
-## Recommendation
+## Part 5 — second review, after corrections (2026-08-06)
+
+### Disposition of the three blockers
+
+#### B-1 — S0 error-category matching was unachievable
+
+**Original finding.** The evidence contract required matching stable error categories
+"wherever ACJ-1 §33 requires one." §33 was written for `CanonicalContractValidatorV1`, an S2
+component operating on a parsed value under AION-owned semantics. At S0 the actor is a JSON
+parser and AION owns none of its taxonomy, so two correct implementations would fail
+conformance for a non-defect.
+
+**Correction applied.** S0 agreement is now limited to six observable facts — rejected;
+rejected at S0; no usable contract value; no canonical bytes; no frame; no digest. Parser
+diagnostic categories are explicitly non-normative, carried only as an optional
+`diagnosticHint` that never participates in a verdict. Stable AION categories begin at S2; at
+S1 only categories an accepted AION schema- or profile-resolution contract owns are normative.
+Inventing parser codes to manufacture uniformity is prohibited.
+
+**Documents and sections changed.** `contracts/contract-fixture-corpus.md` §2 new subsection
+"Where error-code conformance begins"; `decisions/ADR-009-…` §Readiness blockers resolved;
+`decisions/CTO-DECISION-005-…` §Parser-Stage Conformance Decision;
+`sprints/sprint-2.7-fixture-corpus/{specification,acceptance-criteria,risks}.md`.
+
+**Remaining risk.** S0 conformance is now weaker in exchange for being achievable. Two
+implementations can both reject at S0 for genuinely different reasons and still pass — one
+because the UTF-8 was invalid, the other because a number was malformed. The corpus cannot
+detect that. This is an accepted narrowing, recorded as FX-024 rather than eliminated.
+
+**No longer blocking.** The finding was that the requirement was unsatisfiable by any correct
+implementation. It is now satisfiable, and the part AION actually owns — validation semantics
+at S2 — retains full normative force.
+
+#### B-2 — the first ten fixtures could not yet be meaningful
+
+**Original finding.** Three coverage areas BLOCKED, limits provisional, S0 taxonomy
+unsettled, no second runtime — so expected values would be hand-derived and unverified, and
+DG-3 would appear to progress while the corpus certified one person's arithmetic.
+
+**Correction applied.** ADR-009 acceptance is now explicitly decoupled from fixture
+authorization. A seven-condition gate governs the first normative corpus, and candidate
+fixtures are formally distinguished from normative released ones: a candidate may carry
+hand-derived values, never contributes to a conformance verdict, and is promoted only on
+independent reproduction. Sprint 2.8 additionally prohibits authoring even candidates.
+
+**Documents and sections changed.** `contracts/contract-fixture-corpus.md` new §11.1;
+`decisions/ADR-009-…` header, §Readiness blockers resolved, §Approval effect;
+`decisions/CTO-DECISION-005-…` §Normative Fixture Authorization Boundary;
+`sprints/sprint-2.5/acceptance-criteria.md` DG-3 register.
+
+**Remaining risk.** Gate condition 3 — a fixture must not become the sole oracle for its own
+correctness — has **no structural enforcement**. It is a process control, and the only
+mechanism that would make it structural is a second implementation, which does not exist.
+
+**No longer blocking.** The finding was that acceptance would authorize premature fixtures.
+It no longer does, and the gate makes the remaining dependencies explicit and checkable rather
+than implicit.
+
+#### B-3 — no structural defence against a wrong expected value
+
+**Original finding.** `expectedValueProvenance` required an author to *declare* how a value
+was obtained; nothing verified the declaration. A digest computed over canonical bytes without
+the frame — the exact ACJ-1 §23 violation the `checksum`/`digest` split exists to prevent — is
+well-formed, honestly declared, and wrong.
+
+**Correction applied.** `expectedDigestInput` is mandatory, and `expectedDigest` is
+representable **only** alongside it, so omission is structurally impossible rather than
+discouraged. Eleven evidence items are required for any digest-bearing fixture. Five artifacts
+now carry five distinct names with an explicit never-interchange table. A normative
+clarification records that under ACJ-1 §23 the framed digest input *is* the frame byte
+sequence, so the two fields carry identical bytes for `acj-1` — and a loader must verify that,
+making the identity checkable rather than assumed.
+
+**Documents and sections changed.** `contracts/contract-fixture-corpus.md` §4 field matrix
+and new §4.1; `decisions/ADR-009-…` §Readiness blockers resolved;
+`decisions/CTO-DECISION-005-…` §Digest Evidence Decision;
+`sprints/sprint-2.7-fixture-corpus/*`.
+
+**Remaining risk.** This makes derivation *auditable*, not *correct*. A reviewer can now
+recompute `digest(expectedDigestInput)` and re-derive the frame from recorded fields without a
+second implementation — which catches wrong framing, wrong purpose, wrong profile, and
+unframed hashing. It does not catch a correct digest over a *wrongly canonicalized* payload.
+That still needs independent reproduction.
+
+**No longer blocking.** The specific error class the contract most fears is now detectable by
+one reviewer with a hash function.
+
+### Re-evaluation across the twenty required dimensions
+
+| # | Dimension | Verdict |
+|---:|---|---|
+| 1 | Raw-byte vs structured-value separation | **Sound.** Entry-B mandatory where a parsed value destroys the fact; duplicate members decisive. Unchanged by the corrections |
+| 2 | S0 rejection semantics | **Now achievable.** Six observable facts, no taxonomy coupling |
+| 3 | S1 vs S2 error ownership | **Correctly assigned.** AION owns S2 fully, S1 only where an accepted contract owns the semantics, S0 not at all |
+| 4 | Contradictory expectation prevention | **Structural.** One tagged `expectation`; `reject` prohibits output members; loader does its own duplicate-key rejection rather than relying on the unimplemented validator |
+| 5 | Digest evidence auditability | **Resolved by B-3.** Independently checkable without a second implementation |
+| 6 | Expected-value trust | **Improved, not solved.** Auditable derivation; correctness still needs independent reproduction. Gate conditions 2, 3, 7 |
+| 7 | Candidate vs normative lifecycle | **Now defined.** Promotion requires independent reproduction; candidates never reach a verdict |
+| 8 | Cross-runtime independence | **Specified, unmet.** No second runtime; independence verified by dependency inspection when one exists |
+| 9 | Windows newline safety | **Structural.** Verified by execution; sidecars prohibited; hex immune to text conversion |
+| 10 | Inline hexadecimal decision | **Confirmed.** Only encoding that can carry lone surrogates and invalid UTF-8; base64url non-injective |
+| 11 | Fixture identifier stability | **Sound.** Ledger-allocated, assertion-tuple identity, no reuse |
+| 12 | Corpus release integrity | **Sound.** Pinned by version and checksum, offline-verifiable, ratcheted |
+| 13 | Personal-data exclusion | **Process only.** Hard prohibition, no structural backstop. NB-1 stands |
+| 14 | Version separation | **Sound.** Seven categories with explicit negative space |
+| 15 | Timestamp precision-loss handling | **Sound.** Floor toward negative infinity; exact integer instants; pre-epoch fixture required |
+| 16 | DG-4 dependency | **Correctly handled.** Limits provisional, area 26 BLOCKED, area 25 flagged |
+| 17 | Decimal-decision dependency | **Correctly handled.** Area 37 BLOCKED; gate condition 6 |
+| 18 | False-confidence risks | **Named and partially mitigated.** Non-vacuity is structural; the other three controls remain process. FX-001–003 |
+| 19 | Ten-year maintainability | **Sound with one gap.** Paired migration fixtures and append-only IDs are right; archival *loaders* for retired record schemas still unrequired (NB-4) |
+| 20 | Implementation-freeze preservation | **Confirmed.** Restated in ADR-009 §Approval effect, CTO-DECISION-005, and every sprint record |
+
+### Findings that remain open
+
+NB-1 (personal-data exclusion has no structural backstop), NB-3 (schema complexity to be
+re-examined after the first fixtures), NB-4 (archival loaders unrequired), NB-5 (4096-byte cap
+undirected), NB-6 (illustrative/normative tree placement), NB-7 (hex unreviewability), plus
+new **NB-8**: S0 conformance now cannot distinguish two implementations rejecting for
+different reasons — an accepted narrowing, tracked as FX-024.
+
+None blocks acceptance.
+
+## Recommendation — second review
+
+# APPROVE
+
+All three blocking findings are resolved, and none by deletion. B-1 replaced an unsatisfiable
+requirement with an achievable one while preserving normative force where AION actually owns
+the semantics. B-2 separated architecture acceptance from fixture authorization, which is the
+distinction the original finding was really about. B-3 converted a process control into a
+checkable one.
+
+The design's best properties are unchanged and were not weakened: whole failure classes remain
+unrepresentable rather than defended, and the vacuous-pass failure mode remains named and
+structurally caught.
+
+**What this does not establish.** No fixture exists. No loader, no harness, no second
+implementation. Cross-runtime agreement — the only thing that would make this corpus evidence
+rather than intention — has never been demonstrated. Approval accepts an architecture for
+producing evidence, not evidence.
+
+ADR-009 is **Accepted**. Normative fixtures remain **unauthorized**. DG-3 remains **open**.
+DG-1 and DG-4 remain open. The Universal Object Contract remains **pre-stable**. The
+implementation freeze remains in effect.
+
+---
+
+## Recommendation — first review (retained)
 
 # APPROVE WITH CHANGES
 

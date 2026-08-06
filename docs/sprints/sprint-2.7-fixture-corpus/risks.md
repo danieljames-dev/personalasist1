@@ -1,7 +1,12 @@
 # Sprint 2.7 Contract Fixture Corpus Risks
 
-Status: **Proposed** architecture challenge record  
-Implementation: **Frozen**
+Status: **Accepted** as the standing risk register, 2026-08-06  
+Implementation: **Frozen**  
+Normative fixtures: **Not authorized**
+
+FX-002, FX-003, and FX-024 were changed by the B-1, B-2, and B-3 corrections and are updated
+in place below. Every other entry remains open and unmitigated. ADR-009's acceptance did not
+retire this register, and did not authorize a single fixture.
 
 ## Review posture
 
@@ -21,8 +26,8 @@ failure.
 | ID | Risk | Severity | Failure scenario | Recommendation |
 |---|---|---:|---|---|
 | FX-001 | Vacuous pass | **Critical** | `node --test` with zero matching files exits 0. An empty corpus, an unresolvable manifest, or a filter matching nothing reports green and is indistinguishable from complete success — at the exact gate meant to prevent that | Executed-count must equal pinned manifest count and exceed zero; ratchet floors met; run fails loudly if it cannot establish them (contract §10) |
-| FX-002 | Wrong expected value | **Critical** | A hand-computed digest is wrong. A correct implementation fails; a matching wrong implementation passes. The corpus actively certifies the defect | `expectedValueProvenance` on every acceptance fixture; a value produced by the implementation under test is circular and rejected. **Process control only — the corpus's weakest link** |
-| FX-003 | One runtime testing itself | **Critical** | Implementation A generates expected values; A is later "verified" against them. Self-consistency reported as cross-runtime agreement | Independence verified by dependency inspection, not asserted; a single-runtime run may never be reported as cross-runtime agreement |
+| FX-002 | Wrong expected value | **Critical → High** | A hand-computed digest is wrong. A correct implementation fails; a matching wrong implementation passes | **Partially addressed by B-3.** `expectedDigestInput` is now mandatory, so a reviewer recomputes `digest(input)` and re-derives the frame from recorded fields without a second implementation — catching wrong framing, wrong purpose, wrong profile, and unframed hashing. It does **not** catch a correct digest over a wrongly canonicalized payload; that still needs independent reproduction |
+| FX-003 | One runtime testing itself | **Critical** | Implementation A generates expected values; A is later "verified" against them. Self-consistency reported as cross-runtime agreement | **Unchanged.** Gate condition 3 forbids a fixture becoming its own oracle, and promotion requires independent reproduction — but both are process controls with no structural backstop while no second runtime exists |
 | FX-004 | Git destroys authoritative bytes | **Critical** | Verified in this repo: `printf 'a\r\nb'` and `printf 'a\nb'` hash identically through `git hash-object --path=…`, silently, `core.safecrlf` unset. The fixture proving ACJ-1 §27 is the file Git rewrites into a passing test | **Addressed structurally.** Sidecars prohibited; bytes inline as hex, unaffected by text conversion |
 | FX-005 | Text-versus-byte comparison | **Critical** | A harness decodes to strings before comparing, silently passing mismatched line endings, BOMs, and normalization — precisely the defects the corpus exists to catch. Suite stays green | Comparison MUST be on bytes. Most likely harness bug, hardest to notice |
 | FX-006 | Silent coverage deletion | **Critical** | The only fixture covering a load-bearing rule is removed, or demoted to `illustrative` by one token, and the suite stays green | `coversRules` anchors, required-rule inventory, monotonic non-decrease against the prior manifest, governance-controlled `status` |
@@ -43,7 +48,7 @@ failure.
 | FX-021 | Fixture ID collision or reuse | Medium | Two assertions share an ID; one silently shadows the other | Append-only per-family ledger; duplicate IDs a hard manifest error; IDs never reused after withdrawal |
 | FX-022 | Version categories conflated | High | A profile bump is recorded as a fixture-schema bump; consumers cannot tell what changed | Seven categories defined with what changes each and what it does **not** govern |
 | FX-023 | Profile migration loses historical evidence | High | `acj-2` fixtures replace `acj-1` fixtures; historical digests in retained backups and exports become unverifiable | Migration produces **paired** fixtures; old fixture retained, never edited, never deleted |
-| FX-024 | S0 error taxonomy cannot agree across runtimes | High | Two JSON parsers will not naturally agree on error categories; over-specifying stable codes at parser level makes conformance unachievable | Named as a residual decision. Error-category granularity at S0 must be settled before S0 rejection fixtures are authored |
+| FX-024 | S0 error taxonomy cannot agree across runtimes | High → **Medium** | Two JSON parsers will not naturally agree on error categories; over-specifying stable codes at parser level makes conformance unachievable | **Resolved by B-1.** S0 conformance is limited to rejection, stage, and the absence of canonical bytes, frame, and digest. Parser diagnostics are non-normative. **Accepted narrowing:** two implementations rejecting at S0 for genuinely different reasons both pass, and the corpus cannot detect that |
 | FX-025 | Fixture schema complexity | High | The record is elaborate enough that authors get it wrong, or that a second-language loader diverges | Conditional-requirement matrix is explicit and machine-checkable; complexity is the price of making contradiction unrepresentable — but it must be re-examined after the first ten fixtures |
 | FX-026 | DG-4 limits treated as final | High | Boundary fixtures authored against ACJ-1 §29–§31 values that the contract itself marks provisional | Coverage areas 26 and (partly) 25 marked **BLOCKED**; limits remain DG-4's to fix |
 | FX-027 | Blocked coverage silently omitted | High | A corpus claims complete coverage while three areas cannot yet be authored | Blocked areas explicitly marked in the coverage matrix; a completeness claim before those gates close is false by construction |

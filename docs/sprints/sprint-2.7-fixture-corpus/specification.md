@@ -1,10 +1,13 @@
 # Sprint 2.7 Specification: Contract Fixture Corpus
 
-Status: **Proposed**; architecture only  
+Status: **Accepted** — architecture only, 2026-08-06  
 Implementation freeze: **Active**  
+Normative fixtures: **Not authorized** — seven-condition gate,
+[fixture contract §11.1](../../contracts/contract-fixture-corpus.md#111-normative-fixture-authorization-gate)  
 Owner: CTO  
-Targets gate: DG-3 — **specification only. DG-3 remains open.**  
-Authorization: [CTO-DECISION-004](../../decisions/CTO-DECISION-004-sprint-2.7-authorization.md)
+Targets gate: DG-3 — **architecture only. DG-3 remains open.**  
+Decision records: [CTO-DECISION-004](../../decisions/CTO-DECISION-004-sprint-2.7-authorization.md),
+[CTO-DECISION-005](../../decisions/CTO-DECISION-005-fixture-corpus-architecture.md)
 
 ## Mission
 

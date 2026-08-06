@@ -1,13 +1,18 @@
 # ADR-009: Contract fixture corpus
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- Accepted: 2026-08-06
 - Decision owner: CTO
+- Decision record: [CTO-DECISION-005](CTO-DECISION-005-fixture-corpus-architecture.md)
 - Implementation status: **Frozen.** No fixture, loader, or harness may be built.
+- **Normative fixtures: NOT AUTHORIZED.** Acceptance of this ADR authorizes the architecture
+  only. A separate seven-condition gate governs the first normative corpus —
+  [fixture contract §11.1](../contracts/contract-fixture-corpus.md#111-normative-fixture-authorization-gate)
 - Authorized by: [CTO-DECISION-004](CTO-DECISION-004-sprint-2.7-authorization.md)
 - Targets gate: DG-3 in the
   [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md) —
-  **specification only; DG-3 remains open**
+  **architecture only; DG-3 remains open**
 - Depends on: [ADR-007](ADR-007-universal-object-model.md) (Accepted),
   [ADR-008](ADR-008-canonical-serialization.md) (Accepted)
 
@@ -92,6 +97,36 @@ Adopt the **AFX-1 contract fixture corpus profile**. The load-bearing decisions:
    coverage area are manifest metadata, never directory structure. Harnesses must not
    discover fixtures by globbing — a globbing harness silently loses a deleted or misnamed
    fixture and reports green.
+
+## Readiness blockers resolved before acceptance
+
+Three blocking findings from the readiness review were resolved by
+[CTO-DECISION-005](CTO-DECISION-005-fixture-corpus-architecture.md).
+
+**B-1 — parser diagnostics are not contract errors.** Requiring identical error categories at
+S0 was unachievable: standards-compliant parsers legitimately disagree on taxonomy for
+malformed UTF-8, duplicate members, escapes, numbers, and trailing content, so a conformance
+run would report a defect where none exists. S0 now requires agreement only on *rejection*,
+*stage*, and the absence of canonical bytes, frame, and digest. A `diagnosticHint` may be
+recorded for human review and is explicitly non-normative. Stable AION error categories begin
+at **S2**, where `CanonicalContractValidatorV1` applies AION-owned semantics; at S1 only
+categories an accepted AION schema- or profile-resolution contract owns are normative.
+Inventing parser error codes to manufacture uniformity is prohibited.
+
+**B-2 — architecture acceptance is not fixture authorization.** Accepting this ADR does not
+authorize a single normative fixture. A seven-condition gate now governs the first corpus,
+and candidate fixtures are formally distinguished from normative released ones: a candidate
+may carry hand-derived values and never contributes to a conformance verdict; promotion
+requires independent reproduction. The absence of a second runtime does not block drafting a
+candidate — it blocks promoting one.
+
+**B-3 — a digest is never recorded alone.** A digest value cannot reveal wrong field
+ordering, wrong length prefixes, missing domain separation, a wrong purpose or profile, a
+payload-boundary error, or hashing canonical bytes without framing — each produces a
+well-formed digest of the wrong input. `expectedDigestInput` is now mandatory, and
+`expectedDigest` is representable only alongside it, so the omission is structurally
+impossible. This makes derivation independently auditable without a second implementation,
+which is why B-3 could be closed now.
 
 ## Alternatives considered
 
@@ -206,9 +241,29 @@ The Universal Object Contract remains **pre-stable**. DG-3 remains **open**.
 
 ## Approval effect
 
-ADR-009 is **Proposed** and is not accepted by this directive.
+Acceptance is an **architecture-boundary decision only**.
 
-Acceptance would authorize the fixture contract, the corpus organization, and the
-subordinate decisions above. It would **not** authorize creating any normative fixture, any
-loader, any harness, any implementation, or closure of DG-3 — and would not lift the
-implementation freeze.
+### Acceptance authorizes
+
+- the fixture corpus architecture and record schema;
+- corpus organization, identifier, and versioning rules;
+- the subordinate decisions listed above;
+- future candidate-fixture work **when separately directed**.
+
+### Acceptance does NOT authorize
+
+- creating any normative fixture — see the seven-condition gate in
+  [fixture contract §11.1](../contracts/contract-fixture-corpus.md#111-normative-fixture-authorization-gate);
+- creating any candidate fixture during Sprint 2.8;
+- creating a fixtures directory;
+- a fixture loader or conformance harness;
+- any canonicalizer, validator, or digest implementation;
+- Identity, Object, Memory, Planner, Event Bus, Knowledge Graph, Capability Registry,
+  Workflow Engine, plugin, agent, persistence, or UI implementation;
+- personal-data ingestion, job search, or job applications;
+- storage, database, transport, or second-runtime selection;
+- closure of DG-3.
+
+DG-3 remains **open**. DG-1 and DG-4 remain open. The Universal Object Contract remains
+**pre-stable**. The implementation freeze remains in effect; no artifact produced under this
+ADR lifts it, and only a separate recorded CTO decision can.

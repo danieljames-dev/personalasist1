@@ -144,6 +144,44 @@ reason inline hex is safe where sidecars are not.
 | **S0** Raw input bytes | bytes | parse outcome | Malformed encoding, malformed JSON, duplicate members, invalid escapes, BOM, invalid UTF-8, trailing content, illegal number syntax, excessive raw size |
 | **S1** Parsed contract value | parse result | resolved value | Schema and profile resolution, permitted value types, unknown/required members, identifier syntax, timestamp syntax, numeric constraints, Unicode requirements, canonical-position restrictions |
 | **S2** Canonical validation | resolved value | validated value or rejection | `CanonicalContractValidatorV1` outcomes and ACJ-1 §33 error categories |
+
+### Where error-code conformance begins
+
+Recorded by [CTO-DECISION-005](../decisions/CTO-DECISION-005-fixture-corpus-architecture.md),
+resolving readiness finding B-1. **Parser diagnostics and AION contract errors are different
+things and are conformed to differently.**
+
+**At S0, required cross-runtime agreement is limited to:**
+
+1. the input is rejected;
+2. rejection occurs at S0;
+3. parsing does not produce a usable contract value;
+4. no canonical bytes are produced;
+5. no AION Frame is produced;
+6. no digest is produced.
+
+Implementations are **not** required to emit an identical parser-specific error category at
+S0. Standards-compliant parsers legitimately use different diagnostic taxonomies for
+malformed UTF-8, duplicate members, malformed escapes, malformed numbers, and trailing
+content. Requiring identical diagnostics would couple the corpus to particular parser
+libraries and runtime languages, and would report a defect where none exists.
+
+An S0 fixture records `targetStage: S0` and `expectation: reject`. It **may** carry
+`diagnosticHint` — a free-text note for human review. `diagnosticHint` is **non-normative**,
+is never compared across runtimes, and never participates in a conformance verdict. A
+harness that fails a run on `diagnosticHint` mismatch is non-conforming.
+
+**At S1**, only those error categories explicitly owned by an accepted AION
+schema-resolution or profile-resolution contract are normative. Where AION owns no
+semantics, S0 rules apply.
+
+**At S2 and later**, stable AION error categories are fully normative, because
+`CanonicalContractValidatorV1` applies AION-defined validation semantics rather than a
+parser's.
+
+Stable parser error codes MUST NOT be invented merely to make implementations appear
+uniform. Uniformity purchased that way is fictional: it would be satisfied by a mapping
+table, not by agreement.
 | **S3** Canonical serialization | validated value | canonical bytes | Exact canonical byte output |
 | **S4** Frame construction | canonical bytes + frame fields | framed bytes | Exact framed bytes, field boundaries, length prefixes |
 | **S5** Digest calculation | framed bytes | digest | Exact digest under a registered algorithm |
@@ -246,8 +284,9 @@ but because there is nowhere to put the second claim.
 | `sourceProvenance` | Always required: `synthetic`, `derived-from-spec-example`, or `derived-from-external-standard`, with citation for the latter two |
 | `expectation` | Always required. Exactly one. Tagged union below |
 | `expectedCanonicalBytes` | Permitted **only** inside an `accept` expectation with `terminalStage ≥ S3`. `HexBytesV1` |
-| `expectedFrameBytes` | Permitted **only** inside an `accept` expectation with `terminalStage ≥ S4`. `HexBytesV1` |
-| `expectedDigest` | Permitted **only** inside an `accept` expectation with `terminalStage ≥ S5`. Carries algorithm and all six frame fields |
+| `expectedFrameBytes` | **Required** inside an `accept` expectation with `terminalStage ≥ S4`. `HexBytesV1`. §4.1 |
+| `expectedDigestInput` | **Required** inside an `accept` expectation with `terminalStage ≥ S5`. `HexBytesV1`. §4.1 |
+| `expectedDigest` | Permitted **only** inside an `accept` expectation with `terminalStage ≥ S5`, and **only** alongside `expectedDigestInput`. Carries algorithm and all six frame fields |
 | `expectedErrorCategory` | Required inside a `reject` expectation. Must be an ACJ-1 §33 category. **Prohibited** in `accept` |
 | `rejectionStage` | Required inside a `reject` expectation. Must equal `terminalStage` |
 | `precisionLoss` | Required iff the fixture exercises timestamp conversion. §7 |
@@ -272,6 +311,59 @@ expectation := accept { … }   |   reject { expectedErrorCategory, rejectionSta
   `expectedDigest` unconditionally. A rejection fixture never asserts bytes it never
   produces.
 - No fixture may carry two expectations, two error categories, or two terminal stages.
+
+## 4.1 Digest evidence — a digest is never recorded alone
+
+Recorded by [CTO-DECISION-005](../decisions/CTO-DECISION-005-fixture-corpus-architecture.md),
+resolving readiness finding B-3.
+
+A final digest value, on its own, cannot reveal **incorrect field ordering, incorrect length
+prefixes, missing domain-separation fields, a wrong purpose, a wrong profile, a
+payload-boundary mistake, or — the error the contract most fears — accidental hashing of
+canonical bytes without framing.** All of those produce a well-formed digest of the wrong
+input. A fixture recording only the output certifies the mistake.
+
+Every digest-bearing fixture MUST therefore carry, or unambiguously reference, all eleven:
+
+1. source contract value **or** authoritative source bytes;
+2. expected canonical bytes;
+3. expected AION Frame v1 bytes;
+4. expected **complete framed digest input bytes**;
+5. digest algorithm identifier;
+6. expected digest bytes;
+7. applicable canonicalization profile;
+8. contract family and version;
+9. frame version;
+10. domain-separation purpose;
+11. domain context where applicable.
+
+`expectedDigestInput` is **mandatory**, not optional. The fixture record structurally
+prohibits an `accept` expectation with `terminalStage ≥ S5` from omitting it: `expectedDigest`
+is permitted only alongside `expectedDigestInput`, so a digest without its input is
+unrepresentable rather than merely discouraged.
+
+This makes the derivation **independently auditable**: a reviewer or tool recomputes
+`digest(expectedDigestInput)` and compares it to `expectedDigest`, then re-derives the frame
+from the recorded frame fields and compares it to `expectedDigestInput`. Neither check
+requires a second implementation, which is why B-3 could be resolved before one exists.
+
+### Five artifacts, five names, never interchanged
+
+| Name | What it is | Never |
+|---|---|---|
+| **canonical bytes** | ACJ-1 §28 output for the value | Never digested directly — ACJ-1 §23 forbids it |
+| **frame bytes** | The AION Frame v1 byte sequence, ACJ-1 §23 | Never confused with the payload it contains |
+| **framed digest input** | The exact byte sequence fed to the digest function | Never a subset or re-serialization of the frame |
+| **digest output** | The digest value, lowercase hex | Never recorded without its input |
+| **corpus checksum** | Non-security integrity check over a corpus artifact (§1) | **Never called a digest**, never compared to one, never substituted for one |
+
+> **Normative clarification.** Under ACJ-1 §23 the framed digest input **is** the AION Frame
+> v1 byte sequence — the digest is computed over the frame, not over some further wrapping of
+> it. `expectedFrameBytes` and `expectedDigestInput` therefore carry identical bytes for
+> `acj-1` and `FrameVersion` 1. Both fields are required anyway, and a conforming loader MUST
+> verify they are byte-identical. Recording them separately makes the identity checkable
+> rather than assumed, and leaves room for a future frame version where a digest covers
+> something other than the bare frame. A mismatch is `fixture-frame-digest-input-mismatch`.
 
 ## 5. Identifiers and versioning
 
@@ -485,6 +577,46 @@ Required before DG-3 can close. Each is a testable condition, not an aspiration.
 
 No second runtime is selected here. No harness is designed or implemented beyond this
 evidence contract.
+
+## 11.1 Normative-fixture authorization gate
+
+Recorded by [CTO-DECISION-005](../decisions/CTO-DECISION-005-fixture-corpus-architecture.md),
+resolving readiness finding B-2. **Acceptance of ADR-009 authorizes this architecture. It
+does not authorize creating a single normative fixture.**
+
+### Candidate versus normative
+
+| | Candidate fixture | Normative fixture |
+|---|---|---|
+| Purpose | Exercises the schema; probes whether a case is expressible | Defines what correct means |
+| Expected values | May be hand-derived and unconfirmed | Must be independently reproduced |
+| Lives in | A clearly marked candidate set, never a conformance release | A checksummed conformance release |
+| Conformance | **Never** consulted for a conformance verdict | Authoritative |
+| Authorization | Blocked during Sprint 2.8; permitted only when separately directed | Blocked until the gate below is met |
+
+A candidate fixture is **promoted** to normative only when its expected result has been
+**independently reproduced**. The absence of a second runtime does not prevent *drafting* a
+candidate; it absolutely prevents *promoting* one.
+
+### The gate — all seven required
+
+Authorization for the first normative fixture corpus remains blocked until:
+
+1. **DG-4 measurable limits are accepted** where required by fixture boundaries.
+2. The **expected-value derivation and verification process** is approved.
+3. **A normative fixture cannot become the sole oracle for its own correctness.**
+4. **Digest-bearing fixtures have independently checkable canonical bytes, frame bytes, and
+   framed digest input** — satisfied structurally by §4.1.
+5. The initial corpus plan **distinguishes candidate from normative released fixtures**.
+6. The applicable **decimal or exact continuous-quantity decision exists** before fixtures
+   covering that value class are made normative.
+7. **Cross-runtime confirmation requirements are defined** before a corpus release is
+   labelled conformant.
+
+Condition 3 is the load-bearing one. A fixture whose expected value was produced by the only
+implementation that will ever be tested against it proves nothing — it records that the
+implementation agrees with itself. Nothing structural can detect this; it is why conditions
+2, 3, and 7 exist together.
 
 ## 12. What this corpus does not prove
 

@@ -1,9 +1,11 @@
 # Contract Fixture Corpus Threat Model
 
-Status: **Proposed**  
+Status: **Accepted** alongside
+[ADR-009](../decisions/ADR-009-contract-fixture-corpus.md), 2026-08-06  
 Scope: AFX-1 corpus format, organization, and conformance evidence only  
-Authority: [ADR-009](../decisions/ADR-009-contract-fixture-corpus.md) (Proposed)  
-Implementation: **Not authorized.** No fixture, loader, or harness exists.
+Implementation: **Not authorized.** No fixture, loader, or harness exists.  
+Normative fixtures: **Not authorized** — seven-condition gate,
+[fixture contract §11.1](../contracts/contract-fixture-corpus.md#111-normative-fixture-authorization-gate)
 
 ## What a fixture corpus does not prove
 
