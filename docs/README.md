@@ -68,7 +68,21 @@ The pre-review design below is retained for audit and must not be cited as a con
 - [Object Threat Model](sprints/sprint-2.5-object-model/object-threat-model.md)
 - [Acceptance Criteria](sprints/sprint-2.5-object-model/acceptance-criteria.md)
 
+## Sprint 2.6 proposal: Canonical serialization
+
+ADR-008 is **Proposed**. It opens deferred gate DG-2. The readiness review returned
+APPROVE WITH CHANGES with three required changes. Nothing below authorizes implementation.
+
+- [ADR-008: Canonical serialization](decisions/ADR-008-canonical-serialization.md)
+- [Canonical Serialization Contract — ACJ-1](contracts/canonical-serialization.md)
+- [Canonical Serialization Threat Model](security/canonical-serialization-threat-model.md)
+- [Sprint specification](sprints/sprint-2.6-canonical-serialization/specification.md)
+- [Acceptance criteria](sprints/sprint-2.6-canonical-serialization/acceptance-criteria.md)
+- [Risk register](sprints/sprint-2.6-canonical-serialization/risks.md)
+
 ## Reviews
+
+- [Canonical serialization readiness review](reviews/canonical-serialization-readiness-review.md)
 
 - [Sprint 2.5 Object Model Review](reviews/sprint-2.5-object-model-review.md)
 - [Architecture Readiness Review](reviews/architecture-readiness-review.md)
