@@ -13,8 +13,8 @@
       logs\*.log                        run logs, retained on failure too
 
     SUCCESS is recorded ONLY when the restore test passes: the mirror clones, the
-    expected commit checks out, npm ci completes, and npm run verify reports 11
-    passed / 0 failed. A run that produces artifacts but fails verification is
+    expected commit checks out, npm ci completes, and npm run verify reports exactly
+    -ExpectedTests passed / 0 failed. A run that produces artifacts but fails verification is
     recorded FAILURE and the previous known-good backup remains the recovery point.
 
     The script never deletes source files and never deletes prior backups.
@@ -60,6 +60,7 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
+    [int]      $ExpectedTests     = 12,
     [switch]   $DryRun
 )
 
@@ -126,6 +127,7 @@ $manifest = [ordered]@{
     exclusions          = $ForbiddenPatterns
     checksums           = [ordered]@{}
     verificationCommand = 'npm run verify'
+    expectedTests       = $ExpectedTests
     restoreResult       = $null
     outcome             = 'FAILURE'
     failureReason       = $null
@@ -225,11 +227,11 @@ try {
             if ($declared.Count -gt 0) { Write-Step "would write untracked zip  : $untrackedZip" }
             Write-Step "would write manifest       : $manifestPath"
             Write-Step "would run restore test into: $(Join-Path $BackupRoot "restore-tests\restore-$timestamp")"
-            Write-Step "would require              : npm ci + npm run verify (11 passed / 0 failed)"
+            Write-Step "would require              : npm ci + npm run verify ($ExpectedTests passed / 0 failed)"
             $manifest.outcome = 'DRY-RUN'
             & (Join-Path $PSScriptRoot 'restore-test-aion.ps1') `
                 -ExpectedCommit $commit -BackupRoot $BackupRoot `
-                -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp -DryRun
+                -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp -ExpectedTests $ExpectedTests -DryRun
             Write-Host ''
             return
         }
@@ -290,7 +292,7 @@ try {
         Write-Step "invoking restore test"
         & (Join-Path $PSScriptRoot 'restore-test-aion.ps1') `
             -ExpectedCommit $commit -BackupRoot $BackupRoot `
-            -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp
+            -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp -ExpectedTests $ExpectedTests
         $restoreExit = $LASTEXITCODE
 
         $restoreResultFile = Join-Path $logDir "restore-$timestamp.result.json"

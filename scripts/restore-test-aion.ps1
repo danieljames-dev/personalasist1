@@ -10,7 +10,7 @@
       1. clones from the bare mirror into a NEW timestamped directory;
       2. checks out the exact expected commit;
       3. runs npm ci;
-      4. runs npm run verify and requires 11 passed / 0 failed;
+      4. runs npm run verify and requires exactly -ExpectedTests passed / 0 failed;
       5. writes a JSON result and a full log.
 
     It never restores over the active working repository. It never deletes anything.
@@ -36,6 +36,11 @@
 .PARAMETER Timestamp
     UTC stamp used to name the restore directory. Defaults to now.
 
+.PARAMETER ExpectedTests
+    Exact number of tests the restored clone must report as passing. Exact equality is
+    required in both directions: a DECREASE means tests were lost, an INCREASE means the
+    expectation is stale. Either is a failure that must be looked at, not tolerated.
+
 .PARAMETER DryRun
     Report the planned actions and exit without cloning, installing, or verifying.
 
@@ -60,6 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
+    [int]      $ExpectedTests = 12,
     [switch]   $DryRun
 )
 
@@ -116,6 +122,7 @@ $result = [ordered]@{
     timestampUtc       = $Timestamp
     mirrorPath         = $MirrorPath
     expectedCommit     = $ExpectedCommit
+    expectedTests      = $ExpectedTests
     restoreDirectory   = $restoreDir
     dryRun             = [bool]$DryRun
     steps              = @()
@@ -161,7 +168,7 @@ try {
         Write-Step "would create: $restoreDir"
         Write-Step "would check out commit: $ExpectedCommit"
         Write-Step "would run   : npm ci"
-        Write-Step "would run   : npm run verify  (require 11 passed / 0 failed)"
+        Write-Step "would run   : npm run verify  (require $ExpectedTests passed / 0 failed)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -217,11 +224,13 @@ try {
     if ($passMatch.Success) { $result.testsPassed = [int]$passMatch.Groups[1].Value }
     if ($failMatch.Success) { $result.testsFailed = [int]$failMatch.Groups[1].Value }
 
-    if ($vCode -ne 0)             { throw "npm run verify failed with exit code $vCode (see $vErr)" }
-    if ($result.testsPassed -ne 11) { throw "expected 11 passing tests, observed '$($result.testsPassed)'" }
+    if ($vCode -ne 0) { throw "npm run verify failed with exit code $vCode (see $vErr)" }
+    if ($result.testsPassed -ne $ExpectedTests) {
+        throw "expected $ExpectedTests passing tests, observed '$($result.testsPassed)'. A DECREASE means tests were lost; an INCREASE means -ExpectedTests is stale. Neither is tolerated."
+    }
     if ($result.testsFailed -ne 0)  { throw "expected 0 failing tests, observed '$($result.testsFailed)'" }
 
-    Add-Step 'npm-run-verify' 'PASS' "11 passed / 0 failed"
+    Add-Step 'npm-run-verify' 'PASS' "$ExpectedTests passed / 0 failed"
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"
