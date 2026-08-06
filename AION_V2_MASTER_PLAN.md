@@ -69,6 +69,12 @@ Objects use composition rather than deep inheritance. Runtime services, errors,
 credentials, and transport messages are not silently persisted as domain objects;
 an ADR must define the exact semantic boundary before implementation.
 
+**Amendment (2026-08-06):** ADR-007 and the `docs/contracts/object-*` family are
+authoritative for envelope composition and supersede the field list above. The Object
+envelope carries no typed relationship references and no history or event references.
+Relationships, versions, and events are independently queryable first-class Objects
+keyed to the subject; the base snapshot stays bounded and does not grow with activity.
+
 ### Control plane and work plane
 
 - **Control plane:** Identity, policy, approvals, capability definitions, workflow

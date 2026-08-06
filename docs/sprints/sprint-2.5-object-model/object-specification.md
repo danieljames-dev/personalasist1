@@ -1,8 +1,18 @@
 # Sprint 2.5: Universal Object Model specification
 
-Status: Proposed—implementation prohibited until approval  
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Object Model architecture](../../architecture/object-model.md) and
+[Sprint 2.5 specification](../sprint-2.5/specification.md)  
+Superseded on: 2026-08-06  
+Reason: The [Architecture Readiness Review](../../reviews/architecture-readiness-review.md)
+returned APPROVE WITH CHANGES. This document describes the pre-review design and
+retains rejected elements (embedded `relationshipRefs`/`historyRefs`/`eventRefs`,
+generic public mutation, three-state lifecycle, recursive system Objects).  
 Owner: CTO  
 Component: Universal Object Model
+
+> This document must not be cited as a current contract. It is preserved unmodified
+> below the header so the review trail remains auditable.
 
 ## Purpose
 

@@ -1,6 +1,14 @@
 # Object Relationship Model v1
 
-Status: Proposed normative design
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Object Relationship Contract](../../contracts/object-relationships.md)  
+Superseded on: 2026-08-06  
+Reason: This design coexisted with authoritative `relationshipRefs` arrays on endpoint
+Objects, creating the dual relationship truth the Architecture Readiness Review
+rejected. It also omits the fifteen required standard relationship types.
+
+> This document must not be cited as a current contract. It is preserved unmodified
+> below the header so the review trail remains auditable.
 
 ## Purpose
 

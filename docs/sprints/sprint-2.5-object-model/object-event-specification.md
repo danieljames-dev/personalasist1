@@ -1,6 +1,15 @@
 # Object Event Specification v1
 
-Status: Proposed normative event contract
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Object Event Contract](../../contracts/object-events.md)  
+Superseded on: 2026-08-06  
+Reason: Events were defined as ordinary Objects carrying their own `eventRefs` and
+history, which the Architecture Readiness Review identified as recursive meta-event
+and meta-revision generation. The replacement defines an immutable, non-recursive
+Event profile as a contract invariant rather than an adapter exception.
+
+> This document must not be cited as a current contract. It is preserved unmodified
+> below the header so the review trail remains auditable.
 
 ## Purpose
 

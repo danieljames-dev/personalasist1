@@ -1,6 +1,16 @@
 # Universal Object API contract v1
 
-Status: Proposed normative contract
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Universal Object Contract v1](../../contracts/object-contract-v1.md)
+and [Object Versioning Contract](../../contracts/object-versioning.md)  
+Superseded on: 2026-08-06  
+Reason: The [Architecture Readiness Review](../../reviews/architecture-readiness-review.md)
+rejected the embedded reference arrays, the generic `ObjectServiceV1.update()` mutation
+path, the fixed `sha-256` integrity algorithm, `AbortSignal` in a language-neutral
+contract, and optional caller-supplied identifiers on create.
+
+> This document must not be cited as a current contract. It is preserved unmodified
+> below the header so the review trail remains auditable.
 
 ## Version and compatibility
 

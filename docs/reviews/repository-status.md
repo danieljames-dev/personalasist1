@@ -69,3 +69,11 @@ branch protection, dependency review, or a formal security audit.
 7. Do not implement ADR-007 until its Architecture Readiness Review changes are
    incorporated and approved.
 
+**Disposition of recommendation 7 — 2026-08-06.** ADR-007 was accepted as an
+architecture-boundary decision only
+([CTO-DECISION-002](../decisions/CTO-DECISION-002-sprint-2.5-approval.md)). This does
+**not** satisfy recommendation 7 as permission to implement. The implementation freeze
+remains in effect, and four deferred gates — identity bootstrap, canonical serialization,
+representative fixtures, and measurable limits — remain open. Lifting the freeze requires
+a separate recorded CTO decision.
+

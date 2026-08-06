@@ -26,13 +26,57 @@
 - [Identity acceptance criteria](sprints/sprint-2-identity/acceptance-criteria.md)
 - [ADR-006: Identity boundary](decisions/ADR-006-identity-boundary.md)
 
-## Sprint 2.5 proposal: Universal Object Model
+## Sprint 2.5: Universal Object Model
+
+ADR-007 is **Accepted** (2026-08-06) as an architecture-boundary decision. The contract
+family is normative but **pre-stable** — not designated stable v1. The implementation
+freeze remains in effect; nothing below authorizes implementation. Four deferred gates
+remain open: identity bootstrap, canonical serialization, representative fixtures, and
+measurable limits.
+
+### Decision and architecture
+
+- [ADR-007: Universal Object Model](decisions/ADR-007-universal-object-model.md) — Accepted
+- [CTO-DECISION-002: Sprint 2.5 approval](decisions/CTO-DECISION-002-sprint-2.5-approval.md)
+- [Object Model architecture](architecture/object-model.md)
+
+### Normative contracts
+
+- [Universal Object Contract v1](contracts/object-contract-v1.md)
+- [Object Lifecycle Contract](contracts/object-lifecycle.md)
+- [Object Event Contract](contracts/object-events.md)
+- [Object Relationship Contract](contracts/object-relationships.md)
+- [Object Versioning Contract](contracts/object-versioning.md)
+
+### Security and sprint records
+
+- [Universal Object Model Threat Model](security/object-threat-model.md)
+- [Sprint specification](sprints/sprint-2.5/specification.md)
+- [Acceptance criteria](sprints/sprint-2.5/acceptance-criteria.md) — includes the four
+  deferred implementation gates
+- [Risk register](sprints/sprint-2.5/risks.md)
+
+### Superseded — historical evidence only
+
+The pre-review design below is retained for audit and must not be cited as a contract.
 
 - [Object Specification](sprints/sprint-2.5-object-model/object-specification.md)
-- [Object ADR](decisions/ADR-007-universal-object-model.md)
-- [Object Threat Model](sprints/sprint-2.5-object-model/object-threat-model.md)
 - [Object API Contract](sprints/sprint-2.5-object-model/object-api-contract.md)
-- [Object Relationship Model](sprints/sprint-2.5-object-model/object-relationship-model.md)
 - [Object Lifecycle](sprints/sprint-2.5-object-model/object-lifecycle.md)
+- [Object Relationship Model](sprints/sprint-2.5-object-model/object-relationship-model.md)
 - [Object Event Specification](sprints/sprint-2.5-object-model/object-event-specification.md)
+- [Object Threat Model](sprints/sprint-2.5-object-model/object-threat-model.md)
 - [Acceptance Criteria](sprints/sprint-2.5-object-model/acceptance-criteria.md)
+
+## Reviews
+
+- [Sprint 2.5 Object Model Review](reviews/sprint-2.5-object-model-review.md)
+- [Architecture Readiness Review](reviews/architecture-readiness-review.md)
+- [Repository status report](reviews/repository-status.md)
+
+## Operations
+
+A proposed backup and disaster-recovery strategy exists in the working tree at
+`docs/operations/backup-strategy.md`. It is **not** a Sprint 2.5 deliverable, has not
+been reviewed for content, and is intentionally retained untracked pending its own
+review. It will be indexed here once approved.

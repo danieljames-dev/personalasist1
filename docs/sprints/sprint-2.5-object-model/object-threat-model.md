@@ -1,6 +1,14 @@
 # Universal Object Model threat model
 
-Status: Proposed
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Universal Object Model Threat Model](../../security/object-threat-model.md)  
+Superseded on: 2026-08-06  
+Reason: This analysis predates the four-profile design and does not cover recursive
+system Objects, dual relationship truth, delete-versus-destroy evidence, plugin
+orphaning, backup resurrection, or the authorization-evidence seam.
+
+> This document must not be cited as a current threat model. It is preserved unmodified
+> below the header so the review trail remains auditable.
 
 ## Assets
 

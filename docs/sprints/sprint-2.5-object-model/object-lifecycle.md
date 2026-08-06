@@ -1,6 +1,14 @@
 # Object Lifecycle v1
 
-Status: Proposed normative state model
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Object Lifecycle Contract](../../contracts/object-lifecycle.md)  
+Superseded on: 2026-08-06  
+Reason: The three-state `active`/`archived`/`tombstoned` model does not express the
+Created, Validated, Deprecated, Deleted, and Destroyed states or the Imported,
+Exported, Merged, Split, and Restored operations required by the CTO directive.
+
+> This document must not be cited as a current contract. It is preserved unmodified
+> below the header so the review trail remains auditable.
 
 ## States
 

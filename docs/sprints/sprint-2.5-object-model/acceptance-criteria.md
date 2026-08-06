@@ -1,6 +1,14 @@
 # Sprint 2.5 Object Model acceptance criteria
 
-Status: Proposed
+Status: **Superseded — retained as historical evidence; not normative**  
+Superseded by: [Sprint 2.5 Acceptance Criteria](../sprint-2.5/acceptance-criteria.md)  
+Superseded on: 2026-08-06  
+Reason: These criteria accept `AionObjectV1` as defined by the superseded API contract
+and do not test the Entity/Relationship/Version/Event profiles, the bounded envelope,
+the domain mutation boundary, or the seven-state lifecycle.
+
+> This document must not be cited as a current acceptance gate. It is preserved
+> unmodified below the header so the review trail remains auditable.
 
 ## Design approval
 
