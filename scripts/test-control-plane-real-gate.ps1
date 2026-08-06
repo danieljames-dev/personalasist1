@@ -13,6 +13,12 @@ $errorPath=Join-Path ([IO.Path]::GetTempPath()) "aion-real-gate-$stamp.err"
 $authorizer=Join-Path $PSScriptRoot 'authorize-current-directive.ps1'
 $archivePath=Join-Path $root '.aion-local\directives\archive\AION-S3-P3-PRIVACY-BOUNDARY-20260806T172327Z.md'
 $currentPath=Join-Path $root '.aion-local\directives\CURRENT.md'
+$localRoot=Join-Path $root '.aion-local'
+$directiveRoot=Join-Path $localRoot 'directives'
+$archiveRoot=Join-Path $directiveRoot 'archive'
+$localRootExisted=Test-Path -LiteralPath $localRoot -PathType Container
+$directiveRootExisted=Test-Path -LiteralPath $directiveRoot -PathType Container
+$archiveRootExisted=Test-Path -LiteralPath $archiveRoot -PathType Container
 $phrase='AUTHORIZE SYNTHETIC REAL GATE TEST'
 $complete=$false
 $createdArchive=$false
@@ -163,6 +169,16 @@ finally {
     if(Test-Path -LiteralPath $errorPath){Remove-Item -LiteralPath $errorPath -Force}
     if($createdCurrent-and(Test-Path -LiteralPath $currentPath)){Remove-Item -LiteralPath $currentPath -Force}
     if($createdArchive-and(Test-Path -LiteralPath $archivePath)){Remove-Item -LiteralPath $archivePath -Force}
+    foreach($directory in @(
+        @{ Path=$archiveRoot; Existed=$archiveRootExisted },
+        @{ Path=$directiveRoot; Existed=$directiveRootExisted },
+        @{ Path=$localRoot; Existed=$localRootExisted }
+    )) {
+        if(-not $directory.Existed-and(Test-Path -LiteralPath $directory.Path -PathType Container)-and
+            @(Get-ChildItem -LiteralPath $directory.Path -Force).Count-eq 0) {
+            Remove-Item -LiteralPath $directory.Path -Force
+        }
+    }
 }
 
 if(-not $complete){exit 1}
