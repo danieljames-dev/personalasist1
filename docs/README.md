@@ -99,7 +99,26 @@ fixtures directory exists.
 - [Acceptance criteria](sprints/sprint-2.7-fixture-corpus/acceptance-criteria.md)
 - [Risk register](sprints/sprint-2.7-fixture-corpus/risks.md)
 
+## Sprint 2.8 proposal: Measurable resource limits
+
+ADR-010 is **Proposed**. It targets deferred gate **DG-4**, which **remains open** — the
+readiness review returned APPROVE WITH CHANGES with four blocking findings. Non-production
+benchmark probes live under `tools/benchmarks/resource-limits/` and are fenced by an
+architecture test. No limit is enforced anywhere.
+
+- [ADR-010: Measurable resource limits](decisions/ADR-010-measurable-resource-limits.md) - Proposed
+- [CTO-DECISION-006: Sprint 2.8 authorization](decisions/CTO-DECISION-006-sprint-2.8-authorization.md)
+- [AION Resource Limits Profile 1 - arlp-1](contracts/resource-limits-profile.md)
+- [Resource Limits Threat Model](security/resource-limits-threat-model.md)
+- [Benchmark methodology](benchmarks/resource-limits-methodology.md)
+- [Benchmark evidence](benchmarks/resource-limits-evidence.md)
+- [Sprint specification](sprints/sprint-2.8-resource-limits/specification.md)
+- [Acceptance criteria](sprints/sprint-2.8-resource-limits/acceptance-criteria.md)
+- [Risk register](sprints/sprint-2.8-resource-limits/risks.md)
+
 ## Reviews
+
+- [Resource limits readiness review](reviews/resource-limits-readiness-review.md)
 
 - [Contract fixture corpus readiness review](reviews/contract-fixture-corpus-readiness-review.md)
 - [Canonical serialization readiness review](reviews/canonical-serialization-readiness-review.md)

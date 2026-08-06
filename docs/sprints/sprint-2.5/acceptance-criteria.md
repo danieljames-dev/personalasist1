@@ -111,7 +111,7 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 | DG-1 Identity bootstrap | **Open** |
 | DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
 | DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Proposed); no fixture, loader, or harness exists. Three coverage areas BLOCKED on open gates |
-| DG-4 Measurable limits | **Open** |
+| DG-4 Measurable limits | **Open.** `arlp-1` profile proposed by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) (Proposed) with benchmark evidence, 2026-08-06. Four blocking findings; required workload evidence not supplied |
 
 ### DG-1 — Identity bootstrap
 
