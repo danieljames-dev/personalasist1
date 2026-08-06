@@ -111,3 +111,10 @@ Authorization: [CTO-DECISION-007](../../decisions/CTO-DECISION-007-sprint-2.9-re
 **APPROVE WITH CHANGES** with one required change: **RC-1**, split DG-4 into canonicalization
 limits (DG-4a, closable on this evidence) and Object business limits with their six workload
 families (DG-4b, remaining open). That is a scope decision reserved to the Founder/CTO.
+
+## Subsequent ratification — 2026-08-06
+
+[CTO-DECISION-008](../../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md)
+subsequently made RC-1: ADR-010 is Accepted for DG-4a only, DG-4a is Closed, and DG-4b remains
+Open. The checklist above remains the historical Sprint 2.9 completion record; no production
+protection or implementation is retroactively claimed.

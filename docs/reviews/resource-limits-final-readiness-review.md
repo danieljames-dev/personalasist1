@@ -181,3 +181,11 @@ ADR-009 remain Accepted. The Universal Object Contract remains **pre-stable**. T
 freeze remains in effect.
 
 This review authorizes nothing.
+
+## Subsequent decision — 2026-08-06
+
+The Founder/CTO accepted the review's RC-1 in
+[CTO-DECISION-008](../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md), splitting
+the historical DG-4 into DG-4a and DG-4b. ADR-010 was then Accepted for DG-4a only; DG-4a closed
+and DG-4b remained Open. The review above remains historical evidence and its statements about
+the absence of implemented production protection remain current.

@@ -1,15 +1,16 @@
 # AION Resource Limits Profile — `aion-resource-limits-1`
 
-Status: **Proposed** normative contract  
+Status: **Accepted for DG-4a canonical-processing scope**, 2026-08-06
 Profile identifier: `aion-resource-limits-1`  
 Profile version: 1  
 Supersedes identifier: `arlp-1` (Sprint 2.8 draft; renamed for stability — see §11)  
-Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (**Proposed**)  
+Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (**Accepted for DG-4a only**)
 Evidence: [resource-limits-evidence.md](../benchmarks/resource-limits-evidence.md)  
-Implementation: **Not authorized.** No canonicalizer, validator, or enforcement code exists.
+Implementation: **Not implemented.** No canonicalizer, validator, or enforcement code exists.
 
-> **DG-4 is OPEN.** This profile contains numbers. A table containing numbers is not a closed
-> gate. Values marked Proposed or Deferred are not accepted architecture.
+> **DG-4a is Closed; DG-4b is Open.** The deterministic canonical-processing limits owned by
+> this profile are accepted. Values marked Provisional or Deferred are not accepted limits, and
+> Object/domain workload limits remain outside this profile's accepted scope.
 
 ## Responsibility
 
@@ -308,7 +309,9 @@ stated. **No value is proposed.**
 | L-30 | Cancellation responsiveness | No cancellable implementation exists to measure |
 | L-17–L-20, L-22, L-23 | Object and corpus surfaces | Owned by other subsystems; assigned rather than absorbed |
 
-**Every value in this profile is Proposed.** ADR-010 is Proposed and DG-4 is open.
+Values assigned a deterministic normative limit in the DG-4a tables are Accepted. Values marked
+Provisional or Deferred remain so. ADR-010 acceptance does not absorb Object or domain workload
+limits into this profile; DG-4b remains Open.
 
 ## 6. Inclusivity — stated exactly
 
@@ -398,7 +401,8 @@ inclusivity, stage ownership, and stated derivations.
 
 The [ADR-008](../decisions/ADR-008-canonical-serialization.md) invariant that DG-4 limits must be
 **less than or equal to** the canonicalizer's holds: every value here equals or is below the ACJ-1
-number. **ACJ-1 §29–§31 is not amended while ADR-010 is Proposed.**
+number. ADR-010 acceptance ratifies the equal-or-lower `aion-resource-limits-1` v1 limits for
+the processing boundary it owns; ACJ-1 remains independently versioned.
 
 ## 10.1 Low-resource portability
 
@@ -449,13 +453,16 @@ metadata, and the two are versioned independently.
   produced it, never against a local deployment admission limit. Without this rule, tightening a
   limit would make an archived Object fail revalidation while its digest still verifies.
 
-## 12. DG-4 status
+## 12. DG-4a and DG-4b status
 
-**DG-4 is OPEN.** This profile does not close it.
+The original DG-4 history is preserved, but the gate is now tracked in two parts.
+**DG-4a is Closed** for raw canonical input, structural depth, member and array counts, total value
+nodes, canonical-position strings and identifiers, canonical output, AION Frame v1 fields and
+payload, deterministic rejection, overflow-safe accounting, and processing-stage ownership.
 
-DG-4's required evidence names maximum metadata, label count, provenance, extension, relationship
-page and event sizes, plus benchmarked high-churn, high-degree, large-artifact, migration, export
-and restore workloads. This sprint supplied canonicalization and framing limits with workload
-evidence across six size classes and six workload families. It supplied **none** of the six Object
+**DG-4b remains Open.** Its required evidence includes maximum metadata, label count, provenance,
+extension, relationship page and event sizes, plus benchmarked high-churn, high-degree,
+large-artifact, migration, export and restore workloads. Sprint 2.9 supplied canonicalization and
+framing evidence across six size classes and six workload families. It supplied **none** of the six Object
 business-size classes and **none** of the six Object workload families — those are owned by the
 Universal Object Contract and require an Object implementation that does not exist.

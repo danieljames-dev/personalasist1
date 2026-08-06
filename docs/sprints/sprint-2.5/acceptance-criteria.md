@@ -110,8 +110,9 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 |---|---|
 | DG-1 Identity bootstrap | **Open** |
 | DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
-| DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Proposed); no fixture, loader, or harness exists. Three coverage areas BLOCKED on open gates |
-| DG-4 Measurable limits | **Open.** `aion-resource-limits-1` profile proposed by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) (Proposed). Sprint 2.9 resolved B-1–B-3 fully and B-4 partially: canonicalization and framing limits evidenced across six size classes, six workload families and two runtimes; **Object business limits and the six Object workload families remain unsupplied**. Final review: APPROVE WITH CHANGES, one required change (RC-1: split the gate) |
+| DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Accepted); no fixture, loader, harness, or fixtures directory exists or is authorized |
+| DG-4a Canonical Processing Resource Limits | **Closed** by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) and [CTO-DECISION-008](../../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md), 2026-08-06 |
+| DG-4b Object and Domain Workload Limits | **Open.** Object business limits and workload evidence remain unsupplied. This does not block a local, single-owner, bounded reference slice using small explicitly selected inputs; it continues to block production-scale, hostile public, unbounded, multi-user, production-workload, and production-service readiness claims |
 
 ### DG-1 — Identity bootstrap
 
@@ -152,12 +153,19 @@ subordinate decisions carry forward — see
 | Risk | Premature v1 freeze; a domain that cannot conform without violating its responsibility; unbounded envelope growth discovered after commitment. |
 | Affected components | Universal Object Contract, all future domain schemas, export format, migration graph |
 | Blocking gate | **Still open.** Must exist and pass before the Object Contract can be designated stable v1. |
-| Status | **Open.** Specification authorized and delivered by [ADR-009](../../decisions/ADR-009-contract-fixture-corpus.md) (Proposed) and the [AFX-1 corpus contract](../../contracts/contract-fixture-corpus.md), 2026-08-06. **Specification alone does not close DG-3.** No fixture, loader, or harness exists or is authorized. Three coverage areas remain BLOCKED on open gates: maximum-member rejection (DG-4), invalid decimal representation (decimal decision), and cross-runtime agreement (no second runtime selected). |
+| Status | **Open.** Specification authorized and delivered by [ADR-009](../../decisions/ADR-009-contract-fixture-corpus.md) (Accepted) and the [AFX-1 corpus contract](../../contracts/contract-fixture-corpus.md), 2026-08-06. **Specification alone does not close DG-3.** No fixture, loader, or harness exists or is authorized. DG-4a now defines the maximum-member boundary, but invalid decimal representation, NF-1 cross-runtime exact-integer coverage, and cross-runtime agreement remain future fixture work. |
 | Closure conditions | Fixture schema accepted; ADR-009 accepted; required initial corpus created; positive **and** negative cases present; timestamp precision decision reflected; canonical, framed, and digest expectations recorded; **cross-runtime conformance demonstrated**; release manifest produced; artifacts checksummed; corpus security review passed; no private data or secrets present; `npm run verify` and future corpus checks pass; Object Contract stability gate satisfied. |
 | Required evidence | Language-neutral fixtures modelling at least Owner record, Document, Project, Task, Memory, Capability, Workflow, Relationship, Version, and Event Objects, demonstrating bounded size, round-trip export, migration, and domain-boundary conformance. Each carries source value, expected canonical bytes, expected framed digest input and digest, expected validation outcome, applicable versions, and rationale. Rejection fixtures are mandatory. |
 | Review trigger | Any proposal to label the contract stable v1, publish golden schemas, or begin a domain schema that depends on a frozen envelope. |
 
-### DG-4 — Measurable resource and complexity limits
+### DG-4a — Canonical Processing Resource Limits — **CLOSED 2026-08-06**
+
+DG-4a owns raw canonical input, depth, members, array elements, total nodes, canonical strings and
+identifiers, canonical output, AION Frame v1 bounds, deterministic rejection, overflow-safe
+accounting, and processing-stage ownership. Its closure is limited to the accepted specification
+and evidence in ADR-010; it is not a claim of implemented production protection.
+
+### DG-4b — Object and Domain Workload Limits — **OPEN**
 
 | Field | Value |
 |---|---|
@@ -165,7 +173,7 @@ subordinate decisions carry forward — see
 | Rationale | The contract requires bounded metadata, provenance, data, and events but specifies no number. "Bounded" is unenforceable and untestable until the bounds exist. |
 | Risk | Resource exhaustion through deep or oversized metadata, high-degree relationships, event storms, or large artifacts; write amplification exceeding owner hardware; adapters choosing incompatible limits. |
 | Affected components | Object Model validation, metadata and extension namespaces, relationship cardinality, event payloads, storage adapters, import and ingestion paths |
-| Blocking gate | **Must be specified before production adapters or untrusted ingestion are authorized.** |
+| Blocking gate | **Open before production adapters, hostile/public ingestion, unbounded processing, multi-user readiness, or production workload/service readiness.** |
 | Required evidence | An approved limits specification fixing maximum encoded envelope, data, metadata, label count, nesting depth, provenance, extension, relationship page, and event sizes, plus benchmarked high-churn, high-degree, large-artifact, migration, export, and restore workloads on representative local hardware. |
 | Review trigger | Any proposal for a durable adapter, an import or ingestion path, an untrusted schema or plugin source, or a performance budget claim. |
 
@@ -179,6 +187,7 @@ implementation.
 gate to the seven incorporated construction-blocking changes and recorded DG-1 through
 DG-4 above as deferred gates with controls. Every criterion in this document is accepted
 on that basis. ADR-007 is Accepted. The Universal Object Contract remains **pre-stable**
-and is not designated stable v1. The implementation freeze remains in effect. See
-[CTO-DECISION-002](../../decisions/CTO-DECISION-002-sprint-2.5-approval.md).
-
+and is not designated stable v1. CTO-DECISION-008 later lifted the implementation freeze only
+prospectively for the bounded Sprint 3.0 vertical slice; no implementation has begun. See
+[CTO-DECISION-002](../../decisions/CTO-DECISION-002-sprint-2.5-approval.md) and
+[CTO-DECISION-008](../../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md).

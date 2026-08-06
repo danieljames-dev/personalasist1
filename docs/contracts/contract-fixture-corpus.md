@@ -127,8 +127,9 @@ corpus edit. A literal above the cap is `fixture-oversize-literal`.
 
 ACJ-1 §29–§31 limit fixtures (depth 64, 4096 members, 65536 elements, 1 MiB string, 16 MiB
 total) MUST be recipes. Their assertion is the rejection category `limit-exceeded`, not a
-byte string, so they need no literal bytes and no sidecar. **They also cannot be authored
-until DG-4 fixes those limits** — see §9.
+byte string, so they need no literal bytes and no sidecar. DG-4a now fixes those
+canonical-processing limits, but the fixtures still cannot be authored until a separate
+authorization permits normative fixture creation — see §9.
 
 ### The fixture file itself
 
@@ -439,6 +440,15 @@ A corpus release in which any coverage area lacks a rejection fixture is **incom
 MUST fail its completeness check.
 
 ## 7. Timestamp fixtures
+
+### NF-1 exact-integer cross-runtime fixture — required, not created
+
+The future normative corpus MUST include the same source integer outside
+`−(2^53 − 1) … 2^53 − 1` for a JavaScript implementation and at least one runtime that preserves
+larger integers. Both MUST reject it at the AION canonical validation boundary with
+`integer-out-of-range`; neither may produce canonical bytes, frame bytes, or a digest. The fixture
+must prove that parser success and host numeric capability do not redefine the AION contract.
+This requirement does not authorize a fixture, loader, harness, or fixtures directory.
 
 Recorded per [CTO-DECISION-004](../decisions/CTO-DECISION-004-sprint-2.7-authorization.md),
 resolving NB-7. See [ACJ-1 §14](canonical-serialization.md#14-timestamps).

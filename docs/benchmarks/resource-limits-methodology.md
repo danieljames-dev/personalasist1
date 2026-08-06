@@ -1,7 +1,7 @@
 # Resource-Limit Benchmark Methodology
 
 Status: **Proposed**  
-Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (Proposed)  
+Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (Accepted for DG-4a only)
 Probes: `tools/benchmarks/resource-limits/`  
 Implementation: **Not authorized.** These probes are not production code.
 

@@ -1,9 +1,9 @@
 # Resource Limits Threat Model
 
-Status: **Proposed**  
-Scope: `arlp-1` limit profile and canonical-processing resource exhaustion  
-Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (Proposed)  
-Implementation: **Not authorized.** No canonicalizer, validator, or enforcement code exists.
+Status: **Accepted for DG-4a architecture scope**, 2026-08-06
+Scope: `aion-resource-limits-1` v1 and canonical-processing resource exhaustion
+Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (Accepted for DG-4a only)
+Implementation: **Not implemented.** Any future implementation is limited to the bounded Sprint 3.0 slice.
 
 ## Control status vocabulary
 

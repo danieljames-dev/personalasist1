@@ -1,13 +1,16 @@
 # ADR-010: Measurable resource and complexity limits
 
-- Status: **Proposed**
+- Status: **Accepted** for DG-4a only
 - Date: 2026-08-06
+- Accepted: 2026-08-06
 - Decision owner: CTO
-- Implementation status: **Frozen.** No canonicalizer, validator, or enforcement code exists.
+- Decision record: [CTO-DECISION-008](CTO-DECISION-008-resource-limits-and-vertical-slice.md)
+- Implementation status: **Not implemented.** No canonicalizer, validator, or enforcement code exists.
 - Authorized by: [CTO-DECISION-006](CTO-DECISION-006-sprint-2.8-authorization.md)
 - Corrected by: [CTO-DECISION-007](CTO-DECISION-007-sprint-2.9-resource-limits-corrections.md)
 - Profile identifier: `aion-resource-limits-1` (renamed from the Sprint 2.8 draft `arlp-1`)
-- Targets gate: DG-4 — **DG-4 remains OPEN. This ADR does not close it.**
+- Closes gate: DG-4a — Canonical Processing Resource Limits only
+- Excludes gate: DG-4b — Object and Domain Workload Limits remains **Open**
 - Depends on: [ADR-007](ADR-007-universal-object-model.md),
   [ADR-008](ADR-008-canonical-serialization.md), [ADR-009](ADR-009-contract-fixture-corpus.md)
 
@@ -23,7 +26,8 @@ proposes a limit profile. It did **not** produce a closable gate.
 
 ## Decision
 
-Adopt the **`aion-resource-limits-1`** profile structure, with its values remaining Proposed.
+Adopt **`aion-resource-limits-1` v1** as the deterministic normative profile for the
+canonical-processing surfaces it owns. Limits outside that scope remain Provisional or Deferred.
 
 > **Sprint 2.9 correction.** The Sprint 2.8 draft used a floor-to-ceiling band and the identifier
 > `arlp-1`. Readiness finding B-1 showed the band contradicts ACJ-1 §Conformance and §34, which
@@ -133,8 +137,9 @@ All four were addressed; three fully. See the
 | **B-3** | Total value node undefined | **Resolved** — normative definition, worked examples, iterative counting, boundary triple verified by execution |
 | **B-4** | Workload evidence not supplied | **Partially resolved** — canonicalization and framing evidenced across six size classes, six workload families and two runtimes. Object business limits and the six Object workload families remain unsupplied |
 
-One required change remains, **RC-1**: split DG-4 into canonicalization limits (DG-4a) and Object
-business limits with their workloads (DG-4b). That is a Founder/CTO scope decision.
+RC-1 is resolved by [CTO-DECISION-008](CTO-DECISION-008-resource-limits-and-vertical-slice.md):
+the original DG-4 is retained in history and split prospectively into DG-4a canonical-processing
+limits and DG-4b Object and domain workloads. DG-4a closes; DG-4b remains open.
 
 ## Original blocking findings (retained)
 
@@ -155,7 +160,11 @@ returning REJECT. Four findings must be resolved before ADR-010 could be accepte
    provenance, extension, relationship page, and event sizes plus six benchmarked workloads;
    none was supplied.
 
-## Required subordinate decisions
+## Historical required subordinate decisions
+
+The following list is retained from the Proposed review record. Items 1–7 were resolved or
+dispositioned by Sprint 2.9 and CTO-DECISION-008 for the accepted DG-4a scope; Deferred Object and
+domain workload matters remain governed by DG-4b.
 
 1. Resolve the floor/ceiling conformance contradiction — one normative value per limit, or a
    separately identified reduced profile.
@@ -175,8 +184,20 @@ existing and being slower than the probes assumed; ACJ-1 §29–§31 being updat
 
 ## Approval effect
 
-**ADR-010 is Proposed and is not accepted by this directive.**
+**ADR-010 is Accepted for DG-4a only.** Acceptance closes DG-4a and ratifies one deterministic
+normative limit for each canonical-processing surface owned by `aion-resource-limits-1` v1,
+including exact node counting, explicit processing-stage ownership, JCS-compatible UTF-16
+code-unit member ordering, overflow-safe accounting, framing limits, and deterministic rejection.
 
-Acceptance would authorize the limit profile and its subordinate decisions. It would **not**
-authorize any implementation, any fixture, closure of DG-4, or lifting the freeze. DG-4 remains
-open; production adapters and untrusted ingestion remain unauthorized.
+For the same source input under the same schema version, canonicalization profile,
+resource-limits profile, and processing stage, conforming implementations must return the same
+contract-level accept/reject result. Deployment admission limits are separate operational policy:
+they may be stricter, must be observable, must return `policy-limit-exceeded`, and must not claim
+that the canonical profile rejected the value.
+
+Acceptance does **not** close DG-4b, designate the Universal Object Contract stable, authorize a
+normative fixture, or authorize public, hostile, multi-owner, or production-scale ingestion. It
+does not claim that any documented limit is enforced by production code. DG-3 remains Open, the
+Object Contract remains Pre-stable, and benchmark evidence remains non-production evidence rather
+than an implemented protection. Implementation remains frozen except prospectively within the
+narrow vertical slice authorized by CTO-DECISION-008; no such implementation begins in Phase 2.

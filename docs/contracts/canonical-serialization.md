@@ -8,7 +8,7 @@ Base: strict subset of [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785)
 Stability: `acj-1` names a **profile family**, not a frozen implementation. The profile is
 approved; no implementation exists and cross-runtime agreement has never been demonstrated.
 Advances to `acj-2` on any change to §1–§20 or §23.  
-Implementation: **Not authorized**; freeze in effect
+Implementation: **Not implemented**; authorized only prospectively within the bounded Sprint 3.0 slice
 
 ## Responsibility
 
@@ -243,6 +243,15 @@ would make two distinct inputs produce one output and hide a producer bug.
 The admitted range is **−(2^53 − 1) … 2^53 − 1** inclusive — the range in which every
 integer is exactly representable as an IEEE 754 double, so a JCS implementation backed by
 double arithmetic cannot lose precision.
+
+This is an AION contract boundary, not a description of host-language capability. A conforming
+implementation MUST validate the source numeric token/value and MUST NOT trust success from its
+host parser. JavaScript MUST reject a precision-lost out-of-range integer; Python and runtimes
+with larger exact integers MUST reject the same value despite preserving it. The same source
+contract value therefore receives the same AION result across runtimes. Rejection is
+`integer-out-of-range` at the canonical validation boundary and occurs before canonical bytes,
+AION Frame bytes, or digest output are produced. A future normative cross-runtime fixture is
+required; none is created or authorized here.
 
 Integers outside that range are represented as **strings** with a schema-declared radix
 (decimal by default) and are validated against a declared minimum and maximum. The schema,

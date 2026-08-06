@@ -29,10 +29,10 @@
 ## Sprint 2.5: Universal Object Model
 
 ADR-007 is **Accepted** (2026-08-06) as an architecture-boundary decision. The contract
-family is normative but **pre-stable** — not designated stable v1. The implementation
-freeze remains in effect; nothing below authorizes implementation. Four deferred gates
-remain open: identity bootstrap, canonical serialization, representative fixtures, and
-measurable limits.
+family is normative but **pre-stable** — not designated stable v1. The implementation freeze is
+lifted prospectively only for the bounded Sprint 3.0 vertical slice recorded in
+CTO-DECISION-008; no slice implementation has begun. DG-1, DG-3, and DG-4b remain Open; DG-2 and
+DG-4a are Closed.
 
 ### Decision and architecture
 
@@ -101,15 +101,18 @@ fixtures directory exists.
 
 ## Sprint 2.8–2.9: Measurable resource limits
 
-ADR-010 is **Proposed**. It targets deferred gate **DG-4**, which **remains open**. Sprint 2.9
-resolved three of the four blocking findings fully and the fourth partially; the final review
-returns APPROVE WITH CHANGES with one required change (RC-1: split the gate). Non-production
-benchmark probes live under `tools/benchmarks/resource-limits/` and are fenced by an
-architecture test. No limit is enforced anywhere.
+ADR-010 is **Accepted for DG-4a only**. The historical DG-4 is split: **DG-4a is Closed** for
+canonical-processing resource limits and **DG-4b remains Open** for Object and domain workloads.
+DG-4b does not block a local, single-owner bounded reference slice with small selected inputs,
+but blocks production-scale, hostile/public, unbounded, multi-user, production workload, and
+production service claims. Benchmark probes remain non-production; no documented limit is yet
+implemented as production protection.
 
-- [ADR-010: Measurable resource limits](decisions/ADR-010-measurable-resource-limits.md) - Proposed
+- [ADR-010: Measurable resource limits](decisions/ADR-010-measurable-resource-limits.md) — Accepted for DG-4a only
+- [CTO-DECISION-008: Resource limits and vertical-slice authorization](decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md)
+- [Permanent Sprint 3.0 directive](directives/sprint-3.0-career-vertical-slice.md)
 - [CTO-DECISION-006: Sprint 2.8 authorization](decisions/CTO-DECISION-006-sprint-2.8-authorization.md)
-- [AION Resource Limits Profile 1 - arlp-1](contracts/resource-limits-profile.md)
+- [AION Resource Limits Profile — aion-resource-limits-1 v1](contracts/resource-limits-profile.md)
 - [Resource Limits Threat Model](security/resource-limits-threat-model.md)
 - [Benchmark methodology](benchmarks/resource-limits-methodology.md)
 - [Benchmark evidence](benchmarks/resource-limits-evidence.md)
