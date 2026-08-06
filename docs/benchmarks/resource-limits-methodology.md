@@ -125,9 +125,20 @@ merely because §17 of the profile has rows.
 ## Reproducing
 
 ```bash
+# Sprint 2.8 baseline
 node tools/benchmarks/resource-limits/run.mjs --quick
 node --expose-gc tools/benchmarks/resource-limits/run.mjs --out docs/benchmarks/resource-limits-run.json
+
+# Sprint 2.9 workload matrix (six size classes x six workload families)
+node --expose-gc tools/benchmarks/resource-limits/workloads.mjs --out docs/benchmarks/resource-limits-workloads.json
+
+# Sprint 2.9 second runtime (CPython, standard library only)
+python tools/benchmarks/resource-limits/probe_python.py --out docs/benchmarks/resource-limits-python.json
 ```
+
+The workload runner self-checks for physically impossible measurements and **exits non-zero if any
+self-check fails**. A benchmark run that cannot trust its own numbers must not be reported as
+success.
 
 The second form is what produced the committed evidence. `--expose-gc` is used so heap deltas
 are taken after an explicit collection rather than at an arbitrary point in the GC cycle.

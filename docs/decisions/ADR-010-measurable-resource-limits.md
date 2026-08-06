@@ -5,6 +5,8 @@
 - Decision owner: CTO
 - Implementation status: **Frozen.** No canonicalizer, validator, or enforcement code exists.
 - Authorized by: [CTO-DECISION-006](CTO-DECISION-006-sprint-2.8-authorization.md)
+- Corrected by: [CTO-DECISION-007](CTO-DECISION-007-sprint-2.9-resource-limits-corrections.md)
+- Profile identifier: `aion-resource-limits-1` (renamed from the Sprint 2.8 draft `arlp-1`)
 - Targets gate: DG-4 — **DG-4 remains OPEN. This ADR does not close it.**
 - Depends on: [ADR-007](ADR-007-universal-object-model.md),
   [ADR-008](ADR-008-canonical-serialization.md), [ADR-009](ADR-009-contract-fixture-corpus.md)
@@ -21,12 +23,18 @@ proposes a limit profile. It did **not** produce a closable gate.
 
 ## Decision
 
-Adopt the **AION Resource Limits Profile 1 (`arlp-1`)** structure, with its values remaining
-Proposed.
+Adopt the **`aion-resource-limits-1`** profile structure, with its values remaining Proposed.
 
-1. **Four categories, never conflated.** Encoding capacity (mathematical; **not** authorization
-   to accept values near it), universal safety ceiling, required conformance floor, and
-   deployment policy limit. Representation capacity, safety ceiling, minimum supported capacity,
+> **Sprint 2.9 correction.** The Sprint 2.8 draft used a floor-to-ceiling band and the identifier
+> `arlp-1`. Readiness finding B-1 showed the band contradicts ACJ-1 §Conformance and §34, which
+> require conforming implementations to agree on every rejection. The band is removed: **one
+> deterministic value per surface**. See
+> [CTO-DECISION-007](CTO-DECISION-007-sprint-2.9-resource-limits-corrections.md).
+
+1. **Four categories, never conflated.** Encoding capacity (mathematical; **not** an acceptance
+   limit), normative profile limit (one deterministic value), deployment admission limit (local,
+   outside the conformance verdict), and separately named reduced profile (a future profile, never
+   a deployment setting). Representation capacity, safety ceiling, minimum supported capacity,
    deployment quota, commercial plan limit, owner preference, storage quota, and network
    transport limit are eight different things; this profile governs four.
 
@@ -44,8 +52,9 @@ Proposed.
    and must be discoverable; errors must not reflect oversized input; rejection emits no bytes,
    frame, or digest; limits are not authorization.
 
-5. **Distinct outcomes.** `limit-exceeded` (universal ceiling), `policy-limit-exceeded`
-   (deployment), `conformance-floor-unmet` (implementation defect). Outcomes carry the limit
+5. **Distinct outcomes.** `limit-exceeded` (the contract verdict) and `policy-limit-exceeded`
+   (deployment admission, outside the verdict). `conformance-floor-unmet` is removed — floors no
+   longer exist. Outcomes carry the limit
    identifier and category, **never the offending value**.
 
 6. **Benchmark probes are non-production and are fenced by a test.**
@@ -61,7 +70,8 @@ Proposed.
   Direct evidence for ACJ-1 §7 and §8.
 - **Duplicate members are destroyed by parsing** — 10,000 members collapsed to 1 key. Direct
   evidence for AFX-1's Entry-B routing.
-- **Late rejection costs ~100× early rejection** — 0.523 ms vs 0.005 ms.
+- **Late rejection cost is linear in input size while early rejection is flat** — measured
+  ratios 1.4× at 64 KiB, 8.9× at 1 MiB, 35.0× at 4 MiB. The ratio is unbounded as input grows.
 - **Per-unit cost is stable and differs by container kind** — object members ~72 bytes and
   164–288 ns each; array elements ~8 bytes and ~20–30 ns each.
 
@@ -93,15 +103,15 @@ It could never fire independently.
 - Bounds become numbers with stated derivations, so a boundary fixture can be written.
 - The four-category split separates "what this machine can do" from "what every implementation
   must do" — the distinction that keeps limits portable.
-- Limits sit outside ACJ-1 §24's change trigger (§1–§20, §23), so `arlp-1` versions
-  independently and a limits revision does not invalidate a single retained digest.
+- Limits sit outside ACJ-1 §24's change trigger (§1–§20, §23), so `aion-resource-limits-1`
+  versions independently and a limits revision does not invalidate a single retained digest.
 - The benchmark fence is enforced by a passing test, not by a convention.
 
 ### Costs
 
 - Seven surfaces are Deferred for lack of evidence, so the profile is visibly incomplete.
-- The floor/ceiling band creates two normative numbers per limit and a permanent maintenance
-  burden — and see the blocking finding below.
+- One deterministic value per surface means a genuinely low-resource implementation has no
+  conformant option short of a separately named reduced profile, which does not yet exist.
 - Every latency-derived number has **less** headroom than it appears: the probes use
   `JSON.parse`, and a real AION canonicalizer will be slower because it checks more.
 
@@ -111,7 +121,22 @@ It could never fire independently.
 - This machine's capability is not universal architecture.
 - A benchmarked rule is **not** an implemented production control.
 
-## Blocking findings carried forward
+## Blocking findings — disposition after Sprint 2.9
+
+All four were addressed; three fully. See the
+[final readiness review](../reviews/resource-limits-final-readiness-review.md).
+
+| | Finding | Status |
+|---|---|---|
+| **B-1** | Floor/ceiling band contradicts deterministic conformance | **Resolved** — band removed, one value per surface |
+| **B-2** | Enforcement stage unspecified | **Resolved** — stage ownership assigned; pre-parse structural scan mandated. CPython's fixed recursion guard measured directly at 2,990/3,000, not tunable |
+| **B-3** | Total value node undefined | **Resolved** — normative definition, worked examples, iterative counting, boundary triple verified by execution |
+| **B-4** | Workload evidence not supplied | **Partially resolved** — canonicalization and framing evidenced across six size classes, six workload families and two runtimes. Object business limits and the six Object workload families remain unsupplied |
+
+One required change remains, **RC-1**: split DG-4 into canonicalization limits (DG-4a) and Object
+business limits with their workloads (DG-4b). That is a Founder/CTO scope decision.
+
+## Original blocking findings (retained)
 
 The readiness review returned **APPROVE WITH CHANGES**, with two of three reviewers initially
 returning REJECT. Four findings must be resolved before ADR-010 could be accepted:

@@ -1,0 +1,1049 @@
+{
+  "schema": "aion.resource-limit-workloads.v1",
+  "disclaimer": "NON-PRODUCTION PROBE. Not the AION canonicalizer, validator, fixture loader, conformance harness, or a security boundary. Measured facts only. A proxy is not proof of the future production implementation.",
+  "environment": {
+    "runtime": "Node",
+    "nodeVersion": "v22.18.0",
+    "v8Version": "12.4.254.21-node.27",
+    "osFamily": "Windows_NT",
+    "osRelease": "10.0.26200",
+    "architecture": "x64",
+    "processorClass": "Intel(R) Core(TM) Ultra 5 226V",
+    "logicalCores": 8,
+    "physicalMemoryBytes": 16811347968,
+    "gitCommit": "9045eb6b9ff7c429b1176ea90fed48a688fccd06",
+    "workingTree": "dirty",
+    "gcExposed": true,
+    "externalDriveParticipated": false,
+    "notes": [
+      "Run from the local NVMe working repository, not the external backup drive.",
+      "Security software was not disabled; background load is part of the measured reality.",
+      "No personal or owner data. Deterministic synthetic shapes from stable seeds.",
+      "No network access. No external service calls."
+    ]
+  },
+  "runConfig": {
+    "runs": 9,
+    "warmup": 3,
+    "quick": false
+  },
+  "selfChecks": [
+    {
+      "check": "f2.nodeCount(65536)",
+      "passed": true,
+      "detail": "expected 65536, counted 65536"
+    },
+    {
+      "check": "f2.nodeCount(262144)",
+      "passed": true,
+      "detail": "expected 262144, counted 262144"
+    },
+    {
+      "check": "f2.nodeCount(1048576)",
+      "passed": true,
+      "detail": "expected 1048576, counted 1048576"
+    },
+    {
+      "check": "f2.boundaryTriple",
+      "passed": true,
+      "detail": "{\"limitMinusOne\":{\"nodes\":65535,\"counted\":65535,\"exceeded\":false},\"atLimit\":{\"nodes\":65536,\"counted\":65536,\"exceeded\":false},\"limitPlusOne\":{\"nodes\":65537,\"counted\":65537,\"exceeded\":true}}"
+    },
+    {
+      "check": "f2.iterativeSurvivesDeeper",
+      "passed": true,
+      "detail": "iterative 200000 vs recursive 4000"
+    },
+    {
+      "check": "f3.orderingDiverges",
+      "passed": true,
+      "detail": "UTF-16 and code-point orders must differ for these keys"
+    },
+    {
+      "check": "f4.frameOverhead(1024)",
+      "passed": true,
+      "detail": "framed 1095, payload 1024"
+    },
+    {
+      "check": "f4.frameOverhead(65536)",
+      "passed": true,
+      "detail": "framed 65607, payload 65536"
+    },
+    {
+      "check": "f4.frameOverhead(1048576)",
+      "passed": true,
+      "detail": "framed 1048647, payload 1048576"
+    },
+    {
+      "check": "f4.frameOverhead(16777216)",
+      "passed": true,
+      "detail": "framed 16777287, payload 16777216"
+    }
+  ],
+  "allSelfChecksPassed": true,
+  "unavailableMeasurements": [
+    "cpuDurationMs - not attributable per probe at this granularity",
+    "cancellationLatencyMs - no cancellable implementation exists",
+    "concurrentInFlightOperations - no server or scheduler exists",
+    "storageIo - deliberately not measured; benchmarks avoid the external drive"
+  ],
+  "results": [
+    {
+      "name": "f1.parse.wideObject(1)",
+      "family": "raw-parsing",
+      "sizeClass": "minimal",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.012,
+        "p95": 0.017,
+        "worst": 0.017,
+        "min": 0.007,
+        "stdDev": 0.003
+      },
+      "opsPerSecond": 83333,
+      "inputBytes": 8,
+      "peakMemoryDeltaBytes": 4024,
+      "memoryAmplificationFactor": null,
+      "unitsUnderTest": 1,
+      "unitName": "member",
+      "nsPerUnit": 12000,
+      "bytesPerUnit": 4024,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f1.parse.wideObject(64)",
+      "family": "raw-parsing",
+      "sizeClass": "small",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.013,
+        "p95": 0.066,
+        "worst": 0.066,
+        "min": 0.01,
+        "stdDev": 0.017
+      },
+      "opsPerSecond": 76923,
+      "inputBytes": 557,
+      "peakMemoryDeltaBytes": 17320,
+      "memoryAmplificationFactor": null,
+      "unitsUnderTest": 64,
+      "unitName": "member",
+      "nsPerUnit": 203.125,
+      "bytesPerUnit": 270.625,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f1.parse.wideObject(1024)",
+      "family": "raw-parsing",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.147,
+        "p95": 0.548,
+        "worst": 0.548,
+        "min": 0.141,
+        "stdDev": 0.125
+      },
+      "opsPerSecond": 6803,
+      "inputBytes": 11093,
+      "peakMemoryDeltaBytes": 74184,
+      "memoryAmplificationFactor": 6.687,
+      "unitsUnderTest": 1024,
+      "unitName": "member",
+      "nsPerUnit": 143.555,
+      "bytesPerUnit": 72.445,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f1.parse.wideObject(65536)",
+      "family": "raw-parsing",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 16.332,
+        "p95": 19.655,
+        "worst": 19.655,
+        "min": 14.653,
+        "stdDev": 1.634
+      },
+      "opsPerSecond": 61,
+      "inputBytes": 960821,
+      "peakMemoryDeltaBytes": 4719048,
+      "memoryAmplificationFactor": 4.911,
+      "unitsUnderTest": 65536,
+      "unitName": "member",
+      "nsPerUnit": 249.207,
+      "bytesPerUnit": 72.007,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f1.parse.wideObject(4096)",
+      "family": "raw-parsing",
+      "sizeClass": "candidate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.686,
+        "p95": 1.224,
+        "worst": 1.224,
+        "min": 0.613,
+        "stdDev": 0.181
+      },
+      "opsPerSecond": 1458,
+      "inputBytes": 51029,
+      "peakMemoryDeltaBytes": 295368,
+      "memoryAmplificationFactor": 5.788,
+      "unitsUnderTest": 4096,
+      "unitName": "member",
+      "nsPerUnit": 167.48,
+      "bytesPerUnit": 72.111,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f2.countNodes.iterative(65536)",
+      "family": "traversal",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.875,
+        "p95": 3.687,
+        "worst": 3.687,
+        "min": 0.767,
+        "stdDev": 0.965
+      },
+      "opsPerSecond": 1143,
+      "inputBytes": 131071,
+      "peakMemoryDeltaBytes": 1910488,
+      "memoryAmplificationFactor": 14.576,
+      "unitsUnderTest": 65536,
+      "unitName": "node",
+      "nsPerUnit": 13.351,
+      "bytesPerUnit": 29.152,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "observedNodeCount": 65536,
+      "expectedNodeCount": 65536
+    },
+    {
+      "name": "f2.countNodes.iterative(262144)",
+      "family": "traversal",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 2.651,
+        "p95": 3.091,
+        "worst": 3.091,
+        "min": 2.325,
+        "stdDev": 0.237
+      },
+      "opsPerSecond": 377,
+      "inputBytes": 524287,
+      "peakMemoryDeltaBytes": 6396824,
+      "memoryAmplificationFactor": 12.201,
+      "unitsUnderTest": 262144,
+      "unitName": "node",
+      "nsPerUnit": 10.113,
+      "bytesPerUnit": 24.402,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "observedNodeCount": 262144,
+      "expectedNodeCount": 262144
+    },
+    {
+      "name": "f2.countNodes.iterative(1048576)",
+      "family": "traversal",
+      "sizeClass": "candidate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 16.05,
+        "p95": 18.929,
+        "worst": 18.929,
+        "min": 14.78,
+        "stdDev": 1.393
+      },
+      "opsPerSecond": 62,
+      "inputBytes": 2097151,
+      "peakMemoryDeltaBytes": 22765296,
+      "memoryAmplificationFactor": 10.855,
+      "unitsUnderTest": 1048576,
+      "unitName": "node",
+      "nsPerUnit": 15.306,
+      "bytesPerUnit": 21.711,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "observedNodeCount": 1048576,
+      "expectedNodeCount": 1048576
+    },
+    {
+      "name": "f2.nodeLimit.boundaryTriple",
+      "family": "traversal",
+      "sizeClass": "boundary",
+      "note": "Inclusivity: below accepted, at accepted, above rejected. Counting stops at the crossing node.",
+      "limit": 65536,
+      "limitMinusOne": {
+        "nodes": 65535,
+        "counted": 65535,
+        "exceeded": false
+      },
+      "atLimit": {
+        "nodes": 65536,
+        "counted": 65536,
+        "exceeded": false
+      },
+      "limitPlusOne": {
+        "nodes": 65537,
+        "counted": 65537,
+        "exceeded": true
+      },
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "f2.counting.iterativeVsRecursive",
+      "family": "traversal",
+      "sizeClass": "adversarial",
+      "note": "A recursive counter overflows on exactly the shapes a node limit exists to reject. B-3 therefore requires an iterative counter.",
+      "deepestRecursive": 4000,
+      "firstFailingRecursive": 8000,
+      "deepestIterative": 200000,
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "f3.ordering.utf16VsCodePoint.node",
+      "family": "ordering",
+      "sizeClass": "minimal",
+      "note": "JavaScript strings ARE UTF-16 and default sort compares code units, so Node is conformant BY DEFAULT. Python is not - see probe_python.py. The divergence is real and runtime-specific.",
+      "keys": [
+        {
+          "codePoints": [
+            "0xffff"
+          ],
+          "utf16CodeUnits": [
+            "0xffff"
+          ]
+        },
+        {
+          "codePoints": [
+            "0x10000"
+          ],
+          "utf16CodeUnits": [
+            "0xd800",
+            "0xdc00"
+          ]
+        },
+        {
+          "codePoints": [
+            "0xe000"
+          ],
+          "utf16CodeUnits": [
+            "0xe000"
+          ]
+        },
+        {
+          "codePoints": [
+            "0x61"
+          ],
+          "utf16CodeUnits": [
+            "0x61"
+          ]
+        }
+      ],
+      "utf16Order": [
+        {
+          "codePoints": [
+            "0x61"
+          ],
+          "utf16CodeUnits": [
+            "0x61"
+          ]
+        },
+        {
+          "codePoints": [
+            "0x10000"
+          ],
+          "utf16CodeUnits": [
+            "0xd800",
+            "0xdc00"
+          ]
+        },
+        {
+          "codePoints": [
+            "0xe000"
+          ],
+          "utf16CodeUnits": [
+            "0xe000"
+          ]
+        },
+        {
+          "codePoints": [
+            "0xffff"
+          ],
+          "utf16CodeUnits": [
+            "0xffff"
+          ]
+        }
+      ],
+      "codePointOrder": [
+        {
+          "codePoints": [
+            "0x61"
+          ],
+          "utf16CodeUnits": [
+            "0x61"
+          ]
+        },
+        {
+          "codePoints": [
+            "0xe000"
+          ],
+          "utf16CodeUnits": [
+            "0xe000"
+          ]
+        },
+        {
+          "codePoints": [
+            "0xffff"
+          ],
+          "utf16CodeUnits": [
+            "0xffff"
+          ]
+        },
+        {
+          "codePoints": [
+            "0x10000"
+          ],
+          "utf16CodeUnits": [
+            "0xd800",
+            "0xdc00"
+          ]
+        }
+      ],
+      "diverges": true,
+      "nodeDefaultIsConformant": true,
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "f3.sort.utf16(1024)",
+      "family": "ordering",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.1,
+        "p95": 0.403,
+        "worst": 0.403,
+        "min": 0.091,
+        "stdDev": 0.111
+      },
+      "opsPerSecond": 10000,
+      "inputBytes": 5378,
+      "peakMemoryDeltaBytes": 18800,
+      "memoryAmplificationFactor": 3.496,
+      "unitsUnderTest": 1024,
+      "unitName": "key",
+      "nsPerUnit": 97.656,
+      "bytesPerUnit": 18.359,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f3.sort.utf16(4096)",
+      "family": "ordering",
+      "sizeClass": "candidate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.322,
+        "p95": 0.83,
+        "worst": 0.83,
+        "min": 0.297,
+        "stdDev": 0.195
+      },
+      "opsPerSecond": 3106,
+      "inputBytes": 24834,
+      "peakMemoryDeltaBytes": 75848,
+      "memoryAmplificationFactor": 3.054,
+      "unitsUnderTest": 4096,
+      "unitName": "key",
+      "nsPerUnit": 78.613,
+      "bytesPerUnit": 18.518,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f3.sort.utf16(65536)",
+      "family": "ordering",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 5.373,
+        "p95": 8.25,
+        "worst": 8.25,
+        "min": 4.686,
+        "stdDev": 1.004
+      },
+      "opsPerSecond": 186,
+      "inputBytes": 469490,
+      "peakMemoryDeltaBytes": 1138864,
+      "memoryAmplificationFactor": 2.426,
+      "unitsUnderTest": 65536,
+      "unitName": "key",
+      "nsPerUnit": 81.985,
+      "bytesPerUnit": 17.378,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f3.serializeProxy.sortAndEmit(1024)",
+      "family": "ordering",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.312,
+        "p95": 0.544,
+        "worst": 0.544,
+        "min": 0.26,
+        "stdDev": 0.1
+      },
+      "opsPerSecond": 3205,
+      "inputBytes": null,
+      "peakMemoryDeltaBytes": 200536,
+      "memoryAmplificationFactor": null,
+      "unitsUnderTest": 1024,
+      "unitName": "member",
+      "nsPerUnit": 304.688,
+      "bytesPerUnit": 195.836,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f3.serializeProxy.sortAndEmit(4096)",
+      "family": "ordering",
+      "sizeClass": "candidate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 1.254,
+        "p95": 2.033,
+        "worst": 2.033,
+        "min": 1.056,
+        "stdDev": 0.383
+      },
+      "opsPerSecond": 797,
+      "inputBytes": null,
+      "peakMemoryDeltaBytes": 795736,
+      "memoryAmplificationFactor": null,
+      "unitsUnderTest": 4096,
+      "unitName": "member",
+      "nsPerUnit": 306.152,
+      "bytesPerUnit": 194.271,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f4.frame.build(1024)",
+      "family": "framing",
+      "sizeClass": "minimal",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.075,
+        "p95": 0.295,
+        "worst": 0.295,
+        "min": 0.048,
+        "stdDev": 0.074
+      },
+      "opsPerSecond": 13333,
+      "inputBytes": 1024,
+      "peakMemoryDeltaBytes": 21024,
+      "memoryAmplificationFactor": null,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "framedBytes": 1095,
+      "lengthPrefixOverheadBytes": 32
+    },
+    {
+      "name": "f4.frame.build(65536)",
+      "family": "framing",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.068,
+        "p95": 0.269,
+        "worst": 0.269,
+        "min": 0.055,
+        "stdDev": 0.065
+      },
+      "opsPerSecond": 14706,
+      "inputBytes": 65536,
+      "peakMemoryDeltaBytes": 135822,
+      "memoryAmplificationFactor": 2.072,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "framedBytes": 65607,
+      "lengthPrefixOverheadBytes": 32
+    },
+    {
+      "name": "f4.frame.build(1048576)",
+      "family": "framing",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.403,
+        "p95": 0.677,
+        "worst": 0.677,
+        "min": 0.351,
+        "stdDev": 0.1
+      },
+      "opsPerSecond": 2481,
+      "inputBytes": 1048576,
+      "peakMemoryDeltaBytes": 2101798,
+      "memoryAmplificationFactor": 2.004,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "framedBytes": 1048647,
+      "lengthPrefixOverheadBytes": 32
+    },
+    {
+      "name": "f4.frame.build(16777216)",
+      "family": "framing",
+      "sizeClass": "candidate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 5.386,
+        "p95": 5.608,
+        "worst": 5.608,
+        "min": 3.698,
+        "stdDev": 0.556
+      },
+      "opsPerSecond": 186,
+      "inputBytes": 16777216,
+      "peakMemoryDeltaBytes": 33559078,
+      "memoryAmplificationFactor": 2,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "framedBytes": 16777287,
+      "lengthPrefixOverheadBytes": 32
+    },
+    {
+      "name": "f5.digest.sha256(1024)",
+      "family": "digest",
+      "sizeClass": "minimal",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.102,
+        "p95": 0.839,
+        "worst": 0.839,
+        "min": 0.072,
+        "stdDev": 0.234
+      },
+      "opsPerSecond": 9804,
+      "inputBytes": 1095,
+      "peakMemoryDeltaBytes": 11832,
+      "memoryAmplificationFactor": null,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f5.digest.sha256(65536)",
+      "family": "digest",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.105,
+        "p95": 0.152,
+        "worst": 0.152,
+        "min": 0.103,
+        "stdDev": 0.015
+      },
+      "opsPerSecond": 9524,
+      "inputBytes": 65607,
+      "peakMemoryDeltaBytes": 2912,
+      "memoryAmplificationFactor": 0.044,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f5.digest.sha256(1048576)",
+      "family": "digest",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.412,
+        "p95": 1.944,
+        "worst": 1.944,
+        "min": 0.396,
+        "stdDev": 0.48
+      },
+      "opsPerSecond": 2427,
+      "inputBytes": 1048647,
+      "peakMemoryDeltaBytes": 2912,
+      "memoryAmplificationFactor": 0.003,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f5.digest.sha256(16777216)",
+      "family": "digest",
+      "sizeClass": "candidate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 5.787,
+        "p95": 6.595,
+        "worst": 6.595,
+        "min": 5.186,
+        "stdDev": 0.532
+      },
+      "opsPerSecond": 173,
+      "inputBytes": 16777287,
+      "peakMemoryDeltaBytes": 2912,
+      "memoryAmplificationFactor": 0,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable"
+    },
+    {
+      "name": "f6.reject.early(65536)",
+      "family": "rejection",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.077,
+        "p95": 0.14,
+        "worst": 0.14,
+        "min": 0.074,
+        "stdDev": 0.023
+      },
+      "opsPerSecond": 12987,
+      "inputBytes": 65546,
+      "peakMemoryDeltaBytes": 2696,
+      "memoryAmplificationFactor": 0.041,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": "SyntaxError",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "rejectionPoint": "byte 7 of input"
+    },
+    {
+      "name": "f6.reject.late(65536)",
+      "family": "rejection",
+      "sizeClass": "moderate",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.151,
+        "p95": 0.256,
+        "worst": 0.256,
+        "min": 0.112,
+        "stdDev": 0.054
+      },
+      "opsPerSecond": 6623,
+      "inputBytes": 65546,
+      "peakMemoryDeltaBytes": 4456,
+      "memoryAmplificationFactor": 0.068,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": "SyntaxError",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "rejectionPoint": "final bytes of input",
+      "lateVsEarlyRatio": 1.961
+    },
+    {
+      "name": "f6.reject.early(1048576)",
+      "family": "rejection",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.076,
+        "p95": 0.306,
+        "worst": 0.306,
+        "min": 0.071,
+        "stdDev": 0.083
+      },
+      "opsPerSecond": 13158,
+      "inputBytes": 1048586,
+      "peakMemoryDeltaBytes": 2624,
+      "memoryAmplificationFactor": 0.003,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": "SyntaxError",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "rejectionPoint": "byte 7 of input"
+    },
+    {
+      "name": "f6.reject.late(1048576)",
+      "family": "rejection",
+      "sizeClass": "large",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.779,
+        "p95": 1.575,
+        "worst": 1.575,
+        "min": 0.684,
+        "stdDev": 0.338
+      },
+      "opsPerSecond": 1284,
+      "inputBytes": 1048586,
+      "peakMemoryDeltaBytes": 2688,
+      "memoryAmplificationFactor": 0.003,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": "SyntaxError",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "rejectionPoint": "final bytes of input",
+      "lateVsEarlyRatio": 10.25
+    },
+    {
+      "name": "f6.reject.early(4194304)",
+      "family": "rejection",
+      "sizeClass": "adversarial",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.08,
+        "p95": 0.128,
+        "worst": 0.128,
+        "min": 0.075,
+        "stdDev": 0.018
+      },
+      "opsPerSecond": 12500,
+      "inputBytes": 4194314,
+      "peakMemoryDeltaBytes": 2624,
+      "memoryAmplificationFactor": 0.001,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": "SyntaxError",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "rejectionPoint": "byte 7 of input"
+    },
+    {
+      "name": "f6.reject.late(4194304)",
+      "family": "rejection",
+      "sizeClass": "adversarial",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 3.174,
+        "p95": 4.092,
+        "worst": 4.092,
+        "min": 2.893,
+        "stdDev": 0.362
+      },
+      "opsPerSecond": 315,
+      "inputBytes": 4194314,
+      "peakMemoryDeltaBytes": 2688,
+      "memoryAmplificationFactor": 0.001,
+      "unitsUnderTest": null,
+      "unitName": null,
+      "nsPerUnit": null,
+      "bytesPerUnit": null,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": "SyntaxError",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "rejectionPoint": "final bytes of input",
+      "lateVsEarlyRatio": 39.675
+    },
+    {
+      "name": "combined.deepAndWide",
+      "family": "traversal",
+      "sizeClass": "adversarial",
+      "note": "Stays within per-container depth/member limits while accumulating nodes - the bypass L-07 exists to close.",
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 3.018,
+        "p95": 3.561,
+        "worst": 3.561,
+        "min": 2.856,
+        "stdDev": 0.21
+      },
+      "opsPerSecond": 331,
+      "inputBytes": 391903,
+      "peakMemoryDeltaBytes": 672400,
+      "memoryAmplificationFactor": 1.716,
+      "unitsUnderTest": 55987,
+      "unitName": "node",
+      "nsPerUnit": 53.905,
+      "bytesPerUnit": 12.01,
+      "completedAsExpected": 9,
+      "completionRate": 1,
+      "failureType": null,
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "cpuDurationMs": "unavailable",
+      "observedNodeCount": 55987
+    }
+  ]
+}

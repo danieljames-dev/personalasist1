@@ -214,6 +214,122 @@ Recorded as unavailable rather than estimated: CPU duration; cancellation latenc
 in-flight operations; cross-runtime agreement; storage I/O; frame rejection latency (no decoder
 exists); full GC attribution.
 
+## Sprint 2.9 workload evidence
+
+Added to satisfy DG-4's requirement for six size classes and six workload families. Commands and
+exit codes below. Machine-readable: `resource-limits-workloads.json` (31 Node probes, 10 of 10
+self-checks passed) and `resource-limits-python.json` (16 CPython probes).
+
+```bash
+# Sprint 2.8 baseline (retained unchanged)
+node --expose-gc tools/benchmarks/resource-limits/run.mjs --out docs/benchmarks/resource-limits-run.json
+
+# Sprint 2.9 workload matrix - exit 0, 31 probes, 10/10 self-checks passed
+node --expose-gc tools/benchmarks/resource-limits/workloads.mjs --out docs/benchmarks/resource-limits-workloads.json
+
+# Sprint 2.9 second runtime - exit 0, 16 probes, CPython 3.13.7 stdlib only
+python tools/benchmarks/resource-limits/probe_python.py --out docs/benchmarks/resource-limits-python.json
+```
+
+The workload runner **exits non-zero if any self-check fails**, so a run that cannot trust its own
+numbers cannot be reported as success.
+
+### Cross-runtime: the same shapes in two runtimes
+
+| Shape | Node v22.18.0 | CPython 3.13.7 | Ratio |
+|---|---:|---:|---:|
+| `wideObject(1024)` parse | 0.144 ms | 0.133 ms | 0.9x |
+| `wideObject(4096)` parse | 0.685 ms | 0.502 ms | 0.7x |
+| `wideObject(65536)` parse | 13.93 ms | 18.95 ms | 1.4x |
+
+Timing is **comparable, not catastrophically divergent**. Python was faster at small sizes and 1.4x
+slower at the largest. Raw speed is not the portability risk; memory footprint and the absence of a
+concurrency bound are.
+
+### Depth: the runtimes disagree about who enforces it
+
+| Runtime | Parser bounds depth? | Deepest parsed | First failure | Tunable? |
+|---|---|---:|---:|---|
+| Node | **No** | 1,000,000 | none | - |
+| CPython | **Yes** | 2,990 | **3,000** (`RecursionError`) | **No** - `setrecursionlimit(20000)` did not move it |
+
+A document at depth 3,000 rejects at **S0 in Python** and reaches **S1/S2 in Node**. AFX-1 s11 item
+6 requires matching rejection stage, so two *correct* implementations would fail conformance against
+each other. This is the direct justification for the pre-parse structural scan.
+
+A recursive Node walker failed at depth 8,000; the iterative counter handled 200,000.
+
+### Member ordering: the divergence, reproduced
+
+Keys `a` (U+0061), U+E000, U+FFFF, and U+10000 (UTF-16 `D800 DC00`):
+
+| Order | Result | Conformant |
+|---|---|---|
+| Required (UTF-16 code units) | `a`, U+10000, U+E000, U+FFFF | - |
+| JavaScript default sort | matches required | **Yes** |
+| Python default `sorted()` | `a`, U+E000, U+FFFF, U+10000 | **No** |
+
+U+10000 is the highest code point of the four, but its UTF-16 form begins `D800`, below `E000` and
+`FFFF`. Python's conformant comparator (`s.encode('utf-16-be')`) cost **0.384 ms vs 0.035 ms** for
+the default - roughly 11x - and allocates one UTF-16 copy per key.
+
+### Node counting
+
+| Nodes | Median | ns/node | Bytes/node |
+|---:|---:|---:|---:|
+| 65,536 | 0.823 ms | 12.6 | 29.2 |
+| 262,144 | 2.557 ms | 9.8 | 24.4 |
+| 1,048,576 | 13.326 ms | 12.7 | 21.7 |
+
+Boundary triple at limit 65,536 - *exceeded* flag at limit-1 / limit / limit+1: **false / false /
+true**. Accepted below, accepted at, rejected above, verified by execution.
+
+L-07 was set to **262,144** rather than 1,048,576: the higher value costs 13.3 ms and ~22.8 MB per
+document here, which on a 4 GB two-core interpreted target is a plausible stall, and with no
+in-flight bound it multiplies.
+
+### Late rejection scales with input size
+
+| Padding | Early | Late | Ratio |
+|---:|---:|---:|---:|
+| 64 KiB | 0.080 ms | 0.112 ms | 1.4x |
+| 1 MiB | 0.076 ms | 0.674 ms | 8.9x |
+| 4 MiB | 0.074 ms | 2.592 ms | **35.0x** |
+
+Early-rejection cost is **flat**; late-rejection cost is **linear in input size**. The earlier
+"~100x" figure was a single point on this curve. The ratio is unbounded as input grows, which is why
+limits must be checked before allocation.
+
+### Framing and digest
+
+| Payload | Frame build | Digest sha-256 |
+|---:|---:|---:|
+| 1 KiB | 0.064 ms | 0.082 ms |
+| 64 KiB | 0.081 ms | 0.108 ms |
+| 1 MiB | 0.375 ms | 0.410 ms |
+| 16 MiB | 5.159 ms | 5.158 ms |
+
+Frame amplification is exactly **2.00x** (`Buffer.concat` copies); digest amplification ~0 (32 bytes
+regardless of input). Both are physically coherent and act as harness self-checks.
+
+### New cross-runtime hazard: integer precision
+
+| Literal | Node | CPython |
+|---|---|---|
+| `9007199254740993` | `9007199254740992` WRONG | `9007199254740993` exact |
+| `9007199254740995` | `9007199254740996` WRONG | `9007199254740995` exact |
+| `18014398509481985` | `18014398509481984` WRONG | `18014398509481985` exact |
+| `123456789012345678901` | `123456789012345680000` WRONG | exact |
+
+CPython returns arbitrary-precision `int` and is **lossless where Node is lossy**. The same document
+yields different numeric values in the two runtimes. This strengthens ACJ-1 s7's cap - and means a
+conformant implementation must **reject** out-of-range integers rather than trust its parser,
+because in Python the value survives and looks correct.
+
+### Duplicate members - confirmed in both runtimes
+
+10,000 duplicate members collapsed to **1 key**, last-wins, in **both** Node and CPython.
+
 ## What this evidence cannot support
 
 - **Any claim about a second runtime.** Python's `json` is recursive with a default recursion

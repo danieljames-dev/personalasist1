@@ -7,6 +7,15 @@ Decision scope: Architecture readiness only. **ADR-010 remains Proposed. DG-4 re
 
 Posture: this review attempts to **reject** the profile.
 
+> **Disposition — 2026-08-06.** The Founder/CTO resolved all four blocking findings by directive.
+> The corrections are recorded in
+> [CTO-DECISION-007](../decisions/CTO-DECISION-007-sprint-2.9-resource-limits-corrections.md) and
+> re-reviewed in the
+> [final readiness review](resource-limits-final-readiness-review.md), which returns
+> **APPROVE WITH CHANGES** with one remaining change (RC-1: split DG-4).
+> **ADR-010 remains Proposed and DG-4 remains open.** This review is retained as written, as the
+> evidence behind that decision.
+
 ## Method
 
 Three independent hostile reviewers — an architect, a security reviewer, and an implementer who

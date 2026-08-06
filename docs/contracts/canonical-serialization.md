@@ -142,6 +142,59 @@ RFC 8785 §3.2.3. This is not lexicographic Unicode ordering and not locale coll
 implementations that sort by code point will diverge on characters outside the Basic
 Multilingual Plane and are non-conforming.
 
+Member ordering is **never** any of the following:
+
+- the host language's default string sort;
+- Unicode code-point order;
+- locale-sensitive or culture-sensitive collation;
+- byte order of the UTF-8 encoding.
+
+A runtime whose native string ordering is **not** UTF-16 code-unit order MUST supply an
+explicit comparator producing the required order. Encoding each key to UTF-16 big-endian
+and comparing the resulting byte sequences is sufficient and is the recommended
+formulation.
+
+### Worked example — non-normative
+
+Measured in both runtimes on 2026-08-06; see
+[benchmark evidence](../benchmarks/resource-limits-evidence.md).
+
+| Key | Code point(s) | UTF-16 code units |
+|---|---|---|
+| `a` | U+0061 | `0061` |
+| `` (private use) | U+E000 | `E000` |
+| `￿` | U+FFFF | `FFFF` |
+| `𐀀` (supplementary) | U+10000 | `D800 DC00` — a surrogate pair |
+
+**Required order (UTF-16 code units):** `a`, `𐀀`, ``, `￿`
+
+**Code-point order (non-conformant):** `a`, ``, `￿`, `𐀀`
+
+U+10000 is the *highest* code point of the four, but its UTF-16 representation begins
+`D800`, which is *lower* than `E000` and `FFFF`. Any implementation ordering by code point
+places it last; the contract requires it second.
+
+**Why this matters per runtime.** JavaScript strings are UTF-16 and its relational
+operators compare code units, so `Array.prototype.sort()` with no comparator is conformant
+by default — verified. Python's `str` ordering is by code point, so `sorted()` is
+**non-conformant** for supplementary-plane keys — verified: Python produced
+`a, U+E000, U+FFFF, U+10000` where the contract requires `a, U+10000, U+E000, U+FFFF`.
+A conformant Python implementation must sort on `s.encode('utf-16-be')`, which was measured
+at roughly 11× the cost of the default sort and allocates one UTF-16 copy per key.
+
+Two independent implementations sorting "correctly" by their own defaults would therefore
+produce **different canonical bytes and different digests** for the same value. This is the
+clearest known cross-runtime hazard in the contract, and it is invisible in any test whose
+keys are entirely within the Basic Multilingual Plane.
+
+A normative fixture covering this case is **required** and is recorded in the AFX-1 coverage
+matrix. None is authored here — normative fixtures remain unauthorized.
+
+> **Status of this subsection.** Clarification only. The ordering rule, the exclusion of
+> code-point sorting, and the Basic Multilingual Plane divergence were all stated in this
+> section as accepted. No accepted semantics are changed; the worked example and the
+> explicit-comparator requirement make the existing rule checkable.
+
 ## 3. Array ordering
 
 Array order is **semantic and preserved exactly**. A canonicalizer never sorts, dedupes,

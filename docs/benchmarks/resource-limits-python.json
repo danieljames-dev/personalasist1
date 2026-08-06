@@ -1,0 +1,412 @@
+{
+  "schema": "aion.resource-limit-benchmark.python.v1",
+  "disclaimer": "NON-PRODUCTION PROBE. Not the AION canonicalizer, validator, fixture loader, conformance harness, or a security boundary. Second-runtime observations only.",
+  "environment": {
+    "runtime": "CPython",
+    "pythonVersion": "3.13.7",
+    "implementation": "CPython",
+    "osFamily": "Windows",
+    "osRelease": "11",
+    "architecture": "AMD64",
+    "recursionLimitDefault": 1000,
+    "maxUnicode": 1114111,
+    "notes": [
+      "Standard library only. No third-party imports. No network access.",
+      "Synthetic shapes only. No personal or owner data.",
+      "Timing uses perf_counter wall clock; peak memory deliberately not sampled."
+    ]
+  },
+  "runConfig": {
+    "quick": false
+  },
+  "unavailableMeasurements": [
+    "peakMemoryBytes - tracemalloc would perturb the timings it is meant to accompany",
+    "cancellationLatencyMs - no cancellable implementation exists",
+    "cpuDurationMs - not attributable per probe at this granularity"
+  ],
+  "results": [
+    {
+      "name": "ordering.utf16VsCodePoint",
+      "category": "ordering",
+      "note": "Python's default str sort is by code point. ACJ-1 \u00a72 requires UTF-16 code-unit order. They diverge for supplementary-plane keys. A naive Python canonicalizer would emit different canonical bytes and therefore a different digest.",
+      "keys": [
+        {
+          "literal": "'\\uffff'",
+          "codePoints": [
+            "0xffff"
+          ],
+          "utf16CodeUnits": [
+            "0xffff"
+          ]
+        },
+        {
+          "literal": "'\ud800\udc00'",
+          "codePoints": [
+            "0x10000"
+          ],
+          "utf16CodeUnits": [
+            "0xd800",
+            "0xdc00"
+          ]
+        },
+        {
+          "literal": "'\\ue000'",
+          "codePoints": [
+            "0xe000"
+          ],
+          "utf16CodeUnits": [
+            "0xe000"
+          ]
+        },
+        {
+          "literal": "'a'",
+          "codePoints": [
+            "0x61"
+          ],
+          "utf16CodeUnits": [
+            "0x61"
+          ]
+        }
+      ],
+      "pythonDefaultOrder": [
+        [
+          "0x61"
+        ],
+        [
+          "0xe000"
+        ],
+        [
+          "0xffff"
+        ],
+        [
+          "0x10000"
+        ]
+      ],
+      "requiredUtf16Order": [
+        [
+          "0x61"
+        ],
+        [
+          "0x10000"
+        ],
+        [
+          "0xe000"
+        ],
+        [
+          "0xffff"
+        ]
+      ],
+      "diverges": true,
+      "conformantComparator": "s.encode('utf-16-be') then bytewise compare",
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "ordering.sort.default",
+      "category": "ordering",
+      "note": "NON-CONFORMANT for supplementary-plane keys",
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.047,
+        "p95": 0.0933,
+        "worst": 0.0933,
+        "min": 0.0401
+      },
+      "opsPerSecond": 21276,
+      "inputBytes": null,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    },
+    {
+      "name": "ordering.sort.utf16Conformant",
+      "category": "ordering",
+      "note": "conformant; allocates one UTF-16BE copy per key",
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.4336,
+        "p95": 0.5319,
+        "worst": 0.5319,
+        "min": 0.415
+      },
+      "opsPerSecond": 2306,
+      "inputBytes": null,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    },
+    {
+      "name": "depth.runtimeCeiling.python",
+      "category": "depth",
+      "note": "Python's json.loads is RECURSIVE. Unlike Node it bounds depth by itself - which means the same input can reject at a DIFFERENT processing stage in the two runtimes unless AION enforces its own depth limit before parsing.",
+      "deepestParsed": 2990,
+      "firstFailingDepth": 3000,
+      "failureType": "RecursionError",
+      "tunableViaSetRecursionLimit": false,
+      "recursionLimitDefault": 1000,
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "depth.parse.nestArray(64).python",
+      "category": "depth",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.0034,
+        "p95": 0.026,
+        "worst": 0.026,
+        "min": 0.0031
+      },
+      "opsPerSecond": 294117,
+      "inputBytes": 132,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    },
+    {
+      "name": "depth.parse.nestArray(256).python",
+      "category": "depth",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.0118,
+        "p95": 0.0344,
+        "worst": 0.0344,
+        "min": 0.0113
+      },
+      "opsPerSecond": 84745,
+      "inputBytes": 516,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    },
+    {
+      "name": "depth.parse.nestArray(1000).python",
+      "category": "depth",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.0452,
+        "p95": 0.0874,
+        "worst": 0.0874,
+        "min": 0.0425
+      },
+      "opsPerSecond": 22123,
+      "inputBytes": 2004,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    },
+    {
+      "name": "width.parse.wideObject(1024).python",
+      "category": "width",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.1344,
+        "p95": 0.1772,
+        "worst": 0.1772,
+        "min": 0.125
+      },
+      "opsPerSecond": 7440,
+      "inputBytes": 11093,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "unitsUnderTest": 1024,
+      "nsPerUnit": 131.25
+    },
+    {
+      "name": "width.parse.wideObject(4096).python",
+      "category": "width",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.5631,
+        "p95": 0.7551,
+        "worst": 0.7551,
+        "min": 0.5407
+      },
+      "opsPerSecond": 1775,
+      "inputBytes": 51029,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "unitsUnderTest": 4096,
+      "nsPerUnit": 137.476
+    },
+    {
+      "name": "width.parse.wideObject(65536).python",
+      "category": "width",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 18.6089,
+        "p95": 24.7763,
+        "worst": 24.7763,
+        "min": 16.9605
+      },
+      "opsPerSecond": 53,
+      "inputBytes": 960821,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "unitsUnderTest": 65536,
+      "nsPerUnit": 283.949
+    },
+    {
+      "name": "width.parse.largeArray(65536).python",
+      "category": "width",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 3.9385,
+        "p95": 4.2746,
+        "worst": 4.2746,
+        "min": 3.5538
+      },
+      "opsPerSecond": 253,
+      "inputBytes": 382107,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "unitsUnderTest": 65536,
+      "nsPerUnit": 60.097
+    },
+    {
+      "name": "width.parse.largeArray(1000000).python",
+      "category": "width",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 87.1632,
+        "p95": 90.7,
+        "worst": 90.7,
+        "min": 82.5315
+      },
+      "opsPerSecond": 11,
+      "inputBytes": 6888891,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)",
+      "unitsUnderTest": 1000000,
+      "nsPerUnit": 87.163
+    },
+    {
+      "name": "reject.duplicateMembers.hostCollapse.python",
+      "category": "reject",
+      "note": "Confirms in a second runtime that a parsed value is not evidence for ACJ-1 \u00a719.",
+      "sourceMemberCount": 10000,
+      "parsedKeyCount": 1,
+      "lastWins": true,
+      "evidenceDestroyedByParsing": true,
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "numeric.precisionHazard.python",
+      "category": "numeric",
+      "note": "Python parses JSON integers as arbitrary-precision int and is LOSSLESS where Node is lossy. This is itself a cross-runtime hazard: the same document yields different values in the two runtimes, which is exactly why ACJ-1 \u00a77 caps the integer domain rather than relying on the parser.",
+      "cases": [
+        {
+          "literal": "9007199254740993",
+          "parsed": "9007199254740993",
+          "lossless": true,
+          "type": "int"
+        },
+        {
+          "literal": "9007199254740995",
+          "parsed": "9007199254740995",
+          "lossless": true,
+          "type": "int"
+        },
+        {
+          "literal": "18014398509481985",
+          "parsed": "18014398509481985",
+          "lossless": true,
+          "type": "int"
+        },
+        {
+          "literal": "123456789012345678901",
+          "parsed": "123456789012345678901",
+          "lossless": true,
+          "type": "int"
+        }
+      ],
+      "losslessCount": 4,
+      "runs": 1,
+      "warmup": 0
+    },
+    {
+      "name": "unicode.isNFC.check.nfd.python",
+      "category": "unicode",
+      "note": "Python has a native is_normalized; JavaScript has none and must normalize-and-compare",
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 5.5849,
+        "p95": 6.8616,
+        "worst": 6.8616,
+        "min": 5.4065
+      },
+      "opsPerSecond": 179,
+      "inputBytes": 600000,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    },
+    {
+      "name": "unicode.isNFC.check.nfc.python",
+      "category": "unicode",
+      "note": null,
+      "runs": 9,
+      "warmup": 3,
+      "durationMs": {
+        "median": 0.3413,
+        "p95": 0.414,
+        "worst": 0.414,
+        "min": 0.2939
+      },
+      "opsPerSecond": 2929,
+      "inputBytes": 400000,
+      "completedAsExpected": 9,
+      "completionRate": 1.0,
+      "failureType": null,
+      "peakMemoryBytes": "unavailable (tracemalloc not used; would perturb timing)",
+      "cancellationLatencyMs": "unavailable (no cancellable implementation exists)"
+    }
+  ]
+}

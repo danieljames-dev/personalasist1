@@ -111,7 +111,7 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 | DG-1 Identity bootstrap | **Open** |
 | DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
 | DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Proposed); no fixture, loader, or harness exists. Three coverage areas BLOCKED on open gates |
-| DG-4 Measurable limits | **Open.** `arlp-1` profile proposed by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) (Proposed) with benchmark evidence, 2026-08-06. Four blocking findings; required workload evidence not supplied |
+| DG-4 Measurable limits | **Open.** `aion-resource-limits-1` profile proposed by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) (Proposed). Sprint 2.9 resolved B-1–B-3 fully and B-4 partially: canonicalization and framing limits evidenced across six size classes, six workload families and two runtimes; **Object business limits and the six Object workload families remain unsupplied**. Final review: APPROVE WITH CHANGES, one required change (RC-1: split the gate) |
 
 ### DG-1 — Identity bootstrap
 

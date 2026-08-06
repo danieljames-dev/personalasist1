@@ -99,10 +99,11 @@ fixtures directory exists.
 - [Acceptance criteria](sprints/sprint-2.7-fixture-corpus/acceptance-criteria.md)
 - [Risk register](sprints/sprint-2.7-fixture-corpus/risks.md)
 
-## Sprint 2.8 proposal: Measurable resource limits
+## Sprint 2.8–2.9: Measurable resource limits
 
-ADR-010 is **Proposed**. It targets deferred gate **DG-4**, which **remains open** — the
-readiness review returned APPROVE WITH CHANGES with four blocking findings. Non-production
+ADR-010 is **Proposed**. It targets deferred gate **DG-4**, which **remains open**. Sprint 2.9
+resolved three of the four blocking findings fully and the fourth partially; the final review
+returns APPROVE WITH CHANGES with one required change (RC-1: split the gate). Non-production
 benchmark probes live under `tools/benchmarks/resource-limits/` and are fenced by an
 architecture test. No limit is enforced anywhere.
 
@@ -115,10 +116,15 @@ architecture test. No limit is enforced anywhere.
 - [Sprint specification](sprints/sprint-2.8-resource-limits/specification.md)
 - [Acceptance criteria](sprints/sprint-2.8-resource-limits/acceptance-criteria.md)
 - [Risk register](sprints/sprint-2.8-resource-limits/risks.md)
+- [CTO-DECISION-007: Sprint 2.9 corrections](decisions/CTO-DECISION-007-sprint-2.9-resource-limits-corrections.md)
+- [Sprint 2.9 specification](sprints/sprint-2.9-resource-limits-corrections/specification.md)
+- [Sprint 2.9 acceptance criteria](sprints/sprint-2.9-resource-limits-corrections/acceptance-criteria.md)
+- [Sprint 2.9 risk register](sprints/sprint-2.9-resource-limits-corrections/risks.md)
 
 ## Reviews
 
-- [Resource limits readiness review](reviews/resource-limits-readiness-review.md)
+- [Resource limits FINAL readiness review](reviews/resource-limits-final-readiness-review.md)
+- [Resource limits readiness review (Sprint 2.8)](reviews/resource-limits-readiness-review.md)
 
 - [Contract fixture corpus readiness review](reviews/contract-fixture-corpus-readiness-review.md)
 - [Canonical serialization readiness review](reviews/canonical-serialization-readiness-review.md)
