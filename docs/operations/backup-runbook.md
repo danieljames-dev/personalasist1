@@ -18,7 +18,7 @@ kept, and the previous known-good backup remains the current recovery point.
 ## Before you start
 
 1. Connect the WD easystore drive and confirm it mounts as `D:`.
-2. Confirm the working tree is clean, or know exactly which untracked files you intend to
+2. Confirm the working tree is clean and local `main` equals `origin/main`, or know exactly which untracked files you intend to
    include. The script refuses to run otherwise — that refusal is deliberate.
 3. Confirm `git remote get-url origin` matches the approved remote. The script also
    checks this and aborts on mismatch.
@@ -56,7 +56,8 @@ Expected output ends with:
 Exit code 0 means the run is a valid recovery point. Any other exit code means it is not.
 
 The run takes a few minutes; most of it is `npm ci` in the restored clone, which
-downloads dependencies from the network.
+downloads dependencies from the network. It also runs the synthetic overlong-Codex-ref
+regression test in the restored repository.
 
 ## Procedure — standalone restore test
 
@@ -73,7 +74,9 @@ restores over the active working repository, and it refuses if the target alread
 
 ```
 D:\AION-backups\
-    repository-mirror\AION.git                  bare mirror, updated in place
+    repository-mirror\AION.git                  verified canonical durable-ref mirror
+    repository-mirror\staging\                  timestamped candidates during validation
+    repository-mirror\quarantine\               preserved prior mirrors
     working-snapshots\AION-<UTC>.bundle         immutable point-in-time bundle
     working-snapshots\AION-<UTC>-untracked.zip  declared untracked files only
     manifests\backup-<UTC>.json                 machine-readable run record
@@ -87,6 +90,45 @@ D:\AION-backups\
 
 Nothing is ever deleted automatically. Prior backups, restore-test directories, and
 failure logs accumulate until pruned deliberately.
+
+## Ref policy and mirror replacement
+
+The code backup includes only `refs/heads/*`, `refs/tags/*`, and intentionally used
+`refs/notes/*`. It excludes every other namespace, including `refs/codex/*`, because editor and
+agent checkpoints are local recovery metadata rather than canonical AION source history. The
+manifest records included ref names, excluded namespace counts, the total excluded count, and the
+longest excluded ref length without logging unreadably long names.
+
+The mirror comes from the approved canonical origin. The bundle comes from the active local
+repository. Both use the durable allowlist; neither uses `--all` or a catch-all mirror refspec.
+
+For every real run, the script:
+
+1. creates a timestamped bare candidate under `repository-mirror\staging\`;
+2. configures only durable refspecs and fetches from the approved origin;
+3. verifies object integrity, exact `main`, absence of `refs/codex/*`, and independent cloning;
+4. moves the existing mirror intact into `repository-mirror\quarantine\`; and
+5. installs the verified candidate as `repository-mirror\AION.git`.
+
+If validation or replacement fails, the candidate, prior mirror, manifest, and logs remain
+failure evidence. Recover by selecting the newest mirror whose manifest and restore result are
+`SUCCESS`; never relabel a failed run. Adding any future durable custom namespace requires a
+reviewed update to the policy helper, manifest contract, strategy, runbook, and regression test.
+
+The historical failure manifest
+`D:\AION-backups\manifests\backup-20260806T163039Z.json` records the catch-all-refspec failure.
+No source data was lost: commit `5d4599873569cfbfbea68ae6999f44c4cf1a6627` was already pushed,
+the working tree remained clean, and earlier verified recovery points remained available.
+
+Run the policy regression directly with:
+
+```powershell
+npm run test:backup-refs
+```
+
+It creates only a temporary synthetic repository, adds a deliberately long
+`refs/codex/turn-diffs/checkpoints/*` ref, proves durable mirror/bundle recovery, and removes the
+temporary repository after success. Failure evidence is preserved for diagnosis.
 
 ## Refusals and what they mean
 

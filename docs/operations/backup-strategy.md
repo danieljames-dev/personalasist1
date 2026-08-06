@@ -96,7 +96,9 @@ common way a backup set turns out to be unrestorable.
 
 ```text
 D:\AION-backups\
-    repository-mirror\    AION.git — bare mirror, all refs, updated in place
+    repository-mirror\    AION.git — verified canonical durable-ref mirror
+                           staging\ — candidate mirrors awaiting validation
+                           quarantine\ — preserved superseded/failed mirrors
     working-snapshots\    dated Git bundles + retained-untracked archives
     releases\             self-contained release recovery sets (§5)
     databases\            reserved; no engine approved, no data yet
@@ -107,8 +109,8 @@ D:\AION-backups\
 
 | Class | What it is | What it is not |
 |---|---|---|
-| **Repository mirror** | A bare `--mirror` clone holding every ref, updated in place. Fast to re-clone from. | Not point-in-time. Updating it propagates upstream deletions, so it cannot recover a force-pushed or deleted branch on its own. |
-| **Git bundle** | A single immutable file capturing all refs at one instant. Point-in-time, offline-transportable, verifiable. | Not incrementally updatable. A new bundle is written per run. |
+| **Repository mirror** | A bare canonical mirror fetched from the approved origin using explicit branch, tag, and intentional-note refspecs. Rebuilt through staged validation and replacement. | Not a copy of every local ref and not editor/agent checkpoint storage. Not point-in-time. |
+| **Git bundle** | A single immutable file capturing explicitly selected durable local branches, tags, and intentional notes. Point-in-time, offline-transportable, verifiable. | Does not contain `refs/codex/*`, remote-tracking refs, or unknown custom namespaces. Not incrementally updatable. |
 | **Working snapshot** | A bundle plus an archive of explicitly declared untracked files that have no source-control guarantee. | Not a copy of the working directory. Never includes dependencies, build output, caches, `.env` files, or editor state. |
 | **Release archive** | A self-contained recovery set for one approved release (§5). | Not a substitute for the mirror or bundle. |
 | **Database backup** | Engine-consistent physical/logical/log backups (§7). | Not a file copy of a running database. Reserved and empty until an engine is approved. |
@@ -117,6 +119,32 @@ D:\AION-backups\
 The mirror and the bundle are both required and neither replaces the other: the mirror
 gives fast recovery, the bundle gives an immutable point in time that survives an
 upstream history rewrite.
+
+### Durable-ref policy
+
+Verified source backups use an allowlist:
+
+- `refs/heads/*`;
+- `refs/tags/*`; and
+- `refs/notes/*` only when notes intentionally exist.
+
+All other namespaces are transient unless a later recorded decision adds them to the allowlist.
+Excluded examples include `refs/codex/*`, `refs/bisect/*`, `refs/rewritten/*`,
+`refs/worktree/*`, remote-tracking refs, temporary merge/debug refs, editor checkpoints, and
+agent turn-diff refs. Exclusion never deletes those refs from the active repository. Source
+branches and release history are durable; editor recovery checkpoints are not.
+
+The canonical mirror and local recovery bundle have different sources and roles. The mirror is
+fetched from the approved GitHub origin after local `main` and `origin/main` are proven equal.
+The bundle is created from the active repository's explicitly enumerated durable refs. Neither
+uses `--all`. A future durable custom namespace requires a documented policy and manifest-schema
+update before tooling refspecs may include it.
+
+Mirrors are never repaired in place. A new candidate is created under `staging\`, fetched with
+only durable refspecs, checked with `git fsck --full`, checked for exact `main`, checked for absent
+`refs/codex/*`, and independently cloned. Only then is the prior mirror moved intact to a
+timestamped `quarantine\` path and the candidate installed as `AION.git`. Quarantined mirrors and
+failed manifests are evidence and are not deleted by the tooling.
 
 ### Success definition
 
@@ -147,8 +175,9 @@ suggestions.
   never in the repository.
 - Always eject through **Safely Remove Hardware** before disconnecting. Pulling a mounted
   NTFS volume mid-write can corrupt the mirror.
-- Keep total path length under the 260-character limit, or enable long-path support.
-  Nested timestamped restore-test directories are the realistic risk.
+- Keep ordinary backup paths short, but do not use global long-path or registry changes as the
+  primary correction for generated refs. Durable-ref selection prevents editor and agent ref
+  paths from entering the mirror at all.
 - Do not place `D:\AION-backups` inside any consumer file-sync directory. Partial
   synchronization of Git internals produces silently broken repositories.
 - Do not add blanket antivirus exclusions for the backup root. Scan on write is the

@@ -140,4 +140,5 @@ implemented as production protection.
 
 - [Backup and disaster recovery strategy](operations/backup-strategy.md) — reviewed and
   accepted 2026-08-06. Approved external root `D:\AION-backups`; scheduling not approved.
+  Source backups use a durable branch/tag/note ref allowlist and exclude editor/agent refs.
   Standing gap: no off-site or offline rotated copy yet.

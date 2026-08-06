@@ -127,6 +127,8 @@ $result = [ordered]@{
     dryRun             = [bool]$DryRun
     steps              = @()
     verificationCommand= 'npm run verify'
+    regressionCommand  = 'npm run test:backup-refs'
+    regressionResult   = $null
     testsPassed        = $null
     testsFailed        = $null
     outcome            = 'FAILURE'
@@ -169,6 +171,7 @@ try {
         Write-Step "would check out commit: $ExpectedCommit"
         Write-Step "would run   : npm ci"
         Write-Step "would run   : npm run verify  (require $ExpectedTests passed / 0 failed)"
+        Write-Step "would run   : npm run test:backup-refs"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -177,6 +180,14 @@ try {
 
     New-Item -ItemType Directory -Path $logDir          -Force | Out-Null
     New-Item -ItemType Directory -Path $RestoreTestsRoot -Force | Out-Null
+
+    $mirrorMain = (& git --git-dir=$MirrorPath rev-parse refs/heads/main).Trim()
+    if ($mirrorMain -ne $ExpectedCommit) {
+        throw "Mirror main $mirrorMain does not match expected $ExpectedCommit"
+    }
+    $mirrorCodexRefs = @(& git --git-dir=$MirrorPath for-each-ref --format='%(refname)' refs/codex)
+    if ($mirrorCodexRefs.Count -gt 0) { throw 'Mirror contains excluded refs/codex refs' }
+    Add-Step 'mirror-ref-policy' 'PASS' 'main matches expected commit; refs/codex absent'
 
     # ---------------------------------------------------------------------
     # 1. Clone from the mirror
@@ -208,7 +219,7 @@ try {
     Add-Step 'npm-ci' 'PASS' "exit 0"
 
     # ---------------------------------------------------------------------
-    # 4. npm run verify - require 11 passed / 0 failed
+    # 4. npm run verify - require the declared count / 0 failed
     # ---------------------------------------------------------------------
     Write-Step "running npm run verify"
     $vOut = Join-Path $logDir "restore-$Timestamp.verify.out.log"
@@ -231,6 +242,17 @@ try {
     if ($result.testsFailed -ne 0)  { throw "expected 0 failing tests, observed '$($result.testsFailed)'" }
 
     Add-Step 'npm-run-verify' 'PASS' "$ExpectedTests passed / 0 failed"
+
+    # ---------------------------------------------------------------------
+    # 5. Backup-ref regression test
+    # ---------------------------------------------------------------------
+    Write-Step "running npm run test:backup-refs"
+    $rOut = Join-Path $logDir "restore-$Timestamp.backup-refs.out.log"
+    $rErr = Join-Path $logDir "restore-$Timestamp.backup-refs.err.log"
+    $rCode = Invoke-Logged -CommandLine 'npm run test:backup-refs' -WorkingDirectory $restoreDir -OutFile $rOut -ErrFile $rErr
+    if ($rCode -ne 0) { throw "backup-ref regression failed with exit code $rCode (see $rErr)" }
+    $result.regressionResult = 'PASS'
+    Add-Step 'backup-ref-regression' 'PASS' 'overlong synthetic refs/codex excluded'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

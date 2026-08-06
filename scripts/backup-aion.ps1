@@ -1,57 +1,15 @@
 <#
 .SYNOPSIS
-    Creates a verified external backup of the AION repository on the approved drive.
+    Creates a verified durable-ref backup of AION code and documentation.
 
 .DESCRIPTION
-    Produces four artifact classes under the approved backup root, then proves the
-    backup is restorable before recording success:
+    The canonical mirror is rebuilt from the approved origin using only branches,
+    tags, and intentionally used notes. The local recovery bundle is built from the
+    same durable namespace allowlist in the active repository. Editor and agent refs,
+    including refs/codex/*, are inventoried but never copied into either artifact.
 
-      repository-mirror\AION.git        bare mirror, updated in place
-      working-snapshots\*.bundle        immutable point-in-time Git bundle
-      working-snapshots\*-untracked.zip explicitly declared untracked files only
-      manifests\*.json                  machine-readable record of the run
-      logs\*.log                        run logs, retained on failure too
-
-    SUCCESS is recorded ONLY when the restore test passes: the mirror clones, the
-    expected commit checks out, npm ci completes, and npm run verify reports exactly
-    -ExpectedTests passed / 0 failed. A run that produces artifacts but fails verification is
-    recorded FAILURE and the previous known-good backup remains the recovery point.
-
-    The script never deletes source files and never deletes prior backups.
-
-.PARAMETER BackupRoot
-    Approved external backup root. Default: D:\AION-backups
-
-.PARAMETER RepositoryPath
-    Repository to back up. Defaults to the parent of the scripts directory.
-
-.PARAMETER ExpectedRemote
-    Canonical remote the repository must be configured with. The run aborts on
-    mismatch, so a misconfigured clone cannot be silently backed up as canonical.
-
-.PARAMETER IncludeUntracked
-    Repository-relative untracked files to archive. Untracked files are excluded by
-    default; each one must be named here explicitly. Any untracked file present but
-    not declared aborts the run.
-
-.PARAMETER DryRun
-    Report every planned action and abort before writing to the backup root.
-
-.EXAMPLE
-    # Dry run - shows what would happen, writes nothing
-    .\scripts\backup-aion.ps1 -DryRun
-
-.EXAMPLE
-    # Real backup with a declared untracked file
-    .\scripts\backup-aion.ps1 -IncludeUntracked 'docs/operations/backup-strategy.md'
-
-.EXAMPLE
-    # Real backup to a different approved root
-    .\scripts\backup-aion.ps1 -BackupRoot 'E:\AION-backups'
-
-.NOTES
-    Windows PowerShell 5.1 compatible. No external modules. Not scheduled - run on
-    demand only. Scheduling requires separate approval.
+    SUCCESS is recorded only after mirror validation, bundle verification, isolated
+    restore, npm ci, npm run verify, and the backup-ref regression test all pass.
 #>
 
 [CmdletBinding()]
@@ -66,278 +24,193 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'backup-ref-policy.ps1')
 
-# Content that must never reach a backup archive, regardless of declaration.
 $ForbiddenPatterns = @(
-    'node_modules', 'dist/', 'dist-test/', '*.tsbuildinfo', '*.tgz',
+    'private/', 'node_modules', 'dist/', 'dist-test/', '*.tsbuildinfo', '*.tgz',
     '.env', '.env.*', '*.pem', '*.key', '*.pfx', 'id_rsa*',
     '.vscode/', '.idea/', '*.log', '*.sqlite', '*.db', 'Thumbs.db', '.DS_Store'
 )
 
 function Write-Step { param([string]$Message) Write-Host "  [backup] $Message" }
 function Write-Fail { param([string]$Message) Write-Host "  [backup] FAIL: $Message" -ForegroundColor Red }
-
-# Runs git and throws on non-zero exit. stderr is intentionally not redirected:
-# git writes progress there and merging it in PS 5.1 creates spurious errors.
 function Invoke-Git {
     param([string[]]$Arguments, [string]$WorkingDirectory)
     if ($WorkingDirectory) { Push-Location $WorkingDirectory }
     try {
         & git @Arguments
         if ($LASTEXITCODE -ne 0) { throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE" }
-    } finally {
-        if ($WorkingDirectory) { Pop-Location }
-    }
+    } finally { if ($WorkingDirectory) { Pop-Location } }
 }
-
-function Get-Sha256 {
-    param([string]$Path)
-    if (-not (Test-Path $Path)) { return $null }
-    return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-}
+function Get-Sha256 { param([string]$Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
+if (-not $RepositoryPath) { $RepositoryPath = Split-Path -Parent $PSScriptRoot }
+$RepositoryPath = (Resolve-Path -LiteralPath $RepositoryPath).Path
 
-if (-not $RepositoryPath) {
-    $RepositoryPath = Split-Path -Parent $PSScriptRoot
-}
-$RepositoryPath = (Resolve-Path $RepositoryPath).Path
-
-$mirrorDir    = Join-Path $BackupRoot 'repository-mirror'
-$mirrorPath   = Join-Path $mirrorDir  'AION.git'
-$snapshotDir  = Join-Path $BackupRoot 'working-snapshots'
-$manifestDir  = Join-Path $BackupRoot 'manifests'
-$logDir       = Join-Path $BackupRoot 'logs'
-$bundlePath   = Join-Path $snapshotDir "AION-$timestamp.bundle"
-$untrackedZip = Join-Path $snapshotDir "AION-$timestamp-untracked.zip"
-$manifestPath = Join-Path $manifestDir "backup-$timestamp.json"
-$logPath      = Join-Path $logDir      "backup-$timestamp.log"
+$mirrorRoot    = Join-Path $BackupRoot 'repository-mirror'
+$mirrorPath    = Join-Path $mirrorRoot 'AION.git'
+$stagingRoot   = Join-Path $mirrorRoot 'staging'
+$quarantineRoot= Join-Path $mirrorRoot 'quarantine'
+$stagedMirror  = Join-Path $stagingRoot "AION-$timestamp.git"
+$cloneCheck    = Join-Path $stagingRoot "clone-check-$timestamp"
+$quarantinePath= Join-Path $quarantineRoot "AION-before-ref-policy-$timestamp.git"
+$snapshotDir   = Join-Path $BackupRoot 'working-snapshots'
+$manifestDir   = Join-Path $BackupRoot 'manifests'
+$logDir        = Join-Path $BackupRoot 'logs'
+$bundlePath    = Join-Path $snapshotDir "AION-$timestamp.bundle"
+$untrackedZip  = Join-Path $snapshotDir "AION-$timestamp-untracked.zip"
+$manifestPath  = Join-Path $manifestDir "backup-$timestamp.json"
+$logPath       = Join-Path $logDir "backup-$timestamp.log"
 
 $manifest = [ordered]@{
-    schema              = 'aion.backup-manifest.v1'
-    timestampUtc        = $timestamp
-    repositorySourcePath= $RepositoryPath
-    canonicalRemote     = $ExpectedRemote
-    branch              = $null
-    commitHash          = $null
-    mirrorPath          = $mirrorPath
-    bundlePath          = $bundlePath
-    untrackedArchivePath= $null
-    includedUntracked   = @()
-    exclusions          = $ForbiddenPatterns
-    checksums           = [ordered]@{}
-    verificationCommand = 'npm run verify'
-    expectedTests       = $ExpectedTests
-    restoreResult       = $null
-    outcome             = 'FAILURE'
-    failureReason       = $null
-    dryRun              = [bool]$DryRun
+    schema='aion.backup-manifest.v2'; timestampUtc=$timestamp
+    repositorySourcePath=$RepositoryPath; canonicalRemote=$ExpectedRemote
+    branch=$null; commitHash=$null; localHead=$null; originMain=$null
+    expectedBackedUpCommit=$null; mirrorSource=$ExpectedRemote; bundleSource=$RepositoryPath
+    mirrorPath=$mirrorPath; stagedMirrorPath=$stagedMirror; quarantinedMirrorPath=$null
+    bundlePath=$bundlePath; untrackedArchivePath=$null; includedUntracked=@()
+    refPolicy=[ordered]@{
+        durableNamespaces=@('refs/heads/*','refs/tags/*','refs/notes/*')
+        includedRefs=@(); transientNamespacesExcluded=@(); excludedRefCount=0
+        longestExcludedRefLength=0
+    }
+    exclusions=$ForbiddenPatterns; checksums=[ordered]@{}
+    verificationCommand='npm run verify'; regressionCommand='npm run test:backup-refs'
+    expectedTests=$ExpectedTests; restoreResult=$null; outcome='FAILURE'; failureReason=$null
+    dryRun=[bool]$DryRun
 }
 
 try {
-    Write-Host ''
-    Write-Host "AION backup  ($timestamp)"
-    Write-Host "=============================================================="
-    Write-Step "repository : $RepositoryPath"
-    Write-Step "backup root: $BackupRoot"
+    Write-Host ''; Write-Host "AION durable-ref backup  ($timestamp)"; Write-Host ('=' * 62)
+    Write-Step "repository : $RepositoryPath"; Write-Step "backup root: $BackupRoot"
+    if (-not (Test-Path -LiteralPath (Join-Path $RepositoryPath '.git'))) { throw "Not a Git repository root: $RepositoryPath" }
 
-    # -----------------------------------------------------------------------
-    # Gate 1 - the source must be a Git repository root
-    # -----------------------------------------------------------------------
-    if (-not (Test-Path (Join-Path $RepositoryPath '.git'))) {
-        throw "Not a Git repository root: $RepositoryPath"
+    $topLevel = (& git -C $RepositoryPath rev-parse --show-toplevel).Trim()
+    if ((Resolve-Path $topLevel).Path.TrimEnd('\') -ne $RepositoryPath.TrimEnd('\')) { throw 'Repository root mismatch' }
+    $actualRemote = (& git -C $RepositoryPath remote get-url origin).Trim()
+    if ($actualRemote -ne $ExpectedRemote) { throw "Remote mismatch: '$actualRemote'" }
+
+    $branch = (& git -C $RepositoryPath branch --show-current).Trim()
+    $head = (& git -C $RepositoryPath rev-parse HEAD).Trim()
+    $main = (& git -C $RepositoryPath rev-parse refs/heads/main).Trim()
+    $originMain = (& git -C $RepositoryPath rev-parse refs/remotes/origin/main).Trim()
+    if ($branch -ne 'main') { throw "Backup requires active branch main; observed '$branch'" }
+    if ($head -ne $main -or $main -ne $originMain) { throw "Local main, HEAD, and origin/main are not synchronized" }
+    $manifest.branch=$branch; $manifest.commitHash=$head; $manifest.localHead=$head
+    $manifest.originMain=$originMain; $manifest.expectedBackedUpCommit=$head
+    Write-Step "commit     : $head (local main = origin/main)"
+
+    $statusLines = @(& git -C $RepositoryPath status --porcelain=v1 -uall)
+    $declared = @($IncludeUntracked | ForEach-Object { $_.Replace('\','/').Trim() })
+    $dirty=@(); $undeclared=@()
+    foreach ($line in $statusLines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $code=$line.Substring(0,2); $path=$line.Substring(3).Trim().Replace('\','/')
+        if ($code -eq '??') { if ($declared -notcontains $path) { $undeclared += $path } }
+        else { $dirty += "$code $path" }
     }
-    Push-Location $RepositoryPath
-    try {
-        $topLevel = (& git rev-parse --show-toplevel).Trim()
-        $topLevel = (Resolve-Path $topLevel).Path
-        if ($topLevel.TrimEnd('\') -ne $RepositoryPath.TrimEnd('\')) {
-            throw "Repository root mismatch: git reports '$topLevel', expected '$RepositoryPath'"
-        }
-
-        # -------------------------------------------------------------------
-        # Gate 2 - the configured remote must be the approved canonical remote
-        # -------------------------------------------------------------------
-        $actualRemote = (& git remote get-url origin).Trim()
-        if ($actualRemote -ne $ExpectedRemote) {
-            throw "Remote mismatch. Configured '$actualRemote', approved '$ExpectedRemote'"
-        }
-        Write-Step "remote     : $actualRemote  (approved)"
-
-        $branch = (& git rev-parse --abbrev-ref HEAD).Trim()
-        $commit = (& git rev-parse HEAD).Trim()
-        $manifest.branch     = $branch
-        $manifest.commitHash = $commit
-        Write-Step "branch     : $branch"
-        Write-Step "commit     : $commit"
-
-        # -------------------------------------------------------------------
-        # Gate 3 - refuse unexpected staged or modified tracked files
-        # Gate 4 - permit untracked files only when explicitly declared
-        # -------------------------------------------------------------------
-        $statusLines = @(& git status --porcelain=v1 -uall)
-        $declared    = @($IncludeUntracked | ForEach-Object { $_.Replace('\','/').Trim() })
-        $dirty       = @()
-        $undeclared  = @()
-
-        foreach ($line in $statusLines) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $code = $line.Substring(0, 2)
-            $path = $line.Substring(3).Trim().Replace('\','/')
-            if ($code -eq '??') {
-                if ($declared -notcontains $path) { $undeclared += $path }
-            } else {
-                $dirty += "$code $path"
+    if ($dirty.Count -and -not $DryRun) { throw "Refusing dirty working tree: $($dirty -join ', ')" }
+    if ($undeclared.Count -and -not $DryRun) { throw "Undeclared untracked files: $($undeclared -join ', ')" }
+    if ($DryRun -and ($dirty.Count -or $undeclared.Count)) {
+        Write-Step 'dry-run note: working changes are inspected but a real run would require a clean tree'
+    }
+    foreach ($rel in $declared) {
+        if (-not (Test-Path -LiteralPath (Join-Path $RepositoryPath ($rel -replace '/','\')))) { throw "Missing declared file: $rel" }
+        foreach ($pattern in $ForbiddenPatterns) {
+            if ($rel -like $pattern -or $rel -like "*/$pattern" -or $rel -like "$pattern*") {
+                throw "Declared file '$rel' matches forbidden pattern '$pattern'"
             }
         }
-
-        if ($dirty.Count -gt 0) {
-            throw "Refusing to back up a dirty working tree. Commit or revert first:`n    $($dirty -join "`n    ")"
-        }
-        if ($undeclared.Count -gt 0) {
-            throw "Undeclared untracked files present. Re-run with -IncludeUntracked, or remove them:`n    $($undeclared -join "`n    ")"
-        }
-        Write-Step "worktree   : clean (no staged or modified tracked files)"
-
-        # -------------------------------------------------------------------
-        # Gate 5 - declared files must exist and must not match an exclusion
-        # -------------------------------------------------------------------
-        foreach ($rel in $declared) {
-            if ([string]::IsNullOrWhiteSpace($rel)) { continue }
-            $full = Join-Path $RepositoryPath ($rel -replace '/', '\')
-            if (-not (Test-Path $full)) { throw "Declared untracked file not found: $rel" }
-            foreach ($pattern in $ForbiddenPatterns) {
-                if ($rel -like $pattern -or $rel -like "*/$pattern" -or $rel -like "$pattern*") {
-                    throw "Declared file '$rel' matches forbidden pattern '$pattern' and will not be archived"
-                }
-            }
-            $manifest.includedUntracked += $rel
-        }
-        if ($declared.Count -gt 0) { Write-Step "untracked  : $($declared.Count) declared file(s) approved for archive" }
-        else                       { Write-Step "untracked  : none declared" }
-
-        # -------------------------------------------------------------------
-        # Dry run stops here, before anything is written to the backup root
-        # -------------------------------------------------------------------
-        if ($DryRun) {
-            Write-Host ''
-            Write-Step "DRY RUN - nothing will be written"
-            Write-Step "would create/update mirror : $mirrorPath"
-            Write-Step "would write bundle         : $bundlePath"
-            if ($declared.Count -gt 0) { Write-Step "would write untracked zip  : $untrackedZip" }
-            Write-Step "would write manifest       : $manifestPath"
-            Write-Step "would run restore test into: $(Join-Path $BackupRoot "restore-tests\restore-$timestamp")"
-            Write-Step "would require              : npm ci + npm run verify ($ExpectedTests passed / 0 failed)"
-            $manifest.outcome = 'DRY-RUN'
-            & (Join-Path $PSScriptRoot 'restore-test-aion.ps1') `
-                -ExpectedCommit $commit -BackupRoot $BackupRoot `
-                -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp -ExpectedTests $ExpectedTests -DryRun
-            Write-Host ''
-            return
-        }
-
-        # -------------------------------------------------------------------
-        # 1. Backup root layout - created, never cleared
-        # -------------------------------------------------------------------
-        foreach ($d in @($BackupRoot, $mirrorDir, $snapshotDir, $manifestDir, $logDir,
-                         (Join-Path $BackupRoot 'releases'),
-                         (Join-Path $BackupRoot 'databases'),
-                         (Join-Path $BackupRoot 'restore-tests'))) {
-            New-Item -ItemType Directory -Path $d -Force | Out-Null
-        }
-
-        # -------------------------------------------------------------------
-        # 2. Bare mirror - created once, updated in place thereafter
-        # -------------------------------------------------------------------
-        if (Test-Path $mirrorPath) {
-            Write-Step "updating mirror : $mirrorPath"
-            Invoke-Git @('remote', 'update', '--prune') -WorkingDirectory $mirrorPath
-        } else {
-            Write-Step "creating mirror : $mirrorPath"
-            Invoke-Git @('clone', '--mirror', $RepositoryPath, $mirrorPath)
-        }
-        Write-Step "checking mirror integrity (git fsck)"
-        Invoke-Git @('fsck', '--full') -WorkingDirectory $mirrorPath
-
-        # -------------------------------------------------------------------
-        # 3. Immutable point-in-time bundle
-        # -------------------------------------------------------------------
-        Write-Step "writing bundle  : $bundlePath"
-        Invoke-Git @('bundle', 'create', $bundlePath, '--all') -WorkingDirectory $RepositoryPath
-        Invoke-Git @('bundle', 'verify', $bundlePath) -WorkingDirectory $RepositoryPath
-
-        # -------------------------------------------------------------------
-        # 4. Declared untracked files only
-        # -------------------------------------------------------------------
-        if ($manifest.includedUntracked.Count -gt 0) {
-            Write-Step "writing archive : $untrackedZip"
-            $full = @($manifest.includedUntracked | ForEach-Object { Join-Path $RepositoryPath ($_ -replace '/', '\') })
-            Compress-Archive -Path $full -DestinationPath $untrackedZip -CompressionLevel Optimal
-            $manifest.untrackedArchivePath = $untrackedZip
-        }
-
-        # -------------------------------------------------------------------
-        # 5. SHA-256 checksums
-        # -------------------------------------------------------------------
-        Write-Step "computing SHA-256 checksums"
-        $manifest.checksums[$bundlePath] = Get-Sha256 $bundlePath
-        if ($manifest.untrackedArchivePath) {
-            $manifest.checksums[$untrackedZip] = Get-Sha256 $untrackedZip
-        }
-
-        # -------------------------------------------------------------------
-        # 6. Restore test - the gate that decides SUCCESS or FAILURE
-        # -------------------------------------------------------------------
-        Write-Host ''
-        Write-Step "invoking restore test"
-        & (Join-Path $PSScriptRoot 'restore-test-aion.ps1') `
-            -ExpectedCommit $commit -BackupRoot $BackupRoot `
-            -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp -ExpectedTests $ExpectedTests
-        $restoreExit = $LASTEXITCODE
-
-        $restoreResultFile = Join-Path $logDir "restore-$timestamp.result.json"
-        if (Test-Path $restoreResultFile) {
-            $manifest.restoreResult = (Get-Content $restoreResultFile -Raw | ConvertFrom-Json)
-        }
-
-        if ($restoreExit -ne 0) {
-            throw "Restore test failed. Backup artifacts are retained but this run is NOT a valid recovery point."
-        }
-
-        $manifest.outcome = 'SUCCESS'
-        Write-Host ''
-        Write-Step "BACKUP SUCCESS - restore test passed"
+        $manifest.includedUntracked += $rel
     }
-    finally { Pop-Location }
+
+    $inventory = Get-AionRefInventory -RepositoryPath $RepositoryPath
+    $manifest.refPolicy.includedRefs = @($inventory.includedRefs | ForEach-Object name)
+    $manifest.refPolicy.transientNamespacesExcluded = @($inventory.excludedNamespaces)
+    $manifest.refPolicy.excludedRefCount = $inventory.excludedRefCount
+    $manifest.refPolicy.longestExcludedRefLength = $inventory.longestExcludedRefLength
+    if ($manifest.refPolicy.includedRefs -notcontains 'refs/heads/main') { throw 'Durable ref selection omitted main' }
+    $headReachable=$false
+    foreach ($ref in @($inventory.includedRefs | Where-Object { $_.namespace -eq 'refs/heads' })) {
+        & git -C $RepositoryPath merge-base --is-ancestor $head $ref.name
+        if ($LASTEXITCODE -eq 0) { $headReachable=$true; break }
+    }
+    if (-not $headReachable) { throw 'Expected HEAD is not reachable from an included branch' }
+    Write-Step "durable refs: $($inventory.includedRefs.Count) included; $($inventory.excludedRefCount) transient excluded"
+
+    if ($DryRun) {
+        Write-Step 'DRY RUN - no files or refs will be written'
+        Write-Step "would stage canonical mirror: $stagedMirror"
+        Write-Step "would write durable bundle : $bundlePath"
+        Write-Step "would quarantine old mirror: $quarantinePath"
+        Write-Step "would restore and require $ExpectedTests tests plus backup-ref regression"
+        $manifest.outcome='DRY-RUN'
+        return
+    }
+
+    foreach ($dir in @($BackupRoot,$mirrorRoot,$stagingRoot,$quarantineRoot,$snapshotDir,$manifestDir,$logDir,
+        (Join-Path $BackupRoot 'releases'),(Join-Path $BackupRoot 'databases'),(Join-Path $BackupRoot 'restore-tests'))) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    Write-Step "building staged canonical mirror from approved origin"
+    Initialize-AionDurableMirror -Source $ExpectedRemote -Destination $stagedMirror
+    $stagedInventory = Get-AionRefInventory -GitDir $stagedMirror
+    if (@($stagedInventory.excludedRefs | Where-Object name -like 'refs/codex/*').Count) { throw 'Staged mirror contains refs/codex' }
+    $stagedMain = (& git --git-dir=$stagedMirror rev-parse refs/heads/main).Trim()
+    if ($stagedMain -ne $head) { throw "Staged mirror main '$stagedMain' does not equal expected '$head'" }
+    Invoke-Git @("--git-dir=$stagedMirror",'fsck','--full')
+    Invoke-Git @('clone','--no-checkout',$stagedMirror,$cloneCheck)
+    if ((& git -C $cloneCheck rev-parse refs/remotes/origin/main).Trim() -ne $head) { throw 'Staged mirror clone check mismatch' }
+    Remove-Item -LiteralPath $cloneCheck -Recurse -Force
+
+    if (Test-Path -LiteralPath $mirrorPath) {
+        Write-Step "quarantining prior mirror: $quarantinePath"
+        Move-Item -LiteralPath $mirrorPath -Destination $quarantinePath
+        $manifest.quarantinedMirrorPath=$quarantinePath
+    }
+    Move-Item -LiteralPath $stagedMirror -Destination $mirrorPath
+    $manifest.stagedMirrorPath=$null
+    if ((& git --git-dir=$mirrorPath rev-parse refs/heads/main).Trim() -ne $head) { throw 'Installed mirror main mismatch' }
+    if (@((Get-AionRefInventory -GitDir $mirrorPath).excludedRefs | Where-Object name -like 'refs/codex/*').Count) {
+        throw 'Installed mirror contains refs/codex'
+    }
+
+    Write-Step "writing durable local recovery bundle: $bundlePath"
+    New-AionDurableBundle -RepositoryPath $RepositoryPath -BundlePath $bundlePath -IncludedRefs $inventory.includedRefs
+    $manifest.checksums[$bundlePath]=Get-Sha256 $bundlePath
+
+    if ($manifest.includedUntracked.Count) {
+        $paths=@($manifest.includedUntracked | ForEach-Object { Join-Path $RepositoryPath ($_ -replace '/','\') })
+        Compress-Archive -Path $paths -DestinationPath $untrackedZip -CompressionLevel Optimal
+        $manifest.untrackedArchivePath=$untrackedZip
+        $manifest.checksums[$untrackedZip]=Get-Sha256 $untrackedZip
+    }
+
+    Write-Step 'invoking isolated restore test'
+    & (Join-Path $PSScriptRoot 'restore-test-aion.ps1') -ExpectedCommit $head -BackupRoot $BackupRoot `
+        -ActiveRepositoryPath $RepositoryPath -Timestamp $timestamp -ExpectedTests $ExpectedTests
+    if ($LASTEXITCODE -ne 0) { throw 'Restore test failed; backup is not a recovery point' }
+    $resultFile=Join-Path $logDir "restore-$timestamp.result.json"
+    if (Test-Path -LiteralPath $resultFile) { $manifest.restoreResult=Get-Content $resultFile -Raw | ConvertFrom-Json }
+    if (-not $manifest.restoreResult -or $manifest.restoreResult.outcome -ne 'SUCCESS') { throw 'Restore SUCCESS evidence missing' }
+    $manifest.outcome='SUCCESS'
+    Write-Step 'BACKUP SUCCESS - durable refs restored and verified'
 }
 catch {
-    $manifest.failureReason = $_.Exception.Message
-    $manifest.outcome       = 'FAILURE'
-    Write-Fail $manifest.failureReason
+    $manifest.failureReason=$_.Exception.Message; $manifest.outcome='FAILURE'; Write-Fail $manifest.failureReason
 }
 finally {
-    # Evidence is always written. A failed run is recorded as failed, never hidden.
     if (-not $DryRun) {
-        foreach ($d in @($manifestDir, $logDir)) {
-            if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-        }
-        ($manifest | ConvertTo-Json -Depth 10) | Set-Content -Path $manifestPath -Encoding utf8
-        Set-Content -Path $logPath -Encoding utf8 -Value @(
-            "AION backup $timestamp",
-            "repository : $RepositoryPath",
-            "remote     : $ExpectedRemote",
-            "branch     : $($manifest.branch)",
-            "commit     : $($manifest.commitHash)",
-            "mirror     : $mirrorPath",
-            "bundle     : $bundlePath",
-            "untracked  : $($manifest.untrackedArchivePath)",
-            "outcome    : $($manifest.outcome)",
-            "reason     : $($manifest.failureReason)"
-        )
-        Write-Host "  [backup] manifest: $manifestPath"
-        Write-Host "  [backup] log     : $logPath"
+        foreach ($dir in @($manifestDir,$logDir)) { if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null } }
+        $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+        @("AION backup $timestamp","commit: $($manifest.expectedBackedUpCommit)","mirror: $mirrorPath",
+          "bundle: $bundlePath","outcome: $($manifest.outcome)","reason: $($manifest.failureReason)") |
+            Set-Content -LiteralPath $logPath -Encoding utf8
+        Write-Step "manifest: $manifestPath"; Write-Step "log: $logPath"
     }
     Write-Host ''
 }
 
-if ($manifest.outcome -eq 'SUCCESS' -or $manifest.outcome -eq 'DRY-RUN') { exit 0 } else { exit 1 }
+if ($manifest.outcome -in @('SUCCESS','DRY-RUN')) { exit 0 } else { exit 1 }
