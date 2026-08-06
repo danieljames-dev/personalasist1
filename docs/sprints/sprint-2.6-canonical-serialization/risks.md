@@ -1,7 +1,11 @@
 # Sprint 2.6 Canonical Serialization Risks
 
-Status: **Proposed** architecture challenge record  
+Status: **Accepted** as the standing risk register, 2026-08-06  
 Implementation: **Frozen**
+
+CS-003, CS-004, and CS-008 were addressed by the B-2 and B-3 corrections and are updated
+in place below. Every other entry remains open and unmitigated. ADR-008's acceptance closed
+DG-2; it did not retire this register.
 
 ## Review posture
 
@@ -14,14 +18,17 @@ fixture set exist.
 
 | ID | Risk | Severity | Failure scenario | Recommendation |
 |---|---|---:|---|---|
-| CS-001 | Float prohibition blocks a real domain | Critical | A domain needs genuine continuous quantities — embedding vectors, measurements, model scores — and cannot express them without floats | Vectors are derived projections outside canonical envelopes; measurements use declared-scale integers. Escalate to a profile revision if a canonical float need is proven, not by exception |
+| CS-001 | Float prohibition blocks a real domain | Critical | A domain needs genuine continuous quantities — embedding vectors, measurements, model scores — and cannot express them without floats | **Controlled.** The prohibition is scoped to canonical integrity positions only; domain, transport, and storage representations are unconstrained (§8). Vectors are derived projections outside canonical envelopes. The mandatory continuous-quantity review trigger, with nine required evidence items, is the designated point at which the constraint is re-tested against a real schema rather than against argument |
 | CS-002 | Decimal modelling error | High | Wrong declared scale or ambiguous rounding produces wrong data that canonicalizes perfectly | Scale and rounding declared per field with fixtures; ACJ-1 removes encoding ambiguity, never modelling error |
-| CS-003 | NFC rule never enforced | Critical | The validation contract does not exist yet, so nothing enforces NFC; non-NFC strings become contract values and hash inconsistently | Make NFC enforcement a named subordinate decision and a precondition for fixture authoring |
-| CS-004 | Canonicalizer bypassed | Critical | A caller invokes the canonicalizer directly on unvalidated input, skipping NFC and identifier rules | Canonicalizer rejects what it can detect; validation is a required precondition stated in the contract and conformance-tested |
+| CS-003 | NFC rule never enforced | Critical → **High** | Nothing enforces NFC; non-NFC strings become contract values and hash inconsistently | **Partially addressed.** `CanonicalContractValidatorV1` (§0) now owns NFC verification with a stable rejection outcome. The responsibility is specified but unimplemented, so the risk persists in full until it exists — it is now assigned rather than homeless |
+| CS-004 | Canonicalizer bypassed | Critical → **High** | A caller invokes the canonicalizer directly on unvalidated input, skipping NFC and identifier rules | **Partially addressed.** §0 states the canonicalizer accepts only validated values and enumerates nine prohibited repairs; `unvalidated-input` is a named rejection (§33). Enforcement still requires the unimplemented validator |
+| CS-004a | Validator implemented as a repairer | High | An implementation "helpfully" normalizes non-NFC input or drops duplicate keys, mapping two inputs to one output and hiding a producer bug | §0 requirements 4 and 5 forbid silent rewriting and forbid treating a normalized invalid value as equivalent; conformance requires agreement on rejections, not only on acceptances |
 | CS-005 | JCS subset relationship silently broken | Critical | A later amendment makes ACJ-1 output that stock JCS would not produce; cross-checking becomes invalid | Cross-check against an unmodified third-party JCS implementation is a standing conformance requirement, not a one-time check |
 | CS-006 | Code-unit vs code-point sort divergence | High | An implementation sorts by code point; keys outside the Basic Multilingual Plane order differently and digests diverge | Explicit UTF-16 code unit rule plus mandatory astral-plane fixtures |
 | CS-007 | Duplicate-key parser differential | Critical | Validator and consumer disagree on which duplicate wins | Reject duplicates; rejection is fixture-tested |
-| CS-008 | Domain label omitted as an optimisation | Critical | Implementation hashes bare bytes; cross-protocol digest reuse becomes possible | Named rejection category, required rejection fixture, conformance failure |
+| CS-008 | Frame omitted as an optimisation | Critical → **Medium** | Implementation hashes bare canonical bytes; cross-protocol digest reuse becomes possible | **Addressed.** `missing-frame` is a named rejection (§33) with a required rejection fixture. Residual risk is an implementation that skips framing entirely, which conformance fixtures detect |
+| CS-008a | Delimiter framing reintroduced | Critical | A future profile or implementation reverts to separator-based framing, restoring boundary-shifting collisions | **Addressed structurally.** §23 rejects delimiter-only framing by name and states the injectivity argument does not depend on any byte being absent. Reversion requires a new frame version and fails closed for old readers |
+| CS-008b | Frame parsing attack | High | Crafted lengths cause truncated reads, integer overflow, or trailing-byte smuggling | **Addressed.** `frame-truncated`, `frame-length-overflow`, `frame-trailing-bytes`, `unknown-frame-version` are named deterministic rejections; length arithmetic must use a non-wrapping width (§23 rules 8–11) |
 | CS-009 | Algorithm downgrade | Critical | Verifier accepts a descriptor naming a weak or withdrawn algorithm | Registry resolution; unknown or retired identifiers fail closed; no default inference |
 | CS-010 | Digest mistaken for authenticity | Critical | Owner or operator believes a matching digest proves origin | Stated in the contract, the threat model, and the ADR. Signing is a separate decision and its absence is explicit |
 | CS-011 | Signature designed later without domain separation | High | A future signature covers raw bytes, reopening cross-protocol attacks | Signature boundary fixed now: signatures cover the domain-separated digest input |
@@ -79,21 +86,29 @@ signature wrapping if signatures are designed without the domain-separation cons
 the standing misconception that a digest proves authenticity. The threat model defines
 controls; none is verified until two implementations agree on the fixture set.
 
-## Improvements required before DG-2 closure
+## Improvements required before implementation
 
-1. Accept ADR-008 or record explicit bounded exceptions.
+DG-2 closed on 2026-08-06. These remain outstanding and block later work, not DG-2.
+
+1. Decide the exact decimal representation at the continuous-quantity review trigger.
 2. Fix the registered digest algorithm set and the add/retire process.
-3. Decide the NFC enforcement point and its rejection behaviour.
-4. Decide the decimal representation against real Memory and Invoice data.
-5. Fix the boundary between canonicalizer limits and DG-4 business limits.
-6. Decide where constant-time digest comparison is mandatory.
+3. Decide algorithm retirement over immutable Version and Event Objects, and over
+   Destroyed content that cannot be re-digested.
+4. Fix the boundary between canonicalizer limits and DG-4 business limits; current values
+   are provisional.
+5. Decide where constant-time digest comparison is mandatory.
+6. Decide the signature and trust architecture.
 7. Produce two independent implementations that agree byte-for-byte on the fixture set,
    including rejections, cross-checked against an unmodified JCS implementation.
 
 ## Architecture recommendation
 
-ACJ-1 is coherent enough for CTO review and resolves the numeric ambiguity that made
-unconstrained JCS unsuitable for an integrity mechanism. It remains **not ready for
-implementation** until the subordinate decisions above are resolved and cross-runtime
-agreement is demonstrated. The float prohibition is a genuine constraint on future domain
-schemas and must be accepted deliberately, not absorbed by default.
+ACJ-1 resolves the numeric ambiguity that made unconstrained JCS unsuitable for an
+integrity mechanism, assigns validation to a named boundary, and frames digest inputs
+injectively without depending on any byte being absent. The architecture is **accepted**.
+
+It remains **not ready for implementation**. Every control that depends on
+`CanonicalContractValidatorV1` is specified rather than active, no implementation exists,
+and cross-runtime agreement has never been demonstrated. The float prohibition was accepted
+deliberately, with a review trigger, rather than absorbed by default — but it has still
+never been tested against a real domain schema, because none exists.

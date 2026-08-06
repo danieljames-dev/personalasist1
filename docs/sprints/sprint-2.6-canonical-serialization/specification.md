@@ -1,10 +1,12 @@
 # Sprint 2.6 Specification: Canonical Serialization
 
-Status: **Proposed**; architecture only  
+Status: **Accepted** — architecture only, 2026-08-06  
 Implementation freeze: **Active**  
 Owner: CTO  
-Opens gate: DG-2 in the
-[Sprint 2.5 acceptance criteria](../sprint-2.5/acceptance-criteria.md)
+Closes gate: DG-2 in the
+[Sprint 2.5 acceptance criteria](../sprint-2.5/acceptance-criteria.md)  
+Unblocks: DG-3 for design and fixture authoring only  
+Decision record: [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md)
 
 ## Mission
 
@@ -64,6 +66,7 @@ answered in [canonical-serialization.md](../../contracts/canonical-serialization
 | Time | 14, 15 | §14–§15 |
 | Identity and binary | 16, 17 | §16–§17 |
 | Members | 18, 19, 20 | §18–§20 |
+| Validation boundary | — | §0 |
 | Binding and framing | 21, 22, 23, 24 | §21–§24 |
 | Bytes and limits | 28, 29, 30, 31, 32 | §28–§32 |
 | Behaviour | 33, 34, 35, 36 | §33–§36 |
@@ -103,7 +106,11 @@ DG-3 fixtures stay blocked until canonicalization is sufficiently specified.
 
 Where the serialization rules constrain the Object contract — notably the prohibition on
 binary floats in canonical positions — the constraint is recorded and decided explicitly
-rather than absorbed silently.
+rather than absorbed silently. That decision is
+[CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md), which
+scopes the prohibition to the canonical integrity context only, leaves domain, transport,
+and storage representations unconstrained, defers the universal decimal choice, and
+attaches a mandatory review trigger at the first continuous-quantity schema.
 
 ## Fixture plan
 

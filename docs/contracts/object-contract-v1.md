@@ -59,7 +59,7 @@ Profile is immutable after creation. Converting between profiles requires a new 
 | `provenanceSummary` | Yes | Append/replace by rule | Bounded origin evidence for current state |
 | `permissionSetRef` | No | Explicit command | Scalar Object reference; conveys no authority by itself |
 | `auditStreamRef` | No | Controlled | Stable reference to protected audit history, not embedded entries |
-| `integrity` | Yes | Recomputed | Versioned algorithm and digest over canonical committed content |
+| `integrity` | Yes | Recomputed | Versioned canonicalization profile and digest algorithm over canonical committed content — see [ACJ-1](canonical-serialization.md) |
 | `data` | Yes | Domain command | Immutable value tree conforming to `schemaId` and `schemaVersion` |
 
 `objectProfile` is universal and mandatory for all four profiles. This table states the

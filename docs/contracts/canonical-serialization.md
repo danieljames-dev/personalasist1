@@ -1,10 +1,14 @@
 # Canonical Serialization Contract — ACJ-1
 
-Status: **Proposed** normative contract  
-Profile identifier: `acj-1`  
-Authority: [ADR-008](../decisions/ADR-008-canonical-serialization.md) (Proposed)  
+Status: **Accepted** normative contract, 2026-08-06  
+Profile identifier: `acj-1` — the approved canonicalization profile  
+Authority: [ADR-008](../decisions/ADR-008-canonical-serialization.md) (Accepted) and
+[CTO-DECISION-003](../decisions/CTO-DECISION-003-canonical-serialization.md)  
 Base: strict subset of [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785)  
-Implementation: Not authorized; freeze in effect
+Stability: `acj-1` names a **profile family**, not a frozen implementation. The profile is
+approved; no implementation exists and cross-runtime agreement has never been demonstrated.
+Advances to `acj-2` on any change to §1–§20 or §23.  
+Implementation: **Not authorized**; freeze in effect
 
 ## Responsibility
 
@@ -25,6 +29,94 @@ fixture set.
 **Subset guarantee:** every ACJ-1 output is valid RFC 8785 output. An implementation may
 be a thin validating wrapper over a stock JCS library. It may not be a fork of the JCS
 algorithm.
+
+## 0. Validation boundary — `CanonicalContractValidatorV1`
+
+Canonicalization is not a validating operation. A separate, explicitly named
+language-neutral responsibility runs first and decides whether a value may be
+canonicalized at all.
+
+### Processing sequence
+
+```text
+Contract Value
+    |
+    v
+Schema and Profile Resolution
+    |
+    v
+CanonicalContractValidatorV1
+    |
+    v
+Validated Canonical-Domain Value
+    |
+    v
+Canonical Serializer
+    |
+    v
+Canonical Bytes
+    |
+    v
+Domain-Separated Digest or Signature Input   (§23)
+```
+
+This sequence is normative and is **not implemented** by this contract.
+
+### Validator responsibility
+
+`CanonicalContractValidatorV1` has one responsibility: determine whether a contract value
+satisfies
+
+- its versioned schema;
+- its canonicalization profile;
+- Unicode requirements (§4);
+- numeric constraints (§6–§11);
+- member and key constraints (§18–§20);
+- depth and size constraints assigned to the profile (§29–§31);
+- identifier and timestamp normalization rules (§14–§16);
+- duplicate-member prohibitions (§19);
+- forbidden value classes (§1, §8);
+- applicable contract invariants.
+
+### Validator requirements
+
+1. Runs **before** canonicalization.
+2. **Fails closed.** An unresolvable schema, unknown profile, or unrecognised value kind
+   is a rejection, never a pass-through.
+3. Returns stable, **non-enumerating** error codes — an error must not confirm the
+   existence of anything the caller could not otherwise observe.
+4. **Never silently rewrites** an invalid value.
+5. **Never normalizes an invalid value and then treats the normalized result as
+   equivalent**, unless a future profile explicitly defines that normalization as part of
+   the contract transformation.
+6. Remains separate from authentication, authorization, persistence, transport, and
+   business validation. It answers "is this canonicalizable under this schema and
+   profile?" — never "is this true, permitted, or wanted?"
+7. Is replaceable and language-neutral at the contract level.
+
+### Canonicalizer obligations
+
+The canonicalizer accepts **only** values already validated against a named schema and a
+named canonicalization profile. It must not:
+
+- repair Unicode;
+- remove duplicate keys;
+- coerce numbers;
+- infer timestamps;
+- fill absent members;
+- remove unknown members;
+- reorder semantically ordered arrays;
+- reinterpret identifiers; or
+- silently upgrade contract versions.
+
+Every one of these is a *repair*, and a repairing canonicalizer maps two distinct inputs
+to one output — which hides a producer bug and defeats the purpose of a digest.
+
+### Status of this boundary
+
+`CanonicalContractValidatorV1` is a **specified contract responsibility with no
+implementation**. Controls in the threat model that depend on it are specified controls,
+not runtime controls, until it exists. Implementing it is not authorized.
 
 ## 1. Value domain
 
@@ -59,16 +151,22 @@ does not infer it.
 
 ## 4. Unicode normalization
 
-All strings must be **NFC**-normalized before becoming contract values. Canonicalization
-does not normalize — that would fork JCS — and does not verify normalization.
+Canonical strings must satisfy **NFC**.
 
-Non-NFC input is rejected at the **validation boundary**, before canonicalization, with a
-deterministic error. This is a required companion rule: without it, `café` in NFC and NFD
-are different contract values with different digests, and the difference is invisible on
-screen.
+`CanonicalContractValidatorV1` (§0) verifies NFC. Non-NFC input fails with a stable
+outcome. **Canonicalization does not silently normalize it** — that would fork JCS and,
+worse, would map two distinct inputs to one output. A future profile may define
+normalization as an explicit contract transformation; `acj-1` does not.
+
+Without this rule, `café` in NFC and in NFD are different contract values producing
+different digests, and the difference is invisible on screen. That is precisely why the
+check belongs at a boundary that rejects rather than at a serializer that repairs.
 
 Lone surrogates, unpaired surrogates, and code points that are not valid Unicode scalar
 values are rejected.
+
+**Enforcement status:** specified, not implemented. The validator does not exist, so this
+control is a contract requirement rather than an active runtime defence.
 
 ## 5. String encoding and escaping
 
@@ -99,12 +197,75 @@ not the canonicalizer, gives them numeric meaning.
 
 ## 8. Floating point
 
-**Prohibited in canonical positions.** No binary floating-point value may be a contract
-value. A schema requiring a fractional quantity uses §9.
+**IEEE 754 binary floating-point values are prohibited in canonical contract positions.**
 
-This is the sharpest constraint in ACJ-1 and its cost is real — see
-[ADR-008 §Consequences](../decisions/ADR-008-canonical-serialization.md#costs) and
-[the readiness review](../reviews/canonical-serialization-readiness-review.md).
+This is a deliberate architectural constraint recorded by
+[CTO-DECISION-003](../decisions/CTO-DECISION-003-canonical-serialization.md), not an
+incidental consequence of selecting a JSON-based profile. It would apply to any format
+chosen for integrity purposes.
+
+Rationale: binary floating-point representations can differ across runtimes; JSON number
+parsing can silently lose precision; and integrity, hashing, signing, fixture comparison,
+and conformance all require exact reproducible values. Silent precision loss inside an
+integrity mechanism is unacceptable.
+
+### Four value contexts
+
+The prohibition is scoped to one of four contexts. Conflating them is the usual source of
+confusion about this rule.
+
+| Context | Definition | Binary floats |
+|---|---|---|
+| **Domain value** | A quantity as the owning domain conceptually models it | Permitted as a concept — a probability *is* continuous |
+| **Transport value** | A representation in transit between components | Unconstrained by this contract |
+| **Storage value** | A representation at rest in a storage engine | Unconstrained by this contract |
+| **Canonical integrity value** | The representation that enters canonicalization, hashing, signing, fixtures, or export verification | **Prohibited** |
+
+Continuous quantities are permitted in AION. Their **canonical contract representation**
+must be exact and explicitly versioned.
+
+Binary floats may exist freely inside local implementation calculations. They must not
+cross a canonical contract boundary without conversion to an approved exact
+representation, and the conversion — including its rounding rule — is part of the schema,
+not an implementation detail.
+
+### Permitted exact-representation strategies
+
+Per §9, a schema selects one of:
+
+- a bounded canonical decimal string;
+- a scaled integer with an explicit declared unit and scale;
+- a future versioned exact-decimal contract type, once one exists.
+
+**No universal decimal representation is selected.** CTO-DECISION-003 defers that choice
+until sufficient domain evidence exists; picking one now would be guessing against zero
+real schemas.
+
+### Mandatory review trigger
+
+When the first production or candidate domain schema models a continuous quantity —
+money, probability, measurement, score, geographic coordinate, scientific value, or
+statistical output — the schema owner must supply, before that schema is approved:
+
+1. required precision;
+2. required scale;
+3. permitted range;
+4. rounding rule;
+5. unit semantics;
+6. overflow behaviour;
+7. comparison semantics;
+8. conversion evidence from the domain representation;
+9. cross-runtime fixtures.
+
+That review determines whether the exact representations in §9 remain adequate, or
+whether a versioned exact-decimal contract type is required. It is the designated moment
+at which this constraint is re-tested against reality rather than argument.
+
+### Boundary with ADR-007
+
+The Universal Object Model is **not** modified to accommodate a numeric encoding. This
+rule constrains what may enter a canonical position; it does not change the Object
+envelope, its profiles, or its invariants.
 
 ## 9. Decimal representation
 
@@ -205,26 +366,128 @@ it does not recognise.
 
 ## 21–22. Schema and contract-family inclusion
 
-The digest input includes the contract family and the schema identity and version. This is
-not decoration: without it, the same bytes under two different schemas produce the same
-digest, and a schema-substitution attack becomes free. Inclusion is via the domain label
-(§23), not by injecting fields into the value.
+The digest input includes the contract family and the contract/schema version. This is not
+decoration: without it, the same bytes under two different schemas produce the same digest,
+and a schema-substitution attack becomes free. Inclusion is via dedicated **frame fields**
+(§23), not by injecting fields into the value — the value stays exactly what the schema
+says it is.
 
-## 23. Domain separation
+## 23. Domain separation — AION Frame v1
 
-A digest is **never** computed over bare canonical bytes. The input is:
+A digest or signature is **never** computed over bare canonical bytes. It is computed over
+a framed input.
 
+Delimiter-only framing is **rejected**. Its safety rests on the claim that a separator
+byte never occurs inside any field — a claim that depends on a grammar that can later be
+widened, and that fails silently when it is. Framing here is length-prefixed and does not
+depend on any byte being absent from any field.
+
+### Structure
+
+```text
+AionFrame :=
+    u32(len(FrameVersion))     || FrameVersion
+    u32(len(Purpose))          || Purpose
+    u32(len(ProfileId))        || ProfileId
+    u32(len(ContractFamily))   || ContractFamily
+    u32(len(ContractVersion))  || ContractVersion
+    u32(len(Context))          || Context
+    u64(len(CanonicalPayload)) || CanonicalPayload
 ```
-digest_input := domain_label ‖ 0x00 ‖ profile_id ‖ 0x00 ‖ canonical_bytes
+
+Exactly seven fields, always in this order.
+
+### Framing rules
+
+| # | Rule | Value |
+|---:|---|---|
+| 1 | Length integer encoding | Fixed-width unsigned. `u32` for the six textual fields, `u64` for the payload. **Not** variable-length — a varint admits non-minimal encodings, and two encodings of one length would break injectivity |
+| 2 | Byte order | Big-endian (network byte order), for all length fields |
+| 3 | Maximum field length | 1024 bytes for each textual field; 16 MiB for `CanonicalPayload`, matching §31 |
+| 4 | Zero-length fields | Permitted **only** for `Context`. The other six must be non-empty. A zero length is still unambiguous, so this is a semantic rule, not an injectivity requirement |
+| 5 | Text encoding | UTF-8, no BOM, NFC, for all six textual fields |
+| 6 | Identifier grammar | `[A-Za-z0-9][A-Za-z0-9._:+-]*` — ASCII only. Framing identifiers deliberately exclude non-ASCII so homoglyph substitution cannot occur in a security label |
+| 7 | Duplicate or omitted fields | Impossible by construction: the frame is a fixed seven-field sequence. A field cannot be repeated or omitted. Absence is a parse failure, never a default |
+| 8 | Unknown `FrameVersion` | **Fail closed.** Never guessed, never treated as v1 |
+| 9 | Truncation | Input shorter than a declared length → reject `frame-truncated` |
+| 10 | Overflow | A declared length exceeding its maximum, or exceeding the remaining input, → reject `frame-length-overflow`. Length arithmetic must be performed in a width that cannot wrap |
+| 11 | Payload boundary | The payload begins immediately after its `u64` length and extends exactly that many bytes. Bytes remaining after the payload → reject `frame-trailing-bytes` |
+| 12 | Total-length prefix | **Not required.** Each field is individually length-prefixed and the field count is fixed, so the total is derivable. A redundant total would introduce a disagreement case with no correct resolution. Trailing-byte rejection (rule 11) provides the same protection without that failure mode |
+| 13 | Registered purposes | See below |
+
+### Registered purposes
+
+`Purpose` separates uses that must never share a digest:
+
+| Purpose | Use |
+|---|---|
+| `aion.object.integrity` | Entity and Relationship snapshot integrity |
+| `aion.event.integrity` | Event Object integrity |
+| `aion.export.integrity` | Export package and manifest integrity |
+| `aion.fixture.digest` | Conformance fixture expected digests |
+| `aion.release.artifact` | Release archive and build evidence |
+| `aion.signature` | Reserved. Signature design is out of scope (§39) |
+
+A digest produced under one purpose must never be accepted under another. Adding a purpose
+is a registry change; reusing one is a contract violation.
+
+### Injectivity
+
+The framing is injective: two distinct field sequences never produce the same framed byte
+sequence.
+
+Decoding is a deterministic left inverse of encoding. Given a frame, a parser reads a
+fixed-width length, then exactly that many bytes, seven times, with no search and no
+lookahead. It therefore recovers exactly the field tuple that was encoded. A function with
+a left inverse is injective, so distinct tuples must produce distinct byte strings.
+
+Critically, this argument depends on **no** property of the field contents — not on a byte
+being absent, not on a grammar, not on an encoding. Rules 4 and 6 exist for semantic and
+anti-homoglyph reasons; injectivity does not rest on them.
+
+### Adversarial examples
+
+Each case is unambiguous under this framing.
+
+**Boundary shifting** — the classic delimiter failure. With a delimiter that can be
+omitted or escaped, `("ab","c")` and `("a","bc")` can both render as `abc`. Length-prefixed:
+
+```text
+("ab","c") -> 00000002 "ab" 00000001 "c"
+("a","bc") -> 00000001 "a"  00000002 "bc"
 ```
 
-`domain_label` is a registered ASCII string naming the exact purpose, contract family, and
-schema version — for example `aion.object.integrity.v1:org.aion.task:3`. The `0x00`
-separators cannot occur inside a label or profile identifier, so no two distinct
-(label, profile, content) triples can produce the same input.
+Different byte sequences. No collision is constructible.
 
-Omitting the domain label is a contract violation, not an optimisation. Its absence is
-what makes cross-protocol digest reuse possible.
+**NUL bytes.** A payload containing `0x00` is length-delimited, so it cannot terminate a
+field early. Under the previous `0x00`-separated design this was the entire attack.
+
+**Delimiter-like text.** `Context = "aion.object.integrity.v1:org.aion.task:3"` is just
+bytes with a length. It cannot be misread as additional fields.
+
+**Unicode payloads.** Canonical payloads are arbitrary UTF-8 including astral-plane
+characters; the `u64` length governs the boundary. Framing identifiers stay ASCII (rule 6),
+so a Cyrillic `а` cannot impersonate a Latin `a` in a purpose or profile name.
+
+**Empty strings.** `Context = ""` encodes as `00000000` with no bytes. It is distinct from
+any non-empty context and cannot be confused with an omitted field, because fields cannot
+be omitted (rule 7).
+
+**Embedded profile names.** `Purpose = "aion.object.integrity"` with `ProfileId = "acj-1"`
+is distinct from any single field containing `"aion.object.integrityacj-1"`, because the
+two are separated by their own lengths rather than by a discoverable marker.
+
+**Version-looking strings.** `ContractVersion = "1"` and a `Context` beginning `"1"` occupy
+different framed positions. Position is fixed by the field order, not inferred from content.
+
+### Prohibition
+
+Computing a digest or signature over bare canonical bytes, or over any framing other than
+this one, is a contract violation — not an optimisation. It is exactly what makes
+cross-protocol digest reuse possible.
+
+Framing defines the bytes only. It performs no hashing and no signing, and this contract
+implements neither.
 
 ## 24. Content type and profile identifiers
 
@@ -290,7 +553,13 @@ for the same stated reason. Error categories:
 | `limit-exceeded` | §29–§31 |
 | `invalid-timestamp` | Wrong precision, offset, or leap second |
 | `invalid-identifier` | Identifier fails §16 |
-| `missing-domain-label` | Digest attempted without domain separation |
+| `unvalidated-input` | Canonicalization attempted on a value not validated against a named schema and profile (§0) |
+| `missing-frame` | Digest or signature attempted without AION Frame domain separation (§23) |
+| `unknown-frame-version` | `FrameVersion` not recognised — fails closed |
+| `frame-truncated` | Input shorter than a declared field length |
+| `frame-length-overflow` | Declared length exceeds its maximum or the remaining input |
+| `frame-trailing-bytes` | Bytes remain after the declared payload |
+| `unregistered-purpose` | `Purpose` is not a registered value |
 
 Errors name the category and the location. They must not echo the offending content, which
 would turn an error channel into a disclosure channel.
@@ -307,8 +576,8 @@ it never sees one in practice.
 - Adding a member changes the canonical bytes and therefore the digest. This is correct:
   the content changed.
 - A reader encountering an unknown profile identifier **fails closed**. It never guesses.
-- A digest is only ever compared against a digest computed under the same profile,
-  algorithm, and domain label. Comparing across profiles is a contract violation.
+- A digest is only ever compared against a digest computed under the same frame version,
+  purpose, profile, and algorithm. Comparing across any of them is a contract violation.
 - Retained digests remain valid indefinitely under the profile that produced them. A new
   profile never invalidates an old digest; it produces a different one.
 
@@ -328,15 +597,35 @@ must retain an archival verifier rather than declaring old data unverifiable.
 The digest algorithm is named in the descriptor and resolved through a registry. `sha-256`
 is the initial registered algorithm and is **not** a contract constant.
 
-Adding an algorithm is additive. Retiring one requires a deprecation window, re-digesting
-of retained content where required, and an archival verifier for content that cannot be
-re-digested. An unknown algorithm identifier fails closed — it is never treated as
-"probably sha-256".
+Adding an algorithm is additive. An unknown algorithm identifier fails closed — it is never
+treated as "probably sha-256".
+
+### Retirement over immutable and destroyed records
+
+Retiring an algorithm requires a deprecation window and re-digesting of retained content
+**where re-digesting is possible**. It is not always possible, and this contract does not
+claim otherwise:
+
+- **Mutable Entity and Relationship Objects** can be re-digested on their next committed
+  revision, or by an explicit migration.
+- **Version and Event Objects are immutable by ADR-007 invariant.** They cannot be
+  re-digested without violating that invariant. A retired algorithm protecting them
+  requires a retained **archival verifier**; their digests are never recomputed.
+- **Destroyed content cannot be re-digested at all**, because the content no longer
+  exists. Only the destruction certificate's own digest remains within reach.
+
+An archival verifier for a weakened algorithm is a liability, not agility: it must be
+retained, scoped strictly to historical verification, and must never be selectable for new
+digests. Retirement policy must state, per algorithm, what happens to immutable records
+already protected by it. Deciding that policy is a subordinate decision, not something this
+contract resolves.
 
 ## 38. Digest descriptor
 
 ```json
 {
+  "frameVersion": "1",
+  "purpose": "aion.object.integrity",
   "canonicalizationProfile": "acj-1",
   "algorithm": "sha-256",
   "digest": "371654f3…",
@@ -344,20 +633,28 @@ re-digested. An unknown algorithm identifier fails closed — it is never treate
   "contractVersion": "1",
   "schemaId": "…",
   "schemaVersion": 3,
-  "domainContext": "aion.object.integrity.v1:org.aion.task:3"
+  "context": "org.aion.task:3"
 }
 ```
 
-Every field is required except `domainContext`, which is required whenever the domain
-label is not fully derivable from the other fields. `digest` is lowercase hex.
+Every field is required except `context`, which may be empty (§23 rule 4). `digest` is
+lowercase hex.
+
+The descriptor carries every input needed to **reconstruct the frame and reproduce
+verification**: frame version, purpose, profile, contract family, contract version, and
+context are exactly the six textual frame fields, and the payload is the canonical form of
+the content being verified. A verifier never has to infer a missing field, and never
+substitutes a default for one.
 
 This descriptor replaces the fixed `{contentHash, algorithm: "sha-256"}` shape of the
 superseded API contract.
 
 ## 39. Signature descriptor boundary
 
-Out of scope. ACJ-1 defines only **what bytes a signature would cover**: the §23 digest
-input, not the raw canonical bytes, so a signature inherits domain separation.
+Out of scope. ACJ-1 defines only **what bytes a signature would cover**: the §23 AION
+Frame, with `Purpose` set to a signature purpose, not the raw canonical bytes. A signature
+therefore inherits the same injective domain separation as a digest, and a signature over
+one purpose can never be replayed as a signature over another.
 
 A signature descriptor — key identity, algorithm, trust root, validity, revocation — is a
 separate future decision. Until it exists:
@@ -369,9 +666,13 @@ separate future decision. Until it exists:
 ## 40. Fixture requirements
 
 Fixtures are the only proof of conformance. Each must carry the source contract value, the
-expected canonical byte sequence, the expected digest under at least one registered
-algorithm, the expected validation outcome, the applicable contract and profile version,
-and a rationale for why the case exists.
+expected canonical byte sequence, the expected framed digest input and digest under at
+least one registered algorithm, the expected validation outcome, the applicable contract
+and profile version, and a rationale for why the case exists.
+
+Framing fixtures are required alongside value fixtures: the adversarial cases in §23 —
+boundary shifting, NUL bytes, delimiter-like text, empty context, embedded profile names,
+version-looking strings — must each have a fixture proving the framed bytes are distinct.
 
 Rejection fixtures are as important as acceptance fixtures — an implementation that
 accepts what it must reject is non-conforming. The full plan is in the

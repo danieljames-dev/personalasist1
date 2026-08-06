@@ -100,10 +100,18 @@ Decision record: [CTO-DECISION-002](../../decisions/CTO-DECISION-002-sprint-2.5-
 
 ## Deferred implementation gates
 
-These four matters were raised by the Architecture Readiness Review and are **not**
-satisfied. They are deferred to explicit later gates, not waived. No gate below may be
-recorded as met without the required evidence. Architecture-boundary approval of ADR-007
-does not close any of them.
+These four matters were raised by the Architecture Readiness Review. They are deferred to
+explicit later gates, not waived. No gate below may be recorded as met without the required
+evidence. Architecture-boundary approval of ADR-007 closed none of them.
+
+**Current gate status — 2026-08-06**
+
+| Gate | Status |
+|---|---|
+| DG-1 Identity bootstrap | **Open** |
+| DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
+| DG-3 Representative fixtures | **Open**; unblocked for design and fixture authoring only |
+| DG-4 Measurable limits | **Open** |
 
 ### DG-1 — Identity bootstrap
 
@@ -117,7 +125,7 @@ does not close any of them.
 | Required evidence | An accepted subordinate ADR defining the ceremony, bootstrap actor limitations, second-owner injection prevention, recovery, rotation, provenance, and historical identity-reference behaviour — without raw temporary identifiers or implied authorization. |
 | Review trigger | Any proposal to create a persisted Object, Identity record, or externally reachable Object API; any multi-owner or federation requirement. |
 
-### DG-2 — Canonical serialization
+### DG-2 — Canonical serialization — **CLOSED 2026-08-06**
 
 | Field | Value |
 |---|---|
@@ -125,11 +133,17 @@ does not close any of them.
 | Rationale | Integrity digests are unreproducible across languages and runtimes until one deterministic canonical representation is fixed. Every integrity claim depends on it. |
 | Risk | Divergent digests for identical content; false integrity failures; hashes silently invalidated by a canonicalization change; digest mistaken for authenticity. |
 | Affected components | Object Model integrity, versioning, export/import manifests, event integrity verification, migration, future signing and trust design |
-| Blocking gate | **Must be resolved before integrity digests, signatures, durable persistence, fixture hashing, or cross-runtime conformance are implemented.** |
-| Required evidence | An accepted subordinate ADR specifying canonicalization version, deterministic encoding rules, digest algorithm registry and agility, and cross-runtime agreement fixtures. Authenticity remains a separate design. |
-| Review trigger | Any proposal to compute, store, compare, or publish a digest; any second runtime implementation; any signing requirement. |
+| Blocking gate | **Closed.** |
+| Required evidence | **Satisfied** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) (Accepted 2026-08-06) and the [ACJ-1 contract](../../contracts/canonical-serialization.md): canonicalization profile and version, deterministic encoding rules, a named validation boundary, injective length-prefixed domain separation, and an algorithm registry with agility. Cross-runtime agreement fixtures are **required but not yet produced** — they are DG-3 work. Authenticity remains a separate design. |
+| Review trigger | Any proposal to widen the value domain, change the canonicalization profile, add or retire a digest algorithm, or introduce signing. |
 
-### DG-3 — Representative contract fixtures
+**Closure scope.** DG-2 closed the *specification* gap, not the *evidence* gap. Digest
+computation, storage, comparison, and publication remain unauthorized because no
+implementation exists and cross-runtime agreement has never been demonstrated. Six
+subordinate decisions carry forward — see
+[ADR-008 §Required subordinate decisions](../../decisions/ADR-008-canonical-serialization.md#required-subordinate-decisions).
+
+### DG-3 — Representative contract fixtures — **UNBLOCKED for design 2026-08-06**
 
 | Field | Value |
 |---|---|
@@ -137,8 +151,9 @@ does not close any of them.
 | Rationale | The contract's own stability gate requires the envelope to be validated against real Object shapes before it is frozen. Freezing an unvalidated shape forces an immediate breaking major version. |
 | Risk | Premature v1 freeze; a domain that cannot conform without violating its responsibility; unbounded envelope growth discovered after commitment. |
 | Affected components | Universal Object Contract, all future domain schemas, export format, migration graph |
-| Blocking gate | **Must exist and pass before the Object Contract can be designated stable v1.** |
-| Required evidence | Language-neutral fixtures modelling at least Owner record, Document, Project, Task, Memory, Capability, Workflow, Relationship, Version, and Event Objects, demonstrating bounded size, round-trip export, migration, and domain-boundary conformance. Blocked in part by DG-2 for any fixture carrying a digest. |
+| Blocking gate | **Still open.** Must exist and pass before the Object Contract can be designated stable v1. |
+| Status | **Unblocked for design and fixture authoring only.** DG-2's closure supplies the canonicalization profile and framing needed to compute an expected digest, so fixtures can now be specified and authored. **Implementation remains unauthorized**, and no fixture has been produced. |
+| Required evidence | Language-neutral fixtures modelling at least Owner record, Document, Project, Task, Memory, Capability, Workflow, Relationship, Version, and Event Objects, demonstrating bounded size, round-trip export, migration, and domain-boundary conformance. Each carries source value, expected canonical bytes, expected framed digest input and digest, expected validation outcome, applicable versions, and rationale. Rejection fixtures are mandatory. |
 | Review trigger | Any proposal to label the contract stable v1, publish golden schemas, or begin a domain schema that depends on a frozen envelope. |
 
 ### DG-4 — Measurable resource and complexity limits

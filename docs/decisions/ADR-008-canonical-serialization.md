@@ -1,12 +1,17 @@
 # ADR-008: Canonical serialization
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- Accepted: 2026-08-06
 - Decision owner: CTO
-- Implementation status: Frozen
-- Opens gate: DG-2 in the
+- Decision record: [CTO-DECISION-003](CTO-DECISION-003-canonical-serialization.md)
+- Implementation status: **Frozen.** Acceptance of this ADR does not lift the freeze.
+- Closes gate: DG-2 in the
   [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md)
+- Unblocks: DG-3 for design and fixture authoring only, not implementation
 - Depends on: [ADR-007](ADR-007-universal-object-model.md) (Accepted)
+- Contract stability: ACJ-1 is the approved profile; the Universal Object Contract remains
+  **pre-stable**
 
 ## Context
 
@@ -39,23 +44,41 @@ The load-bearing decisions:
    implementation produces correct ACJ-1 bytes for any value that satisfies the ACJ-1
    value domain. We do not fork the algorithm; we restrict what may enter it.
 
-2. **No binary floating point in canonical positions.** JCS serialises numbers through
-   IEEE 754 double semantics. That is deterministic but *lossy*: integers above 2^53
-   silently lose precision, and `0.1 + 0.2` is not `0.3`. Rather than accept silent
-   corruption inside an integrity mechanism, ACJ-1 forbids floats. Numbers are integers
-   in the exactly-representable range; decimals and large integers are strings with
-   declared scale and radix. The ambiguity is removed from the value domain instead of
-   being papered over in the encoder.
+2. **No binary floating point in canonical positions — a deliberate contract decision.**
+   JCS serialises numbers through IEEE 754 double semantics. That is deterministic but
+   *lossy*: integers above 2^53 silently lose precision, and `0.1 + 0.2` is not `0.3`.
+   Silent precision loss inside an integrity mechanism is unacceptable, so ACJ-1 forbids
+   binary floats in canonical positions.
 
-3. **Unicode normalization happens at validation, not canonicalization.** JCS does not
-   normalize, and adding normalization would fork it. ACJ-1 requires all strings to be
-   NFC-normalized *before* they become contract values, and rejects non-NFC input at the
-   validation boundary. Canonicalization then stays a pure function of already-normalized
-   input.
+   This constraint would apply to **any** format chosen for integrity purposes; it is not
+   an artefact of choosing JSON. It is scoped to the canonical integrity context and does
+   not restrict domain, transport, or storage representations. Continuous quantities
+   remain expressible in AION, exactly and versioned. No universal decimal representation
+   is selected — that choice is deferred until real domain evidence exists — and a
+   mandatory review trigger fires at the first schema modelling a continuous quantity.
+   See [contract §8](../contracts/canonical-serialization.md#8-floating-point).
 
-4. **Domain separation is mandatory.** A digest is computed over
-   `domain-label ‖ profile-id ‖ canonical-bytes`, never over bare content. This prevents
-   a digest computed for one purpose from being accepted for another.
+3. **An explicit pre-canonicalization validation boundary.**
+   `CanonicalContractValidatorV1` is a named, language-neutral responsibility that runs
+   before canonicalization, fails closed, returns stable non-enumerating error codes, and
+   never silently rewrites an invalid value. It verifies NFC; canonicalization never
+   normalizes, coerces, repairs, or reorders. The canonicalizer accepts only values
+   already validated against a named schema and profile.
+
+   The boundary is **specified, not implemented**. Controls that depend on it are
+   specified controls until it exists. See
+   [contract §0](../contracts/canonical-serialization.md#0-validation-boundary--canonicalcontractvalidatorv1).
+
+4. **Domain separation by injective length-prefixed framing.** A digest or signature is
+   computed over an **AION Frame v1**: seven length-prefixed fields — frame version,
+   purpose, profile, contract family, contract version, context, and canonical payload.
+
+   Delimiter-only framing is rejected. Its safety depended on a separator byte never
+   occurring inside a field, which rests on a grammar that can later be widened and fails
+   silently when it is. Length-prefixed framing is injective **regardless of field
+   content**: decoding is a deterministic left inverse of encoding, so distinct field
+   tuples cannot collide. See
+   [contract §23](../contracts/canonical-serialization.md#23-domain-separation--aion-frame-v1).
 
 5. **Algorithm and profile are both versioned and replaceable.** The integrity descriptor
    names the canonicalization profile *and* the digest algorithm. Neither is fixed by the
@@ -136,14 +159,23 @@ it duplicates it.
 ### Costs
 
 - **Domain schemas may not use binary floats in canonical positions.** This is a real
-  constraint on future type data, not a formality. Provenance `confidence`, currently
-  described as a number in 0..1, must become a scaled integer or a decimal string.
-- Large integers and decimals become strings, so schemas must declare scale and radix and
-  validators must enforce them.
-- An NFC normalization rule must exist at the validation boundary before any string is
-  accepted as a contract value.
+  constraint on future type data, deliberately accepted. Provenance `confidence` — a
+  number in 0..1 — must become a scaled integer or a bounded decimal string, and so must
+  money, probability, measurement, score, geographic coordinate, scientific value, and
+  statistical output. The cost lands on every schema author, not only on one field, and
+  the review trigger in contract §8 is the mechanism for re-testing it against reality.
+- A wrong declared scale or ambiguous rounding rule produces wrong data that
+  canonicalizes perfectly. The format removes encoding ambiguity, never modelling error.
+- `CanonicalContractValidatorV1` must exist before any string can be accepted as a
+  contract value. It does not exist, so NFC and several threat-model controls are
+  specified rather than active.
+- Framing adds 28 bytes of fixed overhead per digest input. Negligible, and the price of
+  injectivity that does not depend on field content.
 - Base64url encoding of binary inflates payloads by roughly one third; large artifacts
   must stay out of canonical envelopes and use content-addressed references.
+- Profile migration re-canonicalizes and re-digests every retained Object, Version, Event,
+  and export. Retained descriptors avoid an eager sweep for verification, but any
+  operation needing a uniform current profile pays the full cost.
 
 ### Constraints
 
@@ -171,27 +203,62 @@ canonicalization is sufficiently specified to compute an expected digest.
 
 ## Required subordinate decisions
 
-1. Registered digest algorithm set and the process for adding or retiring one.
-2. Signature and trust design, including what a signature covers and how key rotation
-   interacts with retained digests.
-3. NFC normalization enforcement point and rejection behaviour in the validation contract.
-4. Decimal representation: declared-scale integer string versus arbitrary-precision
-   decimal string, decided against real Memory and Invoice data.
-5. Canonicalizer resource limits versus DG-4 business limits, and which bounds which.
+None of these are closed by acceptance of this ADR.
+
+1. **Exact decimal representation** — scaled integer versus bounded decimal string versus a
+   versioned exact-decimal contract type, decided against real Memory, Invoice, and
+   Memory-confidence data at the contract §8 review trigger.
+2. **Registered digest algorithm set** and the process for adding or retiring one.
+3. **Signature and trust architecture**, including key rotation against retained digests.
+   Constrained in advance: a signature covers the AION Frame, never raw bytes.
+4. **Algorithm retirement over immutable records** — Version and Event Objects cannot be
+   re-digested without violating an ADR-007 invariant, and Destroyed content cannot be
+   re-digested at all. Retirement policy must state what happens to each.
+5. **Canonicalizer limits versus DG-4 business limits.** The stated invariant is that DG-4
+   limits must be less than or equal to the §29–§31 canonicalizer limits; the specific
+   values remain provisional pending DG-4 measurement.
+6. **Constant-time comparison boundaries** — whether required everywhere or only where an
+   untrusted party influences input and observes the outcome.
+
+Implementing `CanonicalContractValidatorV1` is not a subordinate decision; it is
+implementation, and it remains unauthorized.
 
 ## Review triggers
 
-- A domain demonstrates a canonical value it cannot represent without binary floats.
+- **The first production or candidate domain schema modelling a continuous quantity** —
+  money, probability, measurement, score, geographic coordinate, scientific value, or
+  statistical output. The schema owner supplies the nine evidence items in contract §8
+  before approval, and that review re-tests the float constraint against reality.
 - Measured payload size or streaming cost makes deterministic CBOR the better trade.
 - A JCS implementation divergence is discovered that the subset does not exclude.
 - A digest algorithm in the registry is weakened or withdrawn.
 - Cross-runtime fixtures fail to agree byte-for-byte.
+- A proposal to widen the framing identifier grammar beyond ASCII.
 
 ## Approval effect
 
-Acceptance would authorize the canonical serialization contract, its fixture plan, and
-subordinate decisions above. It would **not** authorize implementation of a canonicalizer,
-production code, storage selection, or signing infrastructure, and it would not lift the
-implementation freeze.
+Acceptance is an **architecture-boundary decision only**.
 
-ADR-008 remains **Proposed** pending Founder/CTO approval.
+### Acceptance authorizes
+
+- canonical serialization architecture;
+- language-neutral contract definitions;
+- canonicalization profile registration rules;
+- future representative fixtures;
+- future conformance tests;
+- future reference test adapters;
+- subordinate design ADRs.
+
+### Acceptance does NOT authorize
+
+- production implementation of any kind;
+- a canonicalizer, parser, encoder, or validator implementation;
+- generating fixtures;
+- Identity, Object, Memory, Planner, Event Bus, Knowledge Graph, Capability Registry,
+  Workflow Engine, plugin, agent, persistence, or UI implementation;
+- storage, transport, compression, or encryption selection;
+- signing or key-management infrastructure.
+
+The implementation freeze remains in effect. DG-2 closes; DG-3 becomes unblocked **for
+design and fixture authoring only**; DG-1 and DG-4 remain open. The Universal Object
+Contract remains pre-stable.

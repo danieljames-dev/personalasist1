@@ -2,303 +2,416 @@
 
 Review subject: ACJ-1 profile and ADR-008  
 Reviewer role: Principal Architect / CTO design authority  
-Date: 2026-08-06  
+First review: 2026-08-06 — APPROVE WITH CHANGES  
+Second review: 2026-08-06, after corrections — **APPROVE**  
 Decision scope: Architecture readiness only. No implementation authorization is requested,
 granted, or implied.
 
-Posture: this review attempts to **reject** the proposed design. Nothing below is written
-to justify a conclusion already reached.
+Posture: this review attempted to **reject** the design in both passes. Nothing below is
+written to justify a conclusion already reached, and the second pass re-examined every
+dimension rather than only the three corrected findings.
 
 ## Executive summary
 
 ACJ-1 is a strict subset of RFC 8785 JCS with the value domain constrained so JCS's
 encoding rules are exact rather than merely deterministic. The central move — removing
-numeric ambiguity from the *value domain* instead of patching it in the encoder — is
-correct and is the strongest part of the design. It keeps stock JCS implementations usable
-as cross-checks, keeps output human-readable for forensic work, and eliminates silent
-precision loss inside an integrity mechanism.
+numeric ambiguity from the *value domain* instead of patching it in the encoder — was
+correct in the first pass and remains the strongest part of the design.
 
-The design is not ready to accept unchanged. Three problems are material, one of them
-against the directive's own constraint on ADR-007.
+The first pass raised three blocking findings: an unpriced constraint on ADR-007, two threat
+controls resting on a component nobody owned, and a domain-separation argument resting on an
+unwritten grammar. All three are resolved. None was resolved by deletion; each was resolved
+by making a decision that had previously been implicit.
 
-Recommendation: **APPROVE WITH CHANGES**.
+The design is now accepted. It is **not** implementable, and the corrections made that
+clearer rather than less clear: naming `CanonicalContractValidatorV1` converted a hidden
+assumption into a visible, unimplemented dependency, and the threat model now labels every
+control as specified or structural, with none implemented.
 
-## 1. Is canonical serialization actually necessary?
+Recommendation: **APPROVE**.
 
-**Yes — but the honest answer is narrower than the ADR implies.**
+# Part 1 — Disposition of blocking findings
 
-Testing the null option seriously: nothing is implemented, the freeze is in effect, and no
-digest has ever been computed. Deferral costs nothing operationally today.
+## B-1 — The float prohibition was decided without the evidence to decide it
 
-It fails on sequencing, not on urgency. DG-3 fixtures must carry expected digests, and a
-digest cannot be authored before the rule that produces it. Every fixture written before
-the rule exists must be rewritten afterwards, and a rewritten fixture's expected value *is*
-the definition of correctness — so regeneration bugs are undetectable without an
-independent cross-check. Deferring duplicates the work and degrades the evidence.
+**Original finding.** ACJ-1 §8 barred binary floats in canonical positions. The design
+argued this merely sharpened ADR-007's existing "deterministic, finite, JSON-compatible"
+requirement. That argument held for `finite` — NaN and infinity were already excluded — but
+binary floats are finite, JSON-compatible, and deterministic under JCS, so §8 was a genuinely
+new constraint on every future domain schema. It was adopted against exactly one worked
+example (provenance `confidence`), with no domain schema in existence to test it, and the
+directive prohibits modifying the Object Model to fit a serialization format.
 
-The weaker claim in ADR-008 §Context — that canonicalization blocks export verification and
-migration proof — is true but not yet load-bearing, since neither exists. The necessity
-argument rests on DG-3 alone, and that is sufficient. The ADR would be more honest if it
-said so rather than listing four consequences of equal apparent weight.
+**Correction applied.** The prohibition is now recorded as a deliberate architectural
+decision with four distinct pieces:
 
-**Not a blocking finding.** The conclusion is right.
+1. **Scope narrowed to one of four value contexts.** Domain, transport, and storage
+   representations are explicitly unconstrained; only the canonical integrity context is
+   restricted. Continuous quantities remain expressible in AION.
+2. **Rationale stated as format-independent.** The constraint would apply to any format
+   chosen for integrity purposes, so it is not a JSON artefact.
+3. **The universal decimal choice is deferred**, not made. Three strategies remain
+   permitted per field; no evidence exists to pick one.
+4. **A mandatory review trigger** fires at the first continuous-quantity schema, requiring
+   nine evidence items before that schema is approved.
 
-## 2. Is the scope too broad?
+**Documents and sections changed.**
 
-**No. If anything it is drawn slightly too narrow in one place.**
+| Document | Section |
+|---|---|
+| `contracts/canonical-serialization.md` | §8 rewritten — rationale, four value contexts, permitted strategies, review trigger, ADR-007 boundary |
+| `decisions/ADR-008-canonical-serialization.md` | Decision item 2; §Costs; §Required subordinate decisions 1; §Review triggers |
+| `decisions/CTO-DECISION-003-canonical-serialization.md` | §Binary Floating-Point Decision; §Rationale |
+| `sprints/sprint-2.6-canonical-serialization/specification.md` | §Relationship to ADR-007 |
+| `sprints/sprint-2.6-canonical-serialization/risks.md` | CS-001 downgraded to *Controlled* |
 
-The seven non-responsibilities are stated identically in the ADR, the contract, and the
-specification, which is the correct level of repetition for a rule teams will be tempted to
-violate. The temptation is real: a deterministic, well-specified format is exactly what
-someone will reach for as a wire format, coupling systems to a format optimised for
-hashing. CS-026 records this.
+**Remaining risk.** The constraint has still never been tested against a real domain schema,
+because none exists. Every schema author modelling money, probability, measurement, or score
+now owes a precision, scale, range, and rounding decision, and CS-002 remains valid: a wrong
+scale produces wrong data that canonicalizes perfectly. The format removes encoding
+ambiguity, never modelling error.
 
-The under-drawn edge is §4. ACJ-1 requires NFC but explicitly does not enforce it,
-delegating enforcement to a "validation boundary" that **does not exist in any approved
-contract**. The rule is stated in a document that disclaims responsibility for it, and no
-other document claims it. See finding B-2.
+**Why it is no longer blocking.** The finding was never that the constraint is wrong — it is
+probably right. The finding was that it was being *adopted silently* against inadequate
+evidence. It is now adopted explicitly, scoped to the narrowest context that achieves the
+goal, with the universal decimal choice deferred until evidence exists and a named trigger
+that forces re-examination. An architecture decision taken deliberately, with its cost
+stated and a mechanism to revisit it, is a decision. That is what was missing.
 
-## 3. Does it create transport or storage coupling?
+## B-2 — Two threat controls depended on a validation boundary that did not exist
 
-**No.** Storage engines and transports may use any representation provided the canonical
-form is reproducible on demand. The contract does not require canonical bytes to be stored,
-and §24's media type applies only where canonical bytes are transported *as* a canonical
-form.
+**Original finding.** §4 required NFC and delegated enforcement to a "validation boundary"
+that no approved contract defined. Threat 4 listed that boundary as its control; threat 1's
+control began "validation precedes canonicalization." No document specified where validation
+occurred, what rejected non-NFC input, or what prevented direct canonicalizer invocation.
+The risk register recorded this as risk; the threat model presented it as control. Those are
+different claims and the stronger one was unsupported.
 
-One residual coupling is real and acknowledged: §17 pushes binary out of envelopes into
+**Correction applied.** `CanonicalContractValidatorV1` is now a named, language-neutral
+contract responsibility with: eleven enumerated validation concerns; seven requirements
+(runs first, fails closed, stable non-enumerating errors, never silently rewrites, never
+treats a normalized invalid value as equivalent, separate from auth/persistence/transport/
+business validation, replaceable); nine explicit canonicalizer prohibitions; and a normative
+processing sequence.
+
+The threat model now carries a **control status vocabulary** — *specified* versus
+*structural* — states plainly that **no control is implemented**, and marks
+validator-dependent controls as "specified — depends on validator."
+
+**Documents and sections changed.**
+
+| Document | Section |
+|---|---|
+| `contracts/canonical-serialization.md` | New §0 (validation boundary, sequence, requirements, canonicalizer obligations, status); §4 rewritten; §33 gains `unvalidated-input` |
+| `security/canonical-serialization-threat-model.md` | New §Control status vocabulary; threats 1, 2, 4 restated; §Residual risks; §Residual decisions |
+| `decisions/ADR-008-canonical-serialization.md` | Decision item 3; §Costs |
+| `decisions/CTO-DECISION-003-canonical-serialization.md` | §Validation Boundary Decision; §Rationale |
+| `sprints/sprint-2.6-canonical-serialization/risks.md` | CS-003, CS-004 updated; CS-004a added |
+
+**Remaining risk.** Substantial and now clearly visible: the validator does not exist and is
+not authorized. Threats 1, 2, and 4 have no runtime defence. A non-NFC string, a duplicate
+key, or a float reaching a canonical position today would have nothing to reject it. CS-003
+and CS-004 are downgraded from Critical to High because the responsibility is *assigned*
+rather than homeless — not because the exposure shrank.
+
+**Why it is no longer blocking.** The finding was a truthfulness defect, not a design gap:
+the threat model claimed controls it did not have. It now states exactly what exists
+(nothing runtime), what is structural (framing injectivity, value-domain exclusions), and
+what is specified pending an unimplemented component. A threat model that accurately reports
+zero implemented controls is correct; one that implies controls are in place is not. The
+correction also added a defence the first pass did not request — CS-004a, against a
+*repairing* validator, which is the most likely way an implementer would get this wrong.
+
+## B-3 — Digest-input framing was under-specified for multi-byte labels
+
+**Original finding.** §23 defined `domain_label ‖ 0x00 ‖ profile_id ‖ 0x00 ‖ canonical_bytes`
+and argued injectivity from the premise that `0x00` cannot occur inside a label or profile
+identifier. No grammar was given — labels were "registered ASCII string" in prose, with an
+example and nothing normative constraining character set or length. A registry that later
+admitted a null byte or a UTF-8 label would silently break the injectivity argument the
+entire domain-separation control rested on.
+
+**Correction applied.** Delimiter framing is replaced by **AION Frame v1**: seven
+length-prefixed fields — frame version, purpose, profile, contract family, contract version,
+context, canonical payload. All thirteen required specification items are resolved: fixed-width
+big-endian unsigned lengths (varints rejected because non-minimal encodings would break
+injectivity), maximum field lengths, zero-length rules, UTF-8/NFC, an ASCII identifier
+grammar, fixed field count making omission and duplication impossible, fail-closed unknown
+versions, named truncation/overflow/trailing-byte rejections, exact payload boundary, no
+redundant total-length prefix, and six registered purposes.
+
+The injectivity argument is now a left-inverse proof that depends on **no property of field
+contents**. Seven adversarial cases are worked, including the boundary-shifting collision
+`("ab","c")` vs `("a","bc")` that delimiter framing admits.
+
+**Documents and sections changed.**
+
+| Document | Section |
+|---|---|
+| `contracts/canonical-serialization.md` | §23 fully replaced; §21–§22, §35, §38, §39, §40 updated to reference frame fields; §33 gains five framing rejections |
+| `security/canonical-serialization-threat-model.md` | Threats 6, 7, 8, 10 restated; 8a added |
+| `decisions/ADR-008-canonical-serialization.md` | Decision item 4; §Costs; §Review triggers |
+| `decisions/CTO-DECISION-003-canonical-serialization.md` | §Domain-Separation Framing Decision; §Rationale |
+| `sprints/sprint-2.6-canonical-serialization/risks.md` | CS-008 downgraded; CS-008a, CS-008b added |
+
+**Remaining risk.** Low. The residual is implementation error — a parser that trusts a
+declared length without bounds-checking, or performs length arithmetic in a wrapping width.
+Both are named rejections with required fixtures. CS-008a covers reversion to delimiter
+framing, which now requires a new frame version and fails closed for old readers.
+
+**Why it is no longer blocking.** Injectivity no longer rests on an unwritten grammar. It
+rests on a decoding function that is a deterministic left inverse of encoding, which holds
+for arbitrary field contents including NUL bytes, Unicode, and empty strings. The ASCII
+identifier grammar and zero-length rules now exist, but injectivity does not depend on them
+— they serve anti-homoglyph and semantic purposes. That is the correct structure: a security
+property should not be contingent on a registry policy that can be widened later.
+
+# Part 2 — Full re-evaluation
+
+Every dimension re-examined, not only the corrected ones.
+
+## 1. Necessity
+
+**Confirmed, on the same narrow ground.** The justification is DG-3 sequencing: fixtures must
+carry expected digests, a digest cannot be authored before the rule that produces it, and a
+regenerated fixture's expected value *is* the definition of correctness, so regeneration bugs
+are undetectable without an independent cross-check. Deferral duplicates work and degrades
+evidence.
+
+The first pass criticised ADR-008 for listing export verification and migration proof as
+co-equal justifications when neither system exists. That criticism stands and was not
+addressed. It is cosmetic — the conclusion is right, the supporting list is padded — and is
+recorded as NB-1.
+
+## 2. Scope
+
+**Correct, and the previously under-drawn edge is now closed.** The seven
+non-responsibilities are stated identically in the ADR, contract, and specification. §4's gap
+— requiring NFC while disclaiming enforcement — is resolved by §0, which claims the
+responsibility explicitly rather than leaving it to an unnamed boundary.
+
+Scope did not creep during correction. §0 defines a validator responsibility; it does not
+define business validation, and requirement 6 says so.
+
+## 3. Storage independence
+
+**Preserved.** No storage engine, encoding, or layout is mandated. §8's four-context table
+makes this explicit for the first time: storage values are unconstrained, so a store may hold
+IEEE 754 doubles, decimals, or anything else provided the canonical form is reproducible on
+demand.
+
+The one residual coupling is honest and unchanged: §17 pushes binary out of envelopes into
 content-addressed references, which constrains how large artifacts are modelled. That is a
-consequence of choosing a text format, correctly disclosed rather than hidden.
+consequence of choosing a text format, disclosed rather than hidden.
 
-## 4. Are the numeric rules portable?
+## 4. Transport independence
 
-**Yes, and this is the design's best decision — but it is also its largest unpriced cost.**
+**Preserved.** Transport values are explicitly unconstrained. §24's media type applies only
+where canonical bytes are transported *as* a canonical form. CS-026 continues to track the
+real risk — teams adopting ACJ-1 as a wire format because it is well-specified — which is a
+governance problem, not a contract defect.
 
-Restricting integers to ±(2^53 − 1) means a JCS implementation backed by double arithmetic
-cannot lose precision, so the subset relationship holds on the axis where it is hardest to
-hold. Rejecting `-0` rather than folding it is right: folding maps two inputs to one output
-and hides a producer bug.
+## 5. Numeric exactness
 
-The cost is §8. Prohibiting binary floats is a genuine constraint on every future domain
-schema, and the ADR's cost section names only provenance `confidence`. It is not the only
-case, and it is not the hardest. Model scores, measured quantities, financial rates, and
-any statistical output are all naturally continuous. The design's answer — declared-scale
-integers — works, but it pushes a modelling decision onto every schema author, and CS-002
-correctly notes that a wrong scale produces wrong data that canonicalizes perfectly.
+**Achieved, at a stated cost.** Integers restricted to ±(2^53 − 1) means a JCS implementation
+backed by double arithmetic cannot lose precision, so the subset relationship holds on the
+axis where it is hardest to hold. Rejecting `-0` rather than folding it remains right:
+folding maps two inputs to one output.
 
-This is defensible. It is not yet *decided*, because the evidence to decide it does not
-exist. See finding B-1.
+This is now *structural* rather than *specified* — the ambiguous cases cannot be expressed in
+the value domain, so no runtime check is required to exclude them. Threat 5 is relabelled
+accordingly. That is a genuine strengthening: a structural control cannot be forgotten by an
+implementer.
 
-## 5. Is an existing standard sufficient?
+## 6. Unicode behaviour
 
-**No, and the analysis reaching that conclusion is sound.**
+**Specified, unimplemented, and now labelled as such.** NFC required, verified at §0,
+canonicalization never normalizes. Lone surrogates and invalid scalar values rejected.
 
-Unconstrained JCS is insufficient for the specific reason given: IEEE 754 double semantics
-are deterministic but lossy, and lossiness inside an integrity mechanism is the one
-property that cannot be traded away. This is a real technical objection, not a preference.
+Confusables remain out of reach and are stated so. One improvement the first pass did not
+request: §23 rule 6 restricts *frame* identifiers to ASCII, so a Cyrillic homoglyph cannot
+impersonate a Latin character in a purpose or profile name. Payload and schema identifiers
+remain exposed, and the threat model now says which is which rather than treating threat 3 as
+uniformly unsolvable.
 
-Deterministic CBOR is dismissed on debuggability and profile ambiguity. Both are true —
-canonical CBOR and core deterministic encoding do differ — but the rejection understates
-CBOR's advantages: exact big integers with no string encoding, native byte strings with no
-base64 inflation, and genuine streaming. Over ten years, if payload size or streaming
-becomes a measured constraint, CBOR is the better format and ACJ-1 will have to migrate.
-The ADR records this as a review trigger, which is the right handling.
+## 7. Validation ownership
 
-Protobuf's rejection is correct and needs no defence: its own specification declines to
-promise deterministic serialization.
+**Resolved — this is the largest improvement in the second pass.** Validation had no owner;
+it now has a named contract responsibility with enumerated concerns, requirements, and
+prohibitions, plus a normative sequence.
 
-The two rejections that could have been lazy — "roll our own" and "schema-specific
-encoders" — are both rejected for the right reason, that they multiply the surface where
-JCS has already litigated the edge cases.
+The prohibition list is the part that matters most. Every entry — repair Unicode, remove
+duplicate keys, coerce numbers, infer timestamps, fill absent members, remove unknown
+members, reorder arrays, reinterpret identifiers, upgrade versions — describes a
+"helpful" behaviour an implementer would plausibly add. Each maps two distinct inputs to one
+output, which is precisely the failure a digest exists to detect. Enumerating them is worth
+more than the abstract rule.
 
-## 6. Is algorithm agility real or nominal?
+## 8. Domain-separation injectivity
 
-**Real for algorithms. Nominal for profiles, and that gap is not acknowledged.**
+**Resolved, and the proof structure is now sound.** Injectivity follows from decoding being a
+left inverse of encoding, independent of field contents. The seven adversarial cases are
+worked concretely rather than asserted.
 
-Algorithm agility is genuine: the algorithm is named in the descriptor, resolved through a
-registry, unknown identifiers fail closed, and no default is inferred. §37's retirement
-path — deprecation window, re-digesting, archival verifier — is concrete.
+Rule 12's rejection of a redundant total-length prefix is correct reasoning that could
+easily have gone the other way: a total length looks like defence in depth but creates a
+disagreement case with no principled resolution. Trailing-byte rejection achieves the same
+protection with no ambiguity.
 
-Profile agility is weaker than it appears. §36 says migration re-canonicalizes and
-recomputes digests while retaining both descriptors, and that a profile migration does not
-change Object revision. That last rule is correct and important. But CS-016 and the risk
-register's own scalability section concede that migrating profiles means re-canonicalizing
-and re-digesting *every retained Object, Version, Event, and export*, which on a
-local-first device with long history may be the most expensive operation the platform ever
-performs. Retaining both descriptors avoids an eager sweep for verification, but any
-operation that needs a uniform current profile still pays the full cost.
+Rule 1's rejection of varints is likewise correct and non-obvious — varints are the natural
+choice for compactness, and non-minimal encodings would silently break injectivity.
 
-Calling this "agility" without pricing it is optimistic. It is closer to "migration is
-possible and expensive."
+## 9. Algorithm agility
 
-## 7. Is migration possible?
+**Real for algorithms; honestly re-described for profiles and for immutable records.**
 
-**Yes, with one unresolved case.**
+Algorithm agility is genuine: registry resolution, fail-closed on unknown identifiers, no
+default inference, concrete retirement path.
 
-The retained-descriptor approach is right, and not changing Object revision on profile
-migration is exactly correct — content did not change, so revision must not advance.
+The first pass found profile "agility" overstated. §37 now separates the cases and concedes
+the hard one directly: Version and Event Objects are immutable by ADR-007 invariant and
+**cannot** be re-digested; Destroyed content cannot be re-digested at all. The contract no
+longer promises re-hashing it cannot deliver, and states that an archival verifier for a
+weakened algorithm is a liability rather than agility — retained, scoped to historical
+verification, never selectable for new digests.
 
-The unresolved case is a **withdrawn digest algorithm applied to immutable content**.
-§37 requires re-digesting retained content when an algorithm is retired. But Version and
-Event Objects are immutable by contract invariant, and Destroyed content cannot be
-re-digested at all. The design does not say what happens when the algorithm protecting an
-immutable record is withdrawn. The archival-verifier escape hatch covers *verification*,
-but it means retaining a verifier for a broken algorithm indefinitely, which is a different
-thing from agility.
+This is a case where the correction made the design look *worse* and the documentation
+better. That is the right trade.
 
-Not blocking — it is a subordinate decision — but it must be named rather than discovered.
+## 10. Migration feasibility
 
-## 8. Does the design support deterministic fixtures?
+**Feasible and correctly priced.** Retained descriptors avoid an eager sweep for
+verification. Not changing Object revision on profile migration remains exactly right —
+content did not change, so revision must not advance.
 
-**Yes. This is the requirement it meets most completely.**
+ADR-008 §Costs now states plainly that any operation needing a uniform current profile pays
+the full re-canonicalization cost across every retained Object, Version, Event, and export.
+On a local-first device with long history this may be the most expensive operation the
+platform performs. Naming it is the correction; it was previously implied to be cheap.
 
-All fifteen fixture classes are defined; each future fixture must carry source value,
-expected canonical bytes, expected digest, expected validation outcome, applicable versions,
-and rationale. Two choices deserve credit:
+## 11. Cross-runtime reproducibility
 
-- **Rejection fixtures are mandatory.** CS-028 identifies the failure this prevents: an
-  over-permissive implementation that accepts floats or duplicate keys passes an
-  acceptance-only suite because it never encounters them in the happy path.
-- **Cross-checking against an unmodified third-party JCS implementation** is a standing
-  requirement, not a one-time check. This is what makes the subset claim falsifiable rather
-  than aspirational.
+**Specified, never demonstrated.** Conformance requires byte-for-byte agreement across the
+full fixture set including every rejection, cross-checked against an unmodified third-party
+JCS implementation as a standing requirement.
 
-Class 8's astral-plane key-ordering cases are the right target: UTF-16 code unit versus code
-point ordering diverges only outside the Basic Multilingual Plane, so an implementation
-sorting by code point passes every BMP-only fixture.
+No implementation exists, so nothing has been demonstrated. CTO-DECISION-003's verification
+section states this explicitly: the passing test suite covers the Kernel only and exercises
+no canonical serialization. This is the single largest gap between what is specified and what
+is known.
 
-## 9. Do security failures remain?
+## 12. Fixture readiness
 
-**Yes, three — two disclosed, one under-disclosed.**
+**Ready, and improved.** Fifteen classes defined; each future fixture carries source value,
+expected canonical bytes, expected framed digest input and digest, expected validation
+outcome, applicable versions, and rationale.
 
-Disclosed and correctly handled:
+Framing fixtures are now required alongside value fixtures, covering each §23 adversarial
+case. Rejection fixtures remain mandatory — CS-028's point stands, that an over-permissive
+implementation passes an acceptance-only suite because it never encounters the values it
+would mishandle.
 
-- **A digest proves no authenticity.** Stated in the ADR, the contract, and the threat
-  model. §39 fixes the signature boundary now — signatures cover the domain-separated
-  digest input — so a future signature design cannot reopen cross-protocol attacks by
-  covering raw bytes. Constraining a future decision from the current one is the right
-  move.
-- **Unicode confusables are out of reach.** Threat 3 says so plainly instead of claiming a
-  control. Canonicalization makes two different strings hash differently, which is correct
-  and useless against a human reading two identical-looking type names.
+DG-3 is correctly unblocked for *authoring* only. Nothing has been generated.
 
-Under-disclosed: the **validation boundary does not exist**. Threats 4 (normalization
-mismatch) and 1 (parser differential) both have controls that live outside this contract,
-in a validation step no approved document defines. CS-003 and CS-004 record the risk, but
-the threat model presents the controls as present. They are specified, not available. See
-finding B-2.
+## 13. Security residuals
 
-## 10. Are measurable limits prematurely mixed into DG-2?
+**Three, all disclosed.**
 
-**No — and the separation is the cleanest reasoning in the design.**
+- **No control is implemented.** The threat model's new vocabulary makes this the first thing
+  a reader learns. Structural controls hold as design properties; specified controls defend
+  nothing today.
+- **The validator gap.** Threats 1, 2, and 4 depend entirely on an unauthorized component.
+- **A digest proves no authenticity.** Unchanged and correctly stated. §39 constrains any
+  future signature to cover the AION Frame with a signature purpose, so the design cannot be
+  reopened later by a signature over raw bytes.
 
-§29–§31 are canonicalizer safety limits: bounds on recursion, allocation, and sort cost
-needed to make rejection deterministic rather than a crash. DG-4 owns business limits: what
-the Object contract permits an owner to store. These are different questions with different
-owners.
+Threat 3 (confusables) is now split accurately: structural for frame identifiers, unsolvable
+for payload and schema identifiers.
 
-The stated ordering — DG-4 limits must be ≤ canonicalizer limits — is the correct
-invariant, because the alternative is an Object the contract permits but that cannot be
-canonicalized, and therefore cannot carry an integrity descriptor. CS-017 tracks it.
+## 14. Performance and streaming
 
-The specific numbers (depth 64, 4096 members, 1 MiB strings, 16 MiB total) are asserted
-without derivation. For DoS bounds that is acceptable — they need to be *some* finite
-value — but they should be labelled as provisional pending DG-4 measurement rather than
-presented as settled.
+**Unchanged and honest.** Full streaming is not achievable — member sorting requires all
+members before any byte is emitted — and the contract says so rather than implying otherwise.
+Bounded-buffer is the accurate description; §29–§31 limits bound the buffer.
 
-## Blocking findings
+Framing adds 28 bytes of fixed overhead per digest input, newly stated in ADR-008 §Costs.
+Negligible, and correctly presented as the price of content-independent injectivity.
 
-### B-1 — The float prohibition is decided without the evidence to decide it
+Digest recomputation cost per mutation remains unmeasured and is a real input to the storage
+decision. Unchanged from the first pass; DG-4 owns it.
 
-§8 constrains every future domain schema, and the directive states that the Object Model
-must not be modified to fit a serialization format. The design's position is that ADR-007
-already required values to be "deterministic, finite, JSON-compatible," so ACJ-1 narrows an
-ambiguity rather than adding a constraint. That argument is sound for `finite` — NaN and
-infinity were already excluded — but it does **not** cover binary floats, which are
-finite, JSON-compatible, and deterministic under JCS. §8 is a new constraint.
+## 15. Long-term maintainability
 
-It is probably the right constraint. But it is being adopted against exactly one worked
-example — provenance `confidence` — and no domain schema exists to test it. Memory
-confidence, model scores, and Invoice rates are all plausible counter-cases, and CS-001
-escalates only if a canonical float need is *proven*, which cannot happen while no domain
-is specified.
+**Good, with one durable concern.**
 
-**Required change:** record §8 as an explicit, owner-acknowledged constraint on ADR-007
-with its cost stated, rather than as a neutral refinement. Either accept it deliberately
-with a review trigger tied to the first domain schema that models a continuous quantity, or
-defer §8 to the decimal decision already listed as subordinate. Adopting it silently is the
-one outcome that should not happen.
+Strengths: the subset relationship keeps independent JCS implementations available as
+cross-checks; output stays human-readable, which matters most in ten years when the work is
+forensic; profile and algorithm are both versioned; CS-024 requires preserving profile
+specifications, archival verifiers, and fixtures alongside release snapshots.
 
-### B-2 — Two threat controls depend on a validation boundary that does not exist
+The durable concern is CS-024 itself. Ten-year verifiability depends on retaining working
+verifiers for every profile and algorithm ever used, and that retention is an operational
+commitment no tooling currently enforces. The backup strategy protects the repository; it
+does not yet guarantee a runnable verifier for a profile retired years earlier.
 
-§4 requires NFC and explicitly delegates enforcement to a validation boundary, which no
-approved contract defines. Threat 4 lists that boundary as its control. Threat 1's control
-likewise begins "validation precedes canonicalization."
+# Non-blocking findings
 
-No approved document specifies where validation occurs, what rejects non-NFC input, or what
-prevents a caller from invoking the canonicalizer directly. CS-003 and CS-004 record this
-as risk; the threat model presents it as control. Those are different claims, and the
-stronger one is not supported.
+| ID | Finding | Status |
+|---|---|---|
+| NB-1 | Necessity rests on DG-3 alone; export and migration justifications describe systems that do not exist | Open, cosmetic |
+| NB-2 | Profile "agility" is migration that is possible and expensive | **Addressed** — priced in ADR-008 §Costs |
+| NB-3 | Algorithm retirement undefined for immutable Version/Event Objects, impossible for Destroyed content | **Addressed** — §37 states it directly and defers the policy |
+| NB-4 | §29–§31 limit values asserted without derivation | **Addressed** — labelled provisional pending DG-4 |
+| NB-5 | Deterministic CBOR's advantages understated in the rejection | Open. The review trigger exists; a fair comparison would state size and streaming benefits explicitly |
+| NB-6 | §9 permits scaled integers *or* decimal strings; two mechanisms for one need | **Superseded** — CTO-DECISION-003 deliberately defers the universal choice pending domain evidence. Retaining both is now the decision, not an oversight |
+| NB-7 | §14's three-digit precision asserted without rationale; microsecond sources truncate silently | Open. Should state that truncation is intended and lossy |
+| NB-8 | CS-024 ten-year verifier retention is an operational commitment no tooling enforces | New, open |
 
-**Required change:** either specify the validation boundary in this contract, or restate
-threats 1 and 4 as **open** with the boundary named as a precondition for DG-2 closure.
-The current text reads as though the controls are in place.
+None blocks acceptance. NB-7 is worth resolving before the first timestamp fixture is
+authored.
 
-### B-3 — Digest-input framing is under-specified for multi-byte labels
+# Acceptance gate
 
-§23 defines `domain_label ‖ 0x00 ‖ profile_id ‖ 0x00 ‖ canonical_bytes` and argues that
-because `0x00` cannot occur inside a label or profile identifier, no two distinct triples
-collide.
+Assessed against all ten criteria in the directive.
 
-The reasoning holds only if the label grammar actually excludes `0x00`, and no grammar is
-given — labels are described as "registered ASCII string" in prose, with an example, and
-nothing normative constrains their character set or length. A registry that later admits a
-label containing a null byte, or a UTF-8 label, silently breaks the injectivity argument
-that the whole domain-separation control rests on.
+| # | Criterion | Status |
+|---:|---|---|
+| 1 | B-1 resolved as a deliberate contract decision | **Met** — scoped, rationalised, deferred where evidence is absent, with a mandatory review trigger |
+| 2 | B-2 has an explicit validation boundary | **Met** — `CanonicalContractValidatorV1` named with responsibility, requirements, exclusions, and sequence |
+| 3 | B-3 uses injective length-prefixed framing | **Met** — AION Frame v1; all thirteen items resolved; injectivity independent of field content |
+| 4 | Readiness review recommends APPROVE or confirms mandatory changes incorporated | **Met** — this review returns APPROVE |
+| 5 | No document claims authenticity, confidentiality, authorization, trust, or freshness | **Met** — denied in the ADR, contract §39, and the threat model's opening section |
+| 6 | No storage or transport format mandated | **Met** — §8 four-context table makes the independence explicit |
+| 7 | Universal Object Model unchanged except for necessary profile references | **Met** — only change is the `integrity` row referencing ACJ-1; envelope, profiles, and invariants untouched |
+| 8 | Object Contract remains Pre-stable | **Met** — unchanged in every status header |
+| 9 | DG-3 fixtures remain unimplemented | **Met** — none generated; unblocked for authoring only |
+| 10 | Implementation freeze remains active | **Met** — restated in ADR-008 §Approval effect and CTO-DECISION-003 §Authorization Boundary |
 
-**Required change:** give the domain label a normative grammar — permitted character set,
-maximum length, registration rule — or switch to length-prefixed framing, which is
-injective without depending on a character exclusion.
+All ten satisfied. No construction-blocking contradiction remains.
 
-## Non-blocking findings
+# Recommendation
 
-| ID | Finding |
-|---|---|
-| NB-1 | The necessity argument rests on DG-3 alone; export and migration justifications describe systems that do not exist. State the real reason (§1) |
-| NB-2 | Profile "agility" is migration that is possible and expensive. Price it rather than implying it is cheap (§6) |
-| NB-3 | Algorithm retirement is undefined for immutable Version and Event Objects and impossible for Destroyed content. Name it as a subordinate decision (§7) |
-| NB-4 | §29–§31 limit values are asserted without derivation. Label provisional pending DG-4 measurement (§10) |
-| NB-5 | Deterministic CBOR's advantages are understated in the rejection. The review trigger exists, but a fair comparison would state size and streaming benefits explicitly (§5) |
-| NB-6 | §9 permits scaled integers *or* decimal strings, fixed per field by schema. Two mechanisms for one need is a future inconsistency; prefer scaled integers as the default and require justification for the string form |
-| NB-7 | §14's three-digit precision is asserted without rationale. Microsecond-precision sources will truncate silently — state that truncation is intended and lossy |
+# APPROVE
 
-## Conclusions against the required questions
+The three blocking findings are resolved, and none was resolved by deletion. Each was
+resolved by making a decision that had previously been implicit: the float constraint is now
+scoped and deliberate rather than silent; validation has an owner rather than a citation;
+injectivity rests on a proof rather than an unwritten grammar.
 
-| Question | Answer |
-|---|---|
-| Is canonical serialization necessary? | Yes, on DG-3 sequencing. Other justifications are premature |
-| Is the scope too broad? | No; §4 is drawn slightly too narrow (B-2) |
-| Transport or storage coupling? | No. Binary-reference constraint disclosed |
-| Are numeric rules portable? | Yes. The constraint they impose is unpriced (B-1) |
-| Is an existing standard sufficient? | No. JCS lossiness is a real disqualifier |
-| Is algorithm agility real? | Real for algorithms; migration-shaped for profiles |
-| Is migration possible? | Yes, except for withdrawn algorithms over immutable content |
-| Deterministic fixtures supported? | Yes — the most complete part of the design |
-| Do security failures remain? | Yes: no authenticity, confusables out of reach, validation boundary absent |
-| Are limits prematurely mixed into DG-2? | No. The separation and its ordering are correct |
+The design is correct for its purpose and its limits are stated accurately. Most notably, the
+corrections increased the visible unimplemented surface rather than reducing it — the threat
+model now declares zero implemented controls, and §37 concedes that immutable records cannot
+be re-digested at all. Documentation that makes a design look harder is usually documentation
+that has become truthful.
 
-## Recommendation
+**What this does not establish.** No implementation exists. Cross-runtime byte agreement, the
+property that would actually validate ACJ-1, has never been demonstrated and cannot be until
+fixtures and two implementations exist. Approval accepts an architecture, not a working
+mechanism.
 
-# APPROVE WITH CHANGES
+ADR-008 is **Accepted**. DG-2 is closed. DG-3 is unblocked for design and fixture authoring
+only. DG-1 and DG-4 remain open. The Universal Object Contract remains pre-stable. The
+implementation freeze remains in effect.
 
-The direction is sound and should be preserved. Constraining the value domain so that JCS
-becomes exact is the right answer to a real problem, and it is better than the obvious
-alternatives for reasons that survive scrutiny.
-
-Three changes are required before acceptance: price and explicitly accept the float
-constraint on ADR-007 (B-1); stop presenting the validation boundary as an existing control
-(B-2); and give the domain label a normative grammar or length-prefixed framing (B-3).
-
-**ADR-008 remains Proposed.** DG-2 remains open. DG-3 fixtures remain blocked. The
-Universal Object Contract remains pre-stable. The implementation freeze remains in effect.
-
-This review authorizes nothing. It is evidence for a Founder/CTO decision.
+This review authorizes nothing. It is evidence for
+[CTO-DECISION-003](../decisions/CTO-DECISION-003-canonical-serialization.md).
