@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 109,
+    [int]      $ExpectedTests = 137,
     [switch]   $DryRun
 )
 
@@ -141,6 +141,8 @@ $result = [ordered]@{
     identityResult     = $null
     objectCommand      = 'npm run object:test'
     objectResult       = $null
+    careerInputCommand = 'npm run career-input:test'
+    careerInputResult  = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -191,6 +193,7 @@ try {
         Write-Step "would run   : npm run privacy-boundary:test"
         Write-Step "would run   : npm run identity:test (synthetic state only)"
         Write-Step "would run   : npm run object:test (synthetic process-local state only)"
+        Write-Step "would run   : npm run career-input:test (synthetic temporary inputs only)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -237,8 +240,11 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\object')) {
         throw 'Restored repository contains private Object state'
     }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\career')) {
+        throw 'Restored repository contains private career input or state'
+    }
     $result.exclusionResult = 'PASS'
-    Add-Step 'private-state-exclusion' 'PASS' 'Git tree excludes private/ and .aion-local/; actual Identity state absent'
+    Add-Step 'private-state-exclusion' 'PASS' 'Git tree excludes private/ and .aion-local/; Identity, Object, and career private state absent'
 
     # ---------------------------------------------------------------------
     # 3. npm ci
@@ -347,6 +353,17 @@ try {
     }
     $result.objectResult = 'PASS'
     Add-Step 'object-regression' 'PASS' 'all Object tests passed using synthetic process-local and temporary filesystem state only'
+
+    Write-Step "running npm run career-input:test with synthetic temporary inputs"
+    $kOut = Join-Path $logDir "restore-$Timestamp.career-input.out.log"
+    $kErr = Join-Path $logDir "restore-$Timestamp.career-input.err.log"
+    $kCode = Invoke-Logged -CommandLine 'npm run career-input:test' -WorkingDirectory $restoreDir -OutFile $kOut -ErrFile $kErr
+    if ($kCode -ne 0) { throw "career-input regression failed with exit code $kCode (see $kErr)" }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\career')) {
+        throw 'career-input regression created private career input or state in the restored repository'
+    }
+    $result.careerInputResult = 'PASS'
+    Add-Step 'career-input-regression' 'PASS' 'all career-input tests passed using neutral synthetic temporary files only'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

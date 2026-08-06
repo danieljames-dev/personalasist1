@@ -35,6 +35,13 @@
     "object:test:operations": "npm run test:operations --workspace @aion/object",
     "object:test:limits": "npm run test:limits --workspace @aion/object",
     "object:test:architecture": "npm run test:architecture --workspace @aion/object",
+    "career-input:build": "npm run build --workspace @aion/career-input",
+    "career-input:typecheck": "npm run typecheck --workspace @aion/career-input",
+    "career-input:test": "npm run test --workspace @aion/career-input",
+    "career-input:test:unit": "npm run test:unit --workspace @aion/career-input",
+    "career-input:test:preflight": "npm run test:preflight --workspace @aion/career-input",
+    "career-input:test:templates": "npm run test:templates --workspace @aion/career-input",
+    "career-input:test:architecture": "npm run test:architecture --workspace @aion/career-input",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {

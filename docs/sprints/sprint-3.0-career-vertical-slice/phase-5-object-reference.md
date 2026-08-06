@@ -1,11 +1,12 @@
 # Sprint 3.0 Phase 5: Object Reference Slice
 
-Status: Implemented; pending Founder/CTO review
+Status: Approved by Founder/CTO on 2026-08-06
 
 Directives: `AION-S3-P5-OBJECT-REFERENCE`, `AION-S3-P5B-OBJECT-SLICE-COMPLETION`
 
 Decisions: [CTO-DECISION-009](../../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md),
-[CTO-DECISION-010](../../decisions/CTO-DECISION-010-phase-5-completion.md)
+[CTO-DECISION-010](../../decisions/CTO-DECISION-010-phase-5-completion.md),
+[CTO-DECISION-011](../../decisions/CTO-DECISION-011-phase-5-approval-and-phase-6.md)
 
 The accepted first Phase 5 increment supplied the generic `@aion/object` envelope, ACJ-1 integrity,
 DG-4a processing limits, injected ports, and immutable in-memory revisions. Its initial review was
@@ -35,7 +36,8 @@ corruption rejection, traversal rejection, link/junction containment, and failur
 
 No real Object was initialized and no permanent `private/object-store` record exists. The adapter is
 replaceable reference evidence, not a production storage decision. The Universal Object Contract
-remains Pre-stable; DG-3 and DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
+remains Pre-stable; DG-3 and DG-4b remain Open; normative fixtures remain unauthorized. Phase 6 was
+subsequently authorized by CTO-DECISION-011 without expanding Phase 5.
 
 Final command counts, Git/push state, backup checksum, and isolated-restore proof are recorded in the
 ignored local Phase 5 completion handoff after all gates pass.

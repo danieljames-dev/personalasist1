@@ -12,8 +12,9 @@ rejected. Windows comparisons are case-insensitive. The root itself is accepted 
 
 Input-file policy accepts the final extension `.json`, `.md`, or `.txt`, case-insensitively, and
 requires an existing regular file. PDF, DOCX, images, OCR, archives, email, browser, and cloud inputs
-are unsupported. A later ingestion phase must decode textual input as strict UTF-8; Phase 3 reads or
-parses no owner files.
+are unsupported. Phase 6 composes this policy for explicit non-ingesting preflight, adding strict
+UTF-8, BOM, NUL, size, and contract checks. The privacy package itself still reads or parses no
+owner files.
 
 Operation records contain IDs, operation, approved-root reference, explicitly supplied relative
 path, timestamp, a nullable actor-reference placeholder, dry-run state, outcome, counts, stable

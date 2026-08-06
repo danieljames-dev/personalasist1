@@ -1,0 +1,42 @@
+{
+  "contractVersion": "aion.career-preferences-input.v1",
+  "desiredRoles": {
+    "state": "unknown",
+    "values": []
+  },
+  "employmentTypes": {
+    "state": "unknown",
+    "values": []
+  },
+  "excludedRoles": {
+    "state": "unknown",
+    "values": []
+  },
+  "industriesOfInterest": {
+    "state": "unknown",
+    "values": []
+  },
+  "industriesToAvoid": {
+    "state": "unknown",
+    "values": []
+  },
+  "locations": {
+    "state": "unknown",
+    "values": []
+  },
+  "minimumCompensation": {
+    "state": "unknown"
+  },
+  "scheduleConstraints": {
+    "state": "unknown",
+    "values": []
+  },
+  "travelPreference": {
+    "state": "unknown",
+    "values": []
+  },
+  "workArrangements": {
+    "state": "unknown",
+    "values": []
+  }
+}

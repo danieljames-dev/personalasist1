@@ -5,8 +5,9 @@ increase its owner's effectiveness while keeping data, decisions, and authority
 under owner control.
 
 The repository contains the versioned Kernel lifecycle coordinator, the Phase 3 local path boundary,
-the Phase 4 local Identity bootstrap, and a bounded Phase 5 Universal Object reference. The Object
-Contract remains Pre-stable; later domain and production capabilities remain gated.
+the Phase 4 local Identity bootstrap, a bounded Phase 5 Universal Object reference, and Phase 6
+career input contracts, blank templates, and non-ingesting preflight. The Object Contract remains
+Pre-stable; ingestion and later domain or production capabilities remain gated.
 
 ## Workspace
 
@@ -15,6 +16,10 @@ Contract remains Pre-stable; later domain and production capabilities remain gat
 - `packages/identity` — local single-owner opaque Identity bootstrap.
 - `packages/object` — pre-stable Object reference with seven family boundaries,
   RelationshipObject, ACJ-1/DG-4a controls, and bounded in-memory/filesystem reference repositories.
+- `packages/career-input` — versioned owner-input contracts and explicit local validation with no
+  ingestion, persistence, Object creation, or network behavior.
+- `templates/career` — neutral blank authoring aids; completed owner copies belong only in ignored
+  private storage and must never be committed.
 - `docs` — architecture, decisions, specifications, governance, and templates.
 
 ## Verification

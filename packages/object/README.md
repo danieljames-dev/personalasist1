@@ -21,4 +21,5 @@ Object state, career payload schema, Event Bus, Planner, Memory, Capability Regi
 telemetry, database, vector store, fixture corpus, or import/export behavior.
 
 The implementation is reference evidence only. The Universal Object Contract remains Pre-stable;
-DG-3 and DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
+DG-3 and DG-4b remain Open; normative fixtures remain unauthorized. Phase 6 career-input contracts
+are separately implemented by `@aion/career-input` and do not expand this package or create Objects.

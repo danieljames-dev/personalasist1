@@ -1,0 +1,55 @@
+{
+  "applicationDeadline": {
+    "state": "unknown"
+  },
+  "certificationRequirements": {
+    "state": "unknown",
+    "values": []
+  },
+  "company": {
+    "state": "unknown"
+  },
+  "compensation": {
+    "state": "unknown"
+  },
+  "contractVersion": "aion.job-posting-input.v1",
+  "description": {
+    "state": "unknown"
+  },
+  "educationRequirements": {
+    "state": "unknown",
+    "values": []
+  },
+  "employmentType": {
+    "state": "unknown"
+  },
+  "location": {
+    "state": "unknown"
+  },
+  "preferredSkills": {
+    "state": "unknown",
+    "values": []
+  },
+  "requiredExperience": {
+    "state": "unknown"
+  },
+  "requiredSkills": {
+    "state": "unknown",
+    "values": []
+  },
+  "schedule": {
+    "state": "unknown"
+  },
+  "sourceReference": {
+    "state": "unknown"
+  },
+  "title": {
+    "state": "unknown"
+  },
+  "travel": {
+    "state": "unknown"
+  },
+  "workArrangement": {
+    "state": "unknown"
+  }
+}

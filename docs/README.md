@@ -40,6 +40,7 @@ remains Open. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
 - [CTO-DECISION-002: Sprint 2.5 approval](decisions/CTO-DECISION-002-sprint-2.5-approval.md)
 - [CTO-DECISION-009: Phase 4 approval and Object reference authorization](decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
 - [CTO-DECISION-010: Phase 5 completion scope correction](decisions/CTO-DECISION-010-phase-5-completion.md)
+- [CTO-DECISION-011: Phase 5 approval and Phase 6 authorization](decisions/CTO-DECISION-011-phase-5-approval-and-phase-6.md)
 - [Object Model architecture](architecture/object-model.md)
 
 ### Normative contracts
@@ -168,7 +169,22 @@ mutable-profile envelopes, ACJ-1 framing/integrity, exact DG-4a limits, seven ve
 boundaries, RelationshipObject as sole edge truth, explicit operations, and in-memory plus bounded
 privacy-validated filesystem reference repositories. Detailed career payload schemas remain
 deferred and no real Object or career data exists. The Object Contract remains Pre-stable; DG-3 and
-DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
+DG-4b remain Open; normative fixtures remain unauthorized. Phase 5 was approved by
+CTO-DECISION-011.
+
+## Sprint 3.0 Phase 6: career input contracts
+
+- [Career Input Contract v1](contracts/career-input-contract-v1.md)
+- [Blank template authoring guidance](implementation/career-input-template-authoring.md)
+- [Career input preflight](implementation/career-input-preflight.md)
+- [Career input threat model](security/career-input-threat-model.md)
+- [Phase 6 record](sprints/sprint-3.0-career-vertical-slice/phase-6-career-input-contract.md)
+- [Phase 6 architecture and security review](reviews/sprint-3.0-phase-6-career-input-review.md) — APPROVE
+
+Phase 6 defines closed versioned career-facts, career-preferences, and job-posting inputs; neutral
+blank templates; and explicit local preflight. It reads no real owner data, creates no Object, and
+performs no ingestion, persistence, inference, network action, or archive access. Templates are not
+normative fixtures. Phase 7 remains unauthorized.
 
 ## Reviews
 

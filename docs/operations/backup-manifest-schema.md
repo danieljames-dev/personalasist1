@@ -72,6 +72,7 @@ bundle must pass `git bundle verify`. Checksums prove later byte equality, not a
 | `collectionCommand` | string | PowerShell zero/one/multiple collection regression command |
 | `realGateCommand` | string | Real repository-gate regression command |
 | `privacyBoundaryCommand` | string | Path, link, network, Git-ignore, and backup-exclusion regression command |
+| `careerInputCommand` | string | Versioned career contracts, template, preflight, and architecture-boundary tests |
 | `expectedTests` | integer | Exact Node test count expected in restored verification |
 | `restoreResult` | object \| null | Embedded `aion.restore-test.v1` evidence |
 | `outcome` | string | `SUCCESS` or `FAILURE` |
@@ -100,6 +101,7 @@ restoreResult.controlPlaneResult     == "PASS"
 restoreResult.collectionResult       == "PASS"
 restoreResult.realGateResult         == "PASS"
 restoreResult.privacyBoundaryResult  == "PASS"
+restoreResult.careerInputResult       == "PASS"
 ```
 
 Artifact presence alone never means success.

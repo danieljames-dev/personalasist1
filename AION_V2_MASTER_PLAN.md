@@ -371,8 +371,12 @@ typed Owner/Actor references, ACJ-1 validation/framing/integrity, exact DG-4a li
 required family/profile boundaries, RelationshipObject as sole edge truth, explicit revision
 operations, and replaceable in-memory plus privacy-validated local filesystem reference adapters.
 The six career entity payloads remain closed and empty; no real Object or career state exists. The
-filesystem adapter is not a permanent production storage decision or DG-4b workload evidence. The
-Object Contract remains Pre-stable; DG-3 and DG-4b remain Open, and Phase 6 remains unauthorized.
+filesystem adapter is not a permanent production storage decision or DG-4b workload evidence.
+Sprint 3.0 Phase 6 adds only independently versioned career input contracts, neutral blank owner
+templates, and an explicit non-ingesting preflight composed with the Phase 3 boundary and accepted
+ACJ-1/DG-4a controls. No real career data is read and no Object is created. Templates are not
+normative fixtures. The Object Contract remains Pre-stable; DG-3 and DG-4b remain Open, and Phase 7
+remains unauthorized.
 
 No milestone enters production implementation until it has an approved specification,
 ADRs for architectural change, threat model, public contract, test plan, documentation
