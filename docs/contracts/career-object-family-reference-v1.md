@@ -1,10 +1,11 @@
 # Career Object Family Reference v1
 
-Status: **Pre-stable Phase 5 reference boundary**
+Status: **Pre-stable Phase 5 family boundary with bounded Phase 7 payload composition**
 
-Authority: Sprint 3 Phase 5 completion directive and ADR-007
+Authority: Sprint 3 Phase 5 completion directive, ADR-007, and authorized Phase 7 composition
 
-Detailed career payload schemas: **Deferred and unauthorized**
+Detailed career payload schemas: **Authorized only for CareerSource, CareerFact, and CareerProfile
+by Sprint 3 Phase 7; the remaining families stay deferred**
 
 ## Purpose
 
@@ -22,10 +23,17 @@ lifecycle, immutable revision history, provenance, ACJ-1 integrity, and DG-4a li
 | ApplicationDraftObject | `aion.career.application-draft` | Entity | `aion.schema.application-draft` | 1 | closed empty object |
 | RelationshipObject | `aion.object.relationship` | Relationship | `aion.schema.relationship` | 1 | closed relationship data |
 
-The six career entity payloads accept no members. This is intentional: family identity and the
+The Phase 5 base registry still accepts no members for the six career entity payloads. This is
+intentional: family identity and the
 schema/profile boundary are implemented without inventing résumé, employment-history, preference,
-posting, matching, or application fields. Any non-empty entity payload fails closed. Phase 6 must
-receive separate authorization before defining career input or payload fields.
+posting, matching, or application fields. Any non-empty entity payload fails closed in that base
+registry.
+
+Phase 7 supplies a separate composed schema registry with closed non-empty payloads only for
+CareerSource, CareerFact, and CareerProfile. It delegates RelationshipObject validation to Phase 5
+and leaves JobPosting, JobMatchReport, and ApplicationDraft empty. See the
+[catalogue](career-evidence-catalogue-v1.md), [fact](career-fact-v1.md), and
+[profile](career-profile-derivation-v1.md) contracts. Phase 8 remains unauthorized.
 
 RelationshipObject is the only family with Phase 5 domain data. Its closed contract is defined in
 [RelationshipObject Reference v1](relationship-object-reference-v1.md). Family identifiers are

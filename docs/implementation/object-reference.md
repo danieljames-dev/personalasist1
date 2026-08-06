@@ -14,8 +14,10 @@ Object package does not read Identity state. It contains no Event Bus, Planner, 
 Registry, operational tooling, network, telemetry, database, vector store, authentication, or
 authorization behavior.
 
-The six career entity families intentionally accept only `{}`. Detailed career schemas and Phase 6
-input fields remain deferred. RelationshipObject is the sole persisted edge truth for the seven
+The Phase 5 base registry intentionally accepts only `{}` for six career entity families. Phase 7
+adds a separate composed schema registry that accepts closed non-empty payloads only for
+CareerSource, CareerFact, and CareerProfile; it does not change the generic Phase 5 operations or
+the other three entity families. RelationshipObject is the sole persisted edge truth for the seven
 approved relationship combinations; no entity carries a relationship array. The public operation
 surface has no unrestricted patch callback, delete, query, search, permission, event, planner, or
 synchronization operation.

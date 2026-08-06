@@ -14,6 +14,10 @@ Status: Accepted
 7. Cross-subsystem notifications use versioned event contracts once the Event Bus is
    approved; no shared tables or ambient service locator are permitted.
 8. Cyclic package dependencies are prohibited.
+9. `career-evidence` may depend on Identity contracts, Object contracts/ports, privacy-boundary,
+   and career-input; it must not depend on Identity persistence, matching, drafting, Planner,
+   Memory, model providers, networking, telemetry, database, vector-store, backup, or control-plane
+   implementations.
 
 ```text
 apps -> adapters -> application -> domain -> contracts
@@ -23,4 +27,3 @@ apps -> adapters -> application -> domain -> contracts
 
 The architectural roadmap is a construction order, not an import chain. Automated
 boundary tests begin with the Kernel package and expand with every subsystem.
-

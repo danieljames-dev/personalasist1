@@ -116,9 +116,10 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 | DG-4a Canonical Processing Resource Limits | **Closed** by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) and [CTO-DECISION-008](../../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md), 2026-08-06 |
 | DG-4b Object and Domain Workload Limits | **Open.** Object business limits and workload evidence remain unsupplied. This does not block the explicitly authorized local, single-owner, bounded filesystem reference adapter using small synthetic inputs; it continues to block a permanent production adapter, production-scale, hostile public, unbounded, multi-user, production-workload, and production-service readiness claims |
 
-Sprint 3 Phase 6 does not change any deferred-gate status. Its blank career templates are expressly
-non-normative and do not close DG-3; its 4 MiB preflight bound and synthetic tests do not supply
-DG-4b representative Object/domain workload evidence.
+Sprint 3 Phases 6 and 7 do not change any deferred-gate status. Phase 6 blank career templates and
+Phase 7 synthetic temporary tests are expressly non-normative and do not close DG-3. Their bounded
+input/Object reference evidence does not supply DG-4b representative workload evidence. Phase 7
+does not designate the Object Contract Stable.
 
 ### DG-1 — Identity bootstrap
 

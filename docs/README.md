@@ -41,6 +41,7 @@ remains Open. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
 - [CTO-DECISION-009: Phase 4 approval and Object reference authorization](decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
 - [CTO-DECISION-010: Phase 5 completion scope correction](decisions/CTO-DECISION-010-phase-5-completion.md)
 - [CTO-DECISION-011: Phase 5 approval and Phase 6 authorization](decisions/CTO-DECISION-011-phase-5-approval-and-phase-6.md)
+- [CTO-DECISION-012: Phase 6 approval and Phase 7 authorization](decisions/CTO-DECISION-012-phase-6-approval-and-phase-7.md)
 - [Object Model architecture](architecture/object-model.md)
 
 ### Normative contracts
@@ -184,7 +185,24 @@ CTO-DECISION-011.
 Phase 6 defines closed versioned career-facts, career-preferences, and job-posting inputs; neutral
 blank templates; and explicit local preflight. It reads no real owner data, creates no Object, and
 performs no ingestion, persistence, inference, network action, or archive access. Templates are not
-normative fixtures. Phase 7 remains unauthorized.
+normative fixtures. Phase 6 is approved by CTO-DECISION-012.
+
+## Sprint 3.0 Phase 7: career evidence catalogue and profile
+
+- [Career Evidence Catalogue Contract v1](contracts/career-evidence-catalogue-v1.md)
+- [CareerFact Contract v1](contracts/career-fact-v1.md)
+- [CareerProfile Derivation Contract v1](contracts/career-profile-derivation-v1.md)
+- [Deterministic parsing reference](implementation/career-evidence-deterministic-parsing.md)
+- [Import and recovery boundary](implementation/career-evidence-import-recovery.md)
+- [Career evidence threat model](security/career-evidence-threat-model.md)
+- [Phase 7 record](sprints/sprint-3.0-career-vertical-slice/phase-7-career-evidence-profile.md)
+- [Phase 7 architecture and security review](reviews/sprint-3.0-phase-7-career-evidence-review.md) — APPROVE
+
+Phase 7 adds an explicit local catalogue, deterministic structured CareerFacts, exact provenance,
+conflict/supersession history, and evidence-backed profiles using the accepted bounded Object
+repository. All verification uses synthetic temporary data. No real owner career input or
+permanent career Object exists. Phase 8 remains unauthorized; DG-3 and DG-4b remain Open,
+normative fixtures remain unauthorized, and the Object Contract remains Pre-stable.
 
 ## Reviews
 

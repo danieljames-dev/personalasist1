@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 137,
+    [int]      $ExpectedTests = 163,
     [switch]   $DryRun
 )
 
@@ -142,7 +142,9 @@ $result = [ordered]@{
     objectCommand      = 'npm run object:test'
     objectResult       = $null
     careerInputCommand = 'npm run career-input:test'
+    careerEvidenceCommand = 'npm run career-evidence:test'
     careerInputResult  = $null
+    careerEvidenceResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -194,6 +196,7 @@ try {
         Write-Step "would run   : npm run identity:test (synthetic state only)"
         Write-Step "would run   : npm run object:test (synthetic process-local state only)"
         Write-Step "would run   : npm run career-input:test (synthetic temporary inputs only)"
+        Write-Step "would run   : npm run career-evidence:test (synthetic temporary inputs and Object stores only)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -364,6 +367,20 @@ try {
     }
     $result.careerInputResult = 'PASS'
     Add-Step 'career-input-regression' 'PASS' 'all career-input tests passed using neutral synthetic temporary files only'
+
+    Write-Step "running npm run career-evidence:test with synthetic temporary inputs and Object stores"
+    $eOut = Join-Path $logDir "restore-$Timestamp.career-evidence.out.log"
+    $eErr = Join-Path $logDir "restore-$Timestamp.career-evidence.err.log"
+    $eCode = Invoke-Logged -CommandLine 'npm run career-evidence:test' -WorkingDirectory $restoreDir -OutFile $eOut -ErrFile $eErr
+    if ($eCode -ne 0) { throw "career-evidence regression failed with exit code $eCode (see $eErr)" }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\career')) {
+        throw 'career-evidence regression created permanent private career input in the restored repository'
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\object-store')) {
+        throw 'career-evidence regression created a permanent private Object store in the restored repository'
+    }
+    $result.careerEvidenceResult = 'PASS'
+    Add-Step 'career-evidence-regression' 'PASS' 'all career-evidence tests passed using neutral synthetic temporary state only'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"
