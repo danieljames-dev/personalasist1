@@ -76,7 +76,6 @@ The pre-review design below is retained for audit and must not be cited as a con
 
 ## Operations
 
-A proposed backup and disaster-recovery strategy exists in the working tree at
-`docs/operations/backup-strategy.md`. It is **not** a Sprint 2.5 deliverable, has not
-been reviewed for content, and is intentionally retained untracked pending its own
-review. It will be indexed here once approved.
+- [Backup and disaster recovery strategy](operations/backup-strategy.md) — reviewed and
+  accepted 2026-08-06. Approved external root `D:\AION-backups`; scheduling not approved.
+  Standing gap: no off-site or offline rotated copy yet.
