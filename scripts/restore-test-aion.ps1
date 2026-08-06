@@ -135,6 +135,8 @@ $result = [ordered]@{
     collectionResult   = $null
     realGateCommand    = 'npm run control-plane:test-real-gate'
     realGateResult     = $null
+    privacyBoundaryCommand = 'npm run privacy-boundary:test'
+    privacyBoundaryResult  = $null
     testsPassed        = $null
     testsFailed        = $null
     outcome            = 'FAILURE'
@@ -181,6 +183,7 @@ try {
         Write-Step "would run   : npm run control-plane:test"
         Write-Step "would run   : npm run control-plane:test-collections"
         Write-Step "would run   : npm run control-plane:test-real-gate"
+        Write-Step "would run   : npm run privacy-boundary:test"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -291,6 +294,14 @@ try {
     if($gateText-match "property 'Statement'" -or $gateText-match 'Compare-Object.*null'){throw 'Prior PowerShell compatibility failure returned'}
     $result.realGateResult = 'PASS'
     Add-Step 'real-gate-regression' 'PASS' 'temporary authorization passed and wrong HEAD failed closed'
+
+    Write-Step "running npm run privacy-boundary:test"
+    $pOut = Join-Path $logDir "restore-$Timestamp.privacy-boundary.out.log"
+    $pErr = Join-Path $logDir "restore-$Timestamp.privacy-boundary.err.log"
+    $pCode = Invoke-Logged -CommandLine 'npm run privacy-boundary:test' -WorkingDirectory $restoreDir -OutFile $pOut -ErrFile $pErr
+    if ($pCode -ne 0) { throw "privacy-boundary regression failed with exit code $pCode (see $pErr)" }
+    $result.privacyBoundaryResult = 'PASS'
+    Add-Step 'privacy-boundary-regression' 'PASS' 'path, link, input, network, Git, and backup boundaries passed'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

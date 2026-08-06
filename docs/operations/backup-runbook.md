@@ -62,6 +62,8 @@ When the Codex control plane is present, the restore also requires `npm run cont
 It additionally runs the explicit collection matrix and the real repository-gate regression in the
 isolated clone. The latter uses synthetic ignored directives, proves correct-HEAD authorization and
 wrong-HEAD refusal, and never restores or executes a real pending directive.
+Phase 3 restores also run `npm run privacy-boundary:test`, including path/link/network checks and a
+synthetic proof that `private/` cannot be selected as untracked working data.
 
 ## Procedure — standalone restore test
 
@@ -95,9 +97,11 @@ D:\AION-backups\
 Nothing is ever deleted automatically. Prior backups, restore-test directories, and
 failure logs accumulate until pruned deliberately.
 
-Ignored `.aion-local/` directives, handoffs, prompts, and logs are never accepted as declared
-untracked working-data archives. Tracked control-plane source remains protected through Git
-history; local run state does not enter code/documentation backups.
+Ignored `.aion-local/` directives, handoffs, prompts, and logs and everything beneath `private/`
+are never accepted as declared untracked working-data archives. They are absent from bundles,
+untracked archives, included-working-file manifests, and restore expectations. Tracked
+control-plane source remains protected through Git history; local run state does not enter
+code/documentation backups.
 
 ## Ref policy and mirror replacement
 

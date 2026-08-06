@@ -14,6 +14,7 @@
     "control-plane:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane.ps1",
     "control-plane:test-collections": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane-collections.ps1",
     "control-plane:test-real-gate": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane-real-gate.ps1",
+    "privacy-boundary:test": "npm run privacy:test --workspace @aion/privacy-boundary && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-privacy-boundary.ps1",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {

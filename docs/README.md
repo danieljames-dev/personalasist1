@@ -124,6 +124,18 @@ implemented as production protection.
 - [Sprint 2.9 acceptance criteria](sprints/sprint-2.9-resource-limits-corrections/acceptance-criteria.md)
 - [Sprint 2.9 risk register](sprints/sprint-2.9-resource-limits-corrections/risks.md)
 
+## Sprint 3.0 Phase 3: privacy boundary
+
+- [Personal data boundary](privacy/personal-data-boundary.md)
+- [Threat model](security/personal-data-boundary-threat-model.md)
+- [Local path boundary v1](contracts/local-path-boundary-v1.md)
+- [Reference implementation](implementation/privacy-boundary-reference.md)
+- [Phase 3 record](sprints/sprint-3.0-career-vertical-slice/phase-3-privacy-boundary.md)
+- [Phase 3 privacy review](reviews/sprint-3.0-phase-3-privacy-review.md) — APPROVE
+
+Phase 3 establishes an ignored local directory and explicit filesystem-containment boundary only.
+It accessed no owner data and does not implement Identity, Objects, career ingestion, or Phase 4.
+
 ## Reviews
 
 - [Resource limits FINAL readiness review](reviews/resource-limits-final-readiness-review.md)

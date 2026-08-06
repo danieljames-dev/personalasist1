@@ -359,7 +359,9 @@ Accepted for DG-4a only. DG-1 is Open, DG-2 is Closed, DG-3 is Open, DG-4a is Cl
 is Open. The Universal Object Contract remains Pre-stable. CTO-DECISION-008 prospectively lifts
 the implementation freeze only for the Minimum Personal Career Vertical Slice described by the
 [permanent Sprint 3.0 directive](docs/directives/sprint-3.0-career-vertical-slice.md). Phase 2
-records authorization only; no vertical-slice implementation has begun.
+records the prospective authorization. Sprint 3.0 Phase 3 now provides only the reviewed local
+privacy and filesystem-containment prerequisite. It accessed no owner data and does not implement
+Identity, Objects, career ingestion, or any later phase.
 
 No milestone enters production implementation until it has an approved specification,
 ADRs for architectural change, threat model, public contract, test plan, documentation

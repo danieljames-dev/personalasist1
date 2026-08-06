@@ -69,6 +69,21 @@ function Invoke-TemporaryAuthorization {
     return $process.ExitCode
 }
 
+function Get-PrivateBoundarySnapshot {
+    $privateRoot=Join-Path $root 'private'
+    $items=[Collections.Generic.List[string]]::new()
+    if(Test-Path -LiteralPath $privateRoot -PathType Container){
+        foreach($item in Get-ChildItem -LiteralPath $privateRoot -Force -Recurse){
+            if(-not$item.PSIsContainer){throw 'private boundary contains a file during control-plane regression'}
+            $relative=$item.FullName.Substring($root.Length).TrimStart('\').Replace('\','/')
+            $ignored=@(& git -C $root check-ignore --no-index $relative)
+            if($LASTEXITCODE-ne 0-or$ignored.Count-ne 1){throw "private directory is not ignored: $relative"}
+            $items.Add($relative)
+        }
+    }
+    return $items
+}
+
 try {
     if(-not(Test-Path -LiteralPath $archivePath -PathType Leaf)){
         [IO.Directory]::CreateDirectory((Split-Path -Parent $archivePath))|Out-Null
@@ -80,7 +95,7 @@ try {
         [IO.File]::WriteAllText($currentPath,"# Synthetic restore-test control state`r`n",[Text.UTF8Encoding]::new($false))
         $createdCurrent=$true
     }
-    if(Test-Path -LiteralPath (Join-Path $root 'private') -PathType Container){throw 'private directory exists'}
+    $privateBefore=Get-PrivateBoundarySnapshot
     $head=(& git -C $root rev-parse HEAD).Trim()
     $branch=(& git -C $root branch --show-current).Trim()
     $origin=(& git -C $root remote get-url origin).Trim()
@@ -119,7 +134,8 @@ try {
 
     if((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash-cne$archiveHash){throw 'Archived Phase 3 directive changed'}
     if((Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash-cne$currentHash){throw 'Real current directive changed'}
-    if(Test-Path -LiteralPath (Join-Path $root 'private') -PathType Container){throw 'private directory was created'}
+    $privateAfter=Get-PrivateBoundarySnapshot
+    if(@(Compare-AionCollections -ReferenceObject $privateBefore -DifferenceObject $privateAfter).Count-ne 0){throw 'private directory layout changed'}
     $refsAfter=[Collections.Generic.List[string]]::new()
     foreach($ref in @(& git -C $root for-each-ref --format='%(refname) %(objectname)')){$refsAfter.Add($ref)}
     if(@(Compare-AionCollections -ReferenceObject $refsBefore -DifferenceObject $refsAfter).Count-ne 0){throw 'Git refs changed during authorization regression'}

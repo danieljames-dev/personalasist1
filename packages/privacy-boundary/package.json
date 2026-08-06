@@ -1,0 +1,29 @@
+{
+  "name": "@aion/privacy-boundary",
+  "version": "0.1.0",
+  "description": "Local explicit-path and approved-root privacy boundary",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "privacy:test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED"
+}
