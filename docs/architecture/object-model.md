@@ -3,7 +3,8 @@
 Status: **Accepted** — [ADR-007](../decisions/ADR-007-universal-object-model.md),
 2026-08-06  
 Contract family: Object version 1, **pre-stable**; not designated stable v1  
-Implementation: Not authorized; freeze in effect
+Implementation: Bounded mutable-profile reference implemented in Sprint 3 Phase 5; full contract
+remains frozen outside [CTO-DECISION-009](../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
 
 ## Architectural intent
 
@@ -208,9 +209,9 @@ cannot be represented safely as a facet or Relationship. Breaking changes requir
 new Object contract major version, coexistence, migration, and rollback.
 
 ADR-007 was accepted on 2026-08-06 as an architecture-boundary decision. The contract
-family is normative but pre-stable, and no implementation follows from acceptance. See
+family is normative but pre-stable, and no implementation followed from ADR acceptance alone. The
+bounded Phase 5 reference follows from the later CTO-DECISION-009. See
 [ADR-007 §Approval effect](../decisions/ADR-007-universal-object-model.md#approval-effect)
 for what acceptance does and does not authorize, and the
 [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md)
 §Deferred implementation gates for the four matters that remain open.
-

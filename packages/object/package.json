@@ -1,0 +1,37 @@
+{
+  "name": "@aion/object",
+  "version": "0.1.0",
+  "description": "Minimum pre-stable Universal Object reference implementation",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @aion/identity && tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "npm run build --workspace @aion/identity && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
+    "test:unit": "npm run build && npm run build:test && node --test \"dist-test/test/contracts.test.js\" \"dist-test/test/object.test.js\"",
+    "test:canonical": "npm run build && npm run build:test && node --test \"dist-test/test/canonical.test.js\"",
+    "test:repository": "npm run build && npm run build:test && node --test \"dist-test/test/repository.test.js\"",
+    "test:limits": "npm run build && npm run build:test && node --test \"dist-test/test/resource-limits.test.js\"",
+    "test:architecture": "npm run build && node --test \"test/architecture-boundary.test.mjs\""
+  },
+  "dependencies": {
+    "@aion/identity": "0.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED"
+}

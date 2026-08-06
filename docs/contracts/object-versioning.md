@@ -2,7 +2,8 @@
 
 Status: **Pre-stable** normative contract  
 Authority: [ADR-007](../decisions/ADR-007-universal-object-model.md) (Accepted 2026-08-06)  
-Implementation: Not authorized; freeze in effect
+Implementation: Phase 5 preserves immutable snapshot revisions in a reference repository;
+Version Object materialization and migration remain unimplemented
 
 ## Version dimensions
 
@@ -120,4 +121,3 @@ Current snapshots do not embed all Version IDs. Version queries use subject iden
 stable revision ordering, cursor pagination, and bounded pages. Retention may move old
 Version content to archival storage while preserving owner export and integrity
 requirements. Storage selection remains outside this contract.
-

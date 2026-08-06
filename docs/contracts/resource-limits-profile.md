@@ -6,7 +6,7 @@ Profile version: 1
 Supersedes identifier: `arlp-1` (Sprint 2.8 draft; renamed for stability — see §11)  
 Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (**Accepted for DG-4a only**)
 Evidence: [resource-limits-evidence.md](../benchmarks/resource-limits-evidence.md)  
-Implementation: **Not implemented.** No canonicalizer, validator, or enforcement code exists.
+Implementation: **Implemented only in the bounded Phase 5 Object reference.** DG-4b remains Open.
 
 > **DG-4a is Closed; DG-4b is Open.** The deterministic canonical-processing limits owned by
 > this profile are accepted. Values marked Provisional or Deferred are not accepted limits, and

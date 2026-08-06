@@ -24,6 +24,14 @@
     "identity:initialize": "npm run identity:build --silent && node apps/identity-cli.mjs initialize",
     "identity:status": "npm run identity:build --silent && node apps/identity-cli.mjs status",
     "identity:export": "npm run identity:build --silent && node apps/identity-cli.mjs export",
+    "object:build": "npm run build --workspace @aion/object",
+    "object:typecheck": "npm run typecheck --workspace @aion/object",
+    "object:test": "npm run test --workspace @aion/object",
+    "object:test:unit": "npm run test:unit --workspace @aion/object",
+    "object:test:canonical": "npm run test:canonical --workspace @aion/object",
+    "object:test:repository": "npm run test:repository --workspace @aion/object",
+    "object:test:limits": "npm run test:limits --workspace @aion/object",
+    "object:test:architecture": "npm run test:architecture --workspace @aion/object",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {

@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 44,
+    [int]      $ExpectedTests = 80,
     [switch]   $DryRun
 )
 
@@ -139,6 +139,8 @@ $result = [ordered]@{
     privacyBoundaryResult  = $null
     identityCommand    = 'npm run identity:test'
     identityResult     = $null
+    objectCommand      = 'npm run object:test'
+    objectResult       = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -188,6 +190,7 @@ try {
         Write-Step "would run   : npm run control-plane:test-real-gate"
         Write-Step "would run   : npm run privacy-boundary:test"
         Write-Step "would run   : npm run identity:test (synthetic state only)"
+        Write-Step "would run   : npm run object:test (synthetic process-local state only)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -230,6 +233,9 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\identity\identity-state-v1.json')) {
         throw 'Restored repository contains actual private Identity state'
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\object')) {
+        throw 'Restored repository contains private Object state'
     }
     $result.exclusionResult = 'PASS'
     Add-Step 'private-state-exclusion' 'PASS' 'Git tree excludes private/ and .aion-local/; actual Identity state absent'
@@ -327,6 +333,17 @@ try {
     }
     $result.identityResult = 'PASS'
     Add-Step 'identity-regression' 'PASS' 'all Identity tests passed using synthetic temporary state only'
+
+    Write-Step "running npm run object:test with synthetic process-local state"
+    $oOut = Join-Path $logDir "restore-$Timestamp.object.out.log"
+    $oErr = Join-Path $logDir "restore-$Timestamp.object.err.log"
+    $oCode = Invoke-Logged -CommandLine 'npm run object:test' -WorkingDirectory $restoreDir -OutFile $oOut -ErrFile $oErr
+    if ($oCode -ne 0) { throw "Object regression failed with exit code $oCode (see $oErr)" }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\object')) {
+        throw 'Object regression created private Object state in the restored repository'
+    }
+    $result.objectResult = 'PASS'
+    Add-Step 'object-regression' 'PASS' 'all Object tests passed using synthetic process-local state only'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

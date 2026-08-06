@@ -5,7 +5,8 @@
 - Accepted: 2026-08-06
 - Decision owner: CTO
 - Decision record: [CTO-DECISION-008](CTO-DECISION-008-resource-limits-and-vertical-slice.md)
-- Implementation status: **Not implemented.** No canonicalizer, validator, or enforcement code exists.
+- Implementation status: **Implemented only in the bounded Phase 5 Object reference.** This does not
+  close DG-4b or establish production workload readiness.
 - Authorized by: [CTO-DECISION-006](CTO-DECISION-006-sprint-2.8-authorization.md)
 - Corrected by: [CTO-DECISION-007](CTO-DECISION-007-sprint-2.9-resource-limits-corrections.md)
 - Profile identifier: `aion-resource-limits-1` (renamed from the Sprint 2.8 draft `arlp-1`)
@@ -199,5 +200,5 @@ Acceptance does **not** close DG-4b, designate the Universal Object Contract sta
 normative fixture, or authorize public, hostile, multi-owner, or production-scale ingestion. It
 does not claim that any documented limit is enforced by production code. DG-3 remains Open, the
 Object Contract remains Pre-stable, and benchmark evidence remains non-production evidence rather
-than an implemented protection. Implementation remains frozen except prospectively within the
-narrow vertical slice authorized by CTO-DECISION-008; no such implementation begins in Phase 2.
+than an implemented protection. Implementation remains frozen outside the narrow vertical slice
+authorized by CTO-DECISION-008 and the Phase 5 reference authorized by CTO-DECISION-009.

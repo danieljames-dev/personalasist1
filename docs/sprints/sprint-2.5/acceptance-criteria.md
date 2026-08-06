@@ -109,7 +109,7 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 | Gate | Status |
 |---|---|
 | DG-1 Identity bootstrap | **Historically split** into DG-1a and DG-1b; original record preserved below |
-| DG-1a Local single-owner reference bootstrap | **Open pending CTO acceptance** of complete Phase 4 real-state and restore evidence |
+| DG-1a Local single-owner reference bootstrap | **Closed 2026-08-06** by [CTO-DECISION-009](../../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md) after complete Phase 4 real-state, idempotence, exclusion, and restore evidence |
 | DG-1b Secure external-access bootstrap and authentication boundary | **Open** |
 | DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
 | DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Accepted); no fixture, loader, harness, or fixtures directory exists or is authorized |
@@ -121,15 +121,16 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 This is the preserved original gate record. Sprint 3 Phase 4 splits its review outcome without
 rewriting the original rationale or evidence requirement:
 
-- **DG-1a — Local single-owner reference bootstrap.** The bounded non-Object reference state may
-  close only after implementation, conflict and atomicity tests, real explicit initialization,
+- **DG-1a — Local single-owner reference bootstrap. Closed 2026-08-06.** The bounded non-Object reference state
+  is Closed after implementation, conflict and atomicity tests, real explicit initialization,
   unchanged idempotent re-run, exact reload/export, source-backup exclusion, isolated restore, and
-  absence of authentication/authorization are demonstrated and accepted by the CTO.
+  absence of authentication/authorization were demonstrated and accepted in
+  [CTO-DECISION-009](../../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md).
 - **DG-1b — Secure external-access bootstrap and authentication boundary.** Open. It owns future
   credential proof, authentication, recovery/key custody for external access, and the authorization
   seam. Phase 4 supplies none of these.
 
-Closing DG-1a would not authorize multiple owners, tenancy, authentication, authorization, remote
+Closure of DG-1a does not authorize multiple owners, tenancy, authentication, authorization, remote
 deployment, hosting, federation, or external access.
 
 | Field | Value |

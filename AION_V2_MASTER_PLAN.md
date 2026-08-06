@@ -356,8 +356,8 @@ modes, operational cost, exit strategy, and decision expiry/review triggers.
 
 Current ratified state (2026-08-06): ADR-007 through ADR-010 are Accepted, with ADR-010
 Accepted for DG-4a only. DG-1 is historically split into DG-1a (local single-owner reference
-bootstrap) and DG-1b (secure external access and authentication); both remain Open pending their
-distinct CTO acceptance decisions. DG-2 is Closed, DG-3 is Open, DG-4a is Closed, and DG-4b
+bootstrap) and DG-1b (secure external access and authentication); DG-1a is Closed by
+CTO-DECISION-009 and DG-1b remains Open. DG-2 is Closed, DG-3 is Open, DG-4a is Closed, and DG-4b
 is Open. The Universal Object Contract remains Pre-stable. CTO-DECISION-008 prospectively lifts
 the implementation freeze only for the Minimum Personal Career Vertical Slice described by the
 [permanent Sprint 3.0 directive](docs/directives/sprint-3.0-career-vertical-slice.md). Phase 2
@@ -366,6 +366,10 @@ filesystem-containment prerequisite. Sprint 3.0 Phase 4 implements only the opaq
 reference bootstrap beneath that boundary, with explicit idempotent initialization, locking,
 atomic no-overwrite persistence, redacted status, and local export. It contains no profile data,
 authentication, authorization, Universal Objects, career ingestion, remote access, or later phase.
+Sprint 3.0 Phase 5 adds only the minimum domain-neutral `@aion/object` reference: closed mutable
+profile envelopes, typed Owner/Actor references, ACJ-1 validation/framing/integrity, exact DG-4a
+canonical-processing limits, and an in-memory revision-preserving repository. It creates no real
+Object or career state. The Object Contract remains Pre-stable; DG-3 and DG-4b remain Open.
 
 No milestone enters production implementation until it has an approved specification,
 ADRs for architectural change, threat model, public contract, test plan, documentation

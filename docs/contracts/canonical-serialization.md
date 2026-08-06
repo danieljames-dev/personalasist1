@@ -6,9 +6,10 @@ Authority: [ADR-008](../decisions/ADR-008-canonical-serialization.md) (Accepted)
 [CTO-DECISION-003](../decisions/CTO-DECISION-003-canonical-serialization.md)  
 Base: strict subset of [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785)  
 Stability: `acj-1` names a **profile family**, not a frozen implementation. The profile is
-approved; no implementation exists and cross-runtime agreement has never been demonstrated.
+approved; a bounded Phase 5 reference exists, while cross-runtime agreement has never been demonstrated.
 Advances to `acj-2` on any change to §1–§20 or §23.  
-Implementation: **Not implemented**; authorized only prospectively within the bounded Sprint 3.0 slice
+Implementation: **Bounded Phase 5 reference implemented** in `@aion/object`; no normative fixture or
+cross-runtime conformance evidence exists
 
 ## Responsibility
 
@@ -60,7 +61,8 @@ Canonical Bytes
 Domain-Separated Digest or Signature Input   (§23)
 ```
 
-This sequence is normative and is **not implemented** by this contract.
+This sequence is normative. A bounded implementation now exists in `@aion/object`; it does not
+constitute normative fixture or cross-runtime conformance evidence.
 
 ### Validator responsibility
 
@@ -114,9 +116,9 @@ to one output — which hides a producer bug and defeats the purpose of a digest
 
 ### Status of this boundary
 
-`CanonicalContractValidatorV1` is a **specified contract responsibility with no
-implementation**. Controls in the threat model that depend on it are specified controls,
-not runtime controls, until it exists. Implementing it is not authorized.
+`CanonicalContractValidatorV1` is implemented only within the bounded Phase 5 Object reference.
+Its tests demonstrate deterministic local behavior, not cross-runtime conformance. Other packages
+and any broader processing paths remain unimplemented unless separately authorized.
 
 ## 1. Value domain
 
@@ -218,8 +220,8 @@ check belongs at a boundary that rejects rather than at a serializer that repair
 Lone surrogates, unpaired surrogates, and code points that are not valid Unicode scalar
 values are rejected.
 
-**Enforcement status:** specified, not implemented. The validator does not exist, so this
-control is a contract requirement rather than an active runtime defence.
+**Enforcement status:** implemented only in the bounded Phase 5 Object reference. Other paths retain
+this as a contract requirement rather than an active runtime defence.
 
 ## 5. String encoding and escaping
 

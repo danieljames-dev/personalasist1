@@ -2,7 +2,8 @@
 
 Status: **Pre-stable** normative contract  
 Authority: [ADR-007](../decisions/ADR-007-universal-object-model.md) (Accepted 2026-08-06)  
-Implementation: Not authorized; freeze in effect
+Implementation: Phase 5 supports the closed Relationship envelope profile only; relationship
+descriptors, endpoint behavior, and persistence remain unimplemented
 
 ## Responsibility
 
@@ -127,4 +128,3 @@ Relationship queries require stable cursor pagination and bounded page sizes. Hi
 degree does not increase endpoint snapshot size. Indexes and Knowledge Graph projections
 are rebuildable from canonical Relationship Objects and events. No storage/index
 technology is selected by this contract.
-

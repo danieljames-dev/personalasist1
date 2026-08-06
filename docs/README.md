@@ -31,13 +31,14 @@
 ADR-007 is **Accepted** (2026-08-06) as an architecture-boundary decision. The contract
 family is normative but **pre-stable** — not designated stable v1. The implementation freeze is
 lifted only for the bounded Sprint 3.0 phases separately authorized under CTO-DECISION-008.
-DG-1 is historically split into DG-1a and DG-1b; both remain open pending their distinct evidence
-and review. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
+DG-1 is historically split into DG-1a and DG-1b; DG-1a is Closed by CTO-DECISION-009 and DG-1b
+remains Open. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
 
 ### Decision and architecture
 
 - [ADR-007: Universal Object Model](decisions/ADR-007-universal-object-model.md) — Accepted
 - [CTO-DECISION-002: Sprint 2.5 approval](decisions/CTO-DECISION-002-sprint-2.5-approval.md)
+- [CTO-DECISION-009: Phase 4 approval and Object reference authorization](decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
 - [Object Model architecture](architecture/object-model.md)
 
 ### Normative contracts
@@ -71,9 +72,9 @@ The pre-review design below is retained for audit and must not be cited as a con
 ## Sprint 2.6: Canonical serialization
 
 ADR-008 is **Accepted** (2026-08-06) as an architecture-boundary decision, closing deferred
-gate **DG-2**. The ACJ-1 profile is normative but no implementation exists; every
-threat-model control is specified or structural, none implemented. DG-3 is unblocked for
-design and fixture authoring only. Nothing below authorizes implementation.
+gate **DG-2**. The ACJ-1 profile is normative and has a bounded Phase 5 Object-reference
+implementation; no normative fixture or cross-runtime conformance evidence exists. DG-3 is
+unblocked for design only and remains Open.
 
 - [ADR-008: Canonical serialization](decisions/ADR-008-canonical-serialization.md) — Accepted
 - [CTO-DECISION-003: Canonical serialization approval](decisions/CTO-DECISION-003-canonical-serialization.md)
@@ -105,8 +106,8 @@ ADR-010 is **Accepted for DG-4a only**. The historical DG-4 is split: **DG-4a is
 canonical-processing resource limits and **DG-4b remains Open** for Object and domain workloads.
 DG-4b does not block a local, single-owner bounded reference slice with small selected inputs,
 but blocks production-scale, hostile/public, unbounded, multi-user, production workload, and
-production service claims. Benchmark probes remain non-production; no documented limit is yet
-implemented as production protection.
+production service claims. Benchmark probes remain non-production. The accepted DG-4a limits are
+implemented only in the bounded Phase 5 Object reference and are not production-workload evidence.
 
 - [ADR-010: Measurable resource limits](decisions/ADR-010-measurable-resource-limits.md) — Accepted for DG-4a only
 - [CTO-DECISION-008: Resource limits and vertical-slice authorization](decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md)
@@ -146,7 +147,19 @@ It accessed no owner data. Phase 4 composes this boundary without changing the p
 Phase 4 implements one local Owner, Principal, Actor, and System Instance reference and their three
 required relationships. It is explicit, idempotent, private, atomic, locked, locally exportable, and
 redacted by default. It is not authentication, authorization, a profile, a Universal Object, career
-ingestion, or Phase 5. DG-1a and DG-1b remain open pending their respective CTO decisions.
+ingestion, or implicit later-phase authority. DG-1a is Closed; DG-1b remains Open.
+
+## Sprint 3.0 Phase 5: minimum Object reference
+
+- [Minimum Object Reference Contract v1](contracts/object-reference-v1.md)
+- [Object reference implementation](implementation/object-reference.md)
+- [Phase 5 record](sprints/sprint-3.0-career-vertical-slice/phase-5-object-reference.md)
+- [Phase 5 architecture and security review](reviews/sprint-3.0-phase-5-object-review.md) — APPROVE
+
+Phase 5 implements a domain-neutral, local `@aion/object` reference with typed Identity references,
+closed mutable-profile envelopes, ACJ-1 framing/integrity, exact DG-4a limits, and an in-memory
+revision repository. No real Object state or career type exists. The Object Contract remains
+Pre-stable; DG-3 and DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
 
 ## Reviews
 

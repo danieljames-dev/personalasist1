@@ -5,7 +5,8 @@
 - Accepted: 2026-08-06
 - Decision owner: CTO
 - Decision record: [CTO-DECISION-002](CTO-DECISION-002-sprint-2.5-approval.md)
-- Implementation status: **Frozen.** Acceptance of this ADR does not lift the freeze.
+- Implementation status: **Bounded Phase 5 reference implemented.** The freeze remains outside the
+  scope authorized by [CTO-DECISION-009](CTO-DECISION-009-phase-4-approval-and-object-reference.md).
 - Contract stability: Universal Object Contract is **pre-stable**; not designated stable v1
 
 ## Governing documents
@@ -217,8 +218,8 @@ implementation readiness and not contract stability.
 - user interfaces; or
 - external integrations.
 
-The implementation freeze remains in effect. Nothing in this ADR, and no subordinate
-artifact produced under it, lifts that freeze; only a separate recorded CTO decision can.
+At acceptance the implementation freeze remained in effect. Nothing in this ADR, and no
+subordinate artifact produced under it, lifted that freeze. CTO-DECISION-009 later lifted it only
+for the bounded Phase 5 reference.
 The Universal Object Contract remains pre-stable until the deferred gates for
 representative fixtures and canonical serialization are satisfied.
-

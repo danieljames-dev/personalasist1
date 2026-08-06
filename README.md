@@ -4,13 +4,16 @@ AION is a modular, local-first Personal Intelligence Operating System designed t
 increase its owner's effectiveness while keeping data, decisions, and authority
 under owner control.
 
-The repository currently contains one production component: the versioned Kernel
-lifecycle coordinator. All other AION subsystems remain architecture and backlog
-items until their feature-level approval gates are satisfied.
+The repository contains the versioned Kernel lifecycle coordinator, the Phase 3 local path boundary,
+the Phase 4 local Identity bootstrap, and a bounded Phase 5 Universal Object reference. The Object
+Contract remains Pre-stable; later domain and production capabilities remain gated.
 
 ## Workspace
 
 - `packages/kernel` — preserved Kernel v1 library.
+- `packages/privacy-boundary` — explicit local path-containment reference.
+- `packages/identity` — local single-owner opaque Identity bootstrap.
+- `packages/object` — minimum domain-neutral Object reference with ACJ-1 and DG-4a controls.
 - `docs` — architecture, decisions, specifications, governance, and templates.
 
 ## Verification
@@ -22,4 +25,3 @@ items until their feature-level approval gates are satisfied.
 
 See [FOUNDER.md](FOUNDER.md), [AION_V2_MASTER_PLAN.md](AION_V2_MASTER_PLAN.md), and
 [docs/README.md](docs/README.md) for project direction.
-

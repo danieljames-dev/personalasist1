@@ -3,22 +3,27 @@
 Status: **Accepted** alongside
 [ADR-008](../decisions/ADR-008-canonical-serialization.md), 2026-08-06  
 Scope: ACJ-1 profile, validation boundary, and frame construction only  
-Implementation: Not authorized; freeze in effect
+Implementation: Bounded Phase 5 Object-reference validator, serializer, frame, digest, and DG-4a
+controls are implemented; normative fixtures and cross-runtime conformance remain absent
 
 ## Control status vocabulary
 
-Every control below is one of two things, and the distinction is load-bearing:
+The original architecture classified every control below as one of two things:
 
 - **Specified** — defined in a contract, with no implementation. It constrains what a
   future implementation must do. It defends nothing today.
 - **Structural** — a property of the design itself that holds without runtime code, such
   as framing injectivity or the exclusion of a value kind from the domain.
 
-There are **no implemented controls**. Nothing in this threat model is running.
+Sprint 3 Phase 5 now implements the subset exercised by the local `@aion/object` reference. Table
+labels retain their architecture-time classification; implemented evidence is recorded in the
+[Phase 5 review](../reviews/sprint-3.0-phase-5-object-review.md). Controls outside that bounded
+package remain specified or structural.
 
 Controls that depend on `CanonicalContractValidatorV1`
 ([contract §0](../contracts/canonical-serialization.md#0-validation-boundary--canonicalcontractvalidatorv1))
-are marked **specified — depends on validator**. That component does not exist.
+are marked **specified — depends on validator**. The validator now exists only in the bounded
+Phase 5 Object reference; it is not cross-runtime conformance evidence.
 
 ## What canonical serialization does not provide
 
@@ -79,12 +84,11 @@ enforces NFC and the value domain.
 
 ## Residual risks accepted
 
-- **No control here is implemented.** Every entry above is specified or structural.
-  Structural controls hold as design properties; specified controls defend nothing until
-  `CanonicalContractValidatorV1` and a canonicalizer exist. Both are unauthorized.
-- **The validator gap is the largest residual.** Threats 1, 2, and 4 depend entirely on a
-  component that does not exist. Until it does, a non-NFC string, a duplicate key, or a
-  float could reach a canonical position with nothing to reject it.
+- **Implementation is bounded.** The Phase 5 Object reference implements validation,
+  canonicalization, framing, SHA-256 integrity, and resource checks on its own paths. Other package,
+  transport, import, and production paths remain outside this evidence.
+- **Cross-runtime validation remains the largest residual.** Threats 1, 2, and 4 are tested in one
+  runtime only. No normative fixture corpus or second independent implementation exists.
 - **Unicode confusables (#3) are not solved here.** ACJ-1 makes two different strings hash
   differently, which is correct, but it cannot make a human notice that two strings look
   identical. Frame identifiers are ASCII-restricted; payload and schema identifiers are
@@ -128,5 +132,5 @@ validation boundary, and an injective framing contract now exist. The following 
 6. Whether constant-time comparison is mandatory everywhere or only where an untrusted
    party influences input and observes the outcome.
 
-Implementing `CanonicalContractValidatorV1` is implementation, not a residual decision,
-and remains unauthorized.
+Broader use of `CanonicalContractValidatorV1` outside the bounded Phase 5 Object reference remains
+unauthorized without a separate directive.

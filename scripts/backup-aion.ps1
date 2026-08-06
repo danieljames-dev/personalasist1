@@ -18,7 +18,7 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
-    [int]      $ExpectedTests     = 44,
+    [int]      $ExpectedTests     = 80,
     [switch]   $DryRun
 )
 
@@ -81,6 +81,7 @@ $manifest = [ordered]@{
     collectionCommand='npm run control-plane:test-collections'; realGateCommand='npm run control-plane:test-real-gate'
     privacyBoundaryCommand='npm run privacy-boundary:test'
     identityCommand='npm run identity:test'
+    objectCommand='npm run object:test'
     expectedTests=$ExpectedTests; restoreResult=$null; outcome='FAILURE'; failureReason=$null
     dryRun=[bool]$DryRun
 }
@@ -201,8 +202,9 @@ try {
     if (-not $manifest.restoreResult -or $manifest.restoreResult.outcome -ne 'SUCCESS') { throw 'Restore SUCCESS evidence missing' }
     if ($manifest.restoreResult.collectionResult -ne 'PASS' -or $manifest.restoreResult.realGateResult -ne 'PASS' -or
         $manifest.restoreResult.privacyBoundaryResult -ne 'PASS' -or $manifest.restoreResult.identityResult -ne 'PASS' -or
+        $manifest.restoreResult.objectResult -ne 'PASS' -or
         $manifest.restoreResult.exclusionResult -ne 'PASS') {
-        throw 'Mandatory collection, real-gate, privacy, Identity, or exclusion restore evidence missing'
+        throw 'Mandatory collection, real-gate, privacy, Identity, Object, or exclusion restore evidence missing'
     }
     $manifest.outcome='SUCCESS'
     Write-Step 'BACKUP SUCCESS - durable refs restored and verified'

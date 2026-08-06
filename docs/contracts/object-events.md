@@ -2,7 +2,7 @@
 
 Status: **Pre-stable** normative contract  
 Authority: [ADR-007](../decisions/ADR-007-universal-object-model.md) (Accepted 2026-08-06)  
-Implementation: Not authorized; freeze in effect  
+Implementation: Not implemented; Phase 5 does not materialize or publish Event Objects
 Event Bus: Explicitly out of scope
 
 ## Responsibility
@@ -130,4 +130,3 @@ must prove forward/backward behavior before release.
 
 Event failures are observable and isolated so one subject cannot block unrelated
 subjects indefinitely. No fallback path directly calls a downstream service.
-

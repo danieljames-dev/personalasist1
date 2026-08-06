@@ -5,7 +5,9 @@
 - Accepted: 2026-08-06
 - Decision owner: CTO
 - Decision record: [CTO-DECISION-003](CTO-DECISION-003-canonical-serialization.md)
-- Implementation status: **Frozen.** Acceptance of this ADR does not lift the freeze.
+- Implementation status: **Bounded Phase 5 reference implemented.** Cross-runtime conformance and
+  normative fixtures remain absent; the freeze remains outside
+  [CTO-DECISION-009](CTO-DECISION-009-phase-4-approval-and-object-reference.md).
 - Closes gate: DG-2 in the
   [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md)
 - Unblocks: DG-3 for design and fixture authoring only, not implementation
@@ -65,8 +67,8 @@ The load-bearing decisions:
    normalizes, coerces, repairs, or reorders. The canonicalizer accepts only values
    already validated against a named schema and profile.
 
-   The boundary is **specified, not implemented**. Controls that depend on it are
-   specified controls until it exists. See
+   At ADR acceptance the boundary was **specified, not implemented**. Phase 5 later implemented it
+   only for the bounded Object reference; controls elsewhere remain specified. See
    [contract §0](../contracts/canonical-serialization.md#0-validation-boundary--canonicalcontractvalidatorv1).
 
 4. **Domain separation by injective length-prefixed framing.** A digest or signature is
@@ -221,8 +223,8 @@ None of these are closed by acceptance of this ADR.
 6. **Constant-time comparison boundaries** — whether required everywhere or only where an
    untrusted party influences input and observes the outcome.
 
-Implementing `CanonicalContractValidatorV1` is not a subordinate decision; it is
-implementation, and it remains unauthorized.
+Implementing `CanonicalContractValidatorV1` is not a subordinate decision; it is implementation.
+CTO-DECISION-009 authorizes it only inside the bounded Phase 5 Object reference.
 
 ## Review triggers
 
@@ -260,6 +262,6 @@ Acceptance is an **architecture-boundary decision only**.
 - storage, transport, compression, or encryption selection;
 - signing or key-management infrastructure.
 
-The implementation freeze remains in effect. DG-2 closes; DG-3 becomes unblocked **for
-design and fixture authoring only**; DG-1 and DG-4 remain open. The Universal Object
-Contract remains pre-stable.
+At acceptance the implementation freeze remained in effect. DG-2 closed and DG-3 became unblocked
+for design only. CTO-DECISION-009 later authorized only the bounded Phase 5 implementation; DG-3
+remains Open and the Universal Object Contract remains Pre-stable.

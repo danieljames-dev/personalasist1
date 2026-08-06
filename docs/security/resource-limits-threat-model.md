@@ -3,24 +3,25 @@
 Status: **Accepted for DG-4a architecture scope**, 2026-08-06
 Scope: `aion-resource-limits-1` v1 and canonical-processing resource exhaustion
 Authority: [ADR-010](../decisions/ADR-010-measurable-resource-limits.md) (Accepted for DG-4a only)
-Implementation: **Not implemented.** Any future implementation is limited to the bounded Sprint 3.0 slice.
+Implementation: **Implemented only in the bounded Phase 5 Object reference.** DG-4b remains Open.
 
 ## Control status vocabulary
 
 Every control is exactly one of:
 
 - **Architectural** — a property of the design; holds without runtime code.
-- **Specified** — a contract requirement with no implementation. Defends nothing today.
+- **Specified** — a contract requirement without general implementation. It defends only where a
+  bounded implementation is explicitly identified.
 - **Demonstrated by benchmark** — a measured fact about *cost*, from one machine and one
   runtime. **A benchmarked rule is not an implemented production control.**
 - **Implemented** — running code. **There are none.**
 - **Operational** — a deployment or human control.
 - **Deferred** — no control yet exists or is decided.
 
-**No control in this threat model is implemented.** The only enforcement that exists anywhere
-in the repository is `packages/kernel/test/architecture-boundary.test.mjs`, which prevents
-production packages importing benchmark tooling — and that protects the *repository*, not any
-owner data.
+Sprint 3 Phase 5 implements L-01, L-02, L-04 through L-08, and L-10 through L-13 within the local
+`@aion/object` canonical-processing boundary. Exact-boundary tests are reference evidence only;
+they do not close DG-4b or establish production workload readiness. Table labels below retain their
+architecture-time classification for the wider platform.
 
 ## Threats and controls
 

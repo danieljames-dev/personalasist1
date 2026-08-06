@@ -3,7 +3,8 @@
 Status: **Accepted** alongside [ADR-007](../decisions/ADR-007-universal-object-model.md),
 2026-08-06  
 Scope: Object contracts and architecture only  
-Implementation: Not authorized; freeze in effect
+Implementation: Bounded Phase 5 reference controls are implemented; durable, external, destructive,
+multi-owner, and full-profile behavior remains unimplemented and frozen
 
 ## Security objectives
 
@@ -159,4 +160,3 @@ acceptance closed none of the residual decisions above. Items 1, 2, and 4 of thi
 section are recorded as enforceable deferred gates DG-1, DG-2, and DG-4 in the
 [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md)
 §Deferred implementation gates; the remainder stay open under this threat model.
-

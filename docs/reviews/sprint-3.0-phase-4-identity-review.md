@@ -2,6 +2,10 @@
 
 Recommendation: **APPROVE**
 
+Founder/CTO disposition: **APPROVED 2026-08-06** by
+[CTO-DECISION-009](../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md).
+DG-1a is Closed; DG-1b remains Open.
+
 The implementation preserves ADR-006's single responsibility: canonical reference truth. Domain
 bootstrap depends only on injected clock, identifier generator, and repository ports. Filesystem
 behavior is isolated in an adapter; the CLI is the composition root and reuses the accepted Phase 3
@@ -25,7 +29,7 @@ preserves the validated state exactly and remains inside a caller-supplied appro
 Neither path emits complete identifiers. Static architecture tests and runtime CLI tests find no
 network, telemetry, authentication, authorization, profile, Object, or career behavior.
 
-This recommendation covers the Phase 4 local bootstrap implementation only. DG-1a should close only
-after real local initialization, unchanged second run, private-state exclusion, push, backup, and
-isolated restore evidence are complete and reviewed. DG-1b, DG-3, and DG-4b remain open; the Object
-Contract remains pre-stable; Phase 5 remains unauthorized.
+This recommendation covers the Phase 4 local bootstrap implementation only. The required real local
+initialization, unchanged second run, private-state exclusion, push, backup, and isolated restore
+evidence was completed and accepted. DG-1b, DG-3, and DG-4b remain Open; the Object Contract remains
+Pre-stable. Phase 5 was authorized separately and does not broaden this approval.

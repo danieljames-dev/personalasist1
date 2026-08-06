@@ -2,7 +2,8 @@
 
 Status: **Pre-stable** normative contract  
 Authority: [ADR-007](../decisions/ADR-007-universal-object-model.md) (Accepted 2026-08-06)  
-Implementation: Not authorized; freeze in effect
+Implementation: Phase 5 reference enforces create and non-destructive revision transitions only;
+all other operations remain unimplemented and frozen
 
 ## State and operation distinction
 
@@ -223,4 +224,3 @@ as the domain specifies. No ownership or permission is copied without validation
 - Restoration of a system backup never resurrects Objects deleted before the selected
   recovery point without reconciliation and deletion replay.
 - Projection and vector recovery must honor the latest authoritative lifecycle state.
-

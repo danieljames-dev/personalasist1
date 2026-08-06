@@ -1,8 +1,8 @@
 # Contract Fixture Corpus — AFX-1
 
-Status: **Proposed** normative contract  
+Status: **Accepted architecture; normative fixtures remain unauthorized**
 Corpus profile identifier: `afx-1`  
-Authority: [ADR-009](../decisions/ADR-009-contract-fixture-corpus.md) (Proposed)  
+Authority: [ADR-009](../decisions/ADR-009-contract-fixture-corpus.md) (Accepted)
 Subject under test: [ACJ-1](canonical-serialization.md) and
 [Universal Object Contract v1](object-contract-v1.md)  
 Implementation: **Not authorized.** No fixture, loader, or harness exists or may be built.

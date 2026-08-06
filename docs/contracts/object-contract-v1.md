@@ -4,7 +4,8 @@ Status: **Pre-stable** normative contract — accepted architecture, unfrozen sh
 Stability: **Not designated stable v1.** The `v1` in the title names the contract family,
 not a frozen shape. See [Contract stability gate](#contract-stability-gate).  
 Authority: [ADR-007](../decisions/ADR-007-universal-object-model.md) (Accepted 2026-08-06)  
-Implementation: Not authorized; freeze in effect  
+Implementation: Bounded mutable-profile reference implemented in Sprint 3 Phase 5; full contract
+remains frozen outside [CTO-DECISION-009](../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
 Implementation language: Unspecified  
 Storage: Unspecified
 
@@ -270,4 +271,3 @@ That gate is recorded as DG-3, and the canonical serialization it depends on as 
 the [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md)
 §Deferred implementation gates. Until both are satisfied, no document, schema, package,
 or announcement may describe this contract as stable v1.
-
