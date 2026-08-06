@@ -74,13 +74,17 @@ function Get-PrivateBoundarySnapshot {
     $items=[Collections.Generic.List[string]]::new()
     if(Test-Path -LiteralPath $privateRoot -PathType Container){
         foreach($item in Get-ChildItem -LiteralPath $privateRoot -Force -Recurse){
-            if(-not$item.PSIsContainer){throw 'private boundary contains a file during control-plane regression'}
             $relative=$item.FullName.Substring($root.Length).TrimStart('\').Replace('\','/')
             $ignored=@(& git -C $root check-ignore --no-index $relative)
-            if($LASTEXITCODE-ne 0-or$ignored.Count-ne 1){throw "private directory is not ignored: $relative"}
-            $items.Add($relative)
+            if($LASTEXITCODE-ne 0-or$ignored.Count-ne 1){throw 'private boundary item is not ignored'}
+            if($item.PSIsContainer){$items.Add("directory|$relative")}
+            else{
+                $hash=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+                $items.Add("file|$relative|$($item.Length)|$hash")
+            }
         }
     }
+    $items.Sort([StringComparer]::Ordinal)
     return $items
 }
 
@@ -135,7 +139,7 @@ try {
     if((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash-cne$archiveHash){throw 'Archived Phase 3 directive changed'}
     if((Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash-cne$currentHash){throw 'Real current directive changed'}
     $privateAfter=Get-PrivateBoundarySnapshot
-    if(@(Compare-AionCollections -ReferenceObject $privateBefore -DifferenceObject $privateAfter).Count-ne 0){throw 'private directory layout changed'}
+    if(@(Compare-AionCollections -ReferenceObject $privateBefore -DifferenceObject $privateAfter).Count-ne 0){throw 'private boundary content changed'}
     $refsAfter=[Collections.Generic.List[string]]::new()
     foreach($ref in @(& git -C $root for-each-ref --format='%(refname) %(objectname)')){$refsAfter.Add($ref)}
     if(@(Compare-AionCollections -ReferenceObject $refsBefore -DifferenceObject $refsAfter).Count-ne 0){throw 'Git refs changed during authorization regression'}
