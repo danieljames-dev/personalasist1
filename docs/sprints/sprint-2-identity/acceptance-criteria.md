@@ -22,3 +22,19 @@ Status: Approved with CTO amendments
 - [ ] Public API, schemas, adapter guide, and operations are documented.
 - [ ] Full workspace verification passes.
 
+## Sprint 3 Phase 4 scoped evidence
+
+These checks apply only to the authorized local reference bootstrap and do not mark the unchecked
+broader Sprint 2 Identity program complete.
+
+- [x] Owner, Principal, Actor, and System Instance references are distinct branded v1 contracts.
+- [x] First explicit initialization creates exactly four references and three required relationships.
+- [x] Clock, identifier generator, and repository are injected; deterministic tests make exactly four
+  generator calls on the first run and zero on the second.
+- [x] Existing valid state is preserved without rewrite; conflict and corruption fail closed.
+- [x] Local persistence is privacy-bounded, exclusively locked, flushed, atomic, and no-overwrite.
+- [x] Status is redacted and export requires an explicit approved private destination.
+- [x] Architecture tests exclude authentication, authorization, profiles, network, telemetry, Object,
+  career, Kernel, database, vector-store, backup, and test dependencies.
+- [ ] DG-1a closure evidence is accepted by the CTO after real initialization and isolated restore.
+- [ ] DG-1b secure external-access and authentication boundary is approved.

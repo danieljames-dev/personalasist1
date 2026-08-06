@@ -15,6 +15,15 @@
     "control-plane:test-collections": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane-collections.ps1",
     "control-plane:test-real-gate": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane-real-gate.ps1",
     "privacy-boundary:test": "npm run privacy:test --workspace @aion/privacy-boundary && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-privacy-boundary.ps1",
+    "identity:build": "npm run build --workspace @aion/privacy-boundary && npm run build --workspace @aion/identity",
+    "identity:typecheck": "npm run typecheck --workspace @aion/identity",
+    "identity:test": "npm run test --workspace @aion/identity",
+    "identity:test:unit": "npm run test:unit --workspace @aion/identity",
+    "identity:test:persistence": "npm run test:persistence --workspace @aion/identity",
+    "identity:test:cli": "npm run test:cli --workspace @aion/identity",
+    "identity:initialize": "npm run identity:build --silent && node apps/identity-cli.mjs initialize",
+    "identity:status": "npm run identity:build --silent && node apps/identity-cli.mjs status",
+    "identity:export": "npm run identity:build --silent && node apps/identity-cli.mjs export",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {

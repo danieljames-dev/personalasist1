@@ -1,6 +1,6 @@
 # Identity v1 threat model
 
-Status: Proposed
+Status: Phase 4 local-bootstrap controls implemented; broader Identity v1 remains Proposed
 
 ## Assets
 
@@ -38,3 +38,21 @@ Identifiers are sensitive metadata but are not credentials.
 - Compromised local owner account/device; authentication and key custody are outside
   this sprint but must exist before external access.
 
+## Phase 4 local-bootstrap controls
+
+- Exact closed-shape validation rejects unsupported versions, duplicate kinds or identifiers,
+  missing or mismatched relationships, invalid lifecycle values, timestamp disorder, and profile or
+  credential fields before any replacement identifier can be generated.
+- An exclusive lock prevents concurrent initializers; a complete flushed same-directory temporary
+  file is installed with no-overwrite hard-link semantics.
+- The Phase 3 approved-root boundary is checked and immediately rechecked for state, lock,
+  temporary, and export paths. Traversal, cross-volume, device path, and escaping link/junction
+  cases fail closed.
+- Status exposes short SHA-256 fingerprint prefixes rather than complete identifiers. CLI failures
+  omit supplied paths and identifier values.
+- `private/` is ignored and excluded from source backups. Restored tests use synthetic temporary
+  state and never initialize a real owner.
+
+Residual risks include local-account compromise, filesystem ACL errors, lock-file denial of service,
+hard-link availability, and path/reparse TOCTOU after recheck. No external access is safe or
+authorized until the separate DG-1b authentication boundary is approved.

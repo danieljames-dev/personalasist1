@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 12,
+    [int]      $ExpectedTests = 44,
     [switch]   $DryRun
 )
 
@@ -137,6 +137,9 @@ $result = [ordered]@{
     realGateResult     = $null
     privacyBoundaryCommand = 'npm run privacy-boundary:test'
     privacyBoundaryResult  = $null
+    identityCommand    = 'npm run identity:test'
+    identityResult     = $null
+    exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
     outcome            = 'FAILURE'
@@ -184,6 +187,7 @@ try {
         Write-Step "would run   : npm run control-plane:test-collections"
         Write-Step "would run   : npm run control-plane:test-real-gate"
         Write-Step "would run   : npm run privacy-boundary:test"
+        Write-Step "would run   : npm run identity:test (synthetic state only)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -220,6 +224,16 @@ try {
     if ($actual -ne $ExpectedCommit) { throw "Restored HEAD $actual does not match expected $ExpectedCommit" }
     Add-Step 'checkout' 'PASS' $actual
 
+    $treePaths = @(& git -C $restoreDir ls-tree -r --name-only HEAD)
+    if (@($treePaths | Where-Object { $_ -like 'private/*' -or $_ -like '.aion-local/*' }).Count -ne 0) {
+        throw 'Restored Git tree contains private/ or .aion-local/'
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\identity\identity-state-v1.json')) {
+        throw 'Restored repository contains actual private Identity state'
+    }
+    $result.exclusionResult = 'PASS'
+    Add-Step 'private-state-exclusion' 'PASS' 'Git tree excludes private/ and .aion-local/; actual Identity state absent'
+
     # ---------------------------------------------------------------------
     # 3. npm ci
     # ---------------------------------------------------------------------
@@ -242,10 +256,10 @@ try {
     if (Test-Path $vOut) { $verifyText += (Get-Content $vOut -Raw) }
     if (Test-Path $vErr) { $verifyText += (Get-Content $vErr -Raw) }
 
-    $passMatch = [regex]::Match($verifyText, '(?m)^#\s*pass\s+(\d+)\s*$')
-    $failMatch = [regex]::Match($verifyText, '(?m)^#\s*fail\s+(\d+)\s*$')
-    if ($passMatch.Success) { $result.testsPassed = [int]$passMatch.Groups[1].Value }
-    if ($failMatch.Success) { $result.testsFailed = [int]$failMatch.Groups[1].Value }
+    $passMatches = [regex]::Matches($verifyText, '(?m)^#\s*pass\s+(\d+)\s*$')
+    $failMatches = [regex]::Matches($verifyText, '(?m)^#\s*fail\s+(\d+)\s*$')
+    $result.testsPassed = [int](($passMatches | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
+    $result.testsFailed = [int](($failMatches | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
 
     if ($vCode -ne 0) { throw "npm run verify failed with exit code $vCode (see $vErr)" }
     if ($result.testsPassed -ne $ExpectedTests) {
@@ -302,6 +316,17 @@ try {
     if ($pCode -ne 0) { throw "privacy-boundary regression failed with exit code $pCode (see $pErr)" }
     $result.privacyBoundaryResult = 'PASS'
     Add-Step 'privacy-boundary-regression' 'PASS' 'path, link, input, network, Git, and backup boundaries passed'
+
+    Write-Step "running npm run identity:test with synthetic temporary state"
+    $iOut = Join-Path $logDir "restore-$Timestamp.identity.out.log"
+    $iErr = Join-Path $logDir "restore-$Timestamp.identity.err.log"
+    $iCode = Invoke-Logged -CommandLine 'npm run identity:test' -WorkingDirectory $restoreDir -OutFile $iOut -ErrFile $iErr
+    if ($iCode -ne 0) { throw "Identity regression failed with exit code $iCode (see $iErr)" }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\identity\identity-state-v1.json')) {
+        throw 'Identity regression initialized real state in the restored repository'
+    }
+    $result.identityResult = 'PASS'
+    Add-Step 'identity-regression' 'PASS' 'all Identity tests passed using synthetic temporary state only'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

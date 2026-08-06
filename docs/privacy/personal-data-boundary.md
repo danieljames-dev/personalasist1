@@ -16,5 +16,6 @@ remediation only. They do not contain complete paths, file bodies, environment v
 or personal identifiers. Local operation records are private runtime data and must not be committed.
 
 No data is sent externally. Network access, telemetry, analytics, browser launch, service SDKs,
-model providers, databases, vector stores, Identity, Objects, career ingestion, and Phase 4 remain
-unimplemented and unauthorized.
+model providers, databases, and vector stores remain absent. Sprint 3 Phase 4 now composes this
+boundary for the local opaque Identity state and export paths; the privacy package itself still has
+no Identity dependency. Objects, career ingestion, and Phase 5 remain unimplemented and unauthorized.

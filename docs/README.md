@@ -30,9 +30,9 @@
 
 ADR-007 is **Accepted** (2026-08-06) as an architecture-boundary decision. The contract
 family is normative but **pre-stable** — not designated stable v1. The implementation freeze is
-lifted prospectively only for the bounded Sprint 3.0 vertical slice recorded in
-CTO-DECISION-008; no slice implementation has begun. DG-1, DG-3, and DG-4b remain Open; DG-2 and
-DG-4a are Closed.
+lifted only for the bounded Sprint 3.0 phases separately authorized under CTO-DECISION-008.
+DG-1 is historically split into DG-1a and DG-1b; both remain open pending their distinct evidence
+and review. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
 
 ### Decision and architecture
 
@@ -134,7 +134,19 @@ implemented as production protection.
 - [Phase 3 privacy review](reviews/sprint-3.0-phase-3-privacy-review.md) — APPROVE
 
 Phase 3 establishes an ignored local directory and explicit filesystem-containment boundary only.
-It accessed no owner data and does not implement Identity, Objects, career ingestion, or Phase 4.
+It accessed no owner data. Phase 4 composes this boundary without changing the privacy package.
+
+## Sprint 3.0 Phase 4: local Identity bootstrap
+
+- [Local Identity State v1 contract](contracts/local-identity-state-v1.md)
+- [Local owner bootstrap operations](implementation/local-owner-bootstrap.md)
+- [Phase 4 record](sprints/sprint-3.0-career-vertical-slice/phase-4-local-identity-bootstrap.md)
+- [Phase 4 architecture and security review](reviews/sprint-3.0-phase-4-identity-review.md) — APPROVE
+
+Phase 4 implements one local Owner, Principal, Actor, and System Instance reference and their three
+required relationships. It is explicit, idempotent, private, atomic, locked, locally exportable, and
+redacted by default. It is not authentication, authorization, a profile, a Universal Object, career
+ingestion, or Phase 5. DG-1a and DG-1b remain open pending their respective CTO decisions.
 
 ## Reviews
 

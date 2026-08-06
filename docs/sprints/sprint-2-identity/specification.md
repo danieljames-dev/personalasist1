@@ -129,3 +129,16 @@ revisions exactly.
 4. Implement an in-memory repository and event collector only.
 5. Do not choose durable storage or implement reserved namespaces.
 
+## Sprint 3 Phase 4 local-bootstrap amendment
+
+The Founder/CTO Sprint 3 vertical-slice decision authorizes one narrower prerequisite before full
+Identity Entity Objects: a local single-owner opaque reference state. That state uses the four
+approved identifier namespaces and three approved relationships but is not a Universal Object and
+does not claim completion of the broader Sprint 2 delivery slices, event/outbox design, import,
+recovery, rotation, lifecycle mutation, or full repository conformance.
+
+For this bounded bootstrap only, an ignored filesystem adapter is approved beneath
+`private/identity/`. It must use the Phase 3 path boundary, exclusive initialization, atomic
+no-overwrite installation, exact validation, explicit status/export operations, and deterministic
+synthetic tests. Authentication, authorization, profiles, reserved namespaces, multiple owners,
+remote access, and Universal Object implementation remain prohibited.
