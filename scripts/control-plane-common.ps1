@@ -62,6 +62,14 @@ function Assert-AionBaselineValues {
     if(@($StatusLines).Count -ne 0){throw 'Working tree is not clean'}
 }
 
+function Invoke-AionNpmVerification {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $commandName=if($env:OS -ceq 'Windows_NT'){'npm.cmd'}else{'npm'}
+    $npmCommand=Get-Command $commandName -CommandType Application -ErrorAction Stop|Select-Object -First 1
+    & $npmCommand.Source --prefix $Root run verify
+    if($LASTEXITCODE -ne 0){throw "npm run verify failed with exit code $LASTEXITCODE"}
+}
+
 function Assert-AionRepositoryGate {
     param([string]$Root,[string]$ExpectedHead,[switch]$RunVerification)
     $branch=(& git -C $Root branch --show-current).Trim()
@@ -72,8 +80,12 @@ function Assert-AionRepositoryGate {
     Assert-AionBaselineValues -ExpectedHead $ExpectedHead -Branch $branch -Head $head -Origin $origin `
         -Ahead ([int]$counts[0]) -Behind ([int]$counts[1]) -StatusLines $status
     if($RunVerification){
-        & npm --prefix $Root run verify
-        if($LASTEXITCODE -ne 0){throw 'npm run verify failed'}
+        try { Invoke-AionNpmVerification -Root $Root }
+        catch {
+            throw [InvalidOperationException]::new(
+                "Repository gate verification stage failed: $($_.Exception.Message)", $_.Exception
+            )
+        }
     }
 }
 

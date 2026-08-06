@@ -44,4 +44,4 @@ try {
     Write-Host 'Run VS Code task: AION: Run Current Directive'
     exit 0
 }
-catch { Write-Error $_.Exception.Message; exit 1 }
+catch { Write-Error "Founder authorization failed: $($_.Exception.Message)"; exit 1 }

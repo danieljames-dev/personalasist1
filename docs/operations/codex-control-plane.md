@@ -49,6 +49,12 @@ phrase. `Y`, `yes`, blank input, partial text, and case variants fail. The scrip
 synchronized `main`, the approved origin, exact baseline, and passing `npm run verify`. It changes
 only the ignored local directive and does not launch Codex.
 
+On Windows, the repository gate invokes the native `npm.cmd` entry point explicitly. This avoids
+PowerShell-version-dependent behavior in third-party `npm.ps1` shims while preserving the same npm
+verification command, exit-code check, strict mode, and fail-closed repository gates. Run
+`npm run control-plane:test-real-gate` from a clean synchronized `main` to exercise the authorization
+script against the actual repository gate with a temporary ignored directive.
+
 Then select:
 
 ```text
