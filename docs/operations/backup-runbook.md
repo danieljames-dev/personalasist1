@@ -58,6 +58,7 @@ Exit code 0 means the run is a valid recovery point. Any other exit code means i
 The run takes a few minutes; most of it is `npm ci` in the restored clone, which
 downloads dependencies from the network. It also runs the synthetic overlong-Codex-ref
 regression test in the restored repository.
+When the Codex control plane is present, the restore also requires `npm run control-plane:test`.
 
 ## Procedure — standalone restore test
 
@@ -90,6 +91,10 @@ D:\AION-backups\
 
 Nothing is ever deleted automatically. Prior backups, restore-test directories, and
 failure logs accumulate until pruned deliberately.
+
+Ignored `.aion-local/` directives, handoffs, prompts, and logs are never accepted as declared
+untracked working-data archives. Tracked control-plane source remains protected through Git
+history; local run state does not enter code/documentation backups.
 
 ## Ref policy and mirror replacement
 

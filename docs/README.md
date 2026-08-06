@@ -138,6 +138,10 @@ implemented as production protection.
 
 ## Operations
 
+- [Codex control plane](operations/codex-control-plane.md) — Founder-authorized local directive,
+  interactive execution, ignored run state, and standardized handoff workflow.
+- [Codex control-plane architecture review](reviews/codex-control-plane-review.md) — APPROVE.
+
 - [Backup and disaster recovery strategy](operations/backup-strategy.md) — reviewed and
   accepted 2026-08-06. Approved external root `D:\AION-backups`; scheduling not approved.
   Source backups use a durable branch/tag/note ref allowlist and exclude editor/agent refs.

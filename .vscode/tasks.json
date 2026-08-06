@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AION: Verify Repository",
+      "type": "shell",
+      "command": "npm run verify",
+      "problemMatcher": []
+    },
+    {
+      "label": "AION: Authorize Current Directive",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/authorize-current-directive.ps1",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "AION: Run Current Directive",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-current-directive.ps1",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "AION: Open Current Directive",
+      "type": "shell",
+      "command": "code --reuse-window .aion-local/directives/CURRENT.md",
+      "problemMatcher": []
+    },
+    {
+      "label": "AION: Open Latest Handoff",
+      "type": "shell",
+      "command": "code --reuse-window .aion-local/handoffs/LATEST.md",
+      "problemMatcher": []
+    },
+    {
+      "label": "AION: Show Git Status",
+      "type": "shell",
+      "command": "git status --short --branch",
+      "problemMatcher": []
+    }
+  ]
+}

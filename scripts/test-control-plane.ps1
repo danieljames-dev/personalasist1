@@ -1,0 +1,161 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'control-plane-common.ps1')
+
+$testRoot=Join-Path ([IO.Path]::GetTempPath()) ("aion-control-plane-"+[guid]::NewGuid().ToString('N'))
+$repo=Join-Path $testRoot 'repo'
+$passed=0
+$failed=0
+$complete=$false
+
+function Pass([string]$Name){$script:passed++;Write-Host "PASS $Name"}
+function Fail([string]$Name,[string]$Detail){$script:failed++;Write-Host "FAIL $Name - $Detail" -ForegroundColor Red}
+function Expect-Throw([string]$Name,[scriptblock]$Action){try{& $Action;Fail $Name 'expected failure'}catch{Pass $Name}}
+function Expect-True([string]$Name,[bool]$Value){if($Value){Pass $Name}else{Fail $Name 'condition false'}}
+function Invoke-AuthorizationFixture([string]$InputText){
+    $out=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.out')
+    $err=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.err')
+    $arguments=@(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'authorize-current-directive.ps1')+'"'),
+        '-RepositoryRoot',('"'+$repo+'"'),'-DirectivePath',('"'+$current+'"'),
+        '-TestMode','-SkipRepositoryChecks','-AuthorizationInput',('"'+$InputText+'"')
+    )
+    $process=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Wait -PassThru -NoNewWindow `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    return $process.ExitCode
+}
+function Invoke-RunValidationFixture([string]$FakeCodex){
+    $out=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.out')
+    $err=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.err')
+    $arguments=@(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'run-current-directive.ps1')+'"'),
+        '-RepositoryRoot',('"'+$repo+'"'),'-DirectivePath',('"'+$current+'"'),
+        '-AgentsPath',('"'+(Join-Path $repo 'AGENTS.md')+'"'),'-CodexCommand',('"'+$FakeCodex+'"'),
+        '-ValidationOnly','-TestMode'
+    )
+    $process=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Wait -PassThru -NoNewWindow `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    return $process.ExitCode
+}
+function New-Directive([string]$Path,[string]$Status='PENDING_OWNER_AUTHORIZATION',[string]$Baseline='abc',[string]$Phrase='AUTHORIZE SYNTHETIC TEST'){
+    $body=@"
+# AION Current Directive
+Directive-ID: TEST-DIRECTIVE
+Status: $Status
+Title: Synthetic Test
+Prepared-Date: 2026-08-06T00:00:00Z
+Prepared-By: CTO
+Repository-Baseline: $Baseline
+Required-Authorization-Phrase: $Phrase
+
+## Goal
+Test only.
+## Authorized Scope
+- synthetic test
+## Prohibited Scope
+- real work
+## Required Inputs
+- none
+## Baseline Checks
+- synthetic
+## Required Work
+- none
+## Verification
+- local only
+## Commit and Push Authorization
+None.
+## Backup Authorization
+None.
+## Stop Conditions
+Stop on failure.
+## Required Handoff
+Synthetic.
+## Next-Phase Prohibition
+No next phase.
+"@
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Path))|Out-Null
+    [IO.File]::WriteAllText($Path,$body,[Text.UTF8Encoding]::new($false))
+}
+
+try {
+    New-Item -ItemType Directory -Path $repo -Force|Out-Null
+    & git -C $repo init -b main|Out-Null
+    & git -C $repo config user.name 'AION Control Test'
+    & git -C $repo config user.email 'control-test@invalid.example'
+    & git -C $repo remote add origin $script:AionCanonicalOrigin
+    [IO.File]::WriteAllText((Join-Path $repo '.gitignore'),".aion-local/`n",[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $repo 'README.md'),'synthetic',[Text.UTF8Encoding]::new($false))
+    & git -C $repo add README.md .gitignore
+    & git -C $repo commit -m synthetic|Out-Null
+    $head=(& git -C $repo rev-parse HEAD).Trim()
+    $local=Join-Path $repo '.aion-local'
+    $current=Join-Path $local 'directives\CURRENT.md'
+
+    Expect-Throw '1 missing CURRENT fails' {Get-AionDirective -Path $current|Out-Null}
+    [IO.Directory]::CreateDirectory((Split-Path $current))|Out-Null;[IO.File]::WriteAllText($current,'',[Text.UTF8Encoding]::new($false))
+    Expect-Throw '2 empty CURRENT fails' {Get-AionDirective -Path $current|Out-Null}
+    New-Directive $current 'INVALID'
+    Expect-Throw '3 invalid status fails' {Get-AionDirective -Path $current|Out-Null}
+    New-Directive $current 'PENDING_OWNER_AUTHORIZATION'
+    Expect-Throw '4 pending cannot run' {Assert-AionRunnableDirective (Get-AionDirective $current)}
+    New-Directive $current 'AUTHORIZED'
+    try{Assert-AionRunnableDirective (Get-AionDirective $current);Pass '5 authorized passes status gate'}catch{Fail '5 authorized passes status gate' $_.Exception.Message}
+
+    New-Directive $current 'PENDING_OWNER_AUTHORIZATION' $head
+    $wrongExit=Invoke-AuthorizationFixture 'wrong'
+    Expect-True '6 incorrect phrase fails' ($wrongExit -ne 0)
+    $exactExit=Invoke-AuthorizationFixture 'AUTHORIZE SYNTHETIC TEST'
+    Expect-True '7 exact fixture phrase succeeds' (($exactExit -eq 0)-and((Get-AionDirective $current).Fields.Status -ceq 'AUTHORIZED'))
+
+    Expect-Throw '8 dirty baseline fails' {Assert-AionBaselineValues $head main $head $script:AionCanonicalOrigin 0 0 @(' M README.md')}
+    Expect-Throw '9 wrong HEAD fails' {Assert-AionBaselineValues 'expected' main 'wrong' $script:AionCanonicalOrigin 0 0 @()}
+    Expect-Throw '10 wrong origin fails' {Assert-AionBaselineValues $head main $head 'https://invalid.example/repo.git' 0 0 @()}
+    Expect-Throw '11 missing AGENTS fails' {Assert-AionRunDependencies (Join-Path $repo 'AGENTS.md') 'powershell'}
+    [IO.File]::WriteAllText((Join-Path $repo 'AGENTS.md'),'synthetic',[Text.UTF8Encoding]::new($false))
+    Expect-Throw '12 missing Codex executable fails' {Assert-AionRunDependencies (Join-Path $repo 'AGENTS.md') 'definitely-missing-aion-codex'}
+
+    $handoff=Join-Path $local 'handoffs\LATEST.md';[IO.Directory]::CreateDirectory((Split-Path $handoff))|Out-Null
+    New-Directive $current 'AWAITING_CTO_REVIEW';[IO.File]::WriteAllText($handoff,'',[Text.UTF8Encoding]::new($false))
+    Expect-Throw '13 empty handoff cannot succeed' {Assert-AionPostRun $current $handoff}
+    New-Directive $current 'AUTHORIZED';[IO.File]::WriteAllText($handoff,'complete',[Text.UTF8Encoding]::new($false))
+    Expect-Throw '14 unchanged AUTHORIZED cannot succeed' {Assert-AionPostRun $current $handoff}
+    New-Directive $current 'AWAITING_CTO_REVIEW'
+    try{Assert-AionPostRun $current $handoff;Pass '15 review status and handoff pass'}catch{Fail '15 review status and handoff pass' $_.Exception.Message}
+
+    $allLocal=@(Get-ChildItem $local -Recurse -File|?{-not $_.FullName.StartsWith($local,[StringComparison]::OrdinalIgnoreCase)})
+    Expect-True '16 local files stay under .aion-local' ($allLocal.Count -eq 0)
+    & git -C $repo check-ignore -q .aion-local/directives/CURRENT.md
+    Expect-True '17 .aion-local ignored' ($LASTEXITCODE -eq 0)
+    $staged=@(& git -C $repo diff --cached --name-only)
+    Expect-True '18 local state is not staged' (@($staged|?{$_-like '.aion-local/*'}).Count -eq 0)
+    & git -C $repo add AGENTS.md
+    & git -C $repo commit -m 'add synthetic agents'|Out-Null
+    $runHead=(& git -C $repo rev-parse HEAD).Trim()
+    & git -C $repo update-ref refs/remotes/origin/main $runHead
+    New-Directive $current 'AUTHORIZED' $runHead
+    $marker=Join-Path $testRoot 'codex-launched.marker'
+    $fakeCodex=Join-Path $testRoot 'fake-codex.cmd'
+    [IO.File]::WriteAllText($fakeCodex,"@echo launched>`"$marker`"`r`nexit /b 0`r`n",[Text.ASCIIEncoding]::new())
+    $originBefore=(& git -C $repo rev-parse refs/remotes/origin/main).Trim()
+    $validationExit=Invoke-RunValidationFixture $fakeCodex
+    Expect-True '19 test mode never launches Codex' (($validationExit-eq 0)-and(-not(Test-Path $marker))-and(-not(Test-Path (Join-Path $local 'prompts'))))
+    $runnerSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-current-directive.ps1') -Raw
+    $originAfter=(& git -C $repo rev-parse refs/remotes/origin/main).Trim()
+    $networkTokens=@('Invoke-WebRequest','Invoke-RestMethod','Start-BitsTransfer','curl ','--search')
+    Expect-True '20 test mode performs no network access' (($originBefore-ceq$originAfter)-and(@($networkTokens|?{$runnerSource.Contains($_)}).Count-eq 0))
+
+    if($failed-ne 0){throw "$failed control-plane tests failed"}
+    $complete=$true
+    Write-Host "control-plane regression: PASS ($passed passed, 0 failed)"
+}
+catch {Write-Error "control-plane regression: FAIL: $($_.Exception.Message); evidence preserved at $testRoot";exit 1}
+finally {
+    if($complete-and(Test-Path $testRoot)){
+        $resolved=[IO.Path]::GetFullPath($testRoot);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw "Unsafe cleanup path: $resolved"}
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}

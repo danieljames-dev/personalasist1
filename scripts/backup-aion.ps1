@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'backup-ref-policy.ps1')
 
 $ForbiddenPatterns = @(
-    'private/', 'node_modules', 'dist/', 'dist-test/', '*.tsbuildinfo', '*.tgz',
+    'private/', '.aion-local/', 'node_modules', 'dist/', 'dist-test/', '*.tsbuildinfo', '*.tgz',
     '.env', '.env.*', '*.pem', '*.key', '*.pfx', 'id_rsa*',
     '.vscode/', '.idea/', '*.log', '*.sqlite', '*.db', 'Thumbs.db', '.DS_Store'
 )
@@ -77,6 +77,7 @@ $manifest = [ordered]@{
     }
     exclusions=$ForbiddenPatterns; checksums=[ordered]@{}
     verificationCommand='npm run verify'; regressionCommand='npm run test:backup-refs'
+    controlPlaneCommand='npm run control-plane:test'
     expectedTests=$ExpectedTests; restoreResult=$null; outcome='FAILURE'; failureReason=$null
     dryRun=[bool]$DryRun
 }

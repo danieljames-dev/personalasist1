@@ -129,6 +129,8 @@ $result = [ordered]@{
     verificationCommand= 'npm run verify'
     regressionCommand  = 'npm run test:backup-refs'
     regressionResult   = $null
+    controlPlaneCommand= 'npm run control-plane:test'
+    controlPlaneResult = $null
     testsPassed        = $null
     testsFailed        = $null
     outcome            = 'FAILURE'
@@ -172,6 +174,7 @@ try {
         Write-Step "would run   : npm ci"
         Write-Step "would run   : npm run verify  (require $ExpectedTests passed / 0 failed)"
         Write-Step "would run   : npm run test:backup-refs"
+        Write-Step "would run   : npm run control-plane:test"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -253,6 +256,14 @@ try {
     if ($rCode -ne 0) { throw "backup-ref regression failed with exit code $rCode (see $rErr)" }
     $result.regressionResult = 'PASS'
     Add-Step 'backup-ref-regression' 'PASS' 'overlong synthetic refs/codex excluded'
+
+    Write-Step "running npm run control-plane:test"
+    $cOut = Join-Path $logDir "restore-$Timestamp.control-plane.out.log"
+    $cErr = Join-Path $logDir "restore-$Timestamp.control-plane.err.log"
+    $cCode = Invoke-Logged -CommandLine 'npm run control-plane:test' -WorkingDirectory $restoreDir -OutFile $cOut -ErrFile $cErr
+    if ($cCode -ne 0) { throw "control-plane regression failed with exit code $cCode (see $cErr)" }
+    $result.controlPlaneResult = 'PASS'
+    Add-Step 'control-plane-regression' 'PASS' '20 passed / 0 failed; no model or network'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

@@ -56,7 +56,7 @@ namespace requires a versioned policy and schema update.
 | `bundlePath` | string | Immutable local durable-ref recovery bundle |
 | `untrackedArchivePath` | string \| null | Archive of explicitly declared safe untracked files |
 | `includedUntracked` | string[] | Deliberately included repository-relative paths |
-| `exclusions` | string[] | Refused private, secret, dependency, build, cache, and editor patterns |
+| `exclusions` | string[] | Refused `.aion-local/`, private, secret, dependency, build, cache, and editor patterns |
 | `checksums` | object | Absolute artifact path to lowercase SHA-256 |
 
 The mirror is validated by exact ref checks, `git fsck --full`, and an independent clone. The
@@ -68,13 +68,14 @@ bundle must pass `git bundle verify`. Checksums prove later byte equality, not a
 |---|---|---|
 | `verificationCommand` | string | `npm run verify` |
 | `regressionCommand` | string | `npm run test:backup-refs` |
+| `controlPlaneCommand` | string | `npm run control-plane:test` when the control plane exists |
 | `expectedTests` | integer | Exact Node test count expected in restored verification |
 | `restoreResult` | object \| null | Embedded `aion.restore-test.v1` evidence |
 | `outcome` | string | `SUCCESS` or `FAILURE` |
 | `failureReason` | string \| null | Exact failure message |
 
-The restore result adds `mirror-ref-policy` and `backup-ref-regression` steps and a
-`regressionResult` field. It must prove mirror `main`, absence of `refs/codex/*`, exact checkout,
+The restore result adds `mirror-ref-policy`, `backup-ref-regression`, and
+`control-plane-regression` steps plus result fields. It must prove mirror `main`, absence of `refs/codex/*`, exact checkout,
 successful `npm ci`, the expected passing test count with zero failures, and a passing synthetic
 overlong-ref regression.
 
@@ -92,6 +93,7 @@ restoreResult.expectedCommit         == expectedBackedUpCommit
 restoreResult.testsPassed            == expectedTests
 restoreResult.testsFailed            == 0
 restoreResult.regressionResult       == "PASS"
+restoreResult.controlPlaneResult     == "PASS"
 ```
 
 Artifact presence alone never means success.
