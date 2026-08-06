@@ -69,6 +69,8 @@ bundle must pass `git bundle verify`. Checksums prove later byte equality, not a
 | `verificationCommand` | string | `npm run verify` |
 | `regressionCommand` | string | `npm run test:backup-refs` |
 | `controlPlaneCommand` | string | `npm run control-plane:test` when the control plane exists |
+| `collectionCommand` | string | PowerShell zero/one/multiple collection regression command |
+| `realGateCommand` | string | Real repository-gate regression command |
 | `expectedTests` | integer | Exact Node test count expected in restored verification |
 | `restoreResult` | object \| null | Embedded `aion.restore-test.v1` evidence |
 | `outcome` | string | `SUCCESS` or `FAILURE` |
@@ -94,6 +96,8 @@ restoreResult.testsPassed            == expectedTests
 restoreResult.testsFailed            == 0
 restoreResult.regressionResult       == "PASS"
 restoreResult.controlPlaneResult     == "PASS"
+restoreResult.collectionResult       == "PASS"
+restoreResult.realGateResult         == "PASS"
 ```
 
 Artifact presence alone never means success.

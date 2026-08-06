@@ -15,6 +15,8 @@ $archivePath=Join-Path $root '.aion-local\directives\archive\AION-S3-P3-PRIVACY-
 $currentPath=Join-Path $root '.aion-local\directives\CURRENT.md'
 $phrase='AUTHORIZE SYNTHETIC REAL GATE TEST'
 $complete=$false
+$createdArchive=$false
+$createdCurrent=$false
 
 function New-TemporaryDirective([string]$Baseline) {
     $body=@"
@@ -68,7 +70,16 @@ function Invoke-TemporaryAuthorization {
 }
 
 try {
-    if(-not(Test-Path -LiteralPath $archivePath -PathType Leaf)){throw 'Archived Phase 3 directive is missing'}
+    if(-not(Test-Path -LiteralPath $archivePath -PathType Leaf)){
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $archivePath))|Out-Null
+        [IO.File]::WriteAllText($archivePath,"# Synthetic archive sentinel`r`nFinal state: PENDING_OWNER_AUTHORIZATION`r`n",[Text.UTF8Encoding]::new($false))
+        $createdArchive=$true
+    }
+    if(-not(Test-Path -LiteralPath $currentPath -PathType Leaf)){
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $currentPath))|Out-Null
+        [IO.File]::WriteAllText($currentPath,"# Synthetic restore-test control state`r`n",[Text.UTF8Encoding]::new($false))
+        $createdCurrent=$true
+    }
     if(Test-Path -LiteralPath (Join-Path $root 'private') -PathType Container){throw 'private directory exists'}
     $head=(& git -C $root rev-parse HEAD).Trim()
     $branch=(& git -C $root branch --show-current).Trim()
@@ -80,9 +91,13 @@ try {
 
     $archiveHash=(Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
     $currentHash=(Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash
-    $refsBefore=@(& git -C $root for-each-ref --format='%(refname) %(objectname)')
+    $refsBefore=[Collections.Generic.List[string]]::new()
+    foreach($ref in @(& git -C $root for-each-ref --format='%(refname) %(objectname)')){$refsBefore.Add($ref)}
     $promptRoot=Join-Path $root '.aion-local\prompts'
-    $promptsBefore=if(Test-Path -LiteralPath $promptRoot -PathType Container){@((Get-ChildItem -LiteralPath $promptRoot -File).Name)}else{@()}
+    $promptsBefore=[Collections.Generic.List[string]]::new()
+    if(Test-Path -LiteralPath $promptRoot -PathType Container){
+        foreach($prompt in Get-ChildItem -LiteralPath $promptRoot -File){$promptsBefore.Add($prompt.Name)}
+    }
     $source=Get-Content -LiteralPath $authorizer -Raw
     foreach($forbidden in @('git commit','git push','git fetch','Invoke-WebRequest','Invoke-RestMethod','backup-aion','codex ')) {
         if($source.IndexOf($forbidden,[StringComparison]::OrdinalIgnoreCase)-ge 0){
@@ -105,11 +120,16 @@ try {
     if((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash-cne$archiveHash){throw 'Archived Phase 3 directive changed'}
     if((Get-FileHash -LiteralPath $currentPath -Algorithm SHA256).Hash-cne$currentHash){throw 'Real current directive changed'}
     if(Test-Path -LiteralPath (Join-Path $root 'private') -PathType Container){throw 'private directory was created'}
-    $refsAfter=@(& git -C $root for-each-ref --format='%(refname) %(objectname)')
-    if(Compare-Object $refsBefore $refsAfter){throw 'Git refs changed during authorization regression'}
+    $refsAfter=[Collections.Generic.List[string]]::new()
+    foreach($ref in @(& git -C $root for-each-ref --format='%(refname) %(objectname)')){$refsAfter.Add($ref)}
+    if(@(Compare-AionCollections -ReferenceObject $refsBefore -DifferenceObject $refsAfter).Count-ne 0){throw 'Git refs changed during authorization regression'}
     if((& git -C $root rev-parse HEAD).Trim()-cne$head){throw 'HEAD changed during authorization regression'}
-    $promptsAfter=if(Test-Path -LiteralPath $promptRoot -PathType Container){@((Get-ChildItem -LiteralPath $promptRoot -File).Name)}else{@()}
-    if(Compare-Object $promptsBefore $promptsAfter){throw 'Codex prompt appeared during authorization regression'}
+    $promptsAfter=[Collections.Generic.List[string]]::new()
+    if(Test-Path -LiteralPath $promptRoot -PathType Container){
+        foreach($prompt in Get-ChildItem -LiteralPath $promptRoot -File){$promptsAfter.Add($prompt.Name)}
+    }
+    if(@(Compare-AionCollections -ReferenceObject $promptsBefore -DifferenceObject $promptsAfter).Count-ne 0){throw 'Codex prompt appeared during authorization regression'}
+    if(@(& git -C $root status --porcelain=v1 -uall).Count-ne 0){throw 'Tracked or untracked repository state changed during authorization regression'}
     $complete=$true
     Write-Host 'real repository gate regression: PASS (authorization 1, wrong-HEAD refusal 1)'
 }
@@ -121,6 +141,8 @@ finally {
     if(Test-Path -LiteralPath $directivePath){Remove-Item -LiteralPath $directivePath -Force}
     if(Test-Path -LiteralPath $outputPath){Remove-Item -LiteralPath $outputPath -Force}
     if(Test-Path -LiteralPath $errorPath){Remove-Item -LiteralPath $errorPath -Force}
+    if($createdCurrent-and(Test-Path -LiteralPath $currentPath)){Remove-Item -LiteralPath $currentPath -Force}
+    if($createdArchive-and(Test-Path -LiteralPath $archivePath)){Remove-Item -LiteralPath $archivePath -Force}
 }
 
 if(-not $complete){exit 1}

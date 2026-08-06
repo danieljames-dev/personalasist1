@@ -55,6 +55,17 @@ verification command, exit-code check, strict mode, and fail-closed repository g
 `npm run control-plane:test-real-gate` from a clean synchronized `main` to exercise the authorization
 script against the actual repository gate with a temporary ignored directive.
 
+Directive metadata fields are line-oriented. A directive or tracked directive template must contain
+exactly one line beginning with `Status:`; instructional prose must use wording such as
+`Final required state:` so it cannot be parsed as a second status field.
+
+PowerShell pipelines emit no object for a zero-item result, so assigning an `if` expression whose
+empty branch contains `@()` can still produce `$null`. Collection comparisons therefore initialize
+non-null .NET lists and normalize both inputs to explicit `System.Object[]` instances before calling
+`Compare-Object`. The collection matrix and real-gate tests run locally and in every isolated backup
+restore. The native Windows `npm.cmd` selection remains required. These tests use synthetic ignored
+control state; Sprint 3 Phase 3 remains archived and unexecuted.
+
 Then select:
 
 ```text

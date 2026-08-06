@@ -131,6 +131,10 @@ $result = [ordered]@{
     regressionResult   = $null
     controlPlaneCommand= 'npm run control-plane:test'
     controlPlaneResult = $null
+    collectionCommand  = 'npm run control-plane:test-collections'
+    collectionResult   = $null
+    realGateCommand    = 'npm run control-plane:test-real-gate'
+    realGateResult     = $null
     testsPassed        = $null
     testsFailed        = $null
     outcome            = 'FAILURE'
@@ -175,6 +179,8 @@ try {
         Write-Step "would run   : npm run verify  (require $ExpectedTests passed / 0 failed)"
         Write-Step "would run   : npm run test:backup-refs"
         Write-Step "would run   : npm run control-plane:test"
+        Write-Step "would run   : npm run control-plane:test-collections"
+        Write-Step "would run   : npm run control-plane:test-real-gate"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -263,7 +269,28 @@ try {
     $cCode = Invoke-Logged -CommandLine 'npm run control-plane:test' -WorkingDirectory $restoreDir -OutFile $cOut -ErrFile $cErr
     if ($cCode -ne 0) { throw "control-plane regression failed with exit code $cCode (see $cErr)" }
     $result.controlPlaneResult = 'PASS'
-    Add-Step 'control-plane-regression' 'PASS' '20 passed / 0 failed; no model or network'
+    Add-Step 'control-plane-regression' 'PASS' 'control-plane suite passed; no model or network'
+
+    Write-Step "running npm run control-plane:test-collections"
+    $aOut = Join-Path $logDir "restore-$Timestamp.collections.out.log"
+    $aErr = Join-Path $logDir "restore-$Timestamp.collections.err.log"
+    $aCode = Invoke-Logged -CommandLine 'npm run control-plane:test-collections' -WorkingDirectory $restoreDir -OutFile $aOut -ErrFile $aErr
+    if ($aCode -ne 0) { throw "collection regression failed with exit code $aCode (see $aErr)" }
+    $result.collectionResult = 'PASS'
+    Add-Step 'collection-regression' 'PASS' 'zero, one, and multiple collection cases passed'
+
+    Write-Step "preparing isolated clone for the real repository gate"
+    Invoke-Git @('checkout', 'main') -WorkingDirectory $restoreDir
+    Invoke-Git @('remote', 'set-url', 'origin', 'https://github.com/danieljames-dev/personalasist1.git') -WorkingDirectory $restoreDir
+    Write-Step "running npm run control-plane:test-real-gate"
+    $gOut = Join-Path $logDir "restore-$Timestamp.real-gate.out.log"
+    $gErr = Join-Path $logDir "restore-$Timestamp.real-gate.err.log"
+    $gCode = Invoke-Logged -CommandLine 'npm run control-plane:test-real-gate' -WorkingDirectory $restoreDir -OutFile $gOut -ErrFile $gErr
+    if ($gCode -ne 0) { throw "real-gate regression failed with exit code $gCode (see $gErr)" }
+    $gateText=(Get-Content -LiteralPath $gOut -Raw)+(Get-Content -LiteralPath $gErr -Raw)
+    if($gateText-match "property 'Statement'" -or $gateText-match 'Compare-Object.*null'){throw 'Prior PowerShell compatibility failure returned'}
+    $result.realGateResult = 'PASS'
+    Add-Step 'real-gate-regression' 'PASS' 'temporary authorization passed and wrong HEAD failed closed'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

@@ -147,6 +147,13 @@ try {
     $networkTokens=@('Invoke-WebRequest','Invoke-RestMethod','Start-BitsTransfer','curl ','--search')
     Expect-True '20 test mode performs no network access' (($originBefore-ceq$originAfter)-and(@($networkTokens|?{$runnerSource.Contains($_)}).Count-eq 0))
 
+    New-Directive $current 'PENDING_OWNER_AUTHORIZATION' $head
+    Add-Content -LiteralPath $current -Value "`r`nStatus: AWAITING_CTO_REVIEW"
+    Expect-Throw '21 duplicate Status fields fail parsing' {Get-AionDirective -Path $current|Out-Null}
+    $templatePath=Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\directives\CURRENT.template.md'
+    $templateText=Get-Content -LiteralPath $templatePath -Raw
+    Expect-True '22 tracked directive template has exactly one Status field' (([regex]::Matches($templateText,'(?m)^Status:\s*')).Count-eq 1)
+
     if($failed-ne 0){throw "$failed control-plane tests failed"}
     $complete=$true
     Write-Host "control-plane regression: PASS ($passed passed, 0 failed)"

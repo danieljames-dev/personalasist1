@@ -59,6 +59,9 @@ The run takes a few minutes; most of it is `npm ci` in the restored clone, which
 downloads dependencies from the network. It also runs the synthetic overlong-Codex-ref
 regression test in the restored repository.
 When the Codex control plane is present, the restore also requires `npm run control-plane:test`.
+It additionally runs the explicit collection matrix and the real repository-gate regression in the
+isolated clone. The latter uses synthetic ignored directives, proves correct-HEAD authorization and
+wrong-HEAD refusal, and never restores or executes a real pending directive.
 
 ## Procedure — standalone restore test
 

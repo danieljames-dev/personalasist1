@@ -70,6 +70,18 @@ function Invoke-AionNpmVerification {
     if($LASTEXITCODE -ne 0){throw "npm run verify failed with exit code $LASTEXITCODE"}
 }
 
+function Compare-AionCollections {
+    param(
+        [AllowNull()][object[]]$ReferenceObject,
+        [AllowNull()][object[]]$DifferenceObject
+    )
+    $normalizedReference=[object[]]::new(0)
+    $normalizedDifference=[object[]]::new(0)
+    if($null-ne$ReferenceObject){$normalizedReference=[object[]]$ReferenceObject}
+    if($null-ne$DifferenceObject){$normalizedDifference=[object[]]$DifferenceObject}
+    Compare-Object -ReferenceObject $normalizedReference -DifferenceObject $normalizedDifference
+}
+
 function Assert-AionRepositoryGate {
     param([string]$Root,[string]$ExpectedHead,[switch]$RunVerification)
     $branch=(& git -C $Root branch --show-current).Trim()
