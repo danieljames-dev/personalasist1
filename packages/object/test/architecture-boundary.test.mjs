@@ -16,7 +16,13 @@ async function sourceFiles(directory) {
 test("Object production dependencies remain inside the approved boundary", async () => {
   const root = fileURLToPath(new URL("../src/", import.meta.url));
   const files = await sourceFiles(root);
-  const allowed = new Set(["@aion/identity", "node:crypto"]);
+  const allowed = new Set([
+    "@aion/identity",
+    "@aion/privacy-boundary",
+    "node:crypto",
+    "node:fs/promises",
+    "node:path",
+  ]);
   const violations = [];
   for (const file of files) {
     const source = await readFile(file, "utf8");
@@ -30,16 +36,24 @@ test("Object production dependencies remain inside the approved boundary", async
   assert.deepEqual(violations, []);
 });
 
-test("Object production source contains no forbidden subsystem or runtime adapter", async () => {
+test("Object production source contains no forbidden subsystem or later-phase integration", async () => {
   const root = fileURLToPath(new URL("../src/", import.meta.url));
   const files = await sourceFiles(root);
-  const forbidden = /(?:\bcareer\b|\bresume\b|job.?posting|authentication|authorization|oauth|telemetry|analytics|event.?bus|\bplanner\b|\bmemory\b|capability.?registry|vector.?store|\bdatabase\b|private\/identity|benchmarks?|\bbackup\b|control-plane|fetch\(|https?:\/\/)/i;
+  const forbidden = /(?:\bresume\b|employment.?history|career.?preferences|authentication|authorizationGrant|authorizeCaller|accessPolicy|oauth|telemetry|analytics|event.?bus|\bplanner\b|\bmemory\b|capability.?registry|vector.?store|\bdatabase\b|private\/identity|benchmarks?|\bbackup\b|control-plane|fetch\(|https?:\/\/)/i;
   const violations = [];
   for (const file of files) {
     const source = await readFile(file, "utf8");
     if (forbidden.test(source)) violations.push(relative(root, file));
   }
   assert.deepEqual(violations, []);
+});
+
+test("family payload registrations do not embed relationship truth or Phase 6 fields", async () => {
+  const source = await readFile(fileURLToPath(new URL("../src/families.ts", import.meta.url)), "utf8");
+  const forbiddenPayloadFields = /(?:relationshipIds|relationships\s*:|resume\s*:|employmentHistory\s*:|preferences\s*:|jobTitle\s*:|applicationText\s*:)/;
+  assert.equal(forbiddenPayloadFields.test(source), false);
+  assert.equal((source.match(/objectProfile:\s*"entity"/g) ?? []).length, 6);
+  assert.equal((source.match(/objectProfile:\s*"relationship"/g) ?? []).length, 1);
 });
 
 test("no fixture corpus or real Object state is present in the package", async () => {

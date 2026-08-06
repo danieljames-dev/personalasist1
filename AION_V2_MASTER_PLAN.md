@@ -366,10 +366,13 @@ filesystem-containment prerequisite. Sprint 3.0 Phase 4 implements only the opaq
 reference bootstrap beneath that boundary, with explicit idempotent initialization, locking,
 atomic no-overwrite persistence, redacted status, and local export. It contains no profile data,
 authentication, authorization, Universal Objects, career ingestion, remote access, or later phase.
-Sprint 3.0 Phase 5 adds only the minimum domain-neutral `@aion/object` reference: closed mutable
-profile envelopes, typed Owner/Actor references, ACJ-1 validation/framing/integrity, exact DG-4a
-canonical-processing limits, and an in-memory revision-preserving repository. It creates no real
-Object or career state. The Object Contract remains Pre-stable; DG-3 and DG-4b remain Open.
+Sprint 3.0 Phase 5 adds the bounded `@aion/object` reference: closed mutable profile envelopes,
+typed Owner/Actor references, ACJ-1 validation/framing/integrity, exact DG-4a limits, the seven
+required family/profile boundaries, RelationshipObject as sole edge truth, explicit revision
+operations, and replaceable in-memory plus privacy-validated local filesystem reference adapters.
+The six career entity payloads remain closed and empty; no real Object or career state exists. The
+filesystem adapter is not a permanent production storage decision or DG-4b workload evidence. The
+Object Contract remains Pre-stable; DG-3 and DG-4b remain Open, and Phase 6 remains unauthorized.
 
 No milestone enters production implementation until it has an approved specification,
 ADRs for architectural change, threat model, public contract, test plan, documentation

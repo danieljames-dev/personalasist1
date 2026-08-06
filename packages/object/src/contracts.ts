@@ -181,6 +181,8 @@ export type ObjectErrorCodeV1 =
   | "not-found"
   | "revision-conflict"
   | "integrity-mismatch"
+  | "object-path-rejected"
+  | "object-storage-invalid"
   | "commit-failed";
 
 export class ObjectErrorV1 extends Error {

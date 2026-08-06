@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 80,
+    [int]      $ExpectedTests = 109,
     [switch]   $DryRun
 )
 
@@ -342,8 +342,11 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\object')) {
         throw 'Object regression created private Object state in the restored repository'
     }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\object-store')) {
+        throw 'Object regression created a permanent private Object store in the restored repository'
+    }
     $result.objectResult = 'PASS'
-    Add-Step 'object-regression' 'PASS' 'all Object tests passed using synthetic process-local state only'
+    Add-Step 'object-regression' 'PASS' 'all Object tests passed using synthetic process-local and temporary filesystem state only'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

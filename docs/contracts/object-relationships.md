@@ -2,8 +2,9 @@
 
 Status: **Pre-stable** normative contract  
 Authority: [ADR-007](../decisions/ADR-007-universal-object-model.md) (Accepted 2026-08-06)  
-Implementation: Phase 5 supports the closed Relationship envelope profile only; relationship
-descriptors, endpoint behavior, and persistence remain unimplemented
+Implementation: Phase 5 implements only the seven career-reference subtypes in the separate
+[RelationshipObject Reference v1](relationship-object-reference-v1.md); the broader descriptor,
+query, cardinality, policy, Version/Event, and production persistence contract remains unimplemented
 
 ## Responsibility
 

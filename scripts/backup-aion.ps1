@@ -18,7 +18,7 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
-    [int]      $ExpectedTests     = 80,
+    [int]      $ExpectedTests     = 109,
     [switch]   $DryRun
 )
 

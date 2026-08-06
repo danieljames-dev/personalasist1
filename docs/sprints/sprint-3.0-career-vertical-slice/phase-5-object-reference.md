@@ -1,40 +1,41 @@
-# Sprint 3.0 Phase 5: Minimum Universal Object Reference
+# Sprint 3.0 Phase 5: Object Reference Slice
 
 Status: Implemented; pending Founder/CTO review
-Directive: `AION-S3-P5-OBJECT-REFERENCE`
-Decision: [CTO-DECISION-009](../../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
 
-Phase 5 adds `@aion/object`, the smallest domain-neutral Object reference needed before any later
-career-domain work can be considered. It supplies typed references, a closed mutable-profile
-envelope, deterministic injected construction, schema-registry validation, ACJ-1 canonicalization,
-AION Frame v1 SHA-256 integrity, exact DG-4a limits, and a revision-preserving in-memory repository
-adapter with fail-closed optimistic concurrency.
+Directives: `AION-S3-P5-OBJECT-REFERENCE`, `AION-S3-P5B-OBJECT-SLICE-COMPLETION`
 
-No real Object was initialized and no filesystem Object adapter exists. Tests use only synthetic
-opaque Identity references and process-local Object values. The package neither reads nor changes
-the ignored real Identity state.
+Decisions: [CTO-DECISION-009](../../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md),
+[CTO-DECISION-010](../../decisions/CTO-DECISION-010-phase-5-completion.md)
 
-This phase contains no career Object type or schema, personal data, import/ingestion, matching,
-application drafting, authentication, authorization, permissions, networking, telemetry, database,
-vector store, Event Bus, Planner, Memory, or Capability Registry behavior. It does not implement or
-prepare Phase 6.
+The accepted first Phase 5 increment supplied the generic `@aion/object` envelope, ACJ-1 integrity,
+DG-4a processing limits, injected ports, and immutable in-memory revisions. Its initial review was
+APPROVE WITH CHANGES because the earlier authorization omitted permanent Phase 5 requirements.
 
-The Universal Object Contract remains Pre-stable. DG-3 and DG-4b remain Open. Normative fixtures
-remain unauthorized. Version/Event Object aggregate materialization, durable outbox semantics,
-export/import, migration, ownership transfer, delete/destroy, persistent storage, and production
-workload claims remain future decisions.
+The completion increment adds exactly seven registered families: CareerSourceObject,
+CareerFactObject, CareerProfileObject, JobPostingObject, JobMatchReportObject,
+ApplicationDraftObject, and RelationshipObject. The six entity payloads are closed empty objects;
+detailed career fields are deferred. No résumé, employment, preferences, posting content, matching
+content, application content, personal profile, or owner data exists.
 
-## Verification evidence
+RelationshipObject is the sole persisted edge truth. Its closed v1 boundary admits only the seven
+approved directed family combinations. Creation loads and validates both endpoints, ownership,
+availability, direction, family tuple, and self-edge prohibition. Relationship identity, kind, and
+endpoints remain immutable across expected-revision updates. Entity payloads contain no edge arrays.
 
-- Aggregate product verification: 80 passed, 0 failed, 0 skipped.
-- Object verification: 36 passed, 0 failed, 0 skipped.
-- Focused Object suites: unit 10, canonical 6, repository 7, resource limits 9, architecture 4.
-- Identity regression: 32 passed, 0 failed, 0 skipped.
-- Control-plane regression: 22 passed, 0 failed.
-- Collection regression: 8 passed, 0 failed.
-- Privacy-boundary regression: 15 passed, 0 failed, 1 truthful Windows `EPERM` skip for
-  unavailable file-symlink construction.
-- Backup-reference regression, backup dry run, and all 11 PowerShell syntax checks: passed.
+The public operation surface is limited to explicit initial creation, expected-revision entity
+append, relationship create/append, and current/historical load. It exposes no patch callback,
+delete, query, search, indexing, permission, event, planner, or synchronization API.
 
-The separate real-repository gate, normal push, durable backup, and isolated restore are completion
-gates and are recorded in the local handoff after they succeed.
+The bounded filesystem reference adapter requires an explicit absolute `private/object-store` root,
+reuses the Phase 3 privacy boundary, derives a non-reversible safe path key, stores exact ACJ-1 full
+envelopes, and installs each immutable revision through a flushed same-directory temporary file and
+no-overwrite hard link. Loads verify bytes, integrity, schema, path identity, continuity, immutable
+fields, lifecycle, and provenance. Synthetic tests demonstrate one-winner creation/append,
+corruption rejection, traversal rejection, link/junction containment, and failure cleanup.
+
+No real Object was initialized and no permanent `private/object-store` record exists. The adapter is
+replaceable reference evidence, not a production storage decision. The Universal Object Contract
+remains Pre-stable; DG-3 and DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
+
+Final command counts, Git/push state, backup checksum, and isolated-restore proof are recorded in the
+ignored local Phase 5 completion handoff after all gates pass.

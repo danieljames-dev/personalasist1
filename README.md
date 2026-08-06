@@ -13,7 +13,8 @@ Contract remains Pre-stable; later domain and production capabilities remain gat
 - `packages/kernel` — preserved Kernel v1 library.
 - `packages/privacy-boundary` — explicit local path-containment reference.
 - `packages/identity` — local single-owner opaque Identity bootstrap.
-- `packages/object` — minimum domain-neutral Object reference with ACJ-1 and DG-4a controls.
+- `packages/object` — pre-stable Object reference with seven family boundaries,
+  RelationshipObject, ACJ-1/DG-4a controls, and bounded in-memory/filesystem reference repositories.
 - `docs` — architecture, decisions, specifications, governance, and templates.
 
 ## Verification

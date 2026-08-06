@@ -114,7 +114,7 @@ evidence. Architecture-boundary approval of ADR-007 closed none of them.
 | DG-2 Canonical serialization | **Closed** by [ADR-008](../../decisions/ADR-008-canonical-serialization.md) and [CTO-DECISION-003](../../decisions/CTO-DECISION-003-canonical-serialization.md) |
 | DG-3 Representative fixtures | **Open.** Specification delivered by ADR-009 (Accepted); no fixture, loader, harness, or fixtures directory exists or is authorized |
 | DG-4a Canonical Processing Resource Limits | **Closed** by [ADR-010](../../decisions/ADR-010-measurable-resource-limits.md) and [CTO-DECISION-008](../../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md), 2026-08-06 |
-| DG-4b Object and Domain Workload Limits | **Open.** Object business limits and workload evidence remain unsupplied. This does not block a local, single-owner, bounded reference slice using small explicitly selected inputs; it continues to block production-scale, hostile public, unbounded, multi-user, production-workload, and production-service readiness claims |
+| DG-4b Object and Domain Workload Limits | **Open.** Object business limits and workload evidence remain unsupplied. This does not block the explicitly authorized local, single-owner, bounded filesystem reference adapter using small synthetic inputs; it continues to block a permanent production adapter, production-scale, hostile public, unbounded, multi-user, production-workload, and production-service readiness claims |
 
 ### DG-1 — Identity bootstrap
 
@@ -190,9 +190,9 @@ and evidence in ADR-010; it is not a claim of implemented production protection.
 | Rationale | The contract requires bounded metadata, provenance, data, and events but specifies no number. "Bounded" is unenforceable and untestable until the bounds exist. |
 | Risk | Resource exhaustion through deep or oversized metadata, high-degree relationships, event storms, or large artifacts; write amplification exceeding owner hardware; adapters choosing incompatible limits. |
 | Affected components | Object Model validation, metadata and extension namespaces, relationship cardinality, event payloads, storage adapters, import and ingestion paths |
-| Blocking gate | **Open before production adapters, hostile/public ingestion, unbounded processing, multi-user readiness, or production workload/service readiness.** |
+| Blocking gate | **Open before a permanent production adapter, hostile/public ingestion, unbounded processing, multi-user readiness, or production workload/service readiness. The Phase 5 bounded local adapter is reference evidence only and is not closure evidence.** |
 | Required evidence | An approved limits specification fixing maximum encoded envelope, data, metadata, label count, nesting depth, provenance, extension, relationship page, and event sizes, plus benchmarked high-churn, high-degree, large-artifact, migration, export, and restore workloads on representative local hardware. |
-| Review trigger | Any proposal for a durable adapter, an import or ingestion path, an untrusted schema or plugin source, or a performance budget claim. |
+| Review trigger | Any proposal to promote the Phase 5 adapter, select permanent storage, add import/ingestion, accept an untrusted schema or plugin source, or make a performance budget claim. |
 
 ## Approval result
 
@@ -204,7 +204,9 @@ implementation.
 gate to the seven incorporated construction-blocking changes and recorded DG-1 through
 DG-4 above as deferred gates with controls. Every criterion in this document is accepted
 on that basis. ADR-007 is Accepted. The Universal Object Contract remains **pre-stable**
-and is not designated stable v1. CTO-DECISION-008 later lifted the implementation freeze only
-prospectively for the bounded Sprint 3.0 vertical slice; no implementation has begun. See
+and is not designated stable v1. CTO-DECISION-008 later lifted the implementation freeze only for
+the bounded Sprint 3.0 vertical slice. Phase 5 now contains a replaceable local reference adapter,
+but that adapter supplies no representative workload or permanent-storage evidence and does not
+close DG-4b. See
 [CTO-DECISION-002](../../decisions/CTO-DECISION-002-sprint-2.5-approval.md) and
 [CTO-DECISION-008](../../decisions/CTO-DECISION-008-resource-limits-and-vertical-slice.md).

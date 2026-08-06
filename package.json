@@ -30,6 +30,9 @@
     "object:test:unit": "npm run test:unit --workspace @aion/object",
     "object:test:canonical": "npm run test:canonical --workspace @aion/object",
     "object:test:repository": "npm run test:repository --workspace @aion/object",
+    "object:test:families": "npm run test:families --workspace @aion/object",
+    "object:test:relationships": "npm run test:relationships --workspace @aion/object",
+    "object:test:operations": "npm run test:operations --workspace @aion/object",
     "object:test:limits": "npm run test:limits --workspace @aion/object",
     "object:test:architecture": "npm run test:architecture --workspace @aion/object",
     "verify": "npm run typecheck && npm test"

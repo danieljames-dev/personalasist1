@@ -36,6 +36,44 @@ function sameIdentityAndImmutableFields(current: ObjectEnvelopeV1, next: ObjectE
     && current.createdAt === next.createdAt;
 }
 
+export function validateObjectCommitV1(
+  currentValue: unknown | null,
+  request: ObjectCommitRequestV1,
+  ports: ValidationPorts,
+): ObjectEnvelopeV1 {
+  const snapshot = validateObjectEnvelopeV1(request.snapshot, ports);
+  const current = currentValue === null ? null : validateObjectEnvelopeV1(currentValue, ports);
+
+  if (request.expectedRevision === null) {
+    if (current !== null || snapshot.revision !== 1) {
+      fail("revision-conflict", "$.revision", "Object creation conflicts with existing state.");
+    }
+    return snapshot;
+  }
+  if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1) {
+    fail("revision-conflict", "$.expectedRevision", "Expected revision is invalid.");
+  }
+  if (current === null || current.revision !== request.expectedRevision) {
+    fail("revision-conflict", "$.expectedRevision", "Expected revision does not match current state.");
+  }
+  if (snapshot.revision !== current.revision + 1) {
+    fail("revision-conflict", "$.revision", "Next revision must advance exactly once.");
+  }
+  if (!sameIdentityAndImmutableFields(current, snapshot)) {
+    fail("invalid-object", "$", "Immutable Object fields changed.");
+  }
+  if (Date.parse(snapshot.modifiedAt) < Date.parse(current.modifiedAt)) {
+    fail("invalid-object", "$.modifiedAt", "Modified time moved backward.");
+  }
+  if (!NON_DESTRUCTIVE_TRANSITIONS[current.lifecycleState].includes(snapshot.lifecycleState)) {
+    fail("invalid-lifecycle-transition", "$.lifecycleState", "Lifecycle transition is not authorized.");
+  }
+  if (snapshot.lifecycleState === "deleted" || snapshot.lifecycleState === "destroyed") {
+    fail("invalid-lifecycle-transition", "$.lifecycleState", "Delete and destroy are outside Phase 5.");
+  }
+  return snapshot;
+}
+
 export class InMemoryObjectRepositoryV1 implements ObjectRepository {
   readonly #current = new Map<string, ObjectEnvelopeV1>();
   readonly #history = new Map<string, Map<number, ObjectEnvelopeV1>>();
@@ -65,38 +103,14 @@ export class InMemoryObjectRepositoryV1 implements ObjectRepository {
   }
 
   async commit(request: ObjectCommitRequestV1): Promise<void> {
-    const snapshot = validateObjectEnvelopeV1(request.snapshot, this.ports);
-    const current = this.#current.get(snapshot.objectId);
+    const candidate = validateObjectEnvelopeV1(request.snapshot, this.ports);
+    const current = this.#current.get(candidate.objectId);
+    const snapshot = validateObjectCommitV1(current ?? null, request, this.ports);
 
     if (request.expectedRevision === null) {
-      if (current !== undefined || snapshot.revision !== 1) {
-        fail("revision-conflict", "$.revision", "Object creation conflicts with existing state.");
-      }
       this.#current.set(snapshot.objectId, snapshot);
       this.#history.set(snapshot.objectId, new Map([[1, snapshot]]));
       return;
-    }
-
-    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1) {
-      fail("revision-conflict", "$.expectedRevision", "Expected revision is invalid.");
-    }
-    if (current === undefined || current.revision !== request.expectedRevision) {
-      fail("revision-conflict", "$.expectedRevision", "Expected revision does not match current state.");
-    }
-    if (snapshot.revision !== current.revision + 1) {
-      fail("revision-conflict", "$.revision", "Next revision must advance exactly once.");
-    }
-    if (!sameIdentityAndImmutableFields(current, snapshot)) {
-      fail("invalid-object", "$", "Immutable Object fields changed.");
-    }
-    if (Date.parse(snapshot.modifiedAt) < Date.parse(current.modifiedAt)) {
-      fail("invalid-object", "$.modifiedAt", "Modified time moved backward.");
-    }
-    if (!NON_DESTRUCTIVE_TRANSITIONS[current.lifecycleState].includes(snapshot.lifecycleState)) {
-      fail("invalid-lifecycle-transition", "$.lifecycleState", "Lifecycle transition is not authorized.");
-    }
-    if (snapshot.lifecycleState === "deleted" || snapshot.lifecycleState === "destroyed") {
-      fail("invalid-lifecycle-transition", "$.lifecycleState", "Delete and destroy are outside Phase 5.");
     }
 
     const nextHistory = new Map(this.#history.get(snapshot.objectId));

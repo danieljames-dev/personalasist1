@@ -17,18 +17,22 @@
     "README.md"
   ],
   "scripts": {
-    "build": "npm run build --workspace @aion/identity && tsc -p tsconfig.json",
+    "build": "npm run build --workspace @aion/identity && npm run build --workspace @aion/privacy-boundary && tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
-    "typecheck": "npm run build --workspace @aion/identity && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "typecheck": "npm run build --workspace @aion/identity && npm run build --workspace @aion/privacy-boundary && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
     "test:unit": "npm run build && npm run build:test && node --test \"dist-test/test/contracts.test.js\" \"dist-test/test/object.test.js\"",
     "test:canonical": "npm run build && npm run build:test && node --test \"dist-test/test/canonical.test.js\"",
-    "test:repository": "npm run build && npm run build:test && node --test \"dist-test/test/repository.test.js\"",
+    "test:repository": "npm run build && npm run build:test && node --test \"dist-test/test/repository.test.js\" \"dist-test/test/file-repository.test.js\"",
+    "test:families": "npm run build && npm run build:test && node --test \"dist-test/test/families.test.js\"",
+    "test:relationships": "npm run build && npm run build:test && node --test \"dist-test/test/relationships.test.js\"",
+    "test:operations": "npm run build && npm run build:test && node --test \"dist-test/test/operations.test.js\"",
     "test:limits": "npm run build && npm run build:test && node --test \"dist-test/test/resource-limits.test.js\"",
     "test:architecture": "npm run build && node --test \"test/architecture-boundary.test.mjs\""
   },
   "dependencies": {
-    "@aion/identity": "0.1.0"
+    "@aion/identity": "0.1.0",
+    "@aion/privacy-boundary": "0.1.0"
   },
   "engines": {
     "node": ">=22"

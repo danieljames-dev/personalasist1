@@ -2,38 +2,40 @@
 
 Recommendation: **APPROVE**
 
-The reference is cohesive and conforms to the bounded ADR-007 responsibility: universal structural
-and record-lifecycle invariants only. It imports typed Owner/Actor contracts without Identity
-persistence and treats ownership, attribution, Object IDs, and digests as non-authoritative
-references. Kernel, privacy filesystem behavior, career domains, Event Bus, Planner, Memory,
-Capability Registry, and operational tooling remain separate.
+The completed reference remains within ADR-007's structural and record-lifecycle responsibility.
+The seven required family tuples are deterministic and code-owned. Six entity families deliberately
+have closed empty payloads, preventing Phase 6 schema invention. RelationshipObject is the sole
+persisted edge truth and admits exactly the approved directed combinations; missing, reversed,
+wrong-family, wrong-owner, unavailable, and self endpoints fail closed. No entity has an embedded
+relationship collection.
 
-ACJ-1 behavior is deterministic and non-mutating. It rejects unsupported numeric kinds, NF-1
-overflow, non-NFC/invalid scalar strings, duplicate raw members, malformed identifiers/timestamps,
-unknown envelope fields, unsupported versions/schemas, and integrity mismatch. AION Frame v1 uses
-the registered object-integrity purpose and SHA-256 descriptor metadata; digest comparison is
-constant-time. Tests cover insertion independence, UTF-16 member ordering, raw UTF-8 rejection,
-domain separation, content sensitivity, and adapter failure.
+Operations are explicit and revision-oriented. Initial creation and every append use the repository
+port, immutable full-envelope snapshots, expected revision, retained provenance, and shared commit
+validation. There is no unrestricted mutation, delete, query, search, policy, event, planner, or
+synchronization surface. Owner and Actor identifiers remain references and confer no authority.
 
-DG-4a boundaries are tested exactly at and one unit beyond every implemented surface on both raw
-and structured paths where applicable. The repository validates before mutation, requires expected
-revision, advances once, preserves history, and has one winner for competing same-revision commits.
-It has no durable adapter and creates no real Object state, so Phase 3 path validation is correctly
-left at the future adapter boundary.
+The local filesystem adapter imports the Phase 3 privacy boundary at the adapter edge. Its fixed
+versioned layout is rooted only beneath an explicitly supplied absolute `private/object-store` path;
+validated opaque IDs become domain-separated SHA-256 path keys. Same-directory exclusive temporary
+writes are flushed and installed by a no-overwrite hard link. Only the creating writer removes its
+temporary file, closing a competing-writer cleanup race. Exact ACJ-1 bytes, envelope integrity,
+registered schema, Object/path identity, revision continuity, immutable fields, lifecycle, and
+provenance are revalidated on every load. Kernel and Identity persistence remain separate.
 
-ADR-009 is respected: all values are ordinary synthetic unit-test inputs. No fixture corpus,
-normative vector, second-runtime claim, or conformance certification exists. DG-3 stays Open. No
-Object workload limits were invented; DG-4b stays Open. The Object Contract stays Pre-stable.
+ADR-008 and ADR-010 DG-4a behavior is reused without widening the value domain or limits. ADR-009 is
+respected: tests use ordinary deterministic synthetic values, not normative fixtures or cross-runtime
+conformance evidence. DG-3 remains Open. The adapter has no representative workload, crash-durability,
+graph-cardinality, or permanent storage evidence, so DG-4b remains Open and the Object Contract
+remains Pre-stable.
 
-Residual risks are the absent second runtime and normative corpus, unmeasured Object/domain
-workloads, no portable durable aggregate/outbox, no immutable Version/Event Object materialization,
-no persistent adapter, and deferred schema/extension namespace governance. These are explicitly
-outside Phase 5 and block broader conformance or production-readiness claims, not this local
-reference recommendation.
+The focused threat review found no authentication, authorization, network, telemetry, database,
+vector store, real Identity-state access, real Object state, career ingestion, Phase 6 template, or
+later-subsystem integration. Residual risks are local filesystem tampering/deletion, digest
+recomputation without authenticity, platform-specific directory-flush semantics, absence of a
+multi-Object aggregate/outbox, graph-wide uniqueness, encryption, and measured crash recovery.
+These block production claims but do not block this bounded Phase 5 reference.
 
-Local evidence before commit was 80 aggregate product tests and 36 Object tests, including focused
-counts of 10 unit, 6 canonical, 7 repository, 9 resource-limit, and 4 architecture tests. Identity
-remained 32/32, control-plane 22/22, collections 8/8, and privacy 15 passed with one truthful Windows
-`EPERM` file-symlink skip. Backup-reference regression, backup dry run, and PowerShell syntax checks
-also passed. Final push, clean real-repository gate, durable backup, and isolated restore remain
-mandatory completion evidence and do not alter the recommendation unless one fails.
+Local implementation evidence is 65 Object tests: 10 unit, six canonical, 19 repository, nine
+resource-limit, five family, six RelationshipObject, five explicit-operation, and five architecture
+tests. Full repository, control-plane, privacy, backup, push, and isolated-restore evidence is
+reported in the completion handoff; any failure there invalidates this recommendation.

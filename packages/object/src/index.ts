@@ -37,7 +37,56 @@ export {
   SystemObjectClock,
   validateObjectEnvelopeV1,
 } from "./object.js";
-export { InMemoryObjectRepositoryV1 } from "./repository.js";
+export { InMemoryObjectRepositoryV1, validateObjectCommitV1 } from "./repository.js";
+export { deriveObjectStorageKeyV1, FileObjectRepositoryV1 } from "./file-repository.js";
+export type { FileObjectRepositoryHooksV1, FileObjectRepositoryOptionsV1 } from "./file-repository.js";
+export {
+  APPLICATION_DRAFT_OBJECT_V1,
+  CAREER_ENTITY_FAMILY_REGISTRATIONS_V1,
+  CAREER_FACT_OBJECT_V1,
+  CAREER_PROFILE_OBJECT_V1,
+  CAREER_SOURCE_OBJECT_V1,
+  CareerObjectSchemaRegistryV1,
+  isCareerEntityRegistrationV1,
+  JOB_MATCH_REPORT_OBJECT_V1,
+  JOB_POSTING_OBJECT_V1,
+  OBJECT_FAMILY_REGISTRATIONS_V1,
+  RELATIONSHIP_DESCRIPTORS_V1,
+  RELATIONSHIP_OBJECT_V1,
+  relationshipDescriptorV1,
+  relationshipEndpointV1,
+  validateRelationshipObjectDataV1,
+} from "./families.js";
+export type {
+  ApplicationDraftObjectV1,
+  CareerEntityRegistrationV1,
+  CareerFactObjectV1,
+  CareerFamilyDataV1,
+  CareerProfileObjectV1,
+  CareerSourceObjectV1,
+  JobMatchReportObjectV1,
+  JobPostingObjectV1,
+  RelationshipDescriptorV1,
+  RelationshipEndpointV1,
+  RelationshipKindV1,
+  RelationshipObjectDataV1,
+  RelationshipObjectV1,
+} from "./families.js";
+export {
+  appendObjectRevisionV1,
+  appendRelationshipRevisionV1,
+  createInitialObjectV1,
+  createRelationshipObjectV1,
+  loadCurrentObjectV1,
+  loadObjectRevisionV1,
+} from "./operations.js";
+export type {
+  AppendObjectRevisionRequestV1,
+  AppendRelationshipRevisionRequestV1,
+  CreateInitialObjectRequestV1,
+  CreateRelationshipObjectRequestV1,
+  ObjectOperationPortsV1,
+} from "./operations.js";
 export { ObjectErrorV1 } from "./contracts.js";
 export type {
   CanonicalValueV1,

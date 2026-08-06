@@ -3,8 +3,10 @@
 Status: **Accepted** — [ADR-007](../decisions/ADR-007-universal-object-model.md),
 2026-08-06  
 Contract family: Object version 1, **pre-stable**; not designated stable v1  
-Implementation: Bounded mutable-profile reference implemented in Sprint 3 Phase 5; full contract
-remains frozen outside [CTO-DECISION-009](../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
+Implementation: Bounded mutable-profile, seven-family, RelationshipObject, and local filesystem
+reference implemented in Sprint 3 Phase 5; full contract remains frozen outside
+[CTO-DECISION-009](../decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md) and
+[CTO-DECISION-010](../decisions/CTO-DECISION-010-phase-5-completion.md)
 
 ## Architectural intent
 
@@ -210,7 +212,8 @@ new Object contract major version, coexistence, migration, and rollback.
 
 ADR-007 was accepted on 2026-08-06 as an architecture-boundary decision. The contract
 family is normative but pre-stable, and no implementation followed from ADR acceptance alone. The
-bounded Phase 5 reference follows from the later CTO-DECISION-009. See
+bounded Phase 5 reference follows from the later CTO-DECISION-009 and its scope correction in
+CTO-DECISION-010. The filesystem adapter remains non-production reference evidence. See
 [ADR-007 §Approval effect](../decisions/ADR-007-universal-object-model.md#approval-effect)
 for what acceptance does and does not authorize, and the
 [Sprint 2.5 acceptance criteria](../sprints/sprint-2.5/acceptance-criteria.md)

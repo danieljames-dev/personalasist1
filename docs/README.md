@@ -39,6 +39,7 @@ remains Open. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
 - [ADR-007: Universal Object Model](decisions/ADR-007-universal-object-model.md) — Accepted
 - [CTO-DECISION-002: Sprint 2.5 approval](decisions/CTO-DECISION-002-sprint-2.5-approval.md)
 - [CTO-DECISION-009: Phase 4 approval and Object reference authorization](decisions/CTO-DECISION-009-phase-4-approval-and-object-reference.md)
+- [CTO-DECISION-010: Phase 5 completion scope correction](decisions/CTO-DECISION-010-phase-5-completion.md)
 - [Object Model architecture](architecture/object-model.md)
 
 ### Normative contracts
@@ -48,6 +49,8 @@ remains Open. DG-3 and DG-4b remain Open; DG-2 and DG-4a are Closed.
 - [Object Event Contract](contracts/object-events.md)
 - [Object Relationship Contract](contracts/object-relationships.md)
 - [Object Versioning Contract](contracts/object-versioning.md)
+- [Career Object Family Reference v1](contracts/career-object-family-reference-v1.md)
+- [RelationshipObject Reference v1](contracts/relationship-object-reference-v1.md)
 
 ### Security and sprint records
 
@@ -152,14 +155,20 @@ ingestion, or implicit later-phase authority. DG-1a is Closed; DG-1b remains Ope
 ## Sprint 3.0 Phase 5: minimum Object reference
 
 - [Minimum Object Reference Contract v1](contracts/object-reference-v1.md)
+- [Career Object Family Reference v1](contracts/career-object-family-reference-v1.md)
+- [RelationshipObject Reference v1](contracts/relationship-object-reference-v1.md)
 - [Object reference implementation](implementation/object-reference.md)
+- [Bounded filesystem repository](implementation/object-filesystem-reference.md)
+- [Filesystem repository threat model](security/object-filesystem-threat-model.md)
 - [Phase 5 record](sprints/sprint-3.0-career-vertical-slice/phase-5-object-reference.md)
 - [Phase 5 architecture and security review](reviews/sprint-3.0-phase-5-object-review.md) — APPROVE
 
-Phase 5 implements a domain-neutral, local `@aion/object` reference with typed Identity references,
-closed mutable-profile envelopes, ACJ-1 framing/integrity, exact DG-4a limits, and an in-memory
-revision repository. No real Object state or career type exists. The Object Contract remains
-Pre-stable; DG-3 and DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
+Phase 5 implements the local `@aion/object` reference with typed Identity references, closed
+mutable-profile envelopes, ACJ-1 framing/integrity, exact DG-4a limits, seven versioned family
+boundaries, RelationshipObject as sole edge truth, explicit operations, and in-memory plus bounded
+privacy-validated filesystem reference repositories. Detailed career payload schemas remain
+deferred and no real Object or career data exists. The Object Contract remains Pre-stable; DG-3 and
+DG-4b remain Open; normative fixtures and Phase 6 remain unauthorized.
 
 ## Reviews
 
