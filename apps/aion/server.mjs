@@ -7,8 +7,10 @@ import {
   AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
   FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
+  VerificationCapabilityV1, digestValue,
 } from "../../packages/local-assistant/dist/index.js";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
+import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 
 const ASSETS = new Map([["/", ["index.html", "text/html; charset=utf-8"]], ["/app.js", ["app.js", "text/javascript; charset=utf-8"]], ["/styles.css", ["styles.css", "text/css; charset=utf-8"]]]);
 const MAX_BODY = 1024 * 1024;
@@ -75,6 +77,7 @@ export async function createAionServer(options = {}) {
   const exportRoot = resolve(options.exportRoot ?? join(dataRoot, "exports"));
   const developerAgents = options.developerAgents
     ?? (options.developerBridge ? new SelectableDeveloperAgentRegistryV1([options.developerBridge]) : await resolveDeveloperAgentBridges(repositoryRoot));
+  const verificationRunner = options.verificationRunner ?? new AllowlistedVerificationRunnerV1(repositoryRoot, digestValue);
   const service = new AionAssistantV1({
     repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
     providers: options.providers ?? [
@@ -82,7 +85,7 @@ export async function createAionServer(options = {}) {
       new BoundaryModelProviderV1("remote-generic", "remote", "Configure an approved remote adapter and a session credential before this boundary can be used. AION ships no remote client."),
       new BoundaryModelProviderV1("local-model", "local", "No supported local model runtime is configured on this computer."),
     ],
-    capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot)]),
+    capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
   });
@@ -116,6 +119,9 @@ export async function createAionServer(options = {}) {
       case "plan.convert": return service.convertPlanToTasks(input.id);
       case "action.propose": return service.proposeAction(input.capabilityId, input.input ?? {});
       case "developer.health": return { bridges: await service.developerBridgeInventory(true) };
+      // There is no endpoint that submits verification evidence: executing the approved capability
+      // is the only way a record can appear, so an analysis always cites a command AION really ran.
+      case "verify.analyse": return service.proposeVerificationAnalysis(input.id, input.question);
       case "action.execute": return service.executeAction(input.id);
       case "action.cancel": return service.cancelAction(input.id);
       case "approval.decide": return service.decideApproval(input.id, input.approve === true);
@@ -147,6 +153,7 @@ export async function createAionServer(options = {}) {
         return json(response, 200, {
           state: await service.snapshot(), providers: await service.providerHealth(), capabilities: service.capabilities(),
           developerBridge: await service.developerBridgeStatus(), developerBridges: await service.developerBridgeInventory(),
+          verificationOperations: verificationRunner.operations(),
           dataRoot: "private/aion", exportRoot: "private/aion/exports",
         });
       }

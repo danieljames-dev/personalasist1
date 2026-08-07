@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -6,7 +6,8 @@ import test from "node:test";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
   DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
-  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
+  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, SyntheticVerificationRunnerV1,
+  VerificationCapabilityV1,
 } from "../../packages/local-assistant/dist/index.js";
 import { createAionServer } from "../../apps/aion/server.mjs";
 
@@ -16,11 +17,13 @@ const repositoryRoot = resolve(import.meta.dirname, "..", "..");
 async function withServer(run) {
   const root = await mkdtemp(join(tmpdir(), "aion-server-test-"));
   const developerAgents = new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]);
+  // A synthetic verification runner: the suite must never actually shell out to npm or git.
+  const verificationRunner = new SyntheticVerificationRunnerV1({ "npm.verify": { exitCode: 1, stdout: "not ok 3 - synthetic failure\n# fail 1\n" } });
   const app = await createAionServer({
     repositoryRoot, dataRoot: join(root, "private", "aion"), exportRoot: join(root, "private", "aion", "exports"),
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
-    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot)]),
-    developerAgents,
+    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
+    developerAgents, verificationRunner,
   });
   const address = await app.listen(0);
   try { return await run({ app, address, base: `http://127.0.0.1:${address.port}`, root }); }
@@ -48,7 +51,7 @@ test("the state endpoint exposes providers, the capability registry, and no abso
   await withServer(async ({ base }) => {
     const state = await (await fetch(`${base}/api/state`)).json();
     assert.equal(state.dataRoot, "private/aion");
-    assert.deepEqual(state.capabilities.map((c) => c.id).sort(), ["aion.developer.task.v1", "aion.local.echo.v1"]);
+    assert.deepEqual(state.capabilities.map((c) => c.id).sort(), ["aion.developer.task.v1", "aion.local.echo.v1", "aion.verify.run.v1"]);
     assert.equal(state.providers[0].id, "deterministic");
     assert.equal(state.developerBridge.available, true);
     assert.doesNotMatch(JSON.stringify(state), /[A-Za-z]:\\/u, "no absolute local path reaches the browser");
@@ -175,11 +178,41 @@ test("Settings select a registered developer bridge and reject an unregistered o
   });
 });
 
+test("the verification loop runs end to end over the loopback API without any shell reaching a model", async () => {
+  await withServer(async ({ base }) => {
+    await post(base, { type: "onboarding.complete" });
+    const state = await (await fetch(`${base}/api/state`)).json();
+    assert.ok(state.verificationOperations.length >= 2, "the allowlist is published for the owner to read");
+    assert.ok(state.verificationOperations.every((o) => o.readOnly === true));
+
+    for (const bad of [{ command: "npm publish" }, { operationId: "npm.publish" }, { operationId: "npm.verify", args: ["--evil"] }]) {
+      const refused = await post(base, { type: "action.propose", capabilityId: "aion.verify.run.v1", input: bad });
+      assert.equal(refused.status, 400, `refused: ${JSON.stringify(bad)}`);
+    }
+
+    const proposed = await (await post(base, { type: "action.propose", capabilityId: "aion.verify.run.v1", input: { operationId: "npm.verify" } })).json();
+    assert.equal(proposed.result.action.state, "awaiting-approval");
+    assert.equal((await post(base, { type: "action.execute", id: proposed.result.action.id })).status, 400, "verification is approval-gated");
+    await post(base, { type: "approval.decide", id: proposed.result.approval.id, approve: true });
+    const evidence = await (await post(base, { type: "action.execute", id: proposed.result.action.id })).json();
+    assert.equal(evidence.result.outcome, "failed");
+
+    const withEvidence = await (await fetch(`${base}/api/state`)).json();
+    const run = withEvidence.state.verifications[0];
+    assert.equal(run.operationId, "npm.verify");
+    assert.equal(run.resultDigest.length, 64);
+
+    const analysis = await (await post(base, { type: "verify.analyse", id: run.id, question: "What failed?" })).json();
+    assert.equal(analysis.result.action.input.mode, "read-only", "analysing evidence never escalates to write access");
+    assert.match(String(analysis.result.action.input.instruction), /not ok 3 - synthetic failure/u);
+  });
+});
+
 test("UI exposes every required owner-facing area and needs no hosted dependency", async () => {
   const html = await readFile(join(repositoryRoot, "apps/aion/public/index.html"), "utf8");
   const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
   const css = await readFile(join(repositoryRoot, "apps/aion/public/styles.css"), "utf8");
-  for (const area of ["Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Activity", "Career", "Imports", "Settings"]) {
+  for (const area of ["Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"]) {
     assert.match(js, new RegExp(`"${area}"`, "u"), `the ${area} area must exist`);
   }
   for (const [name, text] of [["index.html", html], ["app.js", js], ["styles.css", css]]) {

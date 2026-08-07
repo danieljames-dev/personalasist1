@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * Complete AION V1 synthetic product proof.
  *
@@ -14,7 +14,8 @@ import { join, resolve } from "node:path";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
   DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
-  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
+  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, SyntheticVerificationRunnerV1,
+  VerificationCapabilityV1,
 } from "../packages/local-assistant/dist/index.js";
 import { createAionServer } from "./aion/server.mjs";
 
@@ -24,12 +25,15 @@ function proved(label) { steps.push(label); console.log(`  ok  ${label}`); }
 
 async function open(dataRoot, exportRoot) {
   const developerAgents = new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]);
+  const verificationRunner = new SyntheticVerificationRunnerV1({
+    "npm.verify": { exitCode: 1, stdout: "ok 1 - a passing thing\nnot ok 2 - the synthetic failing assertion\n# tests 2\n# pass 1\n# fail 1\n" },
+  });
   const app = await createAionServer({
     repositoryRoot, dataRoot, exportRoot,
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(),
     providers: [new DeterministicModelProviderV1()],
-    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot)]),
-    developerAgents,
+    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
+    developerAgents, verificationRunner,
   });
   const address = await app.listen(0);
   assert.equal(address.address, "127.0.0.1", "the Command Center must bind loopback only");
@@ -67,7 +71,7 @@ async function scenario(root, announce) {
     assert.equal(initial.state.onboardingComplete, false);
     assert.equal(initial.dataRoot, "private/aion");
     assert.equal(initial.providers[0].available, true);
-    assert.deepEqual(initial.capabilities.map((c) => c.id).sort(), ["aion.developer.task.v1", "aion.local.echo.v1"]);
+    assert.deepEqual(initial.capabilities.map((c) => c.id).sort(), ["aion.developer.task.v1", "aion.local.echo.v1", "aion.verify.run.v1"]);
     say("Command Center starts on loopback, reports provider health, and lists its capability registry");
 
     await call("onboarding.complete");
@@ -155,6 +159,25 @@ async function scenario(root, announce) {
     }
     say("every discovered developer bridge discloses its exact argument vector, and no instruction text ever becomes an argument");
 
+    await assert.rejects(call("action.propose", { capabilityId: "aion.verify.run.v1", input: { command: "npm publish" } }), /must not carry a "command" field/u);
+    await assert.rejects(call("action.propose", { capabilityId: "aion.verify.run.v1", input: { operationId: "npm.publish" } }), /not on the allowlist/u);
+    const verifyProposal = await call("action.propose", { capabilityId: "aion.verify.run.v1", input: { operationId: "npm.verify" } });
+    assert.match(verifyProposal.approval.summary, /AION owns this command/u);
+    await call("approval.decide", { id: verifyProposal.approval.id, approve: true });
+    const evidence = await call("action.execute", { id: verifyProposal.action.id });
+    assert.equal(evidence.outcome, "failed");
+    assert.equal(evidence.resultDigest.length, 64);
+    const recorded = (await view()).state.verifications[0];
+    assert.equal(recorded.operationId, "npm.verify");
+    say("AION runs an allowlisted read-only verification itself; a command, argument vector, or unknown operation is refused outright");
+
+    const analysis = await call("verify.analyse", { id: recorded.id, question: "Which test failed?" });
+    assert.equal(analysis.action.input.mode, "read-only");
+    assert.match(String(analysis.action.input.instruction), /not ok 2 - the synthetic failing assertion/u);
+    await call("approval.decide", { id: analysis.approval.id, approve: true });
+    assert.equal((await call("action.execute", { id: analysis.action.id })).mode, "read-only");
+    say("the failing evidence is handed to a read-only developer agent for analysis, with no shell and no write access anywhere in the path");
+
     const archive = join(imports, "conversations.json");
     await writeFile(archive, JSON.stringify([{ title: "Imported neutral chat", mapping: {
       a: { message: { author: { role: "user" }, content: { parts: ["Neutral question"] }, create_time: 1 } },
@@ -222,14 +245,14 @@ async function careerIntegration(root) {
 
 const roots = [];
 try {
-  console.log("\nAION V1 synthetic product demo — neutral data, no owner content, no network, no live provider\n");
+  console.log("\nAION V1 synthetic product demo â€” neutral data, no owner content, no network, no live provider\n");
   for (const name of ["aion-v1-demo-a-", "aion-v1-demo-b-", "aion-v1-demo-career-"]) roots.push(await mkdtemp(join(tmpdir(), name)));
   const first = await scenario(roots[0], true);
   const second = await scenario(roots[1], false);
   assert.deepEqual(first, second, "an identical run must produce identical local state");
   proved("a second independent run produces byte-identical state: AION V1 is deterministic");
   await careerIntegration(roots[2]);
-  console.log(`\nAION V1 synthetic demo PASS — ${steps.length} product behaviours proved.`);
+  console.log(`\nAION V1 synthetic demo PASS â€” ${steps.length} product behaviours proved.`);
   console.log("No owner data, external account, live provider, network call, or permanent state was used or left behind.\n");
 } finally {
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));

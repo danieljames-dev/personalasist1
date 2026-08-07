@@ -1,5 +1,5 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Activity", "Career", "Imports", "Settings"];
+const areas = ["Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"];
 let model = null;
 let area = "Chat";
 let streaming = "";
@@ -109,6 +109,19 @@ ${cards(s.plans, (p) => `<article class="card"><h2>${esc(p.goal)}</h2><p class="
 <div class="actions">${p.status === "proposed" ? `<button data-do="plan-accept" data-id="${esc(p.id)}">Accept plan</button>` : ""}${p.status === "accepted" ? `<button data-do="plan-convert" data-id="${esc(p.id)}">Convert steps to Tasks</button>` : ""}</div></article>`)}`;
 }
 
+function verifyArea(s) {
+  const operations = model.verificationOperations ?? [];
+  const runs = s.verifications ?? [];
+  return `<h1>Verify</h1><p class="lead">AION runs these itself. Each one is chosen from a fixed allowlist written in the repository — there is no command box, and nothing a model says can become part of a command.</p>
+<p class="hint">This is how you get “run the tests and tell me what failed” without giving a developer agent a shell or write access: AION produces the evidence, then a <em>read-only</em> agent analyses it.</p>
+${operations.length ? `<form data-form="verify"><label>Operation<select name="operationId">${operations.map((o) => `<option value="${esc(o.id)}">${esc(o.label)} — ${esc(o.displayCommand)}</option>`).join("")}</select></label>
+<p class="meta">${operations.map((o) => `<code>${esc(o.displayCommand)}</code>`).join(" · ")} — all read-only.</p><button>Propose verification</button></form>` : `<div class="empty">No verification tooling is available on this computer.</div>`}
+${cards(runs, (r) => `<article class="card"><h2>${esc(r.operationId)} · ${esc(r.outcome)}</h2>
+<p class="meta"><code>${esc(r.displayCommand)}</code> · exit ${r.exitCode}${r.timedOut ? " · timed out" : ""} · ${r.durationMs} ms · ${esc(r.startedAt)} · digest ${esc(short(r.resultDigest))}${r.truncated ? " · output truncated" : ""}</p>
+<details><summary>Evidence</summary><pre>${esc((r.stdout || "") + (r.stderr ? `\n${r.stderr}` : "") || "(no output)")}</pre></details>
+<form data-form="verify-analyse"><input type="hidden" name="id" value="${esc(r.id)}"><label>Ask a read-only developer agent about this run<input name="question" maxlength="500" value="Explain what is failing and why."></label><button>Propose read-only analysis</button></form></article>`, "No verification has been run yet. Propose one above.")}`;
+}
+
 function approvalsArea(s) {
   const capabilities = model.capabilities ?? [];
   return `<h1>Approvals</h1><p class="lead">One decision authorises one exact capability and one exact input digest. A changed input needs a new approval, and the model can never approve its own proposal.</p>
@@ -200,6 +213,7 @@ function page() {
   if (area === "Memory") return memoryArea(s);
   if (area === "Planner") return plannerArea(s);
   if (area === "Approvals") return approvalsArea(s);
+  if (area === "Verify") return verifyArea(s);
   if (area === "Activity") return activityArea(s);
   if (area === "Career") return careerArea();
   if (area === "Imports") return importsArea(s);
@@ -269,6 +283,8 @@ document.addEventListener("submit", async (event) => {
     if (kind === "plan") await api("plan.create", { goal: d.goal, steps: d.steps.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).map((title) => ({ title })) });
     if (kind === "action") await api("action.propose", { capabilityId: "aion.local.echo.v1", input: { text: d.text } });
     if (kind === "developer-task") await api("action.propose", { capabilityId: "aion.developer.task.v1", input: { instruction: d.instruction, mode: d.mode === "workspace-write" ? "workspace-write" : "read-only" } });
+    if (kind === "verify") { await api("action.propose", { capabilityId: "aion.verify.run.v1", input: { operationId: d.operationId } }); toast("Verification proposed. Approve it in Approvals, then execute — AION runs it, not a model."); }
+    if (kind === "verify-analyse") { await api("verify.analyse", { id: d.id, question: d.question }); toast("Read-only analysis proposed. Approve it in Approvals to send the evidence to the developer agent."); }
     if (kind === "import") await api("import.dry-run", { platform: d.platform, root: d.root, path: d.path });
     if (kind === "import-execute") await api("import.execute", { id: d.id, root: d.root, path: d.path });
     if (kind === "backup") { const result = await api("backup.create", { destination: d.destination, passphrase: d.passphrase }); toast(`Backup written and verified (${result.bytes} bytes).`); }

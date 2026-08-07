@@ -231,6 +231,8 @@ export interface AssistantStateV1 {
   approvals: ApprovalV1[];
   activity: ActivityV1[];
   imports: ImportReportV1[];
+  /** Evidence from allowlisted verification runs, newest first. Bounded on every write. */
+  verifications: VerificationRunV1[];
 }
 
 export interface StateRepositoryV1 {
@@ -301,6 +303,58 @@ export interface DeveloperAgentRegistryV1 {
   selected(): DeveloperAgentBridgeV1;
   /** An empty id restores AION's default preference. An unregistered id must fail closed. */
   select(id: string): void;
+}
+
+/**
+ * The complete set of verification operations AION will ever run, as a closed union.
+ *
+ * This is the whole point of the type: a caller — including a model — selects an operation by
+ * identifier. There is no command string, no argument list, and no shell anywhere in the input, so
+ * there is nothing for instruction text to be injected into. AION owns the actual commands.
+ */
+export type VerificationOperationIdV1 =
+  | "git.status"
+  | "git.diff.check"
+  | "npm.verify"
+  | "npm.aion.demo"
+  | "npm.career.demo"
+  | "npm.audit";
+
+export const VERIFICATION_OPERATION_IDS: readonly VerificationOperationIdV1[] = [
+  "git.status", "git.diff.check", "npm.verify", "npm.aion.demo", "npm.career.demo", "npm.audit",
+];
+
+export interface VerificationOperationV1 {
+  readonly id: VerificationOperationIdV1;
+  readonly label: string;
+  readonly description: string;
+  /** Display only, so the owner can read what will run. Never parsed and never reassembled. */
+  readonly displayCommand: string;
+  readonly timeoutMs: number;
+  /** Whether the operation only reads. Every allowlisted operation must be non-mutating. */
+  readonly readOnly: true;
+}
+
+export interface VerificationRunV1 {
+  id: OpaqueId;
+  operationId: VerificationOperationIdV1;
+  displayCommand: string;
+  startedAt: IsoTimestamp;
+  completedAt: IsoTimestamp;
+  durationMs: number;
+  exitCode: number;
+  timedOut: boolean;
+  outcome: "passed" | "failed";
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  resultDigest: string;
+}
+
+export interface VerificationRunnerV1 {
+  operations(): readonly VerificationOperationV1[];
+  get(id: string): VerificationOperationV1 | null;
+  run(id: VerificationOperationIdV1, signal: AbortSignal): Promise<Omit<VerificationRunV1, "id">>;
 }
 
 export interface ImportSourceV1 {

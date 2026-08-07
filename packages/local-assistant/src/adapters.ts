@@ -7,8 +7,9 @@ import type {
   DeveloperAgentBridgeV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1, DeveloperAgentStatusV1,
   IdGeneratorV1, ImportReportV1, ImportSourceV1, ModelProviderV1,
   ModelRequestV1, PrivateBackupV1, StateRepositoryV1,
+  VerificationOperationIdV1, VerificationOperationV1, VerificationRunV1, VerificationRunnerV1,
 } from "./contracts.js";
-import { PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX } from "./contracts.js";
+import { PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS } from "./contracts.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -80,7 +81,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       importRoots: [], exportRoot: "", credentialEnvironmentVariable: "", developerBridgeId: "",
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
-    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [],
+    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [],
   };
 }
 export function validateStateV1(value: unknown): AssistantStateV1 {
@@ -93,6 +94,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   // Additive V1 settings default forward: state written before a setting existed keeps working
   // without a migration, and never silently acquires a value the owner did not choose.
   if (typeof clone.settings.developerBridgeId !== "string") clone.settings.developerBridgeId = "";
+  if (!Array.isArray(clone.verifications)) clone.verifications = [];
   return clone;
 }
 
@@ -263,6 +265,70 @@ export class DeveloperAgentCapabilityV1 implements CapabilityV1 {
     if (!status.modes.includes(mode)) fail(`The selected developer bridge cannot run a ${mode} task.`);
     const result = await bridge.run({ repositoryRoot: this.approvedRepositoryRoot, instruction: String(input.instruction), mode }, signal);
     return { bridgeId: bridge.id, mode, exitCode: result.exitCode, summary: result.summary.slice(-20_000) };
+  }
+}
+
+/**
+ * The bounded verification capability.
+ *
+ * This exists so that "run the tests and tell me what failed" never requires giving a
+ * conversational developer agent shell or write access. The capability accepts one thing: the
+ * identifier of an operation AION already knows. It rejects any command, argument, or shell field
+ * outright rather than ignoring it, so an attempt to smuggle one is a visible failure rather than
+ * a silent no-op. AION owns the commands; the model owns nothing but the choice among them.
+ */
+export class VerificationCapabilityV1 implements CapabilityV1 {
+  readonly id = "aion.verify.run.v1";
+  readonly privacy = "private" as const;
+  readonly approval = "always" as const;
+  readonly timeoutMs = 1_800_000;
+  readonly maxRetries = 0;
+  /** Fields that would only ever be an attempt to supply a command. Their presence is an error. */
+  private static readonly FORBIDDEN = ["command", "commandLine", "args", "argv", "shell", "script", "exec", "run", "cwd", "env", "path"];
+  constructor(private readonly runner: VerificationRunnerV1) {}
+  summarize(input: Record<string, unknown>): string {
+    const operation = this.runner.get(String(input.operationId ?? ""));
+    return operation
+      ? `Run the allowlisted read-only verification "${operation.label}" (${operation.displayCommand}). AION owns this command; it was chosen from a fixed list and no part of it came from a model.`
+      : "Run an unrecognised verification operation. This will be refused.";
+  }
+  validate(input: Record<string, unknown>): void {
+    for (const key of VerificationCapabilityV1.FORBIDDEN) {
+      if (key in input) fail(`Verification input must not carry a "${key}" field; operations are chosen by identifier, never supplied as a command.`);
+    }
+    if (typeof input.operationId !== "string" || !this.runner.get(input.operationId)) fail("Verification operation is not on the allowlist.");
+    const extra = Object.keys(input).filter((key) => key !== "operationId");
+    if (extra.length) fail(`Verification input accepts only operationId; unexpected field(s): ${extra.join(", ")}.`);
+  }
+  async execute(input: Record<string, unknown>, _context: CapabilityContextV1, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const operation = this.runner.get(String(input.operationId));
+    if (!operation) fail("Verification operation is not on the allowlist.");
+    const run = await this.runner.run(operation.id, signal);
+    return { ...run };
+  }
+}
+
+/** Deterministic verification runner for tests and the demo. It starts no process. */
+export class SyntheticVerificationRunnerV1 implements VerificationRunnerV1 {
+  constructor(private readonly outcomes: Partial<Record<VerificationOperationIdV1, { exitCode: number; stdout: string; stderr?: string }>> = {}) {}
+  operations(): readonly VerificationOperationV1[] {
+    return VERIFICATION_OPERATION_IDS.map((id) => ({
+      id, label: `Synthetic ${id}`, description: "Synthetic bounded verification operation.",
+      displayCommand: `synthetic ${id}`, timeoutMs: 5000, readOnly: true as const,
+    }));
+  }
+  get(id: string): VerificationOperationV1 | null { return this.operations().find((operation) => operation.id === id) ?? null; }
+  async run(id: VerificationOperationIdV1, signal: AbortSignal): Promise<Omit<VerificationRunV1, "id">> {
+    if (signal.aborted) fail("Verification cancelled.");
+    const scripted = this.outcomes[id] ?? { exitCode: 0, stdout: `synthetic ${id} completed\n# pass 1\n# fail 0\n` };
+    const startedAt = "2030-01-01T00:00:00.000Z";
+    const stdout = scripted.stdout; const stderr = scripted.stderr ?? "";
+    return {
+      operationId: id, displayCommand: `synthetic ${id}`, startedAt, completedAt: startedAt, durationMs: 0,
+      exitCode: scripted.exitCode, timedOut: false, outcome: scripted.exitCode === 0 ? "passed" : "failed",
+      stdout, stderr, truncated: false,
+      resultDigest: digestValue({ operationId: id, exitCode: scripted.exitCode, stdout, stderr }),
+    };
   }
 }
 

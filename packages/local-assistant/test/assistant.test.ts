@@ -9,9 +9,10 @@ import {
   DeveloperAgentCapabilityV1, FileStateRepositoryV1, InMemoryStateRepositoryV1,
   LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1,
-  SyntheticDeveloperAgentBridgeV1, UnavailableDeveloperAgentBridgeV1,
+  SyntheticDeveloperAgentBridgeV1, SyntheticVerificationRunnerV1,
+  UnavailableDeveloperAgentBridgeV1, VerificationCapabilityV1,
 } from "../src/index.js";
-import type { ClockV1, DeveloperAgentBridgeV1 } from "../src/index.js";
+import type { CapabilityV1, ClockV1, DeveloperAgentBridgeV1 } from "../src/index.js";
 
 /** A clock the test drives explicitly, for expiry and retention behaviour. */
 class SteppableClock implements ClockV1 {
@@ -20,14 +21,14 @@ class SteppableClock implements ClockV1 {
   advance(milliseconds: number): void { this.instant += milliseconds; }
 }
 
-async function fixture(overrides: { clock?: ClockV1; bridges?: readonly DeveloperAgentBridgeV1[] } = {}) {
+async function fixture(overrides: { clock?: ClockV1; bridges?: readonly DeveloperAgentBridgeV1[]; capabilities?: readonly CapabilityV1[] } = {}) {
   const root = await mkdtemp(join(tmpdir(), "aion-assistant-test-"));
   const exports = join(root, "exports"); await mkdir(exports);
   const developerAgents = new SelectableDeveloperAgentRegistryV1(overrides.bridges ?? [new SyntheticDeveloperAgentBridgeV1()]);
   const service = new AionAssistantV1({
     repository: new InMemoryStateRepositoryV1(), clock: overrides.clock ?? new DeterministicClockV1(),
     ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
-    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, root)]),
+    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, root), ...(overrides.capabilities ?? [])]),
     importer: new LocalArchiveImportSourceV1(), backup: new NodePrivateBackupV1(exports), developerAgents,
   });
   return { root, exports, service, developerAgents };
@@ -304,6 +305,66 @@ test("an unavailable developer bridge reports truthfully and refuses to run", as
   await service.decideApproval(proposed.approval!.id, true);
   await assert.rejects(service.executeAction(proposed.action.id));
   assert.equal((await service.snapshot()).actions.find((item) => item.id === proposed.action.id)?.state, "failed");
+});
+
+/** Runs one allowlisted verification the only way it can be run: proposed, approved, executed. */
+async function runVerification(service: AionAssistantV1, operationId: string) {
+  const proposed = await service.proposeAction("aion.verify.run.v1", { operationId });
+  await service.decideApproval(proposed.approval!.id, true);
+  await service.executeAction(proposed.action.id);
+  return (await service.snapshot()).verifications[0]!;
+}
+
+test("verification evidence is recorded, audited, and bounded", async () => {
+  const runner = new SyntheticVerificationRunnerV1({ "npm.verify": { exitCode: 1, stdout: "not ok 7 - a failing thing\n# tests 10\n# pass 9\n# fail 1\n" } });
+  const { service } = await fixture({ capabilities: [new VerificationCapabilityV1(runner)] });
+  const recorded = await runVerification(service, "npm.verify");
+  assert.equal(recorded.operationId, "npm.verify");
+  assert.equal(recorded.outcome, "failed");
+  assert.equal(recorded.resultDigest.length, 64);
+  const state = await service.snapshot();
+  const audited = state.activity.find((entry) => entry.action === "verify.run");
+  assert.ok(audited, "an allowlisted verification run is audited");
+  assert.equal(audited?.outcome, "failed");
+  assert.match(audited!.summary, /npm\.verify failed \(exit 1\)/u);
+  assert.equal(typeof (service as unknown as { recordVerification?: unknown }).recordVerification, "undefined", "evidence cannot be submitted directly; only an executed capability produces it");
+});
+
+test("verification evidence becomes a read-only analysis task that needs no shell or write access", async () => {
+  const runner = new SyntheticVerificationRunnerV1({ "npm.verify": { exitCode: 1, stdout: "ok 1 - fine\nnot ok 7 - the failing assertion\n# tests 10\n# pass 9\n# fail 1\n" } });
+  const { service } = await fixture({ capabilities: [new VerificationCapabilityV1(runner)] });
+  const recorded = await runVerification(service, "npm.verify");
+
+  const proposed = await service.proposeVerificationAnalysis(recorded.id, "Which test failed and why?");
+  assert.equal(proposed.action.capabilityId, "aion.developer.task.v1");
+  assert.equal(proposed.action.input.mode, "read-only", "analysing evidence never needs write access");
+  assert.equal(proposed.action.state, "awaiting-approval");
+  const instruction = String(proposed.action.input.instruction);
+  assert.match(instruction, /not ok 7 - the failing assertion/u, "the failing line is handed to the analyst");
+  assert.match(instruction, /Which test failed and why\?/u);
+  assert.match(instruction, /You have no shell and no write access/u);
+  assert.ok(instruction.length <= 4000, "the instruction stays inside the capability bound");
+
+  await assert.rejects(service.executeAction(proposed.action.id), /one-shot/iu, "analysis is still approval-gated");
+  await service.decideApproval(proposed.approval!.id, true);
+  assert.equal((await service.executeAction(proposed.action.id) as { mode: string }).mode, "read-only");
+  await assert.rejects(service.proposeVerificationAnalysis("not-a-run"), /was not found/iu);
+});
+
+test("the verification capability is the only way a model can cause a command to run", async () => {
+  const runner = new SyntheticVerificationRunnerV1();
+  const capability = new VerificationCapabilityV1(runner);
+  assert.equal(capability.approval, "always", "a verification run always needs the owner's decision");
+  // A provider proposal is validated by exactly the same rules as an owner one.
+  const { service } = await fixture({ capabilities: [new VerificationCapabilityV1(runner)] });
+  await assert.rejects(service.proposeAction("aion.verify.run.v1", { command: "npm publish" }), /must not carry a "command" field/u);
+  await assert.rejects(service.proposeAction("aion.verify.run.v1", { operationId: "npm.publish" }), /not on the allowlist/u);
+  const proposed = await service.proposeAction("aion.verify.run.v1", { operationId: "npm.audit" });
+  assert.equal(proposed.action.state, "awaiting-approval");
+  await service.decideApproval(proposed.approval!.id, true);
+  const result = await service.executeAction(proposed.action.id) as { operationId: string; outcome: string };
+  assert.equal(result.operationId, "npm.audit");
+  assert.equal(result.outcome, "passed");
 });
 
 test("archive dry run detects duplicates and import preserves conversation boundaries", async () => {

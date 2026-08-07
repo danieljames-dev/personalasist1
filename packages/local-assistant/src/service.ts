@@ -3,7 +3,7 @@ import type {
   ChatTurnV1, ClockV1, ConversationV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1,
   DeveloperAgentStatusV1, IdGeneratorV1, ImportReportV1,
   ImportSourceV1, MemoryV1, ModelProviderV1, PlanV1, PrivateBackupV1, RoutineV1, SettingsV1,
-  StateRepositoryV1, TaskStateV1, TaskV1,
+  StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1,
 } from "./contracts.js";
 import { PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX } from "./contracts.js";
 import { createEmptyStateV1, digestValue } from "./adapters.js";
@@ -53,6 +53,22 @@ function subjectKey(content: string): string {
   return (colon > 0 ? normalized.slice(0, colon) : normalized.split(" ").slice(0, 4).join(" ")).trim();
 }
 const CAREER_COMMANDS: readonly string[] = ["init", "ingest", "profile", "job:import", "match", "draft", "export", "demo"];
+const VERIFICATION_CAPABILITY_ID = "aion.verify.run.v1";
+
+/**
+ * Picks the part of a verification transcript worth analysing. A full suite run is far larger than
+ * a bounded instruction, and the useful signal is the failures plus the trailing summary, so both
+ * are kept in order and the bulk of the passing output is dropped.
+ */
+function salientEvidence(run: VerificationRunV1, budget = 2600): string {
+  const lines = `${run.stdout}\n${run.stderr}`.split(/\r?\n/u);
+  const interesting = /^(?:not ok|#\s*(?:tests|pass|fail|skipped)|.*(?:error|Error|AssertionError|FAIL|failed|✗)\b)/u;
+  const failures = lines.filter((line) => interesting.test(line));
+  const tail = lines.slice(-40);
+  const selected = [...new Set([...failures, ...tail])].filter((line) => line.trim());
+  const text = selected.join("\n");
+  return text.length > budget ? text.slice(-budget) : text || "(the operation produced no output)";
+}
 
 /**
  * Splits provider text into the message the owner sees and the proposals AION must revalidate.
@@ -283,7 +299,11 @@ export class AionAssistantV1 {
     try {
       const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("Capability timeout.")); }, capability.timeoutMs); });
       const result = await Promise.race([capability.execute(action.input, { clock: this.ports.clock, ids: this.ports.ids }, controller.signal), timeout]);
-      await this.mutate((draft) => { const current = find(draft.actions, id, "Agent action"); current.state = "succeeded"; current.updatedAt = this.ports.clock.now(); current.result = structuredClone(result); this.activity(draft, "agent", "action.succeed", "Bounded capability succeeded.", id); }); return result;
+      await this.mutate((draft) => { const current = find(draft.actions, id, "Agent action"); current.state = "succeeded"; current.updatedAt = this.ports.clock.now(); current.result = structuredClone(result); this.activity(draft, "agent", "action.succeed", "Bounded capability succeeded.", id); });
+      // Evidence can only originate from a capability that actually ran. There is deliberately no
+      // path for a caller to submit a verification record directly, so a result cannot be forged.
+      if (action.capabilityId === VERIFICATION_CAPABILITY_ID) await this.#recordVerification(result as unknown as Omit<VerificationRunV1, "id">);
+      return result;
     } catch (error) { await this.mutate((draft) => { const current = find(draft.actions, id, "Agent action"); current.state = controller.signal.aborted ? "cancelled" : "failed"; current.updatedAt = this.ports.clock.now(); current.error = "Capability execution failed; private details omitted."; this.activity(draft, "failure", "action.fail", current.error, id, "failed"); }); throw error; }
     finally { if (timer) clearTimeout(timer); this.controllers.delete(`action:${id}`); }
   }
@@ -298,6 +318,42 @@ export class AionAssistantV1 {
     return this.mutate((state) => { const report = find(state.imports, reportId, "Import report"); for (const imported of result.conversations) { const at = this.ports.clock.now(); const conversation: ConversationV1 = { id: this.ports.ids.next("conversation"), title: required(imported.title, "Imported conversation title", 500), state: "archived", memoryContextEnabled: false, createdAt: at, updatedAt: at, messages: imported.messages.map((message) => ({ id: this.ports.ids.next("message"), role: message.role, content: required(message.content, "Imported message", 100_000), createdAt: message.at && !Number.isNaN(Date.parse(message.at)) ? new Date(message.at).toISOString() : at, providerId: `import:${prior.platform}` })) }; state.conversations.push(conversation); report.importedConversationIds.push(conversation.id); } report.state = "imported"; this.activity(state, "import", "import.complete", `${report.importedConversationIds.length} conversation(s) imported with provenance.`, report.id); return structuredClone(report); });
   }
   async cancelImport(reportId: string): Promise<void> { await this.mutate((state) => { const report = find(state.imports, reportId, "Import report"); if (report.state !== "dry-run") throw new Error("Only a dry run can be cancelled."); report.state = "cancelled"; this.activity(state, "import", "import.cancel", "Import cancelled before source mutation.", report.id); }); }
+  /**
+   * Persists the evidence from one allowlisted verification run. Called only by `executeAction`
+   * after the capability itself produced the result, so recorded evidence always corresponds to a
+   * command AION actually ran under an approval.
+   */
+  async #recordVerification(run: Omit<VerificationRunV1, "id">): Promise<VerificationRunV1> {
+    return this.mutate((state) => {
+      const record: VerificationRunV1 = { id: this.ports.ids.next("verification"), ...structuredClone(run) };
+      state.verifications.unshift(record);
+      if (state.verifications.length > 50) state.verifications.length = 50;
+      this.activity(state, "agent", "verify.run", `Allowlisted verification ${record.operationId} ${record.outcome} (exit ${record.exitCode}) in ${record.durationMs} ms.`, record.id, record.outcome === "passed" ? "success" : "failed");
+      return structuredClone(record);
+    });
+  }
+  /**
+   * Turns verification evidence into a read-only developer-agent proposal.
+   *
+   * The agent is given the evidence AION already captured, not permission to gather it. This is
+   * the whole reason the verification capability exists: analysing a failing suite needs the
+   * output, not a shell. The instruction is data on standard input and is still bounded, still
+   * digest-bound, and still requires its own approval.
+   */
+  async proposeVerificationAnalysis(verificationId: string, question = "Explain what is failing and why."): Promise<{ action: AgentActionV1; approval: ApprovalV1 | null }> {
+    const state = await this.snapshot();
+    const run = find(state.verifications, verificationId, "Verification run");
+    const instruction = [
+      `Analyse the following verification evidence that AION captured by running an allowlisted, read-only command itself. You have no shell and no write access, and you do not need them.`,
+      `Operation: ${run.operationId} (${run.displayCommand})`,
+      `Outcome: ${run.outcome}; exit code ${run.exitCode}${run.timedOut ? "; timed out" : ""}; duration ${run.durationMs} ms.`,
+      `Question: ${required(question, "Analysis question", 500)}`,
+      run.truncated ? "The evidence below is truncated to its most recent output." : "",
+      "--- evidence ---",
+      salientEvidence(run),
+    ].filter(Boolean).join("\n").slice(0, 4000);
+    return this.proposeAction("aion.developer.task.v1", { instruction, mode: "read-only" }, { origin: "owner" });
+  }
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
   async verifyPrivateBackup(destination: string, passphrase: string): Promise<AssistantStateV1> { const state = await this.ports.backup.restore(destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.verify", "Encrypted private backup integrity and restore validated.", null); }); return state; }
 }
