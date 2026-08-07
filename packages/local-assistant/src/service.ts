@@ -13,6 +13,14 @@ import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buil
 import { buildRelationship, queryRelationships } from "./relationships.js";
 import type { WorkspaceV1 } from "./workspaces.js";
 import { applyWorkspaceEdit, assertSameWorkspace, buildBrandProduct, buildWorkspace, requireWorkspace } from "./workspaces.js";
+import { buildClaim, promoteClaim, supersedeClaim } from "./knowledge.js";
+import type { OpportunityV1 } from "./product-studio.js";
+import {
+  applyOpportunityEdit, buildCompetitorNote, buildExperiment, buildOpportunity, buildSpecification,
+  completeExperiment, opportunityAssessment,
+} from "./product-studio.js";
+import type { ResearchJobV1, ResearchProviderV1, UrlVerdictV1 } from "./research.js";
+import { applyResearchResult, buildResearchJob, evaluateResearchUrl, researchSummary } from "./research.js";
 import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
@@ -26,6 +34,8 @@ type AssistantPorts = {
   importer: ImportSourceV1;
   backup: PrivateBackupV1;
   developerAgents: DeveloperAgentRegistryV1;
+  /** Optional. Absent means AION has no way to research anything, which is the default. */
+  research?: ResearchProviderV1;
 };
 const TASK_TRANSITIONS: Record<TaskStateV1, readonly TaskStateV1[]> = {
   proposed: ["ready", "cancelled"], ready: ["in-progress", "blocked", "completed", "cancelled"],
@@ -674,6 +684,237 @@ export class AionAssistantV1 {
     const customer = this.#findRelationship(state, id);
     return { customer, last: lastInteraction(customer), nextAction: { action: customer.nextAction, at: customer.nextActionAt } };
   }
+
+  // --- Product Studio ---------------------------------------------------------------------------
+  /**
+   * Product Studio operations are workspace-scoped like everything else, and every one of them
+   * refuses to invent market evidence. AION can hold a hypothesis and score how well supported an
+   * opportunity is; it cannot tell the owner what customers want, and does not pretend to.
+   */
+  #findOpportunity(state: AssistantStateV1, id: string): OpportunityV1 {
+    const found = find(state.opportunities, id, "Opportunity");
+    assertSameWorkspace(found, state.settings.activeWorkspace, "opportunity");
+    return found;
+  }
+  #replaceOpportunity(state: AssistantStateV1, updated: OpportunityV1): OpportunityV1 {
+    state.opportunities = state.opportunities.map((entry) => entry.id === updated.id ? updated : entry);
+    return structuredClone(updated);
+  }
+  async createOpportunity(input: Record<string, unknown> = {}): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, state.settings.activeWorkspace);
+      if (state.opportunities.length >= 500) throw new Error("AION holds at most 500 opportunities.");
+      const opportunity = buildOpportunity(input, { id: this.ports.ids.next("opportunity"), workspace: workspace.id, now: this.ports.clock.now() });
+      state.opportunities.unshift(opportunity);
+      this.activity(state, "plan", "opportunity.create", `Opportunity "${opportunity.title}" opened in "${workspace.label}". It scores zero until something is actually established about it.`, opportunity.id);
+      return structuredClone(opportunity);
+    });
+  }
+  async updateOpportunity(id: string, change: Record<string, unknown> = {}): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const updated = applyOpportunityEdit(this.#findOpportunity(state, id), change, this.ports.clock.now());
+      this.activity(state, "plan", "opportunity.update", `Opportunity "${updated.title}" updated.`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  /**
+   * Records something known, assumed, or guessed about an opportunity.
+   *
+   * The class is required and is enforced by `knowledge.ts`: a model cannot record a fact, and a
+   * class that only means something with a citation cannot be recorded without one.
+   */
+  async addOpportunityClaim(id: string, input: Record<string, unknown> = {}, actor: "owner" | "provider-proposal" | "research" = "owner"): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      if (opportunity.claims.length >= 500) throw new Error("An opportunity holds at most 500 claims.");
+      const claim = buildClaim(input, {
+        id: this.ports.ids.next("claim"), workspace: opportunity.workspace, now: this.ports.clock.now(),
+        actor, sourceRef: actor === "owner" ? "owner-entry" : `${actor}:${id}`,
+      });
+      const updated = { ...structuredClone(opportunity), claims: [...opportunity.claims, claim], updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.claim", `Recorded a ${claim.class} on "${opportunity.title}". Its class is stored, so a guess cannot later be quoted as a finding.`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  /** Owner-only. Promotion is the moment a belief changes, and it is recorded as such. */
+  async promoteOpportunityClaim(id: string, claimId: string, to: string, reason: string): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      const claim = find(opportunity.claims, claimId, "Claim");
+      const promoted = promoteClaim(claim, to, reason, this.ports.clock.now());
+      const updated = { ...structuredClone(opportunity), claims: opportunity.claims.map((entry) => entry.id === claimId ? promoted : entry), updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.claim.promote", `You promoted a ${claim.class} to a ${promoted.class} on "${opportunity.title}". The previous class stays in its history.`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  async supersedeOpportunityClaim(id: string, claimId: string, replacementId: string | null = null): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      const claim = find(opportunity.claims, claimId, "Claim");
+      const superseded = supersedeClaim(claim, replacementId, this.ports.clock.now());
+      const updated = { ...structuredClone(opportunity), claims: opportunity.claims.map((entry) => entry.id === claimId ? superseded : entry), updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.claim.supersede", "A claim is no longer believed. It is kept, disabled, and pointed at whatever replaced it.", id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  async addCompetitorNote(id: string, input: Record<string, unknown> = {}): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      const note = buildCompetitorNote(input, { id: this.ports.ids.next("competitor"), now: this.ports.clock.now() });
+      const updated = { ...structuredClone(opportunity), competitors: [...opportunity.competitors, note], updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.competitor", `Competitor note recorded (${note.sourceRef}). AION did not look this up.`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  async addExperiment(id: string, input: Record<string, unknown> = {}): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      const experiment = buildExperiment(input, { id: this.ports.ids.next("experiment"), now: this.ports.clock.now() });
+      if (experiment.hypothesisId) find(opportunity.claims, experiment.hypothesisId, "Hypothesis");
+      const updated = { ...structuredClone(opportunity), experiments: [...opportunity.experiments, experiment], updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.experiment", `Experiment "${experiment.title}" proposed with its success criteria written down first.`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  async completeExperiment(id: string, experimentId: string, status: string, result = ""): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      const experiment = find(opportunity.experiments, experimentId, "Experiment");
+      const completed = completeExperiment(experiment, status, result, this.ports.clock.now());
+      const updated = { ...structuredClone(opportunity), experiments: opportunity.experiments.map((entry) => entry.id === experimentId ? completed : entry), updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.experiment.result", `Experiment "${experiment.title}" recorded as ${completed.status}. A refuted result counts the same as a supported one.`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  async setOpportunitySpecification(id: string, input: Record<string, unknown> = {}): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      const updated = { ...structuredClone(opportunity), specification: buildSpecification(input, this.ports.clock.now()), updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "opportunity.specify", `Specification written for "${opportunity.title}".`, id);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  /** The honest read: the score, the arithmetic behind it, and what is still only assumed. */
+  async assessOpportunity(id: string): Promise<ReturnType<typeof opportunityAssessment> & { opportunity: OpportunityV1 }> {
+    const state = await this.snapshot();
+    const opportunity = this.#findOpportunity(state, id);
+    return { ...opportunityAssessment(opportunity), opportunity };
+  }
+  async opportunities(): Promise<OpportunityV1[]> {
+    const state = await this.snapshot();
+    return state.opportunities.filter((entry) => entry.workspace === state.settings.activeWorkspace).map((entry) => structuredClone(entry));
+  }
+
+  // --- Governed research ------------------------------------------------------------------------
+  /**
+   * Proposes a research job. Proposing runs nothing: the job records the question, the scope, the
+   * limits and the sources the owner supplied, and then waits for an approval like any other
+   * consequential action.
+   */
+  async proposeResearchJob(input: Record<string, unknown> = {}): Promise<ResearchJobV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, state.settings.activeWorkspace);
+      const job = buildResearchJob(input, { id: this.ports.ids.next("research"), workspace: workspace.id, now: this.ports.clock.now() });
+      state.researchJobs.unshift(job);
+      if (state.researchJobs.length > 200) state.researchJobs.length = 200;
+      const provider = this.ports.research;
+      this.activity(state, "agent", "research.propose", `Research job proposed in "${workspace.label}": ${job.scope} scope, at most ${job.limits.maxSources} source(s), at most ${job.limits.maxCostCents} cent(s). ${provider ? `Provider ${provider.id}${provider.reachesNetwork ? " reaches the network" : " performs no network request"}.` : "No research provider is configured, so this cannot run."}`, job.id, "pending");
+      return structuredClone(job);
+    });
+  }
+  /**
+   * Runs an approved job.
+   *
+   * The state machine is the governance: a job can only run from `approved`, an approval is the
+   * owner's act, and a job that has already produced a result cannot be re-run into a different
+   * one. Every finding is checked against the sources the provider actually returned before it is
+   * stored, so a citation always points at something.
+   */
+  async approveResearchJob(id: string): Promise<ResearchJobV1> {
+    return this.mutate((state) => {
+      const job = find(state.researchJobs, id, "Research job");
+      assertSameWorkspace(job, state.settings.activeWorkspace, "research job");
+      if (job.state !== "proposed") throw new Error("Only a proposed research job can be approved.");
+      job.state = "approved";
+      this.activity(state, "approval", "research.approve", `Research job approved: "${job.question}".`, id);
+      return structuredClone(job);
+    });
+  }
+  async runResearchJob(id: string): Promise<ResearchJobV1> {
+    const snapshot = await this.snapshot();
+    const pending = find(snapshot.researchJobs, id, "Research job");
+    if (pending.state !== "approved") throw new Error("A research job must be approved before it runs.");
+    // A job that cannot run because nothing is configured is refused, recorded, and left approved
+    // rather than marked failed. Nothing about it was wrong, and it should run unchanged once the
+    // owner configures a provider — forcing them to propose it again would be pure ceremony.
+    const provider = this.ports.research;
+    const health = provider ? await provider.health() : { available: false, detail: "No research provider is configured. AION ships without one and will not reach the internet until you configure an owner-controlled provider." };
+    if (!health.available) {
+      await this.mutate((state) => { this.activity(state, "agent", "research.unavailable", `Research job "${pending.question}" could not run: ${health.detail} The job stays approved and will run unchanged once a provider is configured.`, id, "denied"); });
+      throw new Error(health.detail);
+    }
+
+    const controller = new AbortController();
+    this.controllers.set(`research:${id}`, controller);
+    const timer = setTimeout(() => controller.abort(), pending.limits.maxDurationMs);
+    try {
+      await this.mutate((state) => { find(state.researchJobs, id, "Research job").state = "running"; });
+      const raw = await provider!.run({ question: pending.question, scope: pending.scope, limits: pending.limits, seedReferences: pending.seedReferences, signal: controller.signal });
+      return await this.mutate((state) => {
+        const job = find(state.researchJobs, id, "Research job");
+        const { job: completed, dropped } = applyResearchResult(job, raw, { now: this.ports.clock.now(), nextId: (kind) => this.ports.ids.next(kind), digest: digestValue });
+        state.researchJobs = state.researchJobs.map((entry) => entry.id === id ? completed : entry);
+        this.activity(state, "agent", "research.complete", `${researchSummary(completed)}${dropped ? ` ${dropped} uncited finding(s) were discarded.` : ""} Provider ${provider!.id}; ${completed.costCents} cent(s) spent.`, id);
+        return structuredClone(completed);
+      });
+    } catch (error) {
+      await this.mutate((state) => {
+        const job = find(state.researchJobs, id, "Research job");
+        job.state = "failed";
+        job.failureReason = "The research job failed or was cancelled; private details are omitted.";
+        job.completedAt = this.ports.clock.now();
+        this.activity(state, "failure", "research.fail", job.failureReason, id, "failed");
+      });
+      throw error;
+    } finally { clearTimeout(timer); this.controllers.delete(`research:${id}`); }
+  }
+  cancelResearchJob(id: string): boolean { const controller = this.controllers.get(`research:${id}`); if (!controller) return false; controller.abort(); return true; }
+  /**
+   * Carries a research finding into an opportunity as a typed claim.
+   *
+   * This is the only path from research into Product Studio, and it deliberately cannot produce a
+   * fact: a finding arrives as the class the provider gave it, cites the job it came from, and
+   * waits for the owner to promote it if they check it.
+   */
+  async adoptResearchFinding(jobId: string, findingId: string, opportunityId: string): Promise<OpportunityV1> {
+    const snapshot = await this.snapshot();
+    const job = find(snapshot.researchJobs, jobId, "Research job");
+    if (job.state !== "complete") throw new Error("Only a completed research job has findings to adopt.");
+    const finding = find(job.findings, findingId, "Finding");
+    const sources = finding.sourceIds.map((sourceId) => find(job.sources, sourceId, "Source").reference);
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, opportunityId);
+      assertSameWorkspace(job, opportunity.workspace, "research job");
+      const claim = buildClaim(
+        { class: finding.class, statement: finding.statement, confidence: finding.confidence, supportedBy: [`research:${jobId}`, ...sources] },
+        { id: this.ports.ids.next("claim"), workspace: opportunity.workspace, now: this.ports.clock.now(), actor: "research", sourceRef: `research:${jobId}` },
+      );
+      const updated = {
+        ...structuredClone(opportunity),
+        claims: [...opportunity.claims, claim],
+        researchJobIds: opportunity.researchJobIds.includes(jobId) ? opportunity.researchJobIds : [...opportunity.researchJobIds, jobId],
+        updatedAt: this.ports.clock.now(),
+      };
+      this.activity(state, "plan", "opportunity.research", `A research ${claim.class} was carried into "${opportunity.title}" with its sources. It is not a fact until you say so.`, opportunityId);
+      return this.#replaceOpportunity(state, updated);
+    });
+  }
+  async researchJobs(): Promise<ResearchJobV1[]> {
+    const state = await this.snapshot();
+    return state.researchJobs.filter((entry) => entry.workspace === state.settings.activeWorkspace).map((entry) => structuredClone(entry));
+  }
+  /** What a research provider would be allowed to fetch, decided before anything is requested. */
+  checkResearchUrl(candidate: string): UrlVerdictV1 { return evaluateResearchUrl(candidate); }
 
   // --- Sales coaching, routine templates, and owner-entered metrics ---------------------------
   /**

@@ -7,7 +7,7 @@ import {
   AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
   FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
-  VerificationCapabilityV1, digestValue, validateBindAddress,
+  UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
@@ -129,6 +129,9 @@ export async function createAionServer(options = {}) {
     capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
+    // AION ships with no research provider at all. A default that could already reach the
+    // internet would make "governed research" a label rather than a property.
+    research: options.research ?? new UnavailableResearchProviderV1(),
   });
 
   async function dispatch(input) {
@@ -176,6 +179,26 @@ export async function createAionServer(options = {}) {
       // The general Relationship Core. Scoped to the active workspace, whichever one that is.
       case "relationship.create": return service.createRelationship(input.relationship ?? {});
       case "relationship.find": return { relationships: await service.findRelationships(input.query ?? { kind: "all" }) };
+      // Product Studio. Nothing here invents market evidence, and every claim carries its class.
+      case "opportunity.create": return service.createOpportunity(input.opportunity ?? {});
+      case "opportunity.update": return service.updateOpportunity(input.id, input.change ?? {});
+      case "opportunity.claim": return service.addOpportunityClaim(input.id, input.claim ?? {});
+      case "opportunity.claim.promote": return service.promoteOpportunityClaim(input.id, input.claimId, input.to, input.reason);
+      case "opportunity.claim.supersede": return service.supersedeOpportunityClaim(input.id, input.claimId, input.replacementId ?? null);
+      case "opportunity.competitor": return service.addCompetitorNote(input.id, input.competitor ?? {});
+      case "opportunity.experiment": return service.addExperiment(input.id, input.experiment ?? {});
+      case "opportunity.experiment.result": return service.completeExperiment(input.id, input.experimentId, input.status, input.result ?? "");
+      case "opportunity.specify": return service.setOpportunitySpecification(input.id, input.specification ?? {});
+      case "opportunity.assess": return service.assessOpportunity(input.id);
+      case "opportunity.list": return { opportunities: await service.opportunities() };
+      // Governed research. Proposing runs nothing; a job runs only after the owner approves it.
+      case "research.propose": return service.proposeResearchJob(input.job ?? {});
+      case "research.approve": return service.approveResearchJob(input.id);
+      case "research.run": return service.runResearchJob(input.id);
+      case "research.cancel": return { cancelled: service.cancelResearchJob(input.id) };
+      case "research.adopt": return service.adoptResearchFinding(input.id, input.findingId, input.opportunityId);
+      case "research.list": return { jobs: await service.researchJobs() };
+      case "research.check-url": return service.checkResearchUrl(String(input.url ?? ""));
       // Sales-facing relationship operations. Every one of these refuses outside the Work workspace.
       case "customer.create": return service.createCustomer(input.customer ?? {});
       case "customer.update": return service.updateCustomer(input.id, input.change ?? {});

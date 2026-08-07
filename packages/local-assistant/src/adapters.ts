@@ -12,6 +12,7 @@ import type {
 } from "./contracts.js";
 import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS, WORKSPACE_IDS } from "./contracts.js";
 import { builtInWorkspaces } from "./workspaces.js";
+import type { ResearchLimitsV1, ResearchProviderV1, ResearchScopeV1, ResearchSourceV1 } from "./research.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -89,7 +90,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
-    workspaces: builtInWorkspaces(GENESIS), relationships: [],
+    workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
@@ -227,6 +228,8 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.migrations)) clone.migrations = [];
   if (!Array.isArray(clone.workspaces) || !clone.workspaces.length) clone.workspaces = builtInWorkspaces(GENESIS, clone.settings.workspaceLabels ?? {});
   if (!Array.isArray(clone.relationships)) clone.relationships = [];
+  if (!Array.isArray(clone.opportunities)) clone.opportunities = [];
+  if (!Array.isArray(clone.researchJobs)) clone.researchJobs = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
@@ -464,6 +467,66 @@ export class SyntheticVerificationRunnerV1 implements VerificationRunnerV1 {
       stdout, stderr, truncated: false,
       resultDigest: digestValue({ operationId: id, exitCode: scripted.exitCode, stdout, stderr }),
     };
+  }
+}
+
+/**
+ * The research provider AION ships with: none.
+ *
+ * A default configuration that could already reach the internet would make "governed research" a
+ * label rather than a property. This adapter exists so the port is always populated and always
+ * reports the truth — there is nothing configured, so nothing can be fetched.
+ */
+export class UnavailableResearchProviderV1 implements ResearchProviderV1 {
+  readonly id = "none";
+  readonly reachesNetwork = false;
+  constructor(private readonly detail = "No research provider is configured. AION ships without one, so it cannot reach the internet until you configure an owner-controlled provider and approve a job.") {}
+  async health(): Promise<{ available: boolean; detail: string }> { return { available: false, detail: this.detail }; }
+  async run(): Promise<never> { fail(this.detail); }
+}
+
+/**
+ * A deterministic research provider for tests and the demo. It starts no request and opens no
+ * socket: it answers from a scripted corpus keyed by the seed references it was given, so the
+ * research pipeline — limits, citations, dropped findings, digests — can be proved end to end
+ * without the machine ever talking to anything.
+ */
+export class SyntheticResearchProviderV1 implements ResearchProviderV1 {
+  readonly id = "synthetic";
+  readonly reachesNetwork = false;
+  constructor(private readonly corpus: Record<string, { title: string; body: string }> = {}) {}
+  async health(): Promise<{ available: boolean; detail: string }> {
+    return { available: true, detail: `Synthetic research provider with ${Object.keys(this.corpus).length} scripted source(s). It performs no network request.` };
+  }
+  async run(request: { question: string; scope: ResearchScopeV1; limits: ResearchLimitsV1; seedReferences: readonly string[]; signal: AbortSignal }) {
+    if (request.signal.aborted) fail("Research cancelled.");
+    const sources: Array<Omit<ResearchSourceV1, "id">> = [];
+    for (const reference of request.seedReferences.slice(0, request.limits.maxSources)) {
+      const entry = this.corpus[reference];
+      if (!entry) continue;
+      const body = Buffer.from(entry.body, "utf8");
+      const truncated = body.byteLength > request.limits.maxBytesPerSource;
+      const kept = truncated ? body.subarray(0, request.limits.maxBytesPerSource) : body;
+      sources.push({
+        reference, title: entry.title, retrievedVia: `${this.id} (no network)`,
+        retrievedAt: "2030-01-01T00:00:00.000Z", bytes: kept.byteLength, truncated,
+        digest: createHash("sha256").update(kept).digest("hex"),
+      });
+    }
+    // Findings are derived mechanically from the corpus so the same corpus always yields the same
+    // result. A source whose body does not mention the question yields an explicit non-finding.
+    const needle = request.question.toLowerCase();
+    const findings = sources
+      .filter((source) => this.corpus[source.reference]!.body.toLowerCase().includes(needle.split(/\s+/u)[0] ?? ""))
+      .map((source) => ({
+        statement: `${source.title} discusses "${request.question}".`,
+        class: "observation" as const,
+        sourceReferences: [source.reference],
+        confidence: 60,
+        caveat: "A single synthetic source. This is what one document says, not what is true.",
+      }));
+    const unresolved = findings.length ? [] : [`Nothing in the supplied sources addresses "${request.question}".`];
+    return { sources, findings, unresolved, costCents: 0 };
   }
 }
 

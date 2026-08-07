@@ -1,3 +1,5 @@
+import type { OpportunityV1 } from "./product-studio.js";
+import type { ResearchJobV1 } from "./research.js";
 import type { WorkspaceV1 } from "./workspaces.js";
 
 export type OpaqueId = string;
@@ -520,6 +522,10 @@ export interface AssistantStateV1 {
   workspaces: WorkspaceV1[];
   /** Durable relationship records across every workspace. Isolation is by `workspace`. */
   relationships: RelationshipV1[];
+  /** Product Studio opportunities. Each carries its own typed claims rather than loose prose. */
+  opportunities: OpportunityV1[];
+  /** Governed research jobs, newest first. Bounded on every write. */
+  researchJobs: ResearchJobV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
