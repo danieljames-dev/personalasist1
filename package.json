@@ -9,7 +9,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present && npm run career:test",
+    "test": "npm run test --workspaces --if-present && npm run career:test && npm run aion:server:test",
     "test:backup-refs": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-backup-ref-policy.ps1",
     "control-plane:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane.ps1",
     "control-plane:test-collections": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane-collections.ps1",
@@ -84,6 +84,11 @@
     "career:export": "npm run career:build && node apps/career-cli.mjs export",
     "career:demo": "npm run career:build && node apps/career-cli.mjs demo",
     "career:test": "npm run career:build && node --test \"test/career-cli/**/*.test.mjs\"",
+    "aion:build": "npm run build --workspace @aion/local-assistant",
+    "aion": "npm run aion:build --silent && node apps/aion-command-center.mjs",
+    "aion:test": "npm run test --workspace @aion/local-assistant && npm run aion:server:test",
+    "aion:server:test": "npm run aion:build --silent && node --test \"test/aion/**/*.test.mjs\"",
+    "aion:demo": "npm run career:build --silent && npm run aion:build --silent && node apps/aion-demo.mjs",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {

@@ -1,0 +1,172 @@
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import {
+  AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
+  FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
+  RandomIdGeneratorV1, StaticCapabilityRegistryV1, SystemClockV1,
+} from "../../packages/local-assistant/dist/index.js";
+import { resolveDeveloperAgentBridge } from "./developer-agent.mjs";
+
+const ASSETS = new Map([["/", ["index.html", "text/html; charset=utf-8"]], ["/app.js", ["app.js", "text/javascript; charset=utf-8"]], ["/styles.css", ["styles.css", "text/css; charset=utf-8"]]]);
+const MAX_BODY = 1024 * 1024;
+const ASSET_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+const CAREER_COMMANDS = new Set(["init", "ingest", "profile", "job:import", "match", "draft", "export", "demo"]);
+const runFile = promisify(execFile);
+
+/** Removes absolute local paths from any text that reaches the browser, logs, or activity. */
+function privacySafe(text) {
+  return String(text ?? "").replace(/\\\\[^\s"'<>|]+/gu, "[local path]").replace(/[A-Za-z]:[\\/][^\s"'<>|]*/gu, "[local path]");
+}
+function absolute(value, label) {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be an explicit path.`);
+  const normalized = resolve(value);
+  if (normalized !== value) throw new Error(`${label} must already be a normalized absolute path.`);
+  return normalized;
+}
+
+/**
+ * The only bridge from the Command Center to the accepted Career engine. The command is
+ * allow-listed, arguments are fixed and explicit, and no shell is used.
+ */
+async function runCareer(repositoryRoot, input) {
+  if (!CAREER_COMMANDS.has(input.command)) throw new Error("Unsupported Career command.");
+  const args = [join(repositoryRoot, "apps", "career-cli.mjs"), input.command];
+  if (input.command !== "demo") args.push("--root", absolute(input.root, "Career root"));
+  const valueFlag = { ingest: "--input", "job:import": "--input", match: "--job", draft: "--match", export: "--output" }[input.command];
+  if (valueFlag) { if (typeof input.value !== "string" || !input.value.trim() || input.value.length > 4096) throw new Error("Career command requires an explicit value."); args.push(valueFlag, input.value); }
+  if (input.type && input.command === "ingest") { if (!/^[a-z][a-z0-9-]{0,63}$/u.test(input.type)) throw new Error("Career source type is invalid."); args.push("--type", input.type); }
+  if (input.dryRun && input.command !== "demo") args.push("--dry-run");
+  try {
+    const result = await runFile(process.execPath, args, { cwd: repositoryRoot, timeout: 300_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, shell: false });
+    return { command: input.command, exitCode: 0, output: privacySafe(result.stdout).trim().slice(-20_000) };
+  } catch (error) {
+    const detail = privacySafe(`${error?.stdout ?? ""}\n${error?.stderr ?? error?.message ?? ""}`).trim().slice(-20_000);
+    const failure = new Error(detail || "Career command failed."); failure.careerCommand = input.command; throw failure;
+  }
+}
+
+function json(response, status, body) {
+  const data = JSON.stringify(body);
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(data), "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" });
+  response.end(data);
+}
+async function body(request) {
+  const chunks = []; let size = 0;
+  for await (const chunk of request) { size += chunk.length; if (size > MAX_BODY) throw new Error("Request body exceeds the 1 MiB limit."); chunks.push(chunk); }
+  if (!chunks.length) return {};
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Request body must be a JSON object.");
+  return parsed;
+}
+function sameOrigin(request, address) {
+  const host = request.headers.host; const origin = request.headers.origin;
+  if (!host || !new Set([`127.0.0.1:${address.port}`, `localhost:${address.port}`]).has(host.toLowerCase())) return false;
+  return !origin || new Set([`http://127.0.0.1:${address.port}`, `http://localhost:${address.port}`]).has(origin.toLowerCase());
+}
+
+export async function createAionServer(options = {}) {
+  const repositoryRoot = resolve(options.repositoryRoot ?? resolve(import.meta.dirname, "..", ".."));
+  const dataRoot = resolve(options.dataRoot ?? join(repositoryRoot, "private", "aion"));
+  const exportRoot = resolve(options.exportRoot ?? join(dataRoot, "exports"));
+  const developerBridge = options.developerBridge ?? await resolveDeveloperAgentBridge(repositoryRoot);
+  const service = new AionAssistantV1({
+    repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
+    providers: options.providers ?? [
+      new DeterministicModelProviderV1(),
+      new BoundaryModelProviderV1("remote-generic", "remote", "Configure an approved remote adapter and a session credential before this boundary can be used. AION ships no remote client."),
+      new BoundaryModelProviderV1("local-model", "local", "No supported local model runtime is configured on this computer."),
+    ],
+    capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerBridge, repositoryRoot)]),
+    importer: options.importer ?? new LocalArchiveImportSourceV1(),
+    backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerBridge,
+  });
+
+  async function dispatch(input) {
+    switch (input.type) {
+      case "onboarding.complete": return service.completeOnboarding();
+      case "settings.update": return service.updateSettings(input.settings ?? {});
+      case "conversation.create": return service.createConversation(input.title);
+      case "conversation.update": return service.updateConversation(input.id, input.change ?? {});
+      case "conversation.delete": return service.deleteConversation(input.id);
+      case "chat.send": return service.sendMessage(input.id, input.content);
+      case "chat.cancel": return service.cancelChat(input.id);
+      case "memory.create": return service.createMemory(input.memory ?? {});
+      case "memory.search": return service.searchMemories(input.query);
+      case "memory.correct": return service.correctMemory(input.id, input.content, input.reason);
+      case "memory.accept": return service.acceptMemory(input.id);
+      case "memory.enable": return service.setMemoryEnabled(input.id, input.enabled === true);
+      case "memory.delete": return service.forgetMemory(input.id);
+      case "memory.export": return { export: await service.exportMemories() };
+      case "state.export": return { export: await service.exportState() };
+      case "task.create": return service.createTask(input.task ?? {});
+      case "task.update": return service.updateTask(input.id, input.change ?? {});
+      case "task.transition": return service.transitionTask(input.id, input.state, input.reason);
+      case "routine.create": return service.createRoutine(input.routine ?? {});
+      case "routine.update": return service.updateRoutine(input.id, input.change ?? {});
+      case "routine.run": return service.runRoutine(input.id);
+      case "scheduler.tick": return { due: await service.tick() };
+      case "plan.create": return service.createPlan(input.goal, input.steps ?? []);
+      case "plan.accept": return service.acceptPlan(input.id);
+      case "plan.convert": return service.convertPlanToTasks(input.id);
+      case "action.propose": return service.proposeAction(input.capabilityId, input.input ?? {});
+      case "action.execute": return service.executeAction(input.id);
+      case "action.cancel": return service.cancelAction(input.id);
+      case "approval.decide": return service.decideApproval(input.id, input.approve === true);
+      case "import.dry-run": return service.dryRunImport(input.platform, absolute(input.root, "Import root"), absolute(input.path, "Import selection"));
+      case "import.execute": return service.importConversations(input.id, absolute(input.root, "Import root"), absolute(input.path, "Import selection"));
+      case "import.cancel": return service.cancelImport(input.id);
+      case "backup.create": return service.createPrivateBackup(absolute(input.destination, "Backup destination"), String(input.passphrase ?? ""));
+      case "backup.verify": return service.verifyPrivateBackup(absolute(input.destination, "Backup destination"), String(input.passphrase ?? ""));
+      case "career.run": {
+        try { const result = await runCareer(repositoryRoot, input); await service.recordCareerActivity(input.command, "success", "No Career content is stored in activity."); return result; }
+        catch (error) { if (error?.careerCommand) await service.recordCareerActivity(error.careerCommand, "failed", "The command failed; no Career content is stored."); throw error; }
+      }
+      default: throw new Error("Unsupported Command Center action.");
+    }
+  }
+
+  const server = createServer(async (request, response) => {
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string" || !sameOrigin(request, address)) return json(response, 403, { error: "Request origin is not allowed." });
+      const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+      if (request.method === "GET" && ASSETS.has(url.pathname)) {
+        const [file, type] = ASSETS.get(url.pathname);
+        const data = await readFile(join(import.meta.dirname, "public", file));
+        response.writeHead(200, { "content-type": type, "content-length": data.length, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "content-security-policy": ASSET_CSP });
+        return response.end(data);
+      }
+      if (request.method === "GET" && url.pathname === "/api/state") {
+        return json(response, 200, {
+          state: await service.snapshot(), providers: await service.providerHealth(), capabilities: service.capabilities(),
+          developerBridge: await service.developerBridgeStatus(), dataRoot: "private/aion", exportRoot: "private/aion/exports",
+        });
+      }
+      if (request.method === "POST" && url.pathname === "/api/chat/stream") {
+        const input = await body(request);
+        response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "connection": "keep-alive", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" });
+        const send = (event, data) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        try {
+          const turn = service.streamMessage(input.id, input.content);
+          for (;;) { const step = await turn.next(); if (step.done) { send("done", step.value); break; } send("chunk", { text: step.value }); }
+        } catch (error) { send("error", { error: privacySafe(error instanceof Error ? error.message : "Chat request failed.") }); }
+        return response.end();
+      }
+      if (request.method !== "POST" || url.pathname !== "/api/action") return json(response, 404, { error: "Not found." });
+      return json(response, 200, { result: (await dispatch(await body(request))) ?? null });
+    } catch (error) {
+      return json(response, 400, { error: privacySafe(error instanceof Error ? error.message : "Request failed.") });
+    }
+  });
+
+  const tick = setInterval(() => void service.tick().catch(() => {}), 30_000); tick.unref();
+  server.on("close", () => clearInterval(tick));
+  return {
+    server, service, repositoryRoot, dataRoot, exportRoot,
+    async listen(port = 0) { await new Promise((resolveListen, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", () => { server.off("error", reject); resolveListen(); }); }); return server.address(); },
+    async close() { await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose())); },
+  };
+}
