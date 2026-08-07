@@ -16,10 +16,17 @@ inferred, imported, or modified. The existing real private Identity state was ne
 changed. No drive was scanned and no archive was discovered automatically. No live model call was
 made; every test and the demo use the offline deterministic provider.
 
-One narrow local environment check was performed, exactly as the directive permits: a fixed list
-of documented Codex CLI install locations was probed with one `stat` each, and the resolved
-executable was asked for its `--version`. No developer-agent task was executed against the
-repository.
+Narrow local environment checks were performed, exactly as the directives permit: fixed lists of
+documented Codex CLI and Claude Code install locations were probed with one `stat` each, the
+resolved executables were asked for their `--version` and `--help`, and each was asked its local
+sign-in status once. Only the sign-in flag was read; the account address, organisation, and plan
+were never parsed, stored, logged, displayed, or placed in a backup, and remaining credit was
+never determined because that would require a paid call.
+
+During real-use activation one bounded **read-only** developer-agent task was run through the
+approval-gated capability path, as the activation directive permits, to prove the workflow end to
+end. Its instruction was explicitly read-only, it produced a one-word answer, and the repository
+was byte-for-byte unchanged before and after. No repository-modifying developer task was ever run.
 
 ## What AION stores and where
 
@@ -35,6 +42,11 @@ state.
 ## What is deliberately not stored
 
 - Provider credentials. Settings hold only the **name** of an environment variable.
+- Developer-agent account values. AION reads whether a CLI is signed in and nothing else; the
+  address, organisation, and plan are never parsed or kept, and bridge health is live rather than
+  persisted state.
+- Local executable paths. A bridge reports the executable's **name**, and the argument vector it
+  discloses replaces the approved repository root with a placeholder.
 - Passphrases and derived backup keys. Neither is persisted or logged.
 - Imported document bodies in activity history. Activity holds summaries and references only.
 - Absolute local paths in anything that reaches the browser. Errors and Career output are

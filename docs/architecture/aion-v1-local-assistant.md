@@ -80,11 +80,36 @@ environment variable, never its value.
 
 The developer-agent bridge is reached only as the registered `aion.developer.task.v1` capability,
 so it inherits validation, digest binding, one-shot approval, cancellation, and activity records.
-Discovery checks a short fixed list of documented Codex CLI install locations with one `stat`
-each; it never scans the computer. Windows npm shell shims are deliberately ignored because AION
-never routes instruction text through a shell — the adapter spawns a real executable with
-`shell: false` and an argument vector, pinned to one approved repository root. When nothing
-suitable is found the bridge reports itself unavailable rather than fabricating support.
+Two bridges ship — Codex CLI and Claude Code CLI — behind one `DeveloperAgentBridgeV1` port and a
+`DeveloperAgentRegistryV1` the owner selects through Settings. Selection is owner policy: an
+unregistered identifier fails closed and the registry never substitutes a different bridge.
+
+Discovery checks a short fixed list of documented install locations for each supported CLI with
+one `stat` each; it never scans the computer. Windows npm shell shims and script entry points are
+deliberately ignored because AION never routes instruction text through a shell or an interpreter
+of its own choosing — the adapter spawns a real executable with `shell: false` and a fixed argument
+vector, pinned to one approved repository root, with a timeout and cancellation. **Instruction text
+is written to the child's standard input and never appears in the argument vector**, so no part of
+a task can be read as a flag, a path, or shell syntax; control characters are rejected outright.
+Each bridge discloses the exact argument vector it would use, with the local repository path
+redacted, so the owner can read the real command before approving.
+
+A task is `read-only` or `workspace-write`, and the mode is part of the capability input, so it is
+covered by the canonical digest the owner approves: a read-only approval can never be spent on a
+writing run. An absent mode resolves to read-only, so the boundary fails closed. Codex maps the
+mode to its own sandbox policy; Claude Code restricts a read-only task three ways at once —
+planning permission mode, an explicit read-only built-in tool set, and an explicit denial of the
+writing tools — with configured MCP servers excluded from every task.
+
+Executable availability and account health are separate questions and are reported separately. A
+version probe proves only that the program exists; sign-in state is checked with the vendor's own
+local status command, and only when the owner asks. Remaining credit or quota is never determined,
+because that would require a paid call. When nothing suitable is found the registry holds a single
+truthful unavailable bridge rather than fabricating support.
+
+The offline provider can hand a repository question to the developer agent: a `developer:` turn in
+Chat produces an ordinary read-only proposal that AION revalidates against the registry and queues
+for approval. It carries no extra authority, and no capability accepts shell text.
 
 ## Out of scope for V1
 

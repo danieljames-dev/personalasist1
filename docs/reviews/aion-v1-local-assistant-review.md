@@ -56,6 +56,46 @@ Settings, onboarding, the developer-agent bridge, `npm run aion`, and `npm run a
 6. The demo previously printed claims it did not exercise. It now drives the real loopback API,
    proves restart reload and byte-identical rerun, and prints only what it asserted.
 
+## Real-use activation review (AION-V1-R1-REAL-USE-ACTIVATION)
+
+Recommendation: **APPROVE**. The activation milestone extended V1 rather than rebuilding it. No
+package was added, no dependency was added, and no accepted decision was superseded.
+
+- **The bridge stayed a port; a second implementation proved it.** `DeveloperAgentBridgeV1` gained
+  a mode, a command disclosure, and separated account health, then took a second real
+  implementation — Claude Code CLI — beside the preserved Codex CLI. Both share one bounded base
+  that owns spawning, timeout, cancellation, output limits, and containment; each subclass supplies
+  only its own argument vector and status reading. Selection moved into a `DeveloperAgentRegistryV1`
+  port that Settings drives, so vendor choice is owner policy rather than a hard-wired composition
+  decision. This is the replaceability claim being exercised, not asserted.
+- **Task text left the argument vector entirely.** Instructions now travel on standard input for
+  both bridges, which removes the residual flag-injection surface a final positional argument had.
+  Control characters are rejected. Each bridge discloses the exact vector it would run, with the
+  approved root redacted, so the property is checkable by the owner and by tests rather than only
+  by reading the source.
+- **The read-only boundary is carried by the digest, not by convention.** Mode is capability input,
+  so the approval the owner grants names one boundary and authorises only that one. An absent mode
+  resolves to read-only, so the failure direction is safe. This closes the gap where a single
+  approval shape covered both reviewing and writing.
+- **Availability and account health were conflated and are now separate.** A version probe proves a
+  program exists; it says nothing about sign-in. Health is probed only on explicit request, reads
+  only the sign-in flag, and never determines paid quota. This directly answers the case where a
+  CLI is installed but has no usable account.
+- **Two genuine privacy defects were fixed.** The bridge previously reported the full local
+  executable path, and would have disclosed the approved repository root in a command, both of
+  which reach the browser through `/api/state` and both of which contain the owner's user name.
+  Status now reports an executable *name* and the disclosed vector redacts the root.
+- **The copy/paste acceptance criterion is met inside the product.** A `developer:` turn in Chat
+  becomes an ordinary read-only proposal, revalidated against the registry and queued for approval.
+  It gains no authority the proposal protocol did not already grant, and Chat still reaches no
+  shell.
+
+Verified by one bounded read-only task through the real Claude Code bridge and the real approval
+path — refused before approval, executed once after it, not reusable afterwards, with the working
+tree byte-for-byte unchanged. The Codex bridge was verified for discovery, version, account health,
+argument construction, and boundary refusals; no Codex task was executed, because executing one
+would consume paid quota without proving anything the shared base does not already prove.
+
 ## Claims explicitly not made
 
 No normative conformance, production readiness, representative workload, security certification,
@@ -67,6 +107,10 @@ job discovery, email, and browsing do not exist. No real owner data was ingested
 
 - Live `state-v1.json` is not encrypted at rest; the encrypted private backup is the protected
   portable form.
-- An approved developer-agent task runs a third-party CLI that AION bounds by repository root and
-  the absence of a shell, but does not otherwise sandbox.
+- An approved developer-agent task runs a third-party CLI that AION bounds by repository root, task
+  mode, a fixed argument vector, and the absence of a shell, but does not otherwise sandbox. A
+  `workspace-write` approval is a real grant of write authority inside this repository; the owner
+  should prefer read-only and read the disclosed command before approving.
+- Remaining credit or quota on a developer-agent account is not knowable without a paid call, so a
+  bridge reported `signed-in` can still fail at run time. AION reports what it verified and no more.
 - No off-site or offline rotated backup copy exists; this remains a standing operational gap.

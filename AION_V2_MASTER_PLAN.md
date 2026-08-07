@@ -413,6 +413,18 @@ through the interface and did not occur. See
 [the V1 architecture](docs/architecture/aion-v1-local-assistant.md) and
 [its review](docs/reviews/aion-v1-local-assistant-review.md).
 
+The V1 real-use activation milestone prepares that surface for actual owner use without rebuilding
+it. It adds a second developer-agent bridge — Claude Code CLI alongside the preserved Codex CLI —
+behind one replaceable port and an owner-selected registry; an explicit read-only or
+workspace-write task boundary carried in the approval digest, defaulting to read-only; instruction
+delivery on standard input so task text can never become an argument or shell syntax; a disclosed
+argument vector with the local repository path redacted; developer-agent account health reported
+separately from executable availability and probed only on request, without reading any account
+value or determining paid quota; and a Chat hand-off that turns a repository question into an
+approval-gated read-only developer task. It adds no new dependency, no network behaviour, no OS
+service, no production claim, and no real owner-data ingestion; DG-3 and DG-4b remain Open, the
+Universal Object Contract remains Pre-stable, and normative fixtures remain unauthorized.
+
 The next action requires a separate Founder/CTO decision after review.
 
 No milestone enters production implementation until it has an approved specification,

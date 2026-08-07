@@ -25,6 +25,11 @@ Career, Imports, and Settings; no source file needs editing to use them.
 `npm run aion:demo` runs the complete synthetic product proof on neutral temporary data — including
 a restart reload and a byte-identical rerun — and leaves nothing behind.
 
+If a supported developer agent is installed — Claude Code CLI or Codex CLI — Settings lets you
+choose which one AION uses. Developer tasks are approval-gated, confined to this repository, and
+read-only unless you approve a writing boundary; your instruction reaches the agent on its standard
+input and never becomes a command-line argument.
+
 Owner data lives only in the Git-ignored `private/aion` directory and is excluded from source
 backups. See [the Command Center guide](docs/implementation/aion-command-center.md).
 
