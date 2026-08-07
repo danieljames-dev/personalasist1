@@ -366,6 +366,57 @@ export interface CustomerQueryV1 {
   includeArchived?: boolean;
 }
 
+/**
+ * Phone access.
+ *
+ * Reaching AION over a private network is not authentication. A VPN says which machines can open
+ * a socket; it says nothing about who is holding the phone. So every non-loopback request must
+ * additionally carry a session issued by an explicit pairing the owner performed at the console.
+ *
+ * Nothing here stores a secret. A pairing code and a session token exist only in the response
+ * that hands them out; AION keeps their SHA-256 digests, so a stolen state file yields no access.
+ */
+export interface PairedDeviceV1 {
+  id: OpaqueId;
+  label: string;
+  createdAt: IsoTimestamp;
+  lastSeenAt: IsoTimestamp | null;
+  revokedAt: IsoTimestamp | null;
+}
+
+export interface DeviceSessionV1 {
+  id: OpaqueId;
+  deviceId: OpaqueId;
+  /** SHA-256 of the bearer token. The token itself is never stored, logged, or re-displayed. */
+  tokenHash: string;
+  createdAt: IsoTimestamp;
+  expiresAt: IsoTimestamp;
+  lastSeenAt: IsoTimestamp | null;
+  revokedAt: IsoTimestamp | null;
+}
+
+export interface PairingTokenV1 {
+  id: OpaqueId;
+  /** SHA-256 of the one-time code. */
+  codeHash: string;
+  label: string;
+  createdAt: IsoTimestamp;
+  expiresAt: IsoTimestamp;
+  consumedAt: IsoTimestamp | null;
+}
+
+/** A failed-attempt counter per endpoint, so pairing and session use cannot be brute-forced. */
+export interface RateLimitBucketV1 { key: string; windowStartedAt: IsoTimestamp; attempts: number; blockedUntil: IsoTimestamp | null; }
+
+export interface RemoteAccessSettingsV1 {
+  /** Off by default. AION binds loopback only until the owner deliberately turns this on. */
+  enabled: boolean;
+  /** The interface AION may additionally bind. Never a wildcard, never a public address. */
+  bindAddress: string;
+  /** How long a paired device stays signed in before it must pair again. */
+  sessionDays: number;
+}
+
 export interface SettingsV1 {
   providerId: string;
   model: string;
@@ -380,6 +431,8 @@ export interface SettingsV1 {
   developerBridgeId: string;
   /** The workspace new records are created in and the UI is showing. */
   activeWorkspace: WorkspaceIdV1;
+  /** Private phone access. Disabled by default; loopback needs none of it. */
+  remoteAccess: RemoteAccessSettingsV1;
   /** Owner-supplied display names, e.g. a workplace label. Never inferred, never invented. */
   workspaceLabels: Record<WorkspaceIdV1, string>;
   privacy: { includeMemoryByDefault: boolean; retainActivityDays: number };
@@ -407,6 +460,14 @@ export interface AssistantStateV1 {
   customers: CustomerV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
+  /** Phones the owner paired. Revoking one never touches owner data. */
+  devices: PairedDeviceV1[];
+  /** Sessions issued to paired devices. Only digests are stored. */
+  sessions: DeviceSessionV1[];
+  /** Outstanding one-time pairing codes, as digests. */
+  pairingTokens: PairingTokenV1[];
+  /** Failed-attempt counters for pairing and session use. */
+  rateLimits: RateLimitBucketV1[];
 }
 
 export interface StateRepositoryV1 {

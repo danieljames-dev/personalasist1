@@ -12,7 +12,16 @@ import {
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 
-const ASSETS = new Map([["/", ["index.html", "text/html; charset=utf-8"]], ["/app.js", ["app.js", "text/javascript; charset=utf-8"]], ["/styles.css", ["styles.css", "text/css; charset=utf-8"]]]);
+const ASSETS = new Map([
+  ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+  ["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
+  ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json; charset=utf-8"]],
+  ["/icon.svg", ["icon.svg", "image/svg+xml; charset=utf-8"]],
+]);
+/** The shell an unpaired device may fetch so it can render the pairing screen. Never any data. */
+const PUBLIC_ASSETS = new Set(["/", "/app.js", "/styles.css", "/sw.js", "/manifest.webmanifest", "/icon.svg"]);
 const MAX_BODY = 1024 * 1024;
 const ASSET_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const CAREER_COMMANDS = new Set(["init", "ingest", "profile", "job:import", "match", "draft", "export", "demo"]);
@@ -65,10 +74,33 @@ async function body(request) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Request body must be a JSON object.");
   return parsed;
 }
-function sameOrigin(request, address) {
+/** True only for a socket whose peer is this machine. Never inferred from a header. */
+function isLoopbackPeer(request) {
+  const remote = request.socket?.remoteAddress ?? "";
+  return remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+}
+
+/**
+ * Same-origin enforcement. The allowed hosts are loopback plus, only when the owner has turned
+ * private access on, the one private interface they named. A wildcard is never allowed, and an
+ * `Origin` from anywhere else is rejected outright, which is what keeps a web page on the phone
+ * from driving AION behind the owner's back.
+ */
+function sameOrigin(request, address, extraHost) {
   const host = request.headers.host; const origin = request.headers.origin;
-  if (!host || !new Set([`127.0.0.1:${address.port}`, `localhost:${address.port}`]).has(host.toLowerCase())) return false;
-  return !origin || new Set([`http://127.0.0.1:${address.port}`, `http://localhost:${address.port}`]).has(origin.toLowerCase());
+  const hosts = new Set([`127.0.0.1:${address.port}`, `localhost:${address.port}`, `[::1]:${address.port}`]);
+  if (extraHost) { hosts.add(`${extraHost}:${address.port}`); hosts.add(`[${extraHost}]:${address.port}`); }
+  if (!host || !hosts.has(host.toLowerCase())) return false;
+  if (!origin) return true;
+  return [...hosts].some((candidate) => origin.toLowerCase() === `http://${candidate}`);
+}
+
+/** Bearer material is read from a header only. A token in a URL would leak into logs and history. */
+function bearerToken(request) {
+  const header = request.headers.authorization;
+  if (typeof header !== "string") return "";
+  const match = /^Bearer\s+(\S+)$/u.exec(header.trim());
+  return match ? match[1] : "";
 }
 
 export async function createAionServer(options = {}) {
@@ -119,6 +151,11 @@ export async function createAionServer(options = {}) {
       case "plan.convert": return service.convertPlanToTasks(input.id);
       case "action.propose": return service.proposeAction(input.capabilityId, input.input ?? {});
       case "developer.health": return { bridges: await service.developerBridgeInventory(true) };
+      // Pairing is issued from the console only; a phone can redeem a code but never mint one.
+      case "device.pair.code": return service.createPairingCode(input.label ?? "");
+      case "device.revoke": return service.revokeDevice(input.id);
+      case "device.revoke.all": return service.revokeAllDevices();
+      case "device.list": return { devices: await service.deviceInventory() };
       // There is no endpoint that submits verification evidence: executing the approved capability
       // is the only way a record can appear, so an analysis always cites a command AION really ran.
       case "verify.analyse": return service.proposeVerificationAnalysis(input.id, input.question);
@@ -159,8 +196,45 @@ export async function createAionServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const address = server.address();
-      if (!address || typeof address === "string" || !sameOrigin(request, address)) return json(response, 403, { error: "Request origin is not allowed." });
+      const settings = (await service.snapshot()).settings;
+      const remote = settings.remoteAccess;
+      if (!address || typeof address === "string" || !sameOrigin(request, address, remote.enabled ? remote.bindAddress : null)) {
+        return json(response, 403, { error: "Request origin is not allowed." });
+      }
       const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+
+      /*
+       * Who is allowed to be served.
+       *
+       * A request from this machine is the owner at the console, exactly as in V1. Anything else
+       * is a phone, and reaching AION over a private network proves nothing about who is holding
+       * it -- so it must additionally present a session issued by a pairing the owner performed.
+       * Everything fails closed: access off, no token, unknown token, expired or revoked session,
+       * or a revoked device all land in the same place.
+       */
+      const loopback = isLoopbackPeer(request);
+      let device = null;
+      if (!loopback) {
+        if (!remote.enabled) return json(response, 403, { error: "Private phone access is turned off." });
+        device = await service.authenticateDevice(bearerToken(request));
+        const pairing = request.method === "POST" && url.pathname === "/api/pair";
+        if (!device && !pairing && !PUBLIC_ASSETS.has(url.pathname)) {
+          return json(response, 401, { error: "This device is not paired. Pair it from Settings on the computer running AION." });
+        }
+        if (device) void service.touchDevice(device.deviceId).catch(() => {});
+      }
+
+      // Pairing is the one endpoint an unpaired device may reach, and it is rate-limited per peer.
+      if (request.method === "POST" && url.pathname === "/api/pair") {
+        if (loopback && !remote.enabled) return json(response, 403, { error: "Private phone access is turned off." });
+        const body_ = await body(request);
+        try {
+          const paired = await service.pairDevice(String(body_.code ?? ""), `pair:${request.socket?.remoteAddress ?? "unknown"}`);
+          return json(response, 200, { result: paired });
+        } catch (error) {
+          return json(response, 429, { error: privacySafe(error instanceof Error ? error.message : "Pairing failed.") });
+        }
+      }
       if (request.method === "GET" && ASSETS.has(url.pathname)) {
         const [file, type] = ASSETS.get(url.pathname);
         const data = await readFile(join(import.meta.dirname, "public", file));
@@ -187,7 +261,14 @@ export async function createAionServer(options = {}) {
         return response.end();
       }
       if (request.method !== "POST" || url.pathname !== "/api/action") return json(response, 404, { error: "Not found." });
-      return json(response, 200, { result: (await dispatch(await body(request))) ?? null });
+      const command = await body(request);
+      // A phone may drive AION, but it may never mint its own pairing code or change how access
+      // itself works. Those decisions stay at the console the owner physically controls.
+      if (device && ["device.pair.code", "settings.update"].includes(String(command.type))) {
+        const changingAccess = command.type === "device.pair.code" || Object.hasOwn(command.settings ?? {}, "remoteAccess");
+        if (changingAccess) return json(response, 403, { error: "Pairing and access settings can only be changed on the computer running AION." });
+      }
+      return json(response, 200, { result: (await dispatch(command)) ?? null });
     } catch (error) {
       return json(response, 400, { error: privacySafe(error instanceof Error ? error.message : "Request failed.") });
     }

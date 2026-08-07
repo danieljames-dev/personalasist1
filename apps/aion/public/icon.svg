@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="AION">
+  <!-- Repository-owned home-screen icon. No hosted font or remote asset. The generous padding
+       keeps the mark inside the safe area when a platform applies a maskable crop. -->
+  <rect width="512" height="512" rx="112" fill="#0f1216"/>
+  <path d="M256 116 L372 396 H316 L256 246 L196 396 H140 Z" fill="#5eead4"/>
+  <rect x="216" y="316" width="80" height="26" rx="13" fill="#0f1216"/>
+</svg>

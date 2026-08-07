@@ -81,9 +81,10 @@ export function createEmptyStateV1(): AssistantStateV1 {
       memoryContextEnabled: true, schedulerEnabled: true, externalActionsRequireApproval: true,
       importRoots: [], exportRoot: "", credentialEnvironmentVariable: "", developerBridgeId: "",
       activeWorkspace: DEFAULT_WORKSPACE, workspaceLabels: { personal: "Personal", work: "Work" },
+      remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
-    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [], customers: [], salesMetrics: [],
+    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [], customers: [], salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
 
@@ -150,6 +151,8 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.migrations)) clone.migrations = [];
   if (!Array.isArray(clone.customers)) clone.customers = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
+  for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
+  if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
   return clone;
 }
 

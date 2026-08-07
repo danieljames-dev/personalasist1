@@ -10,6 +10,7 @@ import type {
 import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, SALES_COUNT_KEYS, WORKSPACE_IDS } from "./contracts.js";
 import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
 import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buildInteraction, lastInteraction, queryCustomers } from "./sales.js";
+import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
 
@@ -160,6 +161,7 @@ export class AionAssistantV1 {
       const distinct = new Set(group.map((memory) => memory.content.trim().toLocaleLowerCase().replace(/\s+/gu, " ")));
       for (const memory of group) memory.conflict = distinct.size > 1 ? "conflicting" : "none";
     }
+    pruneAccess(state, new Date(now).toISOString());
     const horizon = now - state.settings.privacy.retainActivityDays * 86_400_000;
     state.activity = state.activity.filter((entry) => Date.parse(entry.at) >= horizon);
     if (state.activity.length > 10_000) state.activity.length = 10_000;
@@ -183,6 +185,16 @@ export class AionAssistantV1 {
       if (next.credentialEnvironmentVariable && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(next.credentialEnvironmentVariable)) throw new Error("Credential environment-variable name is invalid.");
       if (typeof next.developerBridgeId !== "string") throw new Error("Developer-agent bridge selection is invalid.");
       if (!WORKSPACE_IDS.includes(next.activeWorkspace)) throw new Error("Workspace is not recognised.");
+      next.remoteAccess = { ...state.settings.remoteAccess, ...(input.remoteAccess ?? {}) };
+      next.remoteAccess.bindAddress = validateBindAddress(next.remoteAccess.bindAddress);
+      if (typeof next.remoteAccess.enabled !== "boolean") throw new Error("Private phone access must be on or off.");
+      if (!Number.isSafeInteger(next.remoteAccess.sessionDays) || next.remoteAccess.sessionDays < 1 || next.remoteAccess.sessionDays > 365) throw new Error("Session length must be between 1 and 365 days.");
+      // Turning private access off ends every phone session immediately rather than merely
+      // refusing new ones: a materially weakened access decision must fail closed at once.
+      if (state.settings.remoteAccess.enabled && !next.remoteAccess.enabled) {
+        const ended = revokeAllDevices(state, this.ports.clock.now());
+        this.activity(state, "settings", "device.revoked.all", `Private phone access was turned off, ending ${ended.sessions} session(s). Owner data is untouched.`, null);
+      }
       next.workspaceLabels = { ...state.settings.workspaceLabels, ...(input.workspaceLabels ?? {}) };
       for (const id of WORKSPACE_IDS) next.workspaceLabels[id] = required(next.workspaceLabels[id], "Workspace label", 80);
       if (next.developerBridgeId && !this.ports.developerAgents.get(next.developerBridgeId)) throw new Error("Selected developer-agent bridge is not registered.");
@@ -622,6 +634,87 @@ export class AionAssistantV1 {
     for (const key of SALES_COUNT_KEYS) totals[key] = daily.reduce((sum, entry) => sum + entry.counts[key], 0);
     const days = Math.round((Date.parse(`${toDate}T00:00:00.000Z`) - Date.parse(`${fromDate}T00:00:00.000Z`)) / 86_400_000) + 1;
     return { from: fromDate, to: toDate, days, entered: daily.length, totals, daily, source: "Owner-entered counts recorded in AION. Not a dealership CRM figure." };
+  }
+
+  // --- Phone access: pairing, sessions, revocation ---------------------------------------------
+  /**
+   * Issues a one-time pairing code. This is the only moment the code exists outside the owner's
+   * screen: AION stores its digest, and no later call can reveal it.
+   */
+  async createPairingCode(label: string): Promise<{ code: string; expiresAt: string; label: string }> {
+    return this.mutate((state) => {
+      if (!state.settings.remoteAccess.enabled) throw new Error("Turn on private phone access in Settings before pairing a device.");
+      const { token, code } = issuePairingToken(state, label, this.ports.ids.next("pairing"), this.ports.clock.now());
+      this.activity(state, "settings", "device.pair.code", `A one-time pairing code was issued for "${token.label}". It expires in ${PAIRING_TTL_MINUTES} minutes and can be used once. The code itself is not stored.`, token.id);
+      return { code, expiresAt: token.expiresAt, label: token.label };
+    });
+  }
+  /** Redeems a code for a session token. Rate-limited, single-use, and returned exactly once. */
+  async pairDevice(code: string, rateKey = "pair"): Promise<{ token: string; deviceId: string; expiresAt: string; label: string }> {
+    /*
+     * The failed-attempt counter has to survive a rejected attempt, so this deliberately does not
+     * throw from inside the write. A throw would abandon the draft and discard the very increment
+     * that makes rate limiting work, leaving pairing open to unlimited guessing.
+     */
+    const outcome = await this.mutate((state) => {
+      const now = this.ports.clock.now();
+      if (!state.settings.remoteAccess.enabled) return { ok: false as const, message: "Private phone access is turned off." };
+      const limit = checkRateLimit(state, rateKey, now);
+      if (!limit.allowed) {
+        this.activity(state, "failure", "device.pair.throttled", "Pairing attempts are temporarily blocked after repeated failures.", null, "denied");
+        return { ok: false as const, message: `Too many attempts. Try again in ${limit.retryAfterSeconds} seconds.` };
+      }
+      try {
+        const result = redeemPairingCode(state, code, { deviceId: this.ports.ids.next("device"), sessionId: this.ports.ids.next("session") }, now, state.settings.remoteAccess.sessionDays);
+        clearRateLimit(state, rateKey);
+        this.activity(state, "settings", "device.paired", `Device "${result.device.label}" paired. Its session expires ${result.session.expiresAt} and can be revoked at any time.`, result.device.id);
+        return { ok: true as const, value: { token: result.token, deviceId: result.device.id, expiresAt: result.session.expiresAt, label: result.device.label } };
+      } catch (error) {
+        recordFailure(state, rateKey, now);
+        this.activity(state, "failure", "device.pair.rejected", "A pairing attempt was rejected. No code or token is recorded.", null, "denied");
+        return { ok: false as const, message: error instanceof Error ? error.message : "Pairing failed." };
+      }
+    });
+    if (!outcome.ok) throw new Error(outcome.message);
+    return outcome.value;
+  }
+  /** Resolves a bearer token. Never records the token, and fails closed on anything unusual. */
+  async authenticateDevice(token: string): Promise<{ deviceId: string; label: string; expiresAt: string } | null> {
+    const state = await this.snapshot();
+    const found = authenticate(state, token, this.ports.clock.now());
+    if (!found) return null;
+    return { deviceId: found.device.id, label: found.device.label, expiresAt: found.session.expiresAt };
+  }
+  async touchDevice(deviceId: string): Promise<void> {
+    await this.mutate((state) => {
+      const device = state.devices.find((entry) => entry.id === deviceId);
+      if (device) device.lastSeenAt = this.ports.clock.now();
+      for (const session of state.sessions) if (session.deviceId === deviceId && !session.revokedAt) session.lastSeenAt = this.ports.clock.now();
+    });
+  }
+  /** Revoking a phone ends its access and touches no owner record whatsoever. */
+  async revokeDevice(deviceId: string): Promise<{ sessionsEnded: number }> {
+    return this.mutate((state) => {
+      const ended = revokeDevice(state, deviceId, this.ports.clock.now());
+      this.activity(state, "settings", "device.revoked", `A paired device was revoked and ${ended} session(s) ended. No conversation, memory, task, relationship, or Career record was changed.`, deviceId);
+      return { sessionsEnded: ended };
+    });
+  }
+  async revokeAllDevices(): Promise<{ devices: number; sessions: number }> {
+    return this.mutate((state) => {
+      const result = revokeAllDevices(state, this.ports.clock.now());
+      this.activity(state, "settings", "device.revoked.all", `Signed out every device: ${result.devices} device(s), ${result.sessions} session(s), and any outstanding pairing code. Owner data is untouched.`, null);
+      return result;
+    });
+  }
+  /** What Settings shows. Digests and tokens are never included. */
+  async deviceInventory(): Promise<Array<{ id: string; label: string; createdAt: string; lastSeenAt: string | null; revokedAt: string | null; activeSessions: number; expiresAt: string | null }>> {
+    const state = await this.snapshot();
+    const now = Date.parse(this.ports.clock.now());
+    return state.devices.map((device) => {
+      const live = state.sessions.filter((entry) => entry.deviceId === device.id && !entry.revokedAt && Date.parse(entry.expiresAt) > now);
+      return { id: device.id, label: device.label, createdAt: device.createdAt, lastSeenAt: device.lastSeenAt, revokedAt: device.revokedAt, activeSessions: live.length, expiresAt: live[0]?.expiresAt ?? null };
+    });
   }
 
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
