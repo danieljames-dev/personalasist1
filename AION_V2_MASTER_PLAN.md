@@ -310,6 +310,32 @@ These are domain packs built on platform contracts, not new architectural center
 Exit requires proof that domain packs can be installed, upgraded, exported, and
 removed without modifying Kernel or corrupting shared data.
 
+## Milestone V1.2: Relationship Core, Product Studio, and Business Agents
+
+Planned, not authorized. No CURRENT directive exists for this milestone, and none may be created
+until the V1.1 private-bind owner phone retest passes.
+
+Scope recorded by the Founder: promote the reusable relationship concepts proved in Sales into a
+general relationship domain serving automotive prospects, professional contacts, business leads,
+brand customers, B2B prospects, support customers, partners, and vendors, preserving explicit
+workspace ownership and keeping sensitive financial and identity material out; a Product Studio
+turning ideas into managed opportunities that distinguishes evidence from assumptions; a governed
+research-agent foundation with scoped questions, provenance, confidence, and cost limits, tested
+against synthetic adapters and never silently crawling; independent business and brand workspaces
+that cannot leak into one another; development-project orchestration extending the existing
+developer-agent bridge from idea through specification, plan, tasks, verification, review, and
+approval without exposing a shell to the conversational model; a website and product build pipeline
+whose real deployment requires a separately authorized capability; a bounded natural-language
+command router mapping ordinary requests onto typed proposals, asking rather than guessing when
+ambiguous; a Memory and learning loop keeping FACT, OBSERVATION, INFERENCE, HYPOTHESIS,
+OWNER-CONFIRMED MEMORY, and LEARNED STRATEGY distinct so an inference never silently becomes fact;
+autonomy governance classifying actions from level 0 read-only through level 5 irreversible, where
+no agent raises its own authority and no model approves its own proposal; and mobile continuity for
+every new area through the existing Command Center rather than a second interface.
+
+The model-independence requirement recorded under Cross-cutting programs is part of this milestone.
+
+
 ## Cross-cutting programs
 
 ### Security and privacy
@@ -333,6 +359,127 @@ receive a new major contract version plus migration, coexistence, and rollback p
 Model requirements describe capabilities—context, modalities, structured output,
 tool use, privacy, latency, and cost—not model names. Provider adapters supply
 runtime catalogs and policy performs selection.
+
+**Amendment (2026-08-07), Founder requirement.** Model independence is raised from a design
+preference to a foundational architecture requirement, planned into the V1.2 milestone. AION's
+primary conversational and reasoning capability must not depend on any mandatory
+company-controlled inference API.
+
+*Core principle.* AION owns Memory, Tasks, Routines, Planner state, relationship and customer
+state, Personal and Work workspaces, Brand state, Product Studio state, research evidence,
+learning history, capability permissions, approvals, Activity, and agent state. No language-model
+vendor owns or defines those domains. A model is a replaceable reasoning provider, and removing or
+changing one must not destroy or alter AION's durable state.
+
+*Local-first primary brain.* A first-class self-hosted model-provider architecture, capable of
+using a locally or owner-controlled remotely hosted open-weight model as the primary provider.
+Core operation must not require the OpenAI, Anthropic, Google, xAI, DeepSeek-hosted,
+Alibaba-hosted, Mistral-hosted, or any other third-party inference service. Remote proprietary
+providers remain optional adapters.
+
+*Open-weight support.* A model-runtime abstraction able to support self-hosted candidates such as
+DeepSeek, Qwen, Mistral, and gpt-oss open-weight families, and future compatible models, without
+being hard-coded around any one. Which models are actually supported is decided per adapter, on
+licensing, hardware requirements, inference quality, context length, tool and function capability,
+structured-output reliability, privacy, and operating cost at the time the adapter is written.
+
+*Owner-controlled inference.* Execution through owner-controlled runtimes where practical —
+llama.cpp-compatible, Ollama-compatible, vLLM-compatible, or other accepted self-hosted inference
+servers — behind a runtime port independent of any one implementation. Cloud inference is never
+required.
+
+*Three tiers.* Tier 1, a smaller local model sufficient for ordinary Chat, task classification,
+simple planning, Memory retrieval assistance, and command routing, continuing to work without
+internet access after installation. Tier 2, a larger open-weight model on a dedicated machine or
+owner-rented GPU infrastructure under the owner's control, preferred for high-capability reasoning
+where practical. Tier 3, optional specialist remote providers; AION must keep functioning when they
+are unavailable, rate-limited, changed, discontinued, or unaffordable.
+
+*Model router.* An AION-owned router supporting LOCAL ONLY, LOCAL PREFERRED, MANUAL, and SPECIALIST
+policies. AION must never silently switch from local inference to a remote provider.
+
+*Privacy disclosure.* Before private context reaches a remote provider, AION states which provider
+receives it, which workspace it came from, what context is proposed, whether Memory is included,
+and whether customer or work information is included. Sensitive Work and customer information must
+not automatically enter remote model context.
+
+*Offline mode.* A true offline mode in which no inference leaves the owner-controlled machine or
+network, no remote fallback occurs, no telemetry is permitted, local state remains fully available,
+and compatible local inference keeps working.
+
+*Capability registry and evaluation.* Each configured model's capabilities are tracked separately —
+conversation, reasoning, code, structured JSON, tool proposal, long context, vision, embeddings,
+local or remote, cost class — rather than assumed uniform. A deterministic synthetic evaluation
+harness compares configured models on instruction following, structured output, planning,
+Memory-context use, tool proposal, hallucination resistance, coding, latency, and resource use, so
+selection is evidence-driven rather than vendor-driven. Benchmark fixtures contain no real personal
+or customer data.
+
+*Brain boundary.* A model's hidden conversational context is never treated as AION's durable
+Memory. Durable information belongs to AION's explicit Memory and provenance system; the model
+receives selected context and owns no history.
+
+*Learning independence.* Evidence, observations, owner corrections, confirmed memories, strategies,
+experiment outcomes, research, and task results persist outside the model. A model may propose
+lessons or hypotheses, which remain explicitly typed and provenance-backed. Replacing the model
+must not erase learned state.
+
+*Adaptation boundary.* An optional future boundary for adapters, LoRA, task-specific fine-tuning,
+retrieval augmentation, and prompt or policy adaptation. Fine-tuning is never required for AION to
+learn; the first learning mechanism is explicit Memory, evidence, retrieval, evaluation, and
+strategy improvement. No automatic training on private owner data; any future training requires
+explicit authorization and an auditable dataset manifest.
+
+*Failure independence.* AION remains operational when any third-party provider is unavailable or a
+key or quota is exhausted. Local data, Tasks, Memory, relationships, Planner state, workspaces,
+Activity, and supported local inference keep working.
+
+*Settings surface.* Primary brain, model, runtime, and mode, with optional remote providers listed
+separately and a clear visual distinction between local or owner-controlled and remote or
+third-party.
+
+*Acceptance criterion.* AION fails this requirement if removing all third-party inference
+credentials prevents the owner from using AION with a supported self-hosted model. The intended end
+state is that with every external provider unavailable, AION still starts, Memory works, Tasks and
+Routines work, Planner works, relationships and brands work, a local model still provides chat and
+reasoning, and AION remains useful.
+
+*Target shape.* The independence stack the Founder specified:
+
+```text
+PHONE
+  |
+Secure private AION connection
+  |
+AION CORE - owner controlled
+  |
+MODEL ROUTER
+  |
+  +-- LOCAL SMALL MODEL          Ollama / llama.cpp; private, offline, default
+  |
+  +-- SELF-HOSTED LARGE MODEL    owner GPU or owner-rented hosting; open-weight
+  |
+  `-- OPTIONAL SPECIALIST APIs   Claude / OpenAI / Grok / Gemini
+```
+
+The self-hosted large tier explicitly includes owner-rented GPU hosting as well as owned hardware,
+with a nominated fallback host, because renting capacity the owner controls is still owner control:
+what matters is that no single vendor can end AION's reasoning capability.
+
+*Settings surface, as specified.* Mode is one of **Local Preferred**, **Local Only**, **Manual**, or
+**Maximum Capability**. Alongside it: the local model, the high-capability brain and its runtime,
+a fallback GPU host, a specialist coding bridge, an explicit remote-proprietary-fallback switch
+that defaults to off, and the phone-access state. Local or owner-controlled entries must be
+visually distinct from remote third-party ones, and Maximum Capability must still disclose what
+leaves the machine before it does so — a capability preference never becomes an implicit consent
+to transmit private context.
+
+*Honest limits.* Self-hosting does not make a model unbiased, uncensored, or correct — weights carry
+the biases and refusal behaviour of their training. What it provides is control: where inference
+runs, whether data leaves the machine, when the model is replaced, how it is configured, and
+whether a provider can cut AION off. The goal is not that a particular model is AION's brain; it is
+that AION is the brain and models are reasoning resources it can choose among.
+
 
 ### Evidence program
 
