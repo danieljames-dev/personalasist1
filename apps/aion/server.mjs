@@ -11,6 +11,7 @@ import {
 } from "../../packages/local-assistant/dist/index.js";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
+import { remoteAccessStatus } from "./private-network.mjs";
 
 const ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -247,6 +248,10 @@ export async function createAionServer(options = {}) {
           developerBridge: await service.developerBridgeStatus(), developerBridges: await service.developerBridgeInventory(),
           verificationOperations: verificationRunner.operations(),
           salesRoutineTemplates: service.salesRoutineTemplates(),
+          remoteAccess: await remoteAccessStatus(settings, address.address),
+          devices: await service.deviceInventory(),
+          // A phone knows it is a phone, so the UI can hide what only the console may change.
+          viewer: loopback ? "console" : "device",
           dataRoot: "private/aion", exportRoot: "private/aion/exports",
         });
       }

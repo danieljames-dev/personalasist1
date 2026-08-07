@@ -170,6 +170,60 @@ test("a foreign origin is refused and bearer material is never accepted from a U
   });
 });
 
+test("remote-access status is truthful about what is actually installed", async () => {
+  const { detectPrivateNetwork, remoteAccessStatus, tailscaleCandidates } = await import("../../apps/aion/private-network.mjs");
+  const candidates = tailscaleCandidates({ ProgramFiles: "C:\\Program Files" }, "win32");
+  assert.ok(candidates.length > 0 && candidates.length <= 6, "a short documented list, never a search");
+  for (const candidate of candidates) assert.match(candidate, /tailscale\.exe$/u);
+  assert.equal(candidates.some((c) => /\.(?:cmd|ps1|bat|sh)$/u.test(c)), false);
+
+  // With nothing installed it must say so rather than implying support.
+  const absent = await detectPrivateNetwork({ AION_TAILSCALE_PATH: "C:\\synthetic\\absent\\tailscale.exe", ProgramFiles: "C:\\synthetic\\absent" }, "win32");
+  assert.equal(absent.available, false);
+  assert.equal(absent.tool, "none");
+  assert.equal(absent.executable, null);
+  assert.match(absent.detail, /does not search your computer/u);
+  assert.match(absent.detail, /never create a tunnel or change your router/u);
+
+  const status = await remoteAccessStatus({ remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 } }, "127.0.0.1",
+    { AION_TAILSCALE_PATH: "C:\\synthetic\\absent\\tailscale.exe" }, "win32");
+  assert.equal(status.enabled, false);
+  assert.equal(status.loopbackOnly, true);
+  assert.equal(status.publiclyExposed, false);
+  assert.match(status.summary, /reachable only from this computer/u);
+  assert.doesNotMatch(JSON.stringify(status), /[A-Za-z]:\\/u, "no local path reaches the browser");
+
+  // Detection never configures anything.
+  const source = await readFile(join(repositoryRoot, "apps/aion/private-network.mjs"), "utf8");
+  for (const forbidden of ["\"up\"", "\"login\"", "\"set\"", "funnel", "serve", "cert"]) {
+    assert.equal(source.includes(`, [${forbidden}]`), false, `detection never runs tailscale ${forbidden}`);
+  }
+  assert.match(source, /shell: false/u);
+});
+
+test("the state endpoint reports remote access and marks who is asking", async () => {
+  await withServer(async ({ base }) => {
+    const state = await (await fetch(`${base}/api/state`)).json();
+    assert.equal(state.viewer, "console", "a loopback request is the owner at the console");
+    assert.equal(state.remoteAccess.enabled, false);
+    assert.equal(state.remoteAccess.publiclyExposed, false);
+    assert.equal(state.remoteAccess.loopbackOnly, true);
+    assert.deepEqual(state.devices, []);
+    assert.doesNotMatch(JSON.stringify(state.remoteAccess), /[A-Za-z]:\\/u);
+  });
+});
+
+test("the UI hides console-only controls from a paired phone and keeps tokens out of URLs", async () => {
+  const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
+  assert.match(js, /model\.viewer === "console" \? privateAccessCard\(\)/u, "access settings render only at the console");
+  assert.match(js, /authorization: `Bearer \$\{token\}`/u, "the phone sends its token in a header");
+  assert.doesNotMatch(js, /[?&](?:token|session|code)=/u, "no secret is ever placed in a URL");
+  assert.match(js, /renderPairing/u, "an unpaired phone gets a pairing screen and nothing else");
+  // The pairing screen must not be able to leak owner data: it is rendered before any state load.
+  const pairingScreen = js.slice(js.indexOf("function renderPairing"), js.indexOf("function chatArea"));
+  assert.doesNotMatch(pairingScreen, /model\./u, "the pairing screen reads no owner state");
+});
+
 test("the service worker caches the shell and never an API response", async () => {
   const sw = await readFile(join(repositoryRoot, "apps/aion/public/sw.js"), "utf8");
   assert.match(sw, /url\.pathname\.startsWith\("\/api\/"\)/u, "API requests are excluded by path");

@@ -4,6 +4,8 @@ let model = null;
 let area = "Chat";
 let streaming = "";
 let openConversation = null;
+/** Held in memory only, shown once, never persisted. */
+let pairingCode = null;
 
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 /** Nothing from another workspace is ever rendered. Work material never appears in Personal. */
@@ -12,14 +14,37 @@ const scoped = (items) => (items ?? []).filter((item) => (item.workspace ?? "per
 const localToIso = (value) => value ? new Date(value).toISOString() : "";
 const short = (value, length = 16) => `${String(value ?? "").slice(0, length)}…`;
 
+const SESSION_KEY = "aion.session";
+/** A paired phone keeps its token here. The console never has one and never needs one. */
+const sessionToken = () => { try { return localStorage.getItem(SESSION_KEY) ?? ""; } catch { return ""; } };
+const setSessionToken = (value) => { try { value ? localStorage.setItem(SESSION_KEY, value) : localStorage.removeItem(SESSION_KEY); } catch { /* private mode */ } };
+/** Bearer material travels in a header, never in a URL where it would reach logs and history. */
+function authHeaders() { const token = sessionToken(); return token ? { authorization: `Bearer ${token}` } : {}; }
+
 async function api(type, payload = {}) {
   // `type` is written last on purpose: a payload field can never displace the action being called.
-  const response = await fetch("/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...payload, type }) });
+  const response = await fetch("/api/action", { method: "POST", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify({ ...payload, type }) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error);
   return data.result;
 }
-async function load() { model = await (await fetch("/api/state")).json(); render(); }
+async function load() {
+  const response = await fetch("/api/state", { headers: authHeaders() });
+  if (response.status === 401 || response.status === 403) { setSessionToken(""); renderPairing(await response.json().then((d) => d.error).catch(() => "This device is not paired.")); return; }
+  model = await response.json();
+  render();
+}
+
+/** The only screen an unpaired phone ever sees. It shows no owner data of any kind. */
+function renderPairing(message) {
+  document.querySelector("#onboarding").hidden = true;
+  const content = document.querySelector("#content");
+  content.hidden = false;
+  content.innerHTML = `<div class="sales"><h1>Pair this device</h1>
+<p class="lead">${esc(message)}</p>
+<p class="hint">On the computer running AION, open <b>Settings</b>, turn on private phone access, and choose <b>Create pairing code</b>. Codes last ten minutes and work once.</p>
+<form data-form="pair" class="quick-form"><label>Pairing code<input name="code" required maxlength="20" autocomplete="one-time-code" autocapitalize="characters" placeholder="ABCDE-FGHIJ"></label><button>Pair</button></form></div>`;
+}
 function toast(message) { const node = document.querySelector("#toast"); node.textContent = message; node.classList.add("show"); setTimeout(() => node.classList.remove("show"), 4000); }
 function cards(items, renderItem, empty = "Nothing here yet. Use the form above to begin.") {
   return items.length ? `<div class="grid">${items.map(renderItem).join("")}</div>` : `<div class="empty">${esc(empty)}</div>`;
@@ -33,7 +58,7 @@ function download(name, text) {
 /** Streams one chat turn so provider tokens appear as they arrive rather than after the turn. */
 async function sendStreamed(id, content) {
   streaming = ""; openConversation = id;
-  const response = await fetch("/api/chat/stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, content }) });
+  const response = await fetch("/api/chat/stream", { method: "POST", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify({ id, content }) });
   const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
   for (;;) {
     const { value, done } = await reader.read();
@@ -309,6 +334,30 @@ ${r.state === "dry-run" ? `<form data-form="import-execute"><input type="hidden"
 <div class="actions"><button data-do="import-cancel" data-id="${esc(r.id)}" class="danger">Cancel this dry run</button></div>` : ""}</article>`, "No imports yet. Start with a dry run above.")}`;
 }
 
+/** Console-only. A paired phone can drive AION but never changes how access itself works. */
+function privateAccessCard() {
+  const r = model.remoteAccess ?? { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30, privateNetwork: { available: false, detail: "" }, summary: "" };
+  const devices = model.devices ?? [];
+  return `<div class="card"><h2>Private phone access</h2>
+<p>${esc(r.summary)}</p>
+<p class="meta">AION binds <code>${esc(r.boundAddress ?? "127.0.0.1")}</code>. It never opens a public port, never creates a tunnel, and never changes your router. Reaching AION over a private network is not enough on its own: a device must also be paired.</p>
+<p class="meta">Private network: ${r.privateNetwork.available ? `${esc(r.privateNetwork.tool)} ${esc(r.privateNetwork.version ?? "")} detected` : "not configured"} — ${esc(r.privateNetwork.detail)}</p>
+<form data-form="remote-access">
+<label><input type="checkbox" name="enabled" ${r.enabled ? "checked" : ""}> Allow paired devices to reach AION</label>
+<label>Bind address (loopback or a private range only)<input name="bindAddress" value="${esc(r.bindAddress)}" maxlength="60"></label>
+<label>Sign a device out after (days)<input name="sessionDays" type="number" min="1" max="365" value="${r.sessionDays}"></label>
+<button>Save access settings</button></form>
+${r.enabled ? `<form data-form="pair-code"><label>Pair a new device — name it so you can tell phones apart<input name="label" required maxlength="80" placeholder="Work phone"></label><button>Create pairing code</button></form>` : `<p class="meta">Turn access on to pair a device.</p>`}
+${pairingCode ? `<div class="card next"><h2>Pairing code</h2><p style="font-size:1.6rem;letter-spacing:.12em"><code>${esc(pairingCode.code)}</code></p>
+<p class="meta">Type it on the phone within ten minutes. It works once, and AION does not store it — if you lose it, make another.</p>
+<div class="actions"><button data-do="pair-code-clear">Done</button></div></div>` : ""}
+<h2>Paired devices</h2>
+${devices.length ? devices.map((device) => `<p class="meta"><b>${esc(device.label)}</b> — ${device.revokedAt ? "revoked" : `${device.activeSessions} active session(s)`}${device.lastSeenAt ? ` · last seen ${esc(device.lastSeenAt)}` : ""}${device.expiresAt ? ` · expires ${esc(device.expiresAt)}` : ""}
+${device.revokedAt ? "" : `<button data-do="device-revoke" data-id="${esc(device.id)}" class="danger">Revoke</button>`}</p>`).join("") : `<p class="meta">No device is paired.</p>`}
+${devices.some((device) => !device.revokedAt) ? `<div class="actions"><button data-do="device-revoke-all" class="danger">Sign out all devices</button></div>` : ""}
+<p class="meta">Revoking a device ends its access only. No conversation, memory, task, relationship, or Career record is changed.</p></div>`;
+}
+
 function settingsArea(s) {
   const p = model.providers ?? [];
   const bridges = model.developerBridges ?? [];
@@ -330,6 +379,7 @@ function settingsArea(s) {
 <div class="card"><h2>Encrypted private backup</h2><p>Authenticated AES-256-GCM with a scrypt-derived key. Your passphrase and the derived key are never stored or logged, and every backup is decrypted and verified immediately after it is written.</p>
 <form data-form="backup"><label>Destination file inside the export root<input name="destination" required maxlength="4096"></label><label>Passphrase (12+ characters)<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Create and verify backup</button></form>
 <form data-form="backup-verify"><label>Verify an existing backup<input name="destination" required maxlength="4096"></label><label>Passphrase<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Verify restore</button></form></div>
+${model.viewer === "console" ? privateAccessCard() : ""}
 <div class="card"><h2>Developer-agent bridges</h2><p>AION checks only documented install locations; it never searches your computer. An installed executable is not the same thing as a usable account, so the two are reported separately. Checking account health is a local sign-in question and never a paid call, and AION never reads or stores the account address or organisation.</p>
 ${bridges.length ? `<ul>${bridges.map((b) => `<li><b>${esc(b.displayName)}</b>${b.selected ? " · selected" : ""} — ${b.available ? "installed" : "unavailable"}${b.executable ? ` (<code>${esc(b.executable)}</code>${b.version ? `, ${esc(b.version)}` : ""})` : ""}<br><span class="meta">${esc(b.detail)}</span><br><span class="meta">Account: ${esc(b.account)} — ${esc(b.accountDetail)}</span>
 ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <code>${esc(c.executable)} ${esc(c.args.join(" "))}</code> — your instruction is written to standard input, never to this list.</span>`).join("")}</li>`).join("")}</ul>` : `<p class="empty">No developer-agent bridge was found.</p>`}
@@ -402,6 +452,9 @@ document.addEventListener("click", async (event) => {
     if (verb === "memory-delete") await api("memory.delete", { id });
     if (verb === "memory-export") { download("aion-memories.json", (await api("memory.export")).export); toast("Memories exported to your browser downloads."); return; }
     if (verb === "state-export") { download("aion-local-export.json", (await api("state.export")).export); toast("Complete local export written. It is plaintext — store it carefully."); return; }
+    if (verb === "pair-code-clear") { pairingCode = null; render(); return; }
+    if (verb === "device-revoke") { const result = await api("device.revoke", { id }); toast(`Device revoked; ${result.sessionsEnded} session(s) ended. Your data is untouched.`); }
+    if (verb === "device-revoke-all") { const result = await api("device.revoke.all"); toast(`Signed out ${result.devices} device(s). Your data is untouched.`); }
     if (verb === "developer-health") { const result = await api("developer.health"); toast(`${result.bridges.filter((b) => b.available).length} bridge(s) installed, ${result.bridges.filter((b) => b.account === "signed-in").length} signed in. No paid call was made.`); }
     if (verb === "plan-accept") await api("plan.accept", { id });
     if (verb === "plan-convert") { const tasks = await api("plan.convert", { id }); toast(`${tasks.length} task(s) created.`); }
@@ -436,6 +489,15 @@ document.addEventListener("submit", async (event) => {
     if (kind === "plan") await api("plan.create", { goal: d.goal, steps: d.steps.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).map((title) => ({ title })) });
     if (kind === "action") await api("action.propose", { capabilityId: "aion.local.echo.v1", input: { text: d.text } });
     if (kind === "developer-task") await api("action.propose", { capabilityId: "aion.developer.task.v1", input: { instruction: d.instruction, mode: d.mode === "workspace-write" ? "workspace-write" : "read-only" } });
+    if (kind === "pair") {
+      const response = await fetch("/api/pair", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: d.code }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      setSessionToken(data.result.token);
+      toast(`Paired as "${data.result.label}".`);
+      await load();
+      return;
+    }
     if (kind === "prospect") {
       const created = await api("customer.create", { customer: { displayName: d.displayName, source: d.source, communicationPreference: d.communicationPreference, interests: d.interest ? [{ kind: "vehicle", description: d.interest }] : [] } });
       openSheet = null; openCustomer = created.id; toast("Prospect added.");
@@ -450,6 +512,11 @@ document.addEventListener("submit", async (event) => {
       for (const key of ["newLeads", "calls", "contacts", "appointmentsSet", "appointmentsShown", "sales", "followUpsCompleted"]) counts[key] = Number(d[key] ?? 0);
       await api("sales.metrics", { date: d.date, counts }); toast("Your day is recorded. These are your own counts.");
     }
+    if (kind === "remote-access") {
+      await api("settings.update", { settings: { remoteAccess: { enabled: form.enabled.checked, bindAddress: d.bindAddress, sessionDays: Number(d.sessionDays) } } });
+      toast(form.enabled.checked ? "Private phone access is on. Restart AION for the bind address to take effect." : "Private phone access is off and every device session has ended.");
+    }
+    if (kind === "pair-code") { pairingCode = await api("device.pair.code", { label: d.label }); toast("Code created. It works once and expires in ten minutes."); }
     if (kind === "verify") { await api("action.propose", { capabilityId: "aion.verify.run.v1", input: { operationId: d.operationId } }); toast("Verification proposed. Approve it in Approvals, then execute — AION runs it, not a model."); }
     if (kind === "verify-analyse") { await api("verify.analyse", { id: d.id, question: d.question }); toast("Read-only analysis proposed. Approve it in Approvals to send the evidence to the developer agent."); }
     if (kind === "import") await api("import.dry-run", { platform: d.platform, root: d.root, path: d.path });
