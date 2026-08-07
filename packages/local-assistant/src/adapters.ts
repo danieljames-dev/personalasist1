@@ -83,7 +83,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       activeWorkspace: DEFAULT_WORKSPACE, workspaceLabels: { personal: "Personal", work: "Work" },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
-    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [], customers: [],
+    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [], customers: [], salesMetrics: [],
   };
 }
 
@@ -149,6 +149,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.verifications)) clone.verifications = [];
   if (!Array.isArray(clone.migrations)) clone.migrations = [];
   if (!Array.isArray(clone.customers)) clone.customers = [];
+  if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   return clone;
 }
 

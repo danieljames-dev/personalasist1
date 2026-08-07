@@ -3,12 +3,15 @@
   ChatTurnV1, ClockV1, ConversationV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1,
   DeveloperAgentStatusV1, IdGeneratorV1, ImportReportV1,
   ImportSourceV1, MemoryV1, ModelProviderV1, PlanV1, PrivateBackupV1, RoutineV1, SettingsV1,
-  CustomerAppointmentV1, CustomerInteractionV1, CustomerQueryV1, CustomerV1, IsoTimestamp,
+  ContactChannelV1, CustomerAppointmentV1, CustomerInteractionV1, CustomerQueryV1, CustomerV1,
+  IsoTimestamp, SalesCountsV1, SalesMetricsEntryV1,
   MigrationRecordV1, StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1, WorkspaceIdV1,
 } from "./contracts.js";
-import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, WORKSPACE_IDS } from "./contracts.js";
+import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, SALES_COUNT_KEYS, WORKSPACE_IDS } from "./contracts.js";
 import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
 import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buildInteraction, lastInteraction, queryCustomers } from "./sales.js";
+import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
+import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
 
 type AssistantPorts = {
   repository: StateRepositoryV1;
@@ -549,6 +552,76 @@ export class AionAssistantV1 {
     const state = await this.snapshot();
     const customer = find(state.customers, id, "Customer");
     return { customer, last: lastInteraction(customer), nextAction: { action: customer.nextAction, at: customer.nextActionAt } };
+  }
+
+  // --- Sales coaching, routine templates, and owner-entered metrics ---------------------------
+  /**
+   * Deterministic coaching over what the owner recorded. No model is called, so this works
+   * offline and identically every time. A draft is only ever a draft: AION sends nothing.
+   */
+  async coach(kind: string, input: { customerId?: string; channel?: string; objection?: string; scenario?: string; onDate?: string } = {}): Promise<CoachOutputV1> {
+    const state = await this.snapshot();
+    if (state.settings.activeWorkspace !== "work") throw new Error("Sales coaching is only available in the Work workspace.");
+    const now = this.ports.clock.now();
+    const onDate = input.onDate ?? now.slice(0, 10);
+    const customer = () => find(state.customers, required(input.customerId, "Customer", 200), "Customer");
+    switch (kind) {
+      case "call-preparation": return callPreparation(customer());
+      case "appointment-preparation": return appointmentPreparation(customer());
+      case "follow-up-draft": return followUpDraft(customer(), (input.channel ?? "text") as ContactChannelV1);
+      case "objection-prompts": return objectionPrompts(required(input.objection, "Objection", 500));
+      case "discovery-questions": return discoveryQuestions(customer());
+      case "next-action": return nextActionSuggestion(customer());
+      case "follow-up-queue": return followUpQueue(state.customers, onDate, now);
+      case "morning-plan": return morningPlan(state.customers, onDate, now);
+      case "end-of-day-recap": return endOfDayRecap(state.customers, onDate);
+      case "role-play": return rolePlay(customer(), required(input.scenario, "Scenario", 500));
+      default: throw new Error("Coaching kind is not recognised.");
+    }
+  }
+  /** Templates the owner may choose to create. Nothing here schedules or enables itself. */
+  salesRoutineTemplates(): readonly SalesRoutineTemplateV1[] { return SALES_ROUTINE_TEMPLATES; }
+  async createRoutineFromTemplate(templateId: string): Promise<RoutineV1> {
+    const template = SALES_ROUTINE_TEMPLATES.find((entry) => entry.id === templateId);
+    if (!template) throw new Error("Sales routine template is not recognised.");
+    const state = await this.snapshot();
+    if (state.settings.activeWorkspace !== "work") throw new Error("Sales routines belong to the Work workspace.");
+    return this.createRoutine({ name: template.name, instructions: template.instructions, intervalMinutes: template.intervalMinutes });
+  }
+  /** Records the owner's own count for one day. Re-entering a day replaces that day's numbers. */
+  async recordSalesMetrics(date: string, counts: Record<string, unknown> = {}, note = ""): Promise<SalesMetricsEntryV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00.000Z`))) throw new Error("Metrics date must be an explicit YYYY-MM-DD day.");
+      const unexpected = Object.keys(counts).filter((key) => !(SALES_COUNT_KEYS as readonly string[]).includes(key));
+      if (unexpected.length) throw new Error(`Metrics accept only ${SALES_COUNT_KEYS.join(", ")}; unexpected field(s): ${unexpected.join(", ")}.`);
+      const tallied = {} as SalesCountsV1;
+      for (const key of SALES_COUNT_KEYS) {
+        const value = counts[key] ?? 0;
+        if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 10_000) throw new Error(`Metric ${key} must be a whole number between 0 and 10000.`);
+        tallied[key] = value as number;
+      }
+      const at = this.ports.clock.now();
+      const existing = state.salesMetrics.find((entry) => entry.date === date);
+      const record: SalesMetricsEntryV1 = existing
+        ? { ...existing, counts: tallied, note: note.slice(0, 2000), updatedAt: at }
+        : { id: this.ports.ids.next("metrics"), workspace: "work", date, counts: tallied, note: note.slice(0, 2000), origin: "owner-created", createdAt: at, updatedAt: at };
+      state.salesMetrics = [record, ...state.salesMetrics.filter((entry) => entry.date !== date)].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 1000);
+      this.activity(state, "task", "sales.metrics", `Owner-entered activity recorded for ${date}. These are your own counts, not a dealership system's.`, record.id);
+      return structuredClone(record);
+    });
+  }
+  /** Daily and range summaries over owner-entered counts only. Nothing is inferred or imported. */
+  async salesSummary(fromDate: string, toDate: string): Promise<{ from: string; to: string; days: number; entered: number; totals: SalesCountsV1; daily: SalesMetricsEntryV1[]; source: string }> {
+    const state = await this.snapshot();
+    if (state.settings.activeWorkspace !== "work") throw new Error("Sales metrics are only available in the Work workspace.");
+    for (const [label, value] of [["from", fromDate], ["to", toDate]] as const) if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) throw new Error(`Summary ${label} date must be YYYY-MM-DD.`);
+    if (toDate < fromDate) throw new Error("Summary range is inverted.");
+    const daily = state.salesMetrics.filter((entry) => entry.date >= fromDate && entry.date <= toDate).sort((a, b) => a.date.localeCompare(b.date));
+    const totals = {} as SalesCountsV1;
+    for (const key of SALES_COUNT_KEYS) totals[key] = daily.reduce((sum, entry) => sum + entry.counts[key], 0);
+    const days = Math.round((Date.parse(`${toDate}T00:00:00.000Z`) - Date.parse(`${fromDate}T00:00:00.000Z`)) / 86_400_000) + 1;
+    return { from: fromDate, to: toDate, days, entered: daily.length, totals, daily, source: "Owner-entered counts recorded in AION. Not a dealership CRM figure." };
   }
 
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }

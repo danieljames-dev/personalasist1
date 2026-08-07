@@ -328,6 +328,29 @@ export interface CustomerV1 {
   updatedAt: IsoTimestamp;
 }
 
+/**
+ * Owner-entered daily activity counts. These are the owner's own record of their day, not any
+ * dealership system's numbers, and AION labels them that way wherever they are shown.
+ */
+export interface SalesMetricsEntryV1 {
+  id: OpaqueId;
+  workspace: WorkspaceIdV1;
+  /** Calendar day, YYYY-MM-DD. One entry per day; re-entering a day updates it. */
+  date: string;
+  counts: SalesCountsV1;
+  note: string;
+  origin: DataOriginV1;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}
+export interface SalesCountsV1 {
+  newLeads: number; calls: number; contacts: number; appointmentsSet: number;
+  appointmentsShown: number; sales: number; followUpsCompleted: number;
+}
+export const SALES_COUNT_KEYS: readonly (keyof SalesCountsV1)[] = [
+  "newLeads", "calls", "contacts", "appointmentsSet", "appointmentsShown", "sales", "followUpsCompleted",
+];
+
 /** A closed query shape. There is no free-text filter expression for a model to inject into. */
 export interface CustomerQueryV1 {
   kind:
@@ -382,6 +405,8 @@ export interface AssistantStateV1 {
   migrations: MigrationRecordV1[];
   /** Durable work-scoped relationship records. */
   customers: CustomerV1[];
+  /** Owner-entered daily activity counts, newest first. */
+  salesMetrics: SalesMetricsEntryV1[];
 }
 
 export interface StateRepositoryV1 {
