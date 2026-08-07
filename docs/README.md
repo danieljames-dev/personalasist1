@@ -214,9 +214,27 @@ permanent career Object exists. Phase 7 is approved by CTO-DECISION-013.
 Phase 8 adds explicit structured JSON, Markdown, and text Job Posting import with closed payloads,
 exact source provenance, description-only unstructured handling, conservative currentness evidence,
 dry run, and atomic create/revision behavior. All proof uses synthetic temporary data. No real Job
-Posting, career data, permanent Object, or AI-assistant archive was read. Phase 9 matching,
-scoring, ranking, and drafting remain absent and unauthorized. DG-3 and DG-4b remain Open,
-normative fixtures remain unauthorized, and the Object Contract remains Pre-stable.
+Posting, career data, permanent Object, or AI-assistant archive was read.
+
+## Sprint 3.0 first-usable Career demo
+
+- [Milestone specification](sprints/sprint-3.0-career-vertical-slice/specification.md)
+- [Acceptance criteria](sprints/sprint-3.0-career-vertical-slice/acceptance-criteria.md)
+- [Risk register](sprints/sprint-3.0-career-vertical-slice/risks.md)
+- [Job Matching Contract v1](contracts/job-matching-v1.md)
+- [Application Preparation Contract v1](contracts/application-preparation-v1.md)
+- [Local Career CLI](implementation/career-cli.md)
+- [Reference Candidate status](implementation/reference-candidate-status.md)
+- [Career data threat model](security/career-data-threat-model.md)
+- [Final architecture review](reviews/sprint-3.0-first-usable-career-demo-review.md)
+
+The local Reference Candidate now accepts explicit owner-selected inputs, preserves source/fact
+provenance, builds a profile, imports an owner-supplied posting, explains a deterministic match,
+creates cited owner-review preparation outputs, exports/reloads locally, and runs a complete neutral
+synthetic temporary demo. It cannot discover jobs, fetch URLs, submit applications, send email,
+answer forms, sign, attest, use a model, or synchronize career data. Real owner-data ingestion did
+not run. DG-3 and DG-4b remain Open, normative fixtures remain unauthorized, and the Universal
+Object Contract remains Pre-stable.
 
 ## Reviews
 

@@ -656,6 +656,10 @@ This document authorizes design review and the approved on-demand tooling descri
 above. It does **not** authorize scheduled jobs, cloud storage, database selection,
 credential creation, or production data movement.
 
+The Sprint 3.0 recovery gate also runs matching, preparation, CLI, and the complete synthetic Career
+demo from the isolated exact-HEAD restore. This proves source recoverability only. Private Career
+state and exports remain excluded and need a separately approved owner-data backup policy.
+
 ## Related artifacts
 
 Delivered separately by the approved tooling slice, not by this commit:

@@ -192,6 +192,12 @@ would appear as `missing`, `broken link`, or `error`, and those are real.
 
 ## After a successful run
 
+For the Career milestone, success additionally means the isolated exact-HEAD clone passed Job
+Matching, Application Preparation, Career CLI, and `npm run career:demo`. The demo must show export
+reload plus deterministic `already-completed` reruns and leave no `private/` state in the restored
+repository. The source mirror and bundle continue to exclude real/private career inputs and local
+exports; they back up source and documentation only.
+
 Record in the drive log or asset register: date, commit hash, manifest path, and restore
 result. Then safely eject the drive through **Safely Remove Hardware** before
 disconnecting. Do not leave the drive permanently mounted — a permanently attached backup

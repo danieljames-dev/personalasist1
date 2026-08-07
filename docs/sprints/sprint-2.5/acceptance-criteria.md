@@ -189,6 +189,12 @@ and evidence in ADR-010; it is not a claim of implemented production protection.
 
 ### DG-4b — Object and Domain Workload Limits — **OPEN**
 
+Sprint 3.0's first-usable Career demo adds small neutral synthetic matching, drafting, CLI, and
+restore regressions. Those checks are bounded functional evidence only: they are neither
+representative workload evidence nor production-scale proof and do not close DG-4b. Likewise,
+synthetic Match/Draft fixtures are ordinary tests, not an authorized AFX-1 corpus, and do not close
+DG-3. The Universal Object Contract remains Pre-stable.
+
 | Field | Value |
 |---|---|
 | Owner | CTO |

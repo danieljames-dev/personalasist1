@@ -384,8 +384,13 @@ reference: explicit structured JSON/Markdown/text dry run and import, exact sour
 description-only unstructured mapping, conservative listing-currentness evidence, and atomic
 create/expected-revision persistence. Phase 8 proof is neutral, synthetic, and temporary; no real
 Job Posting, career data, Identity value, or AI-assistant archive is accessed. Phase 6 templates and
-Phase 7/Phase 8 tests are not normative fixtures. The Object Contract remains Pre-stable; DG-3 and
-DG-4b remain Open, and Phase 9 matching, scoring, ranking, and drafting remain unauthorized.
+Phase 7/Phase 8 tests are not normative fixtures. Phases 9–11 add a bounded Reference Candidate for
+transparent deterministic evidence-backed matching, cited owner-review application preparation,
+an explicit-root local CLI, and a complete neutral synthetic temporary demo with export/reload and
+idempotent rerun. This does not add job discovery, external communication, submission, signing,
+attestation, models, embeddings, vector storage, networking, or telemetry. No real owner career data
+was ingested. The Object Contract remains Pre-stable; DG-3 and DG-4b remain Open; normative fixtures
+remain unauthorized. The next action requires a separate Founder/CTO decision after review.
 
 No milestone enters production implementation until it has an approved specification,
 ADRs for architectural change, threat model, public contract, test plan, documentation

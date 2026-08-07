@@ -25,7 +25,14 @@ The privacy package has no Identity, Object, or career dependency. Phase 6 prefl
 content or complete path and performs no ingestion or persistence. No real owner career data was
 read. Phase 7 reads no real owner data and creates no permanent career Object. Future real inputs
 and Objects would remain under explicit ignored private roots and excluded from source backups.
-Phase 8 composes the same boundaries for one explicit Job Posting path, dry run, and synthetic
-temporary Object proof. It adds no directory discovery, source copy, network action, or real owner
-ingestion. Any future real Job Posting input and Object remain beneath explicit ignored private
-roots and excluded from source backups. Phase 9 remains unauthorized.
+Phase 8 composes the same boundaries for one explicit Job Posting path. Phases 9–11 compose them
+for deterministic matching, review-gated preparation, and the explicit-root local CLI. The CLI
+creates private state only when invoked, reads one selected input at a time, and exports only to an
+explicit contained private path. It does not scan, discover jobs, fetch URLs, use a model, send data,
+or submit an application. The complete demo uses only an OS temporary root and removes it in all
+outcomes. No real owner career input, résumé, work history, or Job Posting was accessed in this
+milestone. Future real input remains unauthorized until a separate Founder decision.
+
+Source Git pushes and dependency installation are development operations; domain operations do not
+send career data externally. Source backups exclude `private/` and `.aion-local/`. Local Career
+exports are private owner data and are not automatically written to the source-backup root.

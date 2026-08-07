@@ -18,7 +18,7 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
-    [int]      $ExpectedTests     = 190,
+    [int]      $ExpectedTests     = 217,
     [switch]   $DryRun
 )
 
@@ -85,6 +85,10 @@ $manifest = [ordered]@{
     careerInputCommand='npm run career-input:test'
     careerEvidenceCommand='npm run career-evidence:test'
     jobPostingCommand='npm run job-posting:test'
+    jobMatchingCommand='npm run job-matching:test'
+    applicationPreparationCommand='npm run application-preparation:test'
+    careerCliCommand='npm run career:test'
+    careerDemoCommand='npm run career:demo'
     expectedTests=$ExpectedTests; restoreResult=$null; outcome='FAILURE'; failureReason=$null
     dryRun=[bool]$DryRun
 }
@@ -208,8 +212,12 @@ try {
         $manifest.restoreResult.objectResult -ne 'PASS' -or $manifest.restoreResult.careerInputResult -ne 'PASS' -or
         $manifest.restoreResult.careerEvidenceResult -ne 'PASS' -or
         $manifest.restoreResult.jobPostingResult -ne 'PASS' -or
+        $manifest.restoreResult.jobMatchingResult -ne 'PASS' -or
+        $manifest.restoreResult.applicationPreparationResult -ne 'PASS' -or
+        $manifest.restoreResult.careerCliResult -ne 'PASS' -or
+        $manifest.restoreResult.careerDemoResult -ne 'PASS' -or
         $manifest.restoreResult.exclusionResult -ne 'PASS') {
-        throw 'Mandatory collection, real-gate, privacy, Identity, Object, career-input, career-evidence, Job Posting, or exclusion restore evidence missing'
+        throw 'Mandatory integration, Career vertical-slice, demo, or private-state exclusion restore evidence missing'
     }
     $manifest.outcome='SUCCESS'
     Write-Step 'BACKUP SUCCESS - durable refs restored and verified'

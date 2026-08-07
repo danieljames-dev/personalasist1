@@ -15,4 +15,7 @@ test("configuration and request contracts are closed, versioned, and reject hidd
   assert.throws(() => validateMatchingConfigurationV1({ ...config, hiddenWeight: 1 }));
   assert.throws(() => validateMatchingConfigurationV1({ ...config, weights: { ...config.weights, requiredSkills: 2399.5, preferredSkills: 600.5 } }));
   assert.throws(() => validateJobMatchRequestV1({ ...matchRequest(), protectedAttribute: "synthetic" }));
+  assert.throws(() => validateMatchingConfigurationV1({ ...config, desiredRoleTitles: ["Cafe\u0301"] }));
+  assert.throws(() => validateMatchingConfigurationV1({ ...config, desiredRoleTitles: ["A".repeat(1_048_577)] }));
+  assert.throws(() => validateJobMatchRequestV1({ ...matchRequest(), careerProfileRevision: Number.MAX_SAFE_INTEGER + 1 }));
 });

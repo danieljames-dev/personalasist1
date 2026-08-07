@@ -75,6 +75,10 @@ bundle must pass `git bundle verify`. Checksums prove later byte equality, not a
 | `careerInputCommand` | string | Versioned career contracts, template, preflight, and architecture-boundary tests |
 | `careerEvidenceCommand` | string | Synthetic catalogue, fact, profile, persistence, and architecture tests |
 | `jobPostingCommand` | string | Synthetic Job Posting contract, source, currentness, import, persistence, and architecture tests |
+| `jobMatchingCommand` | string | Transparent deterministic Job Matching tests |
+| `applicationPreparationCommand` | string | Evidence-backed owner-review preparation tests |
+| `careerCliCommand` | string | CLI help, dry-run, temporary workflow, and boundary tests |
+| `careerDemoCommand` | string | Complete neutral synthetic temporary vertical slice |
 | `expectedTests` | integer | Exact Node test count expected in restored verification |
 | `restoreResult` | object \| null | Embedded `aion.restore-test.v1` evidence |
 | `outcome` | string | `SUCCESS` or `FAILURE` |
@@ -106,6 +110,10 @@ restoreResult.privacyBoundaryResult  == "PASS"
 restoreResult.careerInputResult       == "PASS"
 restoreResult.careerEvidenceResult    == "PASS"
 restoreResult.jobPostingResult        == "PASS"
+restoreResult.jobMatchingResult       == "PASS"
+restoreResult.applicationPreparationResult == "PASS"
+restoreResult.careerCliResult         == "PASS"
+restoreResult.careerDemoResult        == "PASS"
 ```
 
 Artifact presence alone never means success.

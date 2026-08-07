@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 190,
+    [int]      $ExpectedTests = 217,
     [switch]   $DryRun
 )
 
@@ -144,9 +144,17 @@ $result = [ordered]@{
     careerInputCommand = 'npm run career-input:test'
     careerEvidenceCommand = 'npm run career-evidence:test'
     jobPostingCommand = 'npm run job-posting:test'
+    jobMatchingCommand = 'npm run job-matching:test'
+    applicationPreparationCommand = 'npm run application-preparation:test'
+    careerCliCommand = 'npm run career:test'
+    careerDemoCommand = 'npm run career:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
+    jobMatchingResult = $null
+    applicationPreparationResult = $null
+    careerCliResult = $null
+    careerDemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -200,6 +208,10 @@ try {
         Write-Step "would run   : npm run career-input:test (synthetic temporary inputs only)"
         Write-Step "would run   : npm run career-evidence:test (synthetic temporary inputs and Object stores only)"
         Write-Step "would run   : npm run job-posting:test (synthetic temporary Job Posting inputs and Object stores only)"
+        Write-Step "would run   : npm run job-matching:test (synthetic deterministic matching only)"
+        Write-Step "would run   : npm run application-preparation:test (synthetic review-gated drafts only)"
+        Write-Step "would run   : npm run career:test (synthetic temporary roots only)"
+        Write-Step "would run   : npm run career:demo (complete temporary vertical slice)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -398,6 +410,43 @@ try {
     }
     $result.jobPostingResult = 'PASS'
     Add-Step 'job-posting-regression' 'PASS' 'all Job Posting tests passed using neutral synthetic temporary state only'
+
+    Write-Step "running npm run job-matching:test"
+    $mOut = Join-Path $logDir "restore-$Timestamp.job-matching.out.log"
+    $mErr = Join-Path $logDir "restore-$Timestamp.job-matching.err.log"
+    $mCode = Invoke-Logged -CommandLine 'npm run job-matching:test' -WorkingDirectory $restoreDir -OutFile $mOut -ErrFile $mErr
+    if ($mCode -ne 0) { throw "Job Matching regression failed with exit code $mCode (see $mErr)" }
+    $result.jobMatchingResult = 'PASS'
+    Add-Step 'job-matching-regression' 'PASS' 'transparent deterministic matching passed on neutral synthetic state'
+
+    Write-Step "running npm run application-preparation:test"
+    $dOut = Join-Path $logDir "restore-$Timestamp.application-preparation.out.log"
+    $dErr = Join-Path $logDir "restore-$Timestamp.application-preparation.err.log"
+    $dCode = Invoke-Logged -CommandLine 'npm run application-preparation:test' -WorkingDirectory $restoreDir -OutFile $dOut -ErrFile $dErr
+    if ($dCode -ne 0) { throw "Application Preparation regression failed with exit code $dCode (see $dErr)" }
+    $result.applicationPreparationResult = 'PASS'
+    Add-Step 'application-preparation-regression' 'PASS' 'evidence-backed owner-review drafts passed on neutral synthetic state'
+
+    Write-Step "running npm run career:test"
+    $qOut = Join-Path $logDir "restore-$Timestamp.career-cli.out.log"
+    $qErr = Join-Path $logDir "restore-$Timestamp.career-cli.err.log"
+    $qCode = Invoke-Logged -CommandLine 'npm run career:test' -WorkingDirectory $restoreDir -OutFile $qOut -ErrFile $qErr
+    if ($qCode -ne 0) { throw "Career CLI regression failed with exit code $qCode (see $qErr)" }
+    $result.careerCliResult = 'PASS'
+    Add-Step 'career-cli-regression' 'PASS' 'CLI help, dry-run, temporary end-to-end, export/reload, and boundaries passed'
+
+    Write-Step "running npm run career:demo"
+    $zOut = Join-Path $logDir "restore-$Timestamp.career-demo.out.log"
+    $zErr = Join-Path $logDir "restore-$Timestamp.career-demo.err.log"
+    $zCode = Invoke-Logged -CommandLine 'npm run career:demo' -WorkingDirectory $restoreDir -OutFile $zOut -ErrFile $zErr
+    if ($zCode -ne 0) { throw "Career demo failed with exit code $zCode (see $zErr)" }
+    $demoText = (Get-Content -LiteralPath $zOut -Raw) + (Get-Content -LiteralPath $zErr -Raw)
+    if ($demoText -notmatch 'Synthetic Career demo complete' -or $demoText -notmatch 'already-completed') {
+        throw 'Career demo completion or deterministic-rerun evidence missing'
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'Career demo left permanent private runtime state in the restored repository' }
+    $result.careerDemoResult = 'PASS'
+    Add-Step 'career-demo-regression' 'PASS' 'complete synthetic demo, reload, rerun, and temporary cleanup passed'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"
