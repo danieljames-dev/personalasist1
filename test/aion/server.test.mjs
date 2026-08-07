@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -247,11 +247,76 @@ test("Personal and Work stay separated across the API and the rendered UI", asyn
   });
 });
 
+test("a salesperson's day runs end to end over the API in Work, and is refused in Personal", async () => {
+  await withServer(async ({ base }) => {
+    await post(base, { type: "onboarding.complete" });
+    // Personal first: the whole Sales surface must be unavailable.
+    for (const call of [
+      { type: "customer.create", customer: { displayName: "X" } },
+      { type: "customer.find", query: { kind: "all" } },
+      { type: "coach", kind: "morning-plan", input: {} },
+      { type: "sales.metrics", date: "2030-01-01", counts: { calls: 1 } },
+    ]) assert.equal((await post(base, call)).status, 400, `${call.type} is refused in Personal`);
+
+    await post(base, { type: "settings.update", settings: { activeWorkspace: "work", workspaceLabels: { personal: "Personal", work: "Bayfield Motors" } } });
+
+    const created = await (await post(base, { type: "customer.create", customer: { displayName: "J. Rivera (walk-in)", source: "walk-in", interests: [{ kind: "vehicle", description: "compact SUV" }] } })).json();
+    const id = created.result.id;
+    assert.equal(created.result.workspace, "work");
+
+    await post(base, { type: "customer.interaction", id, interaction: { kind: "call", summary: "Talked through the SUV range." } });
+    await post(base, { type: "customer.lifecycle", id, lifecycle: "engaged", summary: "Wants to see one." });
+    await post(base, { type: "customer.appointment", id, appointment: { at: "2030-01-01T15:00:00.000Z", location: "showroom" } });
+    await post(base, { type: "customer.followup", id, followUp: { dueAt: "2030-01-01T09:00:00.000Z", channel: "phone", reason: "Confirm Saturday." } });
+
+    const found = await (await post(base, { type: "customer.find", query: { kind: "follow-up-due", onDate: "2030-01-01" } })).json();
+    assert.deepEqual(found.result.customers.map((c) => c.id), [id]);
+
+    const timeline = await (await post(base, { type: "customer.timeline", id })).json();
+    assert.ok(timeline.result.customer.interactions.length >= 4, "the durable timeline is available in one call");
+    assert.equal(timeline.result.last.kind, "appointment");
+
+    const prep = await (await post(base, { type: "coach", kind: "call-preparation", input: { customerId: id } })).json();
+    assert.match(prep.result.lines.join("\n"), /compact SUV/u);
+    const draft = await (await post(base, { type: "coach", kind: "follow-up-draft", input: { customerId: id, channel: "text" } })).json();
+    assert.equal(draft.result.draft, true);
+    assert.match(draft.result.lines[0], /AION does not send messages/u);
+
+    await post(base, { type: "sales.metrics", date: "2030-01-01", counts: { calls: 12, appointmentsSet: 1 } });
+    const summary = await (await post(base, { type: "sales.summary", from: "2030-01-01", to: "2030-01-01" })).json();
+    assert.equal(summary.result.totals.calls, 12);
+    assert.match(summary.result.source, /Not a dealership CRM figure/u);
+
+    // Sensitive material is refused at the transport boundary too, not only in the domain.
+    assert.equal((await post(base, { type: "customer.create", customer: { displayName: "Y", ssn: "111-22-3333" } })).status, 400);
+
+    const state = await (await fetch(`${base}/api/state`)).json();
+    assert.equal(state.state.customers.length, 1);
+    assert.equal(state.salesRoutineTemplates.length, 4, "routine templates are offered but nothing is scheduled");
+    assert.equal(state.state.routines.length, 0);
+  });
+});
+
+test("the Sales UI is phone-first: large targets, one-tap actions, and a timeline in the detail view", async () => {
+  const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
+  const css = await readFile(join(repositoryRoot, "apps/aion/public/styles.css"), "utf8");
+  for (const tab of ["TODAY", "FOLLOW-UPS", "APPOINTMENTS", "PROSPECTS", "COACH", "METRICS"]) {
+    assert.ok(js.includes(`"${tab}"`), `the ${tab} tab exists`);
+  }
+  // The quick actions the directive names must be reachable without leaving the floor view.
+  for (const action of ["+ Prospect", "+ Note", "Follow-up", "Appointment", "Coach", "Metrics"]) assert.ok(js.includes(action), `${action} is a quick action`);
+  for (const action of ["Call Prep", "Add Note", "Follow-up Draft", "Change Stage"]) assert.ok(js.includes(action), `${action} is on the person view`);
+  assert.match(js, /Timeline/u, "the person view shows the durable timeline");
+  assert.match(css, /@media \(max-width: 700px\)/u, "there is a real phone layout, not just a narrower desktop");
+  assert.match(css, /font-size: 16px/u, "inputs are 16px so iOS does not zoom on focus");
+  assert.match(css, /min-height: 2\.(?:75|9)rem/u, "tap targets are thumb-sized");
+});
+
 test("UI exposes every required owner-facing area and needs no hosted dependency", async () => {
   const html = await readFile(join(repositoryRoot, "apps/aion/public/index.html"), "utf8");
   const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
   const css = await readFile(join(repositoryRoot, "apps/aion/public/styles.css"), "utf8");
-  for (const area of ["Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"]) {
+  for (const area of ["Sales", "Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"]) {
     assert.match(js, new RegExp(`"${area}"`, "u"), `the ${area} area must exist`);
   }
   for (const [name, text] of [["index.html", html], ["app.js", js], ["styles.css", css]]) {

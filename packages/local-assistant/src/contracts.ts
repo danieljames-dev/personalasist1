@@ -1,4 +1,4 @@
-﻿export type OpaqueId = string;
+export type OpaqueId = string;
 export type IsoTimestamp = string;
 
 export interface ClockV1 { now(): IsoTimestamp; }
@@ -6,7 +6,7 @@ export interface IdGeneratorV1 { next(kind: string): OpaqueId; }
 
 /**
  * Workspace separation. Work material stays in WORK unless the owner explicitly moves it, and
- * nothing is ever copied between workspaces implicitly â€” not memory context, not search results,
+ * nothing is ever copied between workspaces implicitly — not memory context, not search results,
  * and not prospect information. Every record that can hold owner content carries its workspace.
  */
 export type WorkspaceIdV1 = "personal" | "work";
@@ -439,8 +439,8 @@ export type DeveloperAgentModeV1 = "read-only" | "workspace-write";
 
 /**
  * Executable availability and account health are deliberately separate. A CLI that answers its
- * version probe proves only that the program exists; whether the owner is signed in â€” and whether
- * any credit remains â€” is a different question. AION never determines remaining quota, because
+ * version probe proves only that the program exists; whether the owner is signed in — and whether
+ * any credit remains — is a different question. AION never determines remaining quota, because
  * that would require a paid call.
  */
 export interface DeveloperAgentStatusV1 {
@@ -482,7 +482,7 @@ export interface DeveloperAgentRegistryV1 {
 /**
  * The complete set of verification operations AION will ever run, as a closed union.
  *
- * This is the whole point of the type: a caller â€” including a model â€” selects an operation by
+ * This is the whole point of the type: a caller — including a model — selects an operation by
  * identifier. There is no command string, no argument list, and no shell anywhere in the input, so
  * there is nothing for instruction text to be injected into. AION owns the actual commands.
  */

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * Complete AION V1 synthetic product proof.
  *
@@ -245,14 +245,14 @@ async function careerIntegration(root) {
 
 const roots = [];
 try {
-  console.log("\nAION V1 synthetic product demo â€” neutral data, no owner content, no network, no live provider\n");
+  console.log("\nAION V1 synthetic product demo — neutral data, no owner content, no network, no live provider\n");
   for (const name of ["aion-v1-demo-a-", "aion-v1-demo-b-", "aion-v1-demo-career-"]) roots.push(await mkdtemp(join(tmpdir(), name)));
   const first = await scenario(roots[0], true);
   const second = await scenario(roots[1], false);
   assert.deepEqual(first, second, "an identical run must produce identical local state");
   proved("a second independent run produces byte-identical state: AION V1 is deterministic");
   await careerIntegration(roots[2]);
-  console.log(`\nAION V1 synthetic demo PASS â€” ${steps.length} product behaviours proved.`);
+  console.log(`\nAION V1 synthetic demo PASS — ${steps.length} product behaviours proved.`);
   console.log("No owner data, external account, live provider, network call, or permanent state was used or left behind.\n");
 } finally {
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));

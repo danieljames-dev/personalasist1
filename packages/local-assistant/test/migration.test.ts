@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AionAssistantV1, DEFAULT_WORKSPACE, DeterministicClockV1, DeterministicIdGeneratorV1,

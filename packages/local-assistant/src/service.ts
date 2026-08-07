@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   ActivityV1, AgentActionV1, ApprovalV1, AssistantStateV1, CapabilityRegistryV1, ChatMessageV1,
   ChatTurnV1, ClockV1, ConversationV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1,
   DeveloperAgentStatusV1, IdGeneratorV1, ImportReportV1,
@@ -67,7 +67,7 @@ const VERIFICATION_CAPABILITY_ID = "aion.verify.run.v1";
  */
 function salientEvidence(run: VerificationRunV1, budget = 2600): string {
   const lines = `${run.stdout}\n${run.stderr}`.split(/\r?\n/u);
-  const interesting = /^(?:not ok|#\s*(?:tests|pass|fail|skipped)|.*(?:error|Error|AssertionError|FAIL|failed|âœ—)\b)/u;
+  const interesting = /^(?:not ok|#\s*(?:tests|pass|fail|skipped)|.*(?:error|Error|AssertionError|FAIL|failed|✗)\b)/u;
   const failures = lines.filter((line) => interesting.test(line));
   const tail = lines.slice(-40);
   const selected = [...new Set([...failures, ...tail])].filter((line) => line.trim());

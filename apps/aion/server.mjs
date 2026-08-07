@@ -122,6 +122,24 @@ export async function createAionServer(options = {}) {
       // There is no endpoint that submits verification evidence: executing the approved capability
       // is the only way a record can appear, so an analysis always cites a command AION really ran.
       case "verify.analyse": return service.proposeVerificationAnalysis(input.id, input.question);
+      // Work-scoped relationship records. Every one of these refuses outside the Work workspace.
+      case "customer.create": return service.createCustomer(input.customer ?? {});
+      case "customer.update": return service.updateCustomer(input.id, input.change ?? {});
+      case "customer.interaction": return service.recordCustomerInteraction(input.id, input.interaction ?? {});
+      case "customer.lifecycle": return service.setCustomerLifecycle(input.id, input.lifecycle, input.summary);
+      case "customer.appointment": return service.addCustomerAppointment(input.id, input.appointment ?? {});
+      case "customer.appointment.status": return service.setCustomerAppointmentStatus(input.id, input.appointmentId, input.status);
+      case "customer.followup": return service.addCustomerFollowUp(input.id, input.followUp ?? {});
+      case "customer.followup.complete": return service.completeCustomerFollowUp(input.id, input.followUpId, input.outcome, input.status === "skipped" ? "skipped" : "done");
+      case "customer.outcome": return service.setCustomerOutcome(input.id, input.outcome, input.detail);
+      case "customer.archive": return service.setCustomerArchived(input.id, input.archived === true);
+      case "customer.link.task": return service.linkCustomerTask(input.id, input.taskId);
+      case "customer.find": return { customers: await service.findCustomers(input.query ?? { kind: "all" }) };
+      case "customer.timeline": return service.customerTimeline(input.id);
+      case "coach": return service.coach(input.kind, input.input ?? {});
+      case "sales.routine.create": return service.createRoutineFromTemplate(input.templateId);
+      case "sales.metrics": return service.recordSalesMetrics(input.date, input.counts ?? {}, input.note ?? "");
+      case "sales.summary": return service.salesSummary(input.from, input.to);
       case "action.execute": return service.executeAction(input.id);
       case "action.cancel": return service.cancelAction(input.id);
       case "approval.decide": return service.decideApproval(input.id, input.approve === true);
@@ -154,6 +172,7 @@ export async function createAionServer(options = {}) {
           state: await service.snapshot(), providers: await service.providerHealth(), capabilities: service.capabilities(),
           developerBridge: await service.developerBridgeStatus(), developerBridges: await service.developerBridgeInventory(),
           verificationOperations: verificationRunner.operations(),
+          salesRoutineTemplates: service.salesRoutineTemplates(),
           dataRoot: "private/aion", exportRoot: "private/aion/exports",
         });
       }
