@@ -14,12 +14,19 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $synthetic) -Force | Out-Null
     Set-Content -LiteralPath $synthetic -Value 'synthetic boundary test only' -Encoding utf8
 
-    $ignored = @(@(
+    # Paths are passed as arguments, not on stdin: stdin encoding varies by host and can prepend a
+    # BOM to the first path, which silently turned this assertion into a weaker one.
+    $mustBeIgnored = @(
         'private/',
         'private/career/input/synthetic-boundary-test.txt',
-        '.aion-local/directives/CURRENT.md'
-    ) | & git -C $root check-ignore --no-index --stdin)
-    if ($LASTEXITCODE -ne 0 -or $ignored.Count -ne 3) { throw 'Git ignore boundary regression failed' }
+        '.aion-local/directives/CURRENT.md',
+        'private/aion/state-v1.json',
+        'private/aion/exports/private-backup.aionbak'
+    )
+    $ignored = @(& git -C $root check-ignore --no-index -- @mustBeIgnored)
+    if ($LASTEXITCODE -ne 0 -or $ignored.Count -ne $mustBeIgnored.Count) {
+        throw "Git ignore boundary regression failed: $($ignored.Count)/$($mustBeIgnored.Count) required paths are ignored"
+    }
 
     $status = @(& git -C $root status --porcelain=v1 -uall)
     if (@($status | Where-Object { $_ -match 'private[/\\]' }).Count -ne 0) {
@@ -33,7 +40,7 @@ try {
         -RepositoryPath $root -IncludeUntracked 'private/career/input/synthetic-boundary-test.txt' -DryRun
     if ($LASTEXITCODE -eq 0) { throw 'Backup dry run accepted a private file explicitly' }
 
-    Write-Host 'privacy boundary regression: PASS (Git ignore 3, staging 1, backup exclusion 1)'
+    Write-Host "privacy boundary regression: PASS (Git ignore $($mustBeIgnored.Count), staging 1, backup exclusion 1)"
 }
 finally {
     if (Test-Path -LiteralPath $synthetic) { Remove-Item -LiteralPath $synthetic -Force }

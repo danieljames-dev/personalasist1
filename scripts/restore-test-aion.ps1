@@ -148,6 +148,8 @@ $result = [ordered]@{
     applicationPreparationCommand = 'npm run application-preparation:test'
     careerCliCommand = 'npm run career:test'
     careerDemoCommand = 'npm run career:demo'
+    aionCommand      = 'npm run aion:test'
+    aionDemoCommand  = 'npm run aion:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
@@ -155,6 +157,8 @@ $result = [ordered]@{
     applicationPreparationResult = $null
     careerCliResult = $null
     careerDemoResult = $null
+    aionResult = $null
+    aionDemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -212,6 +216,8 @@ try {
         Write-Step "would run   : npm run application-preparation:test (synthetic review-gated drafts only)"
         Write-Step "would run   : npm run career:test (synthetic temporary roots only)"
         Write-Step "would run   : npm run career:demo (complete temporary vertical slice)"
+        Write-Step "would run   : npm run aion:test (local assistant, architecture, and Command Center suites)"
+        Write-Step "would run   : npm run aion:demo (complete synthetic V1 product proof, reload, and rerun)"
         $result.outcome = 'DRY-RUN'
         Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
         Write-Host ''
@@ -447,6 +453,36 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'Career demo left permanent private runtime state in the restored repository' }
     $result.careerDemoResult = 'PASS'
     Add-Step 'career-demo-regression' 'PASS' 'complete synthetic demo, reload, rerun, and temporary cleanup passed'
+
+    Write-Step "running npm run aion:test"
+    $tOut = Join-Path $logDir "restore-$Timestamp.aion.out.log"
+    $tErr = Join-Path $logDir "restore-$Timestamp.aion.err.log"
+    $tCode = Invoke-Logged -CommandLine 'npm run aion:test' -WorkingDirectory $restoreDir -OutFile $tOut -ErrFile $tErr
+    if ($tCode -ne 0) { throw "AION V1 regression failed with exit code $tCode (see $tErr)" }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private\aion')) {
+        throw 'AION V1 regression created permanent assistant state in the restored repository'
+    }
+    $result.aionResult = 'PASS'
+    Add-Step 'aion-regression' 'PASS' 'local assistant, architecture boundary, and Command Center suites passed on synthetic temporary state only'
+
+    Write-Step "running npm run aion:demo"
+    $yOut = Join-Path $logDir "restore-$Timestamp.aion-demo.out.log"
+    $yErr = Join-Path $logDir "restore-$Timestamp.aion-demo.err.log"
+    $yCode = Invoke-Logged -CommandLine 'npm run aion:demo' -WorkingDirectory $restoreDir -OutFile $yOut -ErrFile $yErr
+    if ($yCode -ne 0) { throw "AION V1 demo failed with exit code $yCode (see $yErr)" }
+    $aionText = (Get-Content -LiteralPath $yOut -Raw) + (Get-Content -LiteralPath $yErr -Raw)
+    foreach ($required in @(
+        'AION V1 synthetic demo PASS',
+        'reloads the identical local state',
+        'byte-identical state',
+        'one-shot approval is required',
+        'encrypted private backup',
+        'Career screen runs the accepted Career engine')) {
+        if ($aionText -notmatch [regex]::Escape($required)) { throw "AION V1 demo evidence missing: $required" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'AION V1 demo left permanent private runtime state in the restored repository' }
+    $result.aionDemoResult = 'PASS'
+    Add-Step 'aion-demo-regression' 'PASS' 'complete synthetic V1 product proof, restart reload, deterministic rerun, and cleanup passed'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

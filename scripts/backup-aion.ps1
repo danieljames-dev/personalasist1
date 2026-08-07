@@ -216,8 +216,10 @@ try {
         $manifest.restoreResult.applicationPreparationResult -ne 'PASS' -or
         $manifest.restoreResult.careerCliResult -ne 'PASS' -or
         $manifest.restoreResult.careerDemoResult -ne 'PASS' -or
+        $manifest.restoreResult.aionResult -ne 'PASS' -or
+        $manifest.restoreResult.aionDemoResult -ne 'PASS' -or
         $manifest.restoreResult.exclusionResult -ne 'PASS') {
-        throw 'Mandatory integration, Career vertical-slice, demo, or private-state exclusion restore evidence missing'
+        throw 'Mandatory integration, Career vertical-slice, AION V1, demo, or private-state exclusion restore evidence missing'
     }
     $manifest.outcome='SUCCESS'
     Write-Step 'BACKUP SUCCESS - durable refs restored and verified'
