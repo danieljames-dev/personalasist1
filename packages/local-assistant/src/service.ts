@@ -4,12 +4,15 @@ import type {
   DeveloperAgentStatusV1, IdGeneratorV1, ImportReportV1,
   ImportSourceV1, MemoryV1, ModelProviderV1, PlanV1, PrivateBackupV1, RoutineV1, SettingsV1,
   ContactChannelV1, CustomerAppointmentV1, CustomerInteractionV1, CustomerQueryV1, CustomerV1,
-  IsoTimestamp, SalesCountsV1, SalesMetricsEntryV1,
+  IsoTimestamp, RelationshipQueryV1, RelationshipV1, SalesCountsV1, SalesMetricsEntryV1,
   MigrationRecordV1, StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1, WorkspaceIdV1,
 } from "./contracts.js";
-import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, SALES_COUNT_KEYS, WORKSPACE_IDS } from "./contracts.js";
+import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, SALES_COUNT_KEYS } from "./contracts.js";
 import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
 import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buildInteraction, lastInteraction, queryCustomers } from "./sales.js";
+import { buildRelationship, queryRelationships } from "./relationships.js";
+import type { WorkspaceV1 } from "./workspaces.js";
+import { applyWorkspaceEdit, assertSameWorkspace, buildBrandProduct, buildWorkspace, requireWorkspace } from "./workspaces.js";
 import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
@@ -116,7 +119,7 @@ export class AionAssistantV1 {
       if (migrated.applied) {
         const expected = this.state.revision;
         const next = { ...migrated.state, revision: expected + 1 };
-        this.#recordMigration(next, migrated.record);
+        for (const record of migrated.records) this.#recordMigration(next, record);
         await this.ports.repository.save(expected, next);
         this.state = next;
       }
@@ -184,7 +187,8 @@ export class AionAssistantV1 {
       if (next.providerId !== "deterministic" && next.providerId.startsWith("remote") && !next.remoteDisclosureAccepted) throw new Error("Remote-provider disclosure must be accepted before selection.");
       if (next.credentialEnvironmentVariable && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(next.credentialEnvironmentVariable)) throw new Error("Credential environment-variable name is invalid.");
       if (typeof next.developerBridgeId !== "string") throw new Error("Developer-agent bridge selection is invalid.");
-      if (!WORKSPACE_IDS.includes(next.activeWorkspace)) throw new Error("Workspace is not recognised.");
+      const target = requireWorkspace(state.workspaces, next.activeWorkspace);
+      if (target.archived) throw new Error("That workspace is archived. Reactivate it before switching to it.");
       next.remoteAccess = { ...state.settings.remoteAccess, ...(input.remoteAccess ?? {}) };
       next.remoteAccess.bindAddress = validateBindAddress(next.remoteAccess.bindAddress);
       if (typeof next.remoteAccess.enabled !== "boolean") throw new Error("Private phone access must be on or off.");
@@ -195,8 +199,13 @@ export class AionAssistantV1 {
         const ended = revokeAllDevices(state, this.ports.clock.now());
         this.activity(state, "settings", "device.revoked.all", `Private phone access was turned off, ending ${ended.sessions} session(s). Owner data is untouched.`, null);
       }
+      // Labels follow the registry: every workspace that exists has one, and a label for a
+      // workspace that does not exist is refused rather than stored as an orphan.
       next.workspaceLabels = { ...state.settings.workspaceLabels, ...(input.workspaceLabels ?? {}) };
-      for (const id of WORKSPACE_IDS) next.workspaceLabels[id] = required(next.workspaceLabels[id], "Workspace label", 80);
+      for (const key of Object.keys(next.workspaceLabels)) requireWorkspace(state.workspaces, key);
+      for (const workspace of state.workspaces) next.workspaceLabels[workspace.id] = required(next.workspaceLabels[workspace.id] ?? workspace.label, "Workspace label", 80);
+      // A relabelled workspace keeps the registry and the label map saying the same thing.
+      state.workspaces = state.workspaces.map((entry) => next.workspaceLabels[entry.id] === entry.label ? entry : { ...entry, label: next.workspaceLabels[entry.id]!, updatedAt: this.ports.clock.now() });
       if (next.developerBridgeId && !this.ports.developerAgents.get(next.developerBridgeId)) throw new Error("Selected developer-agent bridge is not registered.");
       next.importRoots = unique(next.importRoots, "Import roots").map((root) => required(root, "Import root", 500));
       if (next.exportRoot) required(next.exportRoot, "Export root", 500);
@@ -289,7 +298,7 @@ export class AionAssistantV1 {
     return this.mutate((state) => { const at = this.ports.clock.now(); const memory: MemoryV1 = { id: this.ports.ids.next("memory"), workspace: state.settings.activeWorkspace, content: required(input.content, "Memory", 20_000), category: input.category, confirmation: input.confirmation ?? "owner-confirmed", conflict: "none", enabled: true, createdAt: at, updatedAt: at, sourceTimestamp: at, provenance: { sourceType: input.confirmation === "unconfirmed" ? "provider-proposal" : "owner", sourceRef: required(input.sourceRef ?? "owner-entry", "Memory source", 500), recordedAt: at }, corrections: [] }; state.memories.unshift(memory); this.activity(state, "memory", "memory.create", `Memory ${memory.confirmation} created.`, memory.id); return structuredClone(memory); });
   }
   /** Search never crosses the workspace boundary; pass an explicit workspace to look elsewhere. */
-  async searchMemories(query: string, workspace?: WorkspaceIdV1): Promise<MemoryV1[]> { const needle = required(query, "Memory query", 500).toLocaleLowerCase(); const state = await this.snapshot(); const scope = workspace ?? state.settings.activeWorkspace; if (!WORKSPACE_IDS.includes(scope)) throw new Error("Workspace is not recognised."); return state.memories.filter((item) => item.enabled && item.workspace === scope && `${item.category} ${item.content}`.toLocaleLowerCase().includes(needle)); }
+  async searchMemories(query: string, workspace?: WorkspaceIdV1): Promise<MemoryV1[]> { const needle = required(query, "Memory query", 500).toLocaleLowerCase(); const state = await this.snapshot(); const scope = requireWorkspace(state.workspaces, workspace ?? state.settings.activeWorkspace).id; return state.memories.filter((item) => item.enabled && item.workspace === scope && `${item.category} ${item.content}`.toLocaleLowerCase().includes(needle)); }
   async correctMemory(id: string, content: string, reason: string): Promise<void> { await this.mutate((state) => { const item = find(state.memories, id, "Memory"); const next = required(content, "Memory correction", 20_000); const at = this.ports.clock.now(); item.corrections.push({ at, previousContent: item.content, correctedContent: next, reason: required(reason, "Correction reason", 500) }); item.content = next; item.confirmation = "owner-confirmed"; item.updatedAt = at; this.activity(state, "memory", "memory.correct", "Memory corrected with prior content preserved in history.", id); }); }
   async setMemoryEnabled(id: string, enabled: boolean): Promise<void> { await this.mutate((state) => { const item = find(state.memories, id, "Memory"); item.enabled = enabled; item.updatedAt = this.ports.clock.now(); this.activity(state, "memory", enabled ? "memory.enable" : "memory.disable", `Memory ${enabled ? "enabled" : "disabled"}.`, id); }); }
   async forgetMemory(id: string): Promise<void> { await this.mutate((state) => { find(state.memories, id, "Memory"); state.memories = state.memories.filter((item) => item.id !== id); this.activity(state, "memory", "memory.forget", "Memory content and correction history deleted.", id); }); }
@@ -399,23 +408,123 @@ export class AionAssistantV1 {
     ].filter(Boolean).join("\n").slice(0, 4000);
     return this.proposeAction("aion.developer.task.v1", { instruction, mode: "read-only" }, { origin: "owner" });
   }
-  // --- Work-scoped relationship records -------------------------------------------------------
+  // --- Workspaces -------------------------------------------------------------------------------
   /**
-   * Relationship records live in WORK and nowhere else. Requiring the owner to be in the work
-   * workspace is the point: it makes storing employer and customer material a deliberate act
-   * rather than something that can happen while thinking about personal life.
+   * Creates a business or brand workspace.
+   *
+   * A new workspace starts genuinely empty. Nothing is copied into it from Personal, from Work, or
+   * from another business, because a workspace that inherited someone else's records would defeat
+   * the only property that makes workspaces worth having.
+   */
+  async createWorkspace(input: Record<string, unknown> = {}): Promise<WorkspaceV1> {
+    return this.mutate((state) => {
+      const at = this.ports.clock.now();
+      const workspace = buildWorkspace(input, { now: at, existing: state.workspaces });
+      state.workspaces = [...state.workspaces, workspace];
+      state.settings.workspaceLabels = { ...state.settings.workspaceLabels, [workspace.id]: workspace.label };
+      this.activity(state, "settings", "workspace.create", `Created the ${workspace.kind} workspace "${workspace.label}". It starts empty; no record was copied into it from any other workspace.`, workspace.id);
+      return structuredClone(workspace);
+    });
+  }
+  async updateWorkspace(id: string, change: Record<string, unknown> = {}): Promise<WorkspaceV1> {
+    return this.mutate((state) => {
+      const existing = requireWorkspace(state.workspaces, id);
+      const updated = applyWorkspaceEdit(existing, change, this.ports.clock.now());
+      state.workspaces = state.workspaces.map((entry) => entry.id === id ? updated : entry);
+      state.settings.workspaceLabels = { ...state.settings.workspaceLabels, [updated.id]: updated.label };
+      this.activity(state, "settings", "workspace.update", `Workspace "${updated.label}" updated.`, updated.id);
+      return structuredClone(updated);
+    });
+  }
+  /**
+   * Archives a workspace. Its records stay exactly where they are: archiving hides a workspace
+   * from the switcher, it does not move, merge, or delete anything inside it.
+   */
+  async setWorkspaceArchived(id: string, archived: boolean): Promise<WorkspaceV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, id);
+      if (workspace.builtIn) throw new Error("Personal and Work are always available and cannot be archived.");
+      if (archived && state.settings.activeWorkspace === id) throw new Error("Switch to another workspace before archiving this one.");
+      const updated = { ...workspace, archived, updatedAt: this.ports.clock.now() };
+      state.workspaces = state.workspaces.map((entry) => entry.id === id ? updated : entry);
+      this.activity(state, "settings", archived ? "workspace.archive" : "workspace.reactivate", `Workspace "${updated.label}" ${archived ? "archived" : "reactivated"}. Every record inside it is untouched.`, id);
+      return structuredClone(updated);
+    });
+  }
+  async addBrandProduct(workspaceId: string, input: Record<string, unknown> = {}): Promise<WorkspaceV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, workspaceId);
+      if (workspace.kind !== "business" || !workspace.brand) throw new Error("Only a business or brand workspace holds products.");
+      const product = buildBrandProduct(input, { id: this.ports.ids.next("product"), now: this.ports.clock.now() });
+      if (workspace.brand.products.length >= 200) throw new Error("A brand may hold at most 200 products.");
+      const updated: WorkspaceV1 = { ...workspace, updatedAt: this.ports.clock.now(), brand: { ...workspace.brand, products: [...workspace.brand.products, product] } };
+      state.workspaces = state.workspaces.map((entry) => entry.id === workspaceId ? updated : entry);
+      this.activity(state, "settings", "workspace.product", `Product "${product.name}" recorded for "${updated.label}".`, workspaceId);
+      return structuredClone(updated);
+    });
+  }
+  /** Every workspace, so the switcher can show them. Contains no record from inside any of them. */
+  async workspaces(): Promise<WorkspaceV1[]> { return (await this.snapshot()).workspaces.map((entry) => structuredClone(entry)); }
+
+  // --- Relationship Core --------------------------------------------------------------------
+  /**
+   * Relationship records belong to the workspace they were created in.
+   *
+   * Sales proved the shape in WORK, and the Sales-facing operations below still require WORK for
+   * exactly the reason they always did: storing employer and customer material should be a
+   * deliberate act rather than something that happens while thinking about personal life. The
+   * general operations accept any workspace the owner is actually in, and neither path can read or
+   * write a record belonging to a different one.
    */
   #requireWorkWorkspace(state: AssistantStateV1): void {
     if (state.settings.activeWorkspace !== "work") throw new Error("Customer records belong to the Work workspace. Switch to Work before creating or changing one.");
+  }
+  /** Scopes every relationship read to the active workspace. There is no cross-workspace read. */
+  #scopedRelationships(state: AssistantStateV1): RelationshipV1[] {
+    return state.relationships.filter((entry) => entry.workspace === state.settings.activeWorkspace);
+  }
+  #findRelationship(state: AssistantStateV1, id: string): RelationshipV1 {
+    const found = find(state.relationships, id, "Relationship");
+    assertSameWorkspace(found, state.settings.activeWorkspace, "relationship");
+    return found;
+  }
+  /**
+   * Creates a relationship in the active workspace, of the type the owner declared.
+   *
+   * This is the general entry point: a supplier for a side business, a professional contact, or a
+   * support case are all this call with a different `relationshipType`. Nothing about it is
+   * specific to selling, and it never copies a record from another workspace.
+   */
+  async createRelationship(input: Record<string, unknown> = {}): Promise<RelationshipV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, state.settings.activeWorkspace);
+      const at = this.ports.clock.now();
+      const id = this.ports.ids.next("relationship");
+      // A relationship recorded while doing a job belongs to the employer unless the owner says
+      // otherwise. Everywhere else the owner created it, so it is theirs.
+      const relationship = buildRelationship(input, {
+        id, reference: `relationship:${digestValue({ id }).slice(0, 16)}`, now: at, workspace: workspace.id,
+        defaultOrigin: workspace.kind === "work" ? "employer-work" : "owner-created",
+      });
+      relationship.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "lifecycle", summary: `Relationship opened as ${relationship.lifecycle}.`, detail: "", lifecycleAfter: relationship.lifecycle, actor: "owner" });
+      state.relationships.unshift(relationship);
+      this.activity(state, "task", "relationship.create", `${relationship.relationshipType} relationship recorded in "${workspace.label}" (${relationship.origin}). No identity, credit, or banking material is stored.`, relationship.id);
+      return structuredClone(relationship);
+    });
+  }
+  /** Relationship search inside the active workspace only. */
+  async findRelationships(query: RelationshipQueryV1): Promise<RelationshipV1[]> {
+    const state = await this.snapshot();
+    return queryRelationships(this.#scopedRelationships(state), query, this.ports.clock.now());
   }
   async createCustomer(input: Record<string, unknown> = {}): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
       const at = this.ports.clock.now();
       const id = this.ports.ids.next("customer");
-      const customer = buildCustomer(input, { id, reference: `customer:${digestValue({ id }).slice(0, 16)}`, now: at, workspace: "work" });
+      const customer = buildCustomer(input, { id, reference: `customer:${digestValue({ id }).slice(0, 16)}`, now: at, workspace: "work", relationshipType: "customer", defaultOrigin: "employer-work" });
       customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "lifecycle", summary: `Relationship opened as ${customer.lifecycle}.`, detail: "", lifecycleAfter: customer.lifecycle, actor: "owner" });
-      state.customers.unshift(customer);
+      state.relationships.unshift(customer);
       this.activity(state, "task", "customer.create", `Work relationship record created (${customer.origin}). No identity, credit, or banking material is stored.`, customer.id);
       return structuredClone(customer);
     });
@@ -423,7 +532,7 @@ export class AionAssistantV1 {
   async updateCustomer(id: string, change: Record<string, unknown> = {}): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const existing = find(state.customers, id, "Customer");
+      const existing = this.#findRelationship(state, id);
       const at = this.ports.clock.now();
       const updated = applyCustomerEdit(existing, change, at);
       // History is never rewritten by an edit: the timeline and links are carried across intact.
@@ -433,7 +542,7 @@ export class AionAssistantV1 {
       updated.taskIds = existing.taskIds; updated.routineIds = existing.routineIds; updated.planIds = existing.planIds;
       updated.outcome = existing.outcome; updated.lifecycle = existing.lifecycle; updated.archived = existing.archived;
       updated.lastContactAt = existing.lastContactAt; updated.createdAt = existing.createdAt; updated.provenance = existing.provenance;
-      state.customers = state.customers.map((entry) => entry.id === id ? updated : entry);
+      state.relationships = state.relationships.map((entry) => entry.id === id ? updated : entry);
       this.activity(state, "task", "customer.update", "Work relationship record edited; the timeline was preserved.", id);
       return structuredClone(updated);
     });
@@ -442,7 +551,7 @@ export class AionAssistantV1 {
   async recordCustomerInteraction(id: string, input: Record<string, unknown> = {}): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const at = this.ports.clock.now();
       const interaction = buildInteraction(input, { id: this.ports.ids.next("interaction"), now: at });
       customer.interactions.push(interaction);
@@ -460,7 +569,7 @@ export class AionAssistantV1 {
   async addCustomerAppointment(id: string, input: Record<string, unknown> = {}): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const at = this.ports.clock.now();
       const appointment = buildAppointment(input, { id: this.ports.ids.next("appointment"), now: at });
       customer.appointments.push(appointment);
@@ -473,7 +582,7 @@ export class AionAssistantV1 {
   async setCustomerAppointmentStatus(id: string, appointmentId: string, status: string): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const appointment = find(customer.appointments, appointmentId, "Appointment");
       const allowed = ["scheduled", "confirmed", "shown", "no-show", "rescheduled", "cancelled"];
       if (!allowed.includes(status)) throw new Error(`Appointment status must be one of: ${allowed.join(", ")}.`);
@@ -489,7 +598,7 @@ export class AionAssistantV1 {
   async addCustomerFollowUp(id: string, input: Record<string, unknown> = {}): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const at = this.ports.clock.now();
       const followUp = buildFollowUp(input, { id: this.ports.ids.next("follow-up"), now: at });
       customer.followUps.push(followUp);
@@ -503,7 +612,7 @@ export class AionAssistantV1 {
   async completeCustomerFollowUp(id: string, followUpId: string, outcome = "", status: "done" | "skipped" = "done"): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const followUp = find(customer.followUps, followUpId, "Follow-up");
       if (followUp.status !== "open") throw new Error("Follow-up is no longer open.");
       const at = this.ports.clock.now();
@@ -518,7 +627,7 @@ export class AionAssistantV1 {
   async setCustomerOutcome(id: string, outcome: "open" | "sold" | "lost", detail = ""): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       if (!["open", "sold", "lost"].includes(outcome)) throw new Error("Outcome must be open, sold, or lost.");
       const at = this.ports.clock.now();
       customer.outcome = { state: outcome, at: outcome === "open" ? null : at, detail: detail.slice(0, 2000) };
@@ -533,7 +642,7 @@ export class AionAssistantV1 {
   async setCustomerArchived(id: string, archived: boolean): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const at = this.ports.clock.now();
       customer.archived = archived; customer.updatedAt = at;
       if (archived && customer.lifecycle !== "sold" && customer.lifecycle !== "lost") customer.lifecycle = "inactive";
@@ -545,7 +654,7 @@ export class AionAssistantV1 {
   async linkCustomerTask(id: string, taskId: string): Promise<CustomerV1> {
     return this.mutate((state) => {
       this.#requireWorkWorkspace(state);
-      const customer = find(state.customers, id, "Customer");
+      const customer = this.#findRelationship(state, id);
       const task = find(state.tasks, taskId, "Task");
       if (task.workspace !== "work") throw new Error("Only a Work task can be linked to a work relationship.");
       if (!customer.taskIds.includes(taskId)) customer.taskIds.push(taskId);
@@ -554,15 +663,15 @@ export class AionAssistantV1 {
       return structuredClone(customer);
     });
   }
-  /** Relationship search. Work-scoped by construction: it reads only the customers collection. */
+  /** Sales relationship search. Work-scoped by construction, as it has always been. */
   async findCustomers(query: CustomerQueryV1): Promise<CustomerV1[]> {
     const state = await this.snapshot();
     if (state.settings.activeWorkspace !== "work") throw new Error("Relationship search is only available in the Work workspace.");
-    return queryCustomers(state.customers, query, this.ports.clock.now());
+    return queryCustomers(this.#scopedRelationships(state), query, this.ports.clock.now());
   }
   async customerTimeline(id: string): Promise<{ customer: CustomerV1; last: CustomerInteractionV1 | null; nextAction: { action: string; at: IsoTimestamp | null } }> {
     const state = await this.snapshot();
-    const customer = find(state.customers, id, "Customer");
+    const customer = this.#findRelationship(state, id);
     return { customer, last: lastInteraction(customer), nextAction: { action: customer.nextAction, at: customer.nextActionAt } };
   }
 
@@ -576,7 +685,8 @@ export class AionAssistantV1 {
     if (state.settings.activeWorkspace !== "work") throw new Error("Sales coaching is only available in the Work workspace.");
     const now = this.ports.clock.now();
     const onDate = input.onDate ?? now.slice(0, 10);
-    const customer = () => find(state.customers, required(input.customerId, "Customer", 200), "Customer");
+    const scoped = this.#scopedRelationships(state);
+    const customer = () => this.#findRelationship(state, required(input.customerId, "Customer", 200));
     switch (kind) {
       case "call-preparation": return callPreparation(customer());
       case "appointment-preparation": return appointmentPreparation(customer());
@@ -584,9 +694,9 @@ export class AionAssistantV1 {
       case "objection-prompts": return objectionPrompts(required(input.objection, "Objection", 500));
       case "discovery-questions": return discoveryQuestions(customer());
       case "next-action": return nextActionSuggestion(customer());
-      case "follow-up-queue": return followUpQueue(state.customers, onDate, now);
-      case "morning-plan": return morningPlan(state.customers, onDate, now);
-      case "end-of-day-recap": return endOfDayRecap(state.customers, onDate);
+      case "follow-up-queue": return followUpQueue(scoped, onDate, now);
+      case "morning-plan": return morningPlan(scoped, onDate, now);
+      case "end-of-day-recap": return endOfDayRecap(scoped, onDate);
       case "role-play": return rolePlay(customer(), required(input.scenario, "Scenario", 500));
       default: throw new Error("Coaching kind is not recognised.");
     }

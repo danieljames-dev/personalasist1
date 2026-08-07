@@ -1,3 +1,5 @@
+import type { WorkspaceV1 } from "./workspaces.js";
+
 export type OpaqueId = string;
 export type IsoTimestamp = string;
 
@@ -7,9 +9,15 @@ export interface IdGeneratorV1 { next(kind: string): OpaqueId; }
 /**
  * Workspace separation. Work material stays in WORK unless the owner explicitly moves it, and
  * nothing is ever copied between workspaces implicitly — not memory context, not search results,
- * and not prospect information. Every record that can hold owner content carries its workspace.
+ * and not relationship information. Every record that can hold owner content carries its workspace.
+ *
+ * A workspace is an opaque identifier resolved against the registry in `state.workspaces`, not a
+ * closed union: V1.2 lets the owner create business and brand workspaces alongside the two AION
+ * always provides. Isolation is unchanged and is enforced the same way for all of them — an
+ * unresolvable workspace is an error, never a fall back to a default that belongs to someone else.
  */
-export type WorkspaceIdV1 = "personal" | "work";
+export type WorkspaceIdV1 = string;
+/** The two AION always provides. They can be relabelled but never removed. */
 export const WORKSPACE_IDS: readonly WorkspaceIdV1[] = ["personal", "work"];
 /** The documented default every pre-workspace record migrates to. */
 export const DEFAULT_WORKSPACE: WorkspaceIdV1 = "personal";
@@ -238,47 +246,80 @@ export type DataOriginV1 = "owner-created" | "employer-work" | "imported-employe
 export const DATA_ORIGINS: readonly DataOriginV1[] = ["owner-created", "employer-work", "imported-employer-system"];
 
 /**
- * A durable relationship lifecycle. States are not a workflow the record passes through and
- * forgets: every transition is appended to the timeline, so a customer can go prospect → contact →
- * appointment → visit → follow-up → sale → later follow-up without losing anything earlier.
+ * What kind of relationship this is.
+ *
+ * The type is declared, never inferred. AION does not decide that a new contact is a sales
+ * prospect, and it does not decide that a prospect has become a customer — the owner says so, and
+ * the change lands on the timeline like everything else.
  */
-export type CustomerLifecycleV1 =
+export type RelationshipTypeV1 =
+  | "prospect" | "customer" | "contact" | "lead"
+  | "partner" | "vendor" | "support-contact" | "other";
+export const RELATIONSHIP_TYPES: readonly RelationshipTypeV1[] = [
+  "prospect", "customer", "contact", "lead", "partner", "vendor", "support-contact", "other",
+];
+
+/**
+ * A durable relationship lifecycle. States are not a workflow the record passes through and
+ * forgets: every transition is appended to the timeline, so a relationship can go prospect →
+ * contact → appointment → visit → follow-up → sale → later follow-up without losing anything
+ * earlier. The last three states are the neutral ones a non-sales relationship uses.
+ */
+export type RelationshipLifecycleV1 =
   | "prospect" | "contacted" | "engaged" | "appointment-set" | "appointment-shown"
-  | "negotiating" | "sold" | "lost" | "follow-up" | "inactive";
-export const CUSTOMER_LIFECYCLES: readonly CustomerLifecycleV1[] = [
+  | "negotiating" | "sold" | "lost" | "follow-up" | "inactive"
+  | "active" | "dormant" | "closed";
+export const RELATIONSHIP_LIFECYCLES: readonly RelationshipLifecycleV1[] = [
   "prospect", "contacted", "engaged", "appointment-set", "appointment-shown",
   "negotiating", "sold", "lost", "follow-up", "inactive",
+  "active", "dormant", "closed",
 ];
+/** @deprecated Sales-era name. Use {@link RelationshipLifecycleV1}. */
+export type CustomerLifecycleV1 = RelationshipLifecycleV1;
+/** @deprecated Sales-era name. Use {@link RELATIONSHIP_LIFECYCLES}. */
+export const CUSTOMER_LIFECYCLES = RELATIONSHIP_LIFECYCLES;
 
 export type ContactChannelV1 = "phone" | "text" | "email" | "in-person" | "other";
 export const CONTACT_CHANNELS: readonly ContactChannelV1[] = ["phone", "text", "email", "in-person", "other"];
 
 export interface ContactMethodV1 { channel: ContactChannelV1; label: string; value: string; }
-/** Descriptive interest only — a trade is described, never valued from financial records. */
-export interface CustomerInterestV1 { kind: "vehicle" | "trade" | "other"; description: string; notedAt: IsoTimestamp; }
 
-export interface CustomerInteractionV1 {
+/**
+ * What this person or organisation is interested in. Descriptive only: a trade-in is described,
+ * never valued, and no interest is ever derived from a financial record.
+ */
+export type InterestKindV1 = "vehicle" | "trade" | "product" | "service" | "topic" | "need" | "other";
+export const INTEREST_KINDS: readonly InterestKindV1[] = ["vehicle", "trade", "product", "service", "topic", "need", "other"];
+export interface RelationshipInterestV1 { kind: InterestKindV1; description: string; notedAt: IsoTimestamp; }
+/** @deprecated Sales-era name. Use {@link RelationshipInterestV1}. */
+export type CustomerInterestV1 = RelationshipInterestV1;
+
+export interface RelationshipInteractionV1 {
   id: OpaqueId;
   at: IsoTimestamp;
-  kind: "note" | "call" | "text" | "email" | "visit" | "appointment" | "follow-up" | "lifecycle" | "outcome";
+  kind: "note" | "call" | "text" | "email" | "visit" | "appointment" | "follow-up" | "lifecycle" | "outcome" | "meeting" | "message";
   summary: string;
   detail: string;
   /** Set when this interaction is the one that moved the relationship to a new state. */
-  lifecycleAfter: CustomerLifecycleV1 | null;
+  lifecycleAfter: RelationshipLifecycleV1 | null;
   actor: "owner" | "aion";
 }
+/** @deprecated Sales-era name. Use {@link RelationshipInteractionV1}. */
+export type CustomerInteractionV1 = RelationshipInteractionV1;
 
-export interface CustomerAppointmentV1 {
+export interface RelationshipAppointmentV1 {
   id: OpaqueId;
   at: IsoTimestamp;
-  kind: "appointment" | "callback" | "delivery";
+  kind: "appointment" | "callback" | "delivery" | "meeting" | "demo";
   location: string;
   status: "scheduled" | "confirmed" | "shown" | "no-show" | "rescheduled" | "cancelled";
   notes: string;
   createdAt: IsoTimestamp;
 }
+/** @deprecated Sales-era name. Use {@link RelationshipAppointmentV1}. */
+export type CustomerAppointmentV1 = RelationshipAppointmentV1;
 
-export interface CustomerFollowUpV1 {
+export interface RelationshipFollowUpV1 {
   id: OpaqueId;
   dueAt: IsoTimestamp;
   channel: ContactChannelV1;
@@ -288,45 +329,57 @@ export interface CustomerFollowUpV1 {
   createdAt: IsoTimestamp;
   completedAt: IsoTimestamp | null;
 }
+/** @deprecated Sales-era name. Use {@link RelationshipFollowUpV1}. */
+export type CustomerFollowUpV1 = RelationshipFollowUpV1;
 
 /**
- * A durable, work-scoped relationship record.
+ * A durable, workspace-scoped relationship record.
  *
- * Deliberately not automotive-specific: vehicle interest is one kind of `interests` entry, and no
- * field, state, or rule depends on a dealership, a manufacturer, or a particular employer. The
- * shape is intended to be promotable into a broader relationship system later without redesign.
+ * Deliberately not automotive-specific and no longer Work-only: a vehicle interest is one kind of
+ * `interests` entry, and no field, state, or rule depends on a dealership, a manufacturer, or a
+ * particular employer. A prospect on a sales floor, a supplier for a side business, and a
+ * professional contact are the same shape with a different declared type, living in different
+ * workspaces that cannot see each other.
  */
-export interface CustomerV1 {
+export interface RelationshipV1 {
   id: OpaqueId;
   /** Stable opaque reference that survives renames and is safe to quote in an audit trail. */
   reference: string;
   workspace: WorkspaceIdV1;
+  relationshipType: RelationshipTypeV1;
   displayName: string;
-  lifecycle: CustomerLifecycleV1;
+  /** Owner-supplied. AION never looks a company up or fills this in from anywhere. */
+  organisation: string;
+  role: string;
+  lifecycle: RelationshipLifecycleV1;
   origin: DataOriginV1;
   contactMethods: ContactMethodV1[];
   communicationPreference: ContactChannelV1 | "unknown";
   source: string;
   notes: string;
-  interests: CustomerInterestV1[];
+  interests: RelationshipInterestV1[];
   objections: string[];
   preferences: string[];
-  appointments: CustomerAppointmentV1[];
-  followUps: CustomerFollowUpV1[];
+  appointments: RelationshipAppointmentV1[];
+  followUps: RelationshipFollowUpV1[];
   nextAction: string;
   nextActionAt: IsoTimestamp | null;
   lastContactAt: IsoTimestamp | null;
   /** Append-only relationship timeline. Nothing here is ever rewritten or removed. */
-  interactions: CustomerInteractionV1[];
+  interactions: RelationshipInteractionV1[];
   taskIds: OpaqueId[];
   routineIds: OpaqueId[];
   planIds: OpaqueId[];
+  /** Product Studio opportunities this relationship is evidence for or a participant in. */
+  opportunityIds: OpaqueId[];
   outcome: { state: "open" | "sold" | "lost"; at: IsoTimestamp | null; detail: string };
   archived: boolean;
   provenance: ProvenanceV1;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
 }
+/** @deprecated Sales-era name. A customer is a relationship whose type is `customer`. */
+export type CustomerV1 = RelationshipV1;
 
 /**
  * Owner-entered daily activity counts. These are the owner's own record of their day, not any
@@ -352,19 +405,23 @@ export const SALES_COUNT_KEYS: readonly (keyof SalesCountsV1)[] = [
 ];
 
 /** A closed query shape. There is no free-text filter expression for a model to inject into. */
-export interface CustomerQueryV1 {
+export interface RelationshipQueryV1 {
   kind:
     | "follow-up-due" | "not-contacted-since" | "appointments-on" | "interested-in"
-    | "awaiting-callback" | "in-stage" | "all";
+    | "awaiting-callback" | "in-stage" | "of-type" | "all";
   /** An ISO date (YYYY-MM-DD) for date-based queries. */
   onDate?: string;
   /** Whole days for recency queries. */
   days?: number;
   /** Descriptive text for interest matching. Matched literally, never evaluated. */
   text?: string;
-  stage?: CustomerLifecycleV1;
+  stage?: RelationshipLifecycleV1;
+  /** Narrows any query to one declared relationship type. */
+  relationshipType?: RelationshipTypeV1;
   includeArchived?: boolean;
 }
+/** @deprecated Sales-era name. Use {@link RelationshipQueryV1}. */
+export type CustomerQueryV1 = RelationshipQueryV1;
 
 /**
  * Phone access.
@@ -456,8 +513,13 @@ export interface AssistantStateV1 {
   verifications: VerificationRunV1[];
   /** Every migration that has run against this state, in order. Never rewritten. */
   migrations: MigrationRecordV1[];
-  /** Durable work-scoped relationship records. */
-  customers: CustomerV1[];
+  /**
+   * The workspace registry. Personal and Work are always present; business and brand workspaces
+   * are added by the owner. Every workspace-scoped record resolves its workspace against this list.
+   */
+  workspaces: WorkspaceV1[];
+  /** Durable relationship records across every workspace. Isolation is by `workspace`. */
+  relationships: RelationshipV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */

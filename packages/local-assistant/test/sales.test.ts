@@ -172,7 +172,7 @@ test("relationships are Work-only and never leak into Personal", async () => {
   assert.doesNotMatch(turn.message.content, /enabled local memory/u, "no work memory is fed into a personal conversation");
 
   const state = await service.snapshot();
-  assert.equal(state.customers.every((c) => c.workspace === "work"), true, "every relationship record stays in Work");
+  assert.equal(state.relationships.every((c: { workspace: string }) => c.workspace === "work"), true, "every relationship record stays in Work");
   assert.equal(state.memories.filter((m) => m.workspace === "personal").length, 0, "nothing was promoted into Personal");
 });
 
@@ -205,12 +205,12 @@ test("relationships survive a restart byte for byte", async () => {
   await first.updateSettings({ activeWorkspace: "work", workspaceLabels: { personal: "Personal", work: FICTIONAL_DEALERSHIP } });
   const created = await first.createCustomer(prospect);
   await first.recordCustomerInteraction(created.id, { kind: "visit", summary: "Came in Saturday.", lifecycleAfter: "appointment-shown" });
-  const before = (await first.snapshot()).customers;
+  const before = (await first.snapshot()).relationships;
 
   const reopened = await new AionAssistantV1(ports()).snapshot();
-  assert.deepEqual(reopened.customers, before, "relationship records reload unchanged");
+  assert.deepEqual(reopened.relationships, before, "relationship records reload unchanged");
   assert.equal(reopened.settings.workspaceLabels.work, FICTIONAL_DEALERSHIP);
-  assert.equal(reopened.customers[0]?.interactions.length, 2);
+  assert.equal(reopened.relationships[0]?.interactions.length, 2);
 });
 
 test("nothing in the Sales domain depends on a particular employer, brand, or CRM", async () => {
@@ -224,7 +224,7 @@ test("nothing in the Sales domain depends on a particular employer, brand, or CR
   assert.equal(found[0]?.lifecycle, "engaged");
 
   const state = await service.snapshot();
-  const serialized = JSON.stringify(state.customers);
+  const serialized = JSON.stringify(state.relationships);
   for (const vendor of ["Toyota", "Lakeland", "VinSolutions", "Elead", "CDK", "Reynolds", "DealerSocket"]) {
     assert.equal(serialized.includes(vendor), false, `no ${vendor} concept is baked into a relationship record`);
   }

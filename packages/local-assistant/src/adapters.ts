@@ -11,6 +11,7 @@ import type {
   WorkspaceIdV1,
 } from "./contracts.js";
 import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS, WORKSPACE_IDS } from "./contracts.js";
+import { builtInWorkspaces } from "./workspaces.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -73,6 +74,9 @@ export class DeterministicIdGeneratorV1 implements IdGeneratorV1 {
   }
 }
 
+/** The epoch AION stamps on the workspaces it creates before any clock has been consulted. */
+const GENESIS = "1970-01-01T00:00:00.000Z";
+
 export function createEmptyStateV1(): AssistantStateV1 {
   return {
     schema: "aion.local-assistant-state.v1", revision: 0, onboardingComplete: false,
@@ -84,7 +88,9 @@ export function createEmptyStateV1(): AssistantStateV1 {
       remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
-    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [], customers: [], salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
+    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
+    workspaces: builtInWorkspaces(GENESIS), relationships: [],
+    salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
 
@@ -92,22 +98,43 @@ export function createEmptyStateV1(): AssistantStateV1 {
 const WORKSPACE_SCOPED_COLLECTIONS = ["conversations", "memories", "tasks", "routines", "plans", "activity"] as const;
 
 /**
- * The workspace migration.
+ * The state migrations.
  *
- * Deterministic, idempotent, and fail-closed. Every pre-workspace record is assigned the
- * documented default of PERSONAL and nothing else about it is touched — identifiers, provenance,
- * history, timestamps and cross-record links are carried through untouched, because the migration
- * only ever adds a missing field. It never creates a WORK record, so migration cannot move owner
- * material across the boundary. A record carrying an unrecognised workspace is an error rather
- * than something to guess at.
+ * All of them are deterministic, idempotent, and fail-closed, and they run once on load before
+ * anything can read the state. A migration only ever *adds* what is missing: identifiers,
+ * provenance, history, timestamps and cross-record links are carried through untouched, and no
+ * migration moves owner material between workspaces. A record carrying a workspace that cannot be
+ * resolved is an error rather than something to guess at, because guessing would put someone's
+ * work record in their personal life.
+ *
+ * A migration "applies" only when it actually changed something. State AION already wrote in the
+ * current shape needs nothing, so reopening it writes no revision and records no migration —
+ * which is what keeps a restart byte-identical.
  */
 export function migrateStateV1(
   state: AssistantStateV1,
   now: string,
   nextId: (kind: string) => string,
-): { state: AssistantStateV1; applied: boolean; record: MigrationRecordV1 | null } {
-  const draft = structuredClone(state);
+): { state: AssistantStateV1; applied: boolean; record: MigrationRecordV1 | null; records: MigrationRecordV1[] } {
+  let draft = structuredClone(state);
+  const records: MigrationRecordV1[] = [];
+  for (const step of [migrateWorkspaceSeparation, migrateWorkspaceRegistry, migrateRelationshipCore]) {
+    const result = step(draft, now, nextId);
+    draft = result.state;
+    if (result.record) { draft.migrations.push(result.record); records.push(result.record); }
+  }
+  return { state: draft, applied: records.length > 0, record: records[0] ?? null, records };
+}
+
+type MigrationStep = (state: AssistantStateV1, now: string, nextId: (kind: string) => string) => { state: AssistantStateV1; record: MigrationRecordV1 | null };
+
+/**
+ * V1.1: every pre-workspace record is assigned the documented default of PERSONAL. It never
+ * creates a WORK record, so migration cannot move owner material across the boundary.
+ */
+const migrateWorkspaceSeparation: MigrationStep = (draft, now, nextId) => {
   if (!Array.isArray(draft.migrations)) draft.migrations = [];
+  const known = knownWorkspaceIds(draft);
   const assigned: Record<string, number> = {};
   for (const collection of WORKSPACE_SCOPED_COLLECTIONS) {
     const records = draft[collection] as unknown as Array<{ workspace?: unknown; id?: unknown }>;
@@ -115,28 +142,77 @@ export function migrateStateV1(
     let count = 0;
     for (const record of records) {
       if (record.workspace === undefined || record.workspace === null) { record.workspace = DEFAULT_WORKSPACE; count += 1; continue; }
-      if (!WORKSPACE_IDS.includes(record.workspace as WorkspaceIdV1)) fail(`Assistant state contains an unrecognised workspace on a ${collection} record; refusing to guess.`);
+      if (!known.has(String(record.workspace))) fail(`Assistant state contains an unrecognised workspace on a ${collection} record; refusing to guess.`);
     }
     assigned[collection] = count;
   }
   const settings = draft.settings as SettingsV1;
   let settingsAssigned = 0;
   if (settings.activeWorkspace === undefined) { settings.activeWorkspace = DEFAULT_WORKSPACE; settingsAssigned += 1; }
-  if (!WORKSPACE_IDS.includes(settings.activeWorkspace)) fail("Assistant settings name an unrecognised active workspace.");
+  if (!known.has(settings.activeWorkspace)) fail("Assistant settings name an unrecognised active workspace.");
   if (!settings.workspaceLabels || typeof settings.workspaceLabels !== "object") { settings.workspaceLabels = { personal: "Personal", work: "Work" }; settingsAssigned += 1; }
   for (const id of WORKSPACE_IDS) if (typeof settings.workspaceLabels[id] !== "string" || !settings.workspaceLabels[id]) { settings.workspaceLabels[id] = id === "personal" ? "Personal" : "Work"; settingsAssigned += 1; }
   assigned.settings = settingsAssigned;
-
-  // A migration "applies" only when it actually assigned something. State that AION created
-  // already workspace-aware needs nothing, so reopening it writes no revision and records no
-  // migration — which is what keeps a restart byte-identical.
   const total = Object.values(assigned).reduce((sum, count) => sum + count, 0);
-  if (total === 0) return { state: draft, applied: false, record: null };
-  const record: MigrationRecordV1 = { id: nextId("migration"), migration: WORKSPACE_MIGRATION, at: now, assigned, defaultWorkspace: DEFAULT_WORKSPACE };
-  draft.migrations.push(record);
-  return { state: draft, applied: true, record };
+  if (total === 0) return { state: draft, record: null };
+  return { state: draft, record: { id: nextId("migration"), migration: WORKSPACE_MIGRATION, at: now, assigned, defaultWorkspace: DEFAULT_WORKSPACE } };
+};
+
+/**
+ * V1.2: the two literal workspaces become a registry so business and brand workspaces can join
+ * them. The registry is seeded from the labels the owner already chose, so nothing is renamed and
+ * no workspace appears that the owner did not already have.
+ */
+const migrateWorkspaceRegistry: MigrationStep = (draft, now, nextId) => {
+  if (Array.isArray(draft.workspaces) && draft.workspaces.length) return { state: draft, record: null };
+  draft.workspaces = builtInWorkspaces(now, draft.settings?.workspaceLabels ?? {});
+  return {
+    state: draft,
+    record: { id: nextId("migration"), migration: WORKSPACE_REGISTRY_MIGRATION, at: now, assigned: { workspaces: draft.workspaces.length }, defaultWorkspace: DEFAULT_WORKSPACE },
+  };
+};
+
+/**
+ * V1.2: the Work-only `customers` collection becomes the workspace-scoped `relationships`
+ * collection. Every record keeps its identifier, reference, timeline, links, provenance and
+ * workspace exactly as they were; the migration adds the fields the general shape needs and
+ * declares the type these records already had, which is `customer`.
+ */
+const migrateRelationshipCore: MigrationStep = (draft, now, nextId) => {
+  const legacy = (draft as unknown as { customers?: unknown }).customers;
+  const carried = Array.isArray(legacy) ? legacy as Array<Record<string, unknown>> : [];
+  const existing = Array.isArray(draft.relationships) ? draft.relationships : [];
+  // Fields the general shape needs are spread first so a record that somehow already carries one
+  // keeps its own value: a migration adds what is missing and overwrites nothing.
+  const promoted = carried.map((record) => ({
+    relationshipType: "customer" as const,
+    organisation: "",
+    role: "",
+    opportunityIds: [] as string[],
+    ...record,
+  })) as unknown as AssistantStateV1["relationships"];
+  draft.relationships = [...existing, ...promoted];
+  delete (draft as unknown as { customers?: unknown }).customers;
+  // Only owner records actually moving between collections is worth a migration record. A state
+  // that simply never had the collection gains an empty one the same way every other additive
+  // collection does — silently, and without pretending anything was migrated.
+  if (!carried.length) return { state: draft, record: null };
+  return {
+    state: draft,
+    record: { id: nextId("migration"), migration: RELATIONSHIP_CORE_MIGRATION, at: now, assigned: { relationships: promoted.length }, defaultWorkspace: DEFAULT_WORKSPACE },
+  };
+};
+
+/** Every workspace identifier this state can legitimately reference. */
+function knownWorkspaceIds(state: AssistantStateV1): Set<string> {
+  const ids = new Set<string>(WORKSPACE_IDS);
+  if (Array.isArray(state.workspaces)) for (const entry of state.workspaces) if (entry && typeof entry.id === "string") ids.add(entry.id);
+  return ids;
 }
+
 export const WORKSPACE_MIGRATION = "aion.workspace-separation.v1";
+export const WORKSPACE_REGISTRY_MIGRATION = "aion.workspace-registry.v1";
+export const RELATIONSHIP_CORE_MIGRATION = "aion.relationship-core.v1";
 export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!value || typeof value !== "object") fail("Assistant state is malformed.");
   const state = value as Partial<AssistantStateV1>;
@@ -149,7 +225,8 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (typeof clone.settings.developerBridgeId !== "string") clone.settings.developerBridgeId = "";
   if (!Array.isArray(clone.verifications)) clone.verifications = [];
   if (!Array.isArray(clone.migrations)) clone.migrations = [];
-  if (!Array.isArray(clone.customers)) clone.customers = [];
+  if (!Array.isArray(clone.workspaces) || !clone.workspaces.length) clone.workspaces = builtInWorkspaces(GENESIS, clone.settings.workspaceLabels ?? {});
+  if (!Array.isArray(clone.relationships)) clone.relationships = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };

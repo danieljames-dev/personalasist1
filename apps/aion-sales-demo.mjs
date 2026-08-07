@@ -174,7 +174,7 @@ try {
     const bearer = { authorization: `Bearer ${redeemed.result.token}` };
     const onPhone = await phone.view(bearer);
     assert.equal(onPhone.viewer, "device");
-    assert.equal(onPhone.state.customers.length, 2, "the phone sees the same Work relationships");
+    assert.equal(onPhone.state.relationships.length, 2, "the phone sees the same Work relationships");
     assert.equal(JSON.stringify(onPhone).includes(pairingCode), false, "the pairing code is never returned again");
     assert.equal(JSON.stringify(onPhone).includes(redeemed.result.token), false, "the session token is never echoed back");
     proved("an unpaired phone is refused, then pairs with the one-time code and works over an Authorization header");
@@ -188,7 +188,7 @@ try {
     proved("a paired phone drives AION but cannot mint a code, reuse one, or alter access settings");
 
     // It can, however, do the actual job.
-    const noted = await fetch(`${phone.base}/api/action`, { method: "POST", headers: { "content-type": "application/json", ...bearer }, body: JSON.stringify({ type: "customer.interaction", id: onPhone.state.customers[0].id, interaction: { kind: "note", summary: "Logged from the phone on the lot." } }) });
+    const noted = await fetch(`${phone.base}/api/action`, { method: "POST", headers: { "content-type": "application/json", ...bearer }, body: JSON.stringify({ type: "customer.interaction", id: onPhone.state.relationships[0].id, interaction: { kind: "note", summary: "Logged from the phone on the lot." } }) });
     assert.equal(noted.status, 200);
     proved("the salesperson records an interaction from the phone, which is the point of the whole slice");
   } finally { await phone.close?.(); await phone.app.close(); }
@@ -199,7 +199,7 @@ try {
     const revoked = await consoleAgain.call("device.revoke.all");
     assert.ok(revoked.sessions >= 1);
     const after = (await consoleAgain.view()).state;
-    assert.deepEqual(after.customers.map((c) => c.id), before.customers.map((c) => c.id), "revoking every device changes no relationship");
+    assert.deepEqual(after.relationships.map((c) => c.id), before.relationships.map((c) => c.id), "revoking every device changes no relationship");
     assert.equal(after.memories.length, before.memories.length, "and no memory");
     assert.equal(after.tasks.length, before.tasks.length, "and no task");
     assert.equal(JSON.stringify(after.activity).includes(pairingCode), false, "no secret ever reached Activity");
@@ -209,8 +209,8 @@ try {
   const reopened = await open(dataRoot, exportRoot);
   try {
     const state = (await reopened.view()).state;
-    assert.equal(state.customers.length, 2, "relationships survive a restart");
-    assert.equal(state.customers.find((c) => c.outcome.state === "sold").interactions.length >= 6, true, "so does the whole timeline");
+    assert.equal(state.relationships.length, 2, "relationships survive a restart");
+    assert.equal(state.relationships.find((c) => c.outcome.state === "sold").interactions.length >= 6, true, "so does the whole timeline");
     assert.equal(state.salesMetrics.length, 1);
     assert.equal(state.settings.workspaceLabels.work, DEALERSHIP);
     assert.equal(state.sessions.every((entry) => entry.revokedAt !== null), true, "revoked sessions stay revoked across a restart");

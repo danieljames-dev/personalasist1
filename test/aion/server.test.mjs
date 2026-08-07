@@ -291,7 +291,7 @@ test("a salesperson's day runs end to end over the API in Work, and is refused i
     assert.equal((await post(base, { type: "customer.create", customer: { displayName: "Y", ssn: "111-22-3333" } })).status, 400);
 
     const state = await (await fetch(`${base}/api/state`)).json();
-    assert.equal(state.state.customers.length, 1);
+    assert.equal(state.state.relationships.length, 1);
     assert.equal(state.salesRoutineTemplates.length, 4, "routine templates are offered but nothing is scheduled");
     assert.equal(state.state.routines.length, 0);
   });

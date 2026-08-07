@@ -168,7 +168,15 @@ export async function createAionServer(options = {}) {
       // There is no endpoint that submits verification evidence: executing the approved capability
       // is the only way a record can appear, so an analysis always cites a command AION really ran.
       case "verify.analyse": return service.proposeVerificationAnalysis(input.id, input.question);
-      // Work-scoped relationship records. Every one of these refuses outside the Work workspace.
+      // Workspaces. A new workspace starts empty; nothing is ever copied into it.
+      case "workspace.create": return service.createWorkspace(input.workspace ?? {});
+      case "workspace.update": return service.updateWorkspace(input.id, input.change ?? {});
+      case "workspace.archive": return service.setWorkspaceArchived(input.id, input.archived === true);
+      case "workspace.product": return service.addBrandProduct(input.id, input.product ?? {});
+      // The general Relationship Core. Scoped to the active workspace, whichever one that is.
+      case "relationship.create": return service.createRelationship(input.relationship ?? {});
+      case "relationship.find": return { relationships: await service.findRelationships(input.query ?? { kind: "all" }) };
+      // Sales-facing relationship operations. Every one of these refuses outside the Work workspace.
       case "customer.create": return service.createCustomer(input.customer ?? {});
       case "customer.update": return service.updateCustomer(input.id, input.change ?? {});
       case "customer.interaction": return service.recordCustomerInteraction(input.id, input.interaction ?? {});

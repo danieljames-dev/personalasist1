@@ -157,7 +157,7 @@ let openCustomer = null;
 let coachPanel = null;
 
 const today = () => new Date().toISOString().slice(0, 10);
-const active = (s) => (s.customers ?? []).filter((c) => !c.archived);
+const active = (s) => (s.relationships ?? []).filter((c) => c.workspace === "work" && !c.archived);
 const openFollowUps = (c) => c.followUps.filter((f) => f.status === "open");
 const dueFollowUps = (s, onDate = today()) => active(s).flatMap((c) => openFollowUps(c).filter((f) => f.dueAt.slice(0, 10) <= onDate).map((f) => ({ c, f })));
 const overdueCallbacks = (s, onDate = today()) => active(s).flatMap((c) => openFollowUps(c).filter((f) => f.channel === "phone" && f.dueAt.slice(0, 10) < onDate).map((f) => ({ c, f })));
@@ -186,7 +186,7 @@ function customerRow(c, detail) {
 }
 
 function customerDetail(s) {
-  const c = (s.customers ?? []).find((x) => x.id === openCustomer);
+  const c = (s.relationships ?? []).find((x) => x.id === openCustomer);
   if (!c) { openCustomer = null; return ""; }
   const interest = c.interests.map((i) => i.description).join("; ") || "not recorded";
   const timeline = [...c.interactions].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
@@ -410,10 +410,12 @@ function render() {
   badge.textContent = provider?.location === "remote" ? `● Remote provider selected (${provider.id})` : "● Local-only";
   badge.className = provider?.location === "remote" ? "remote" : "local";
   const active = model.state.settings.activeWorkspace ?? "personal";
-  const labels = model.state.settings.workspaceLabels ?? { personal: "Personal", work: "Work" };
+  // The switcher is the one place that legitimately spans workspaces. It shows names only — never
+  // a count, a record, or anything else from inside a workspace you are not currently in.
+  const registry = (model.state.workspaces ?? []).filter((w) => !w.archived);
   const switcher = document.querySelector("#workspaceSwitch");
   if (switcher) {
-    switcher.innerHTML = ["personal", "work"].map((id) => `<button class="${id === active ? "active" : ""}" data-workspace="${id}">${esc(labels[id] ?? id)}</button>`).join("");
+    switcher.innerHTML = registry.map((w) => `<button class="${w.id === active ? "active" : ""}" data-workspace="${esc(w.id)}">${esc(w.label)}</button>`).join("");
     switcher.dataset.active = active;
   }
   document.querySelector("nav").innerHTML = areas.map((x) => `<button class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`).join("");
@@ -429,7 +431,7 @@ document.addEventListener("click", async (event) => {
   if (!target && !action && !verb && !workspace) return; // a plain form submit button; the submit handler owns it
   event.preventDefault();
   try {
-    if (workspace) { await api("settings.update", { settings: { activeWorkspace: workspace } }); await load(); toast(`Switched to ${model.state.settings.workspaceLabels?.[workspace] ?? workspace}. Records stay in the workspace they were created in.`); return; }
+    if (workspace) { await api("settings.update", { settings: { activeWorkspace: workspace } }); openCustomer = null; openSheet = null; coachPanel = null; await load(); toast(`Switched to ${model.state.settings.workspaceLabels?.[workspace] ?? workspace}. Records stay in the workspace they were created in.`); return; }
     if (target) { area = target; openCustomer = null; openSheet = null; coachPanel = null; render(); return; }
     if (verb === "tab") { salesTab = tab; coachPanel = null; render(); return; }
     if (verb === "sheet") { openSheet = { sheet: sheetName, id }; render(); return; }
