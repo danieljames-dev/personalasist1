@@ -236,8 +236,31 @@ answer forms, sign, attest, use a model, or synchronize career data. Real owner-
 not run. DG-3 and DG-4b remain Open, normative fixtures remain unauthorized, and the Universal
 Object Contract remains Pre-stable.
 
+## AION V1 local assistant
+
+- [V1 architecture](architecture/aion-v1-local-assistant.md)
+- [Command Center usage](implementation/aion-command-center.md)
+- [V1 threat model](security/aion-v1-local-assistant-threat-model.md)
+- [V1 privacy record](privacy/aion-v1-local-assistant-privacy.md)
+- [V1 architecture review](reviews/aion-v1-local-assistant-review.md)
+
+`npm run aion` starts a loopback-only Command Center with Chat, Tasks, Routines, Memory, Planner,
+Approvals, Activity, Career, Imports, and Settings. Chat is offline by default through a
+deterministic provider; two further provider slots are declared boundaries that truthfully report
+themselves unavailable. Memory keeps provenance, corrections, disablement, deletion, export, and
+preserved conflicts. The Agent Controller executes only registered capabilities under an approval
+bound to one exact input digest, once. The Import Center requires an owner-selected path and a dry
+run, computes exact digests, detects duplicates, and never alters a source. Private backup is
+AES-256-GCM with scrypt and post-write restore verification. `npm run aion:demo` proves the whole
+product on neutral synthetic data, including restart reload and a byte-identical rerun.
+
+No real owner data was ingested. Real import remains owner-initiated through the interface. DG-3
+and DG-4b remain Open, normative fixtures remain unauthorized, and the Universal Object Contract
+remains Pre-stable.
+
 ## Reviews
 
+- [AION V1 local assistant review](reviews/aion-v1-local-assistant-review.md)
 - [Resource limits FINAL readiness review](reviews/resource-limits-final-readiness-review.md)
 - [Resource limits readiness review (Sprint 2.8)](reviews/resource-limits-readiness-review.md)
 

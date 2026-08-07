@@ -6,12 +6,35 @@ under owner control.
 
 The repository contains the versioned Kernel lifecycle coordinator, the Phase 3 local path boundary,
 the Phase 4 local Identity bootstrap, a bounded Phase 5 Universal Object reference, Phase 6 career
-input contracts/preflight, and the Phase 7 local career evidence catalogue and evidence-backed
-profile reference. The Object Contract remains Pre-stable; Phase 8 and production capabilities
-remain gated.
+input contracts/preflight, the Phase 7 local career evidence catalogue and evidence-backed profile
+reference, the Phase 8–11 Job Posting, matching, and application-preparation slice, and the AION V1
+local assistant with its loopback Command Center. The Object Contract remains Pre-stable; normative
+conformance and production capabilities remain gated.
+
+## Start AION
+
+```text
+npm run aion
+```
+
+This starts the local Command Center on `http://127.0.0.1:31415`. It binds loopback only, loads no
+hosted dependency, and sends nothing anywhere. Chat is offline by default through a deterministic
+local provider. The ten areas are Chat, Tasks, Routines, Memory, Planner, Approvals, Activity,
+Career, Imports, and Settings; no source file needs editing to use them.
+
+`npm run aion:demo` runs the complete synthetic product proof on neutral temporary data — including
+a restart reload and a byte-identical rerun — and leaves nothing behind.
+
+Owner data lives only in the Git-ignored `private/aion` directory and is excluded from source
+backups. See [the Command Center guide](docs/implementation/aion-command-center.md).
 
 ## Workspace
 
+- `packages/local-assistant` — local-first V1 assistant domains and replaceable ports: chat,
+  memory, tasks, routines, scheduler, planner, capability registry, agent controller, approvals,
+  activity, archive import, and encrypted private backup.
+- `apps/aion` — the loopback Command Center: same-origin UI, HTTP boundary, developer-agent
+  resolution, and integration with the accepted Career engine.
 - `packages/kernel` — preserved Kernel v1 library.
 - `packages/privacy-boundary` — explicit local path-containment reference.
 - `packages/identity` — local single-owner opaque Identity bootstrap.

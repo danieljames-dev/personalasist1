@@ -390,7 +390,30 @@ an explicit-root local CLI, and a complete neutral synthetic temporary demo with
 idempotent rerun. This does not add job discovery, external communication, submission, signing,
 attestation, models, embeddings, vector storage, networking, or telemetry. No real owner career data
 was ingested. The Object Contract remains Pre-stable; DG-3 and DG-4b remain Open; normative fixtures
-remain unauthorized. The next action requires a separate Founder/CTO decision after review.
+remain unauthorized.
+
+The AION V1 local assistant milestone adds the first owner-facing product surface over that
+foundation: a loopback-only Command Center (`npm run aion`) with Chat, Tasks, Routines, Memory,
+Planner, Approvals, Activity, Career, Imports, and Settings. It contributes a replaceable model
+provider port with a deterministic offline provider and two truthfully-unavailable boundary
+adapters; local conversation history with streamed responses; Memory with provenance, corrections,
+disablement, deletion, export, and preserved conflicts; persisted Tasks and Routines with an
+in-process scheduler that installs no OS service; a reviewable Planner; a capability registry and
+bounded Agent Controller whose executions require an approval bound to one exact input digest,
+once; privacy-safe Activity; a Career screen over the accepted Career engine; an Import Center with
+ChatGPT, Claude, and Grok parser boundaries, mandatory dry run, exact digests, and duplicate
+detection; an AES-256-GCM private backup with post-write restore verification; and an
+approval-gated, repository-scoped developer-agent bridge. `npm run aion:demo` proves all of it on
+neutral synthetic data, including restart reload and a byte-identical rerun.
+
+This milestone adds no job discovery, submission, email, browsing, telemetry, analytics, live model
+call, OS service, or production claim. It does not close DG-3 or DG-4b, stabilize the Universal
+Object Contract, or create normative fixtures. Real owner-data ingestion remains owner-initiated
+through the interface and did not occur. See
+[the V1 architecture](docs/architecture/aion-v1-local-assistant.md) and
+[its review](docs/reviews/aion-v1-local-assistant-review.md).
+
+The next action requires a separate Founder/CTO decision after review.
 
 No milestone enters production implementation until it has an approved specification,
 ADRs for architectural change, threat model, public contract, test plan, documentation

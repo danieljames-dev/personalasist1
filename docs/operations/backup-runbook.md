@@ -198,6 +198,13 @@ reload plus deterministic `already-completed` reruns and leave no `private/` sta
 repository. The source mirror and bundle continue to exclude real/private career inputs and local
 exports; they back up source and documentation only.
 
+For the AION V1 milestone, success additionally means the isolated clone passed `npm run aion:test`
+and `npm run aion:demo`. The V1 demo must show the loopback Command Center starting, a one-shot
+approval gating capability execution, the encrypted private backup verifying, the Career screen
+driving the accepted Career engine, a restart reloading identical state, and a byte-identical
+rerun. It must leave no `private/` or `private\aion` state in the restored repository. Assistant
+state, local exports, and encrypted private backups are never included in a source backup.
+
 Record in the drive log or asset register: date, commit hash, manifest path, and restore
 result. Then safely eject the drive through **Safely Remove Hardware** before
 disconnecting. Do not leave the drive permanently mounted — a permanently attached backup
