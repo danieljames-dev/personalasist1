@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 346,
+    [int]      $ExpectedTests = 355,
     [switch]   $DryRun
 )
 
