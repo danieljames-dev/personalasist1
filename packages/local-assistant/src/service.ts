@@ -3,10 +3,12 @@
   ChatTurnV1, ClockV1, ConversationV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1,
   DeveloperAgentStatusV1, IdGeneratorV1, ImportReportV1,
   ImportSourceV1, MemoryV1, ModelProviderV1, PlanV1, PrivateBackupV1, RoutineV1, SettingsV1,
+  CustomerAppointmentV1, CustomerInteractionV1, CustomerQueryV1, CustomerV1, IsoTimestamp,
   MigrationRecordV1, StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1, WorkspaceIdV1,
 } from "./contracts.js";
 import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, WORKSPACE_IDS } from "./contracts.js";
 import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
+import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buildInteraction, lastInteraction, queryCustomers } from "./sales.js";
 
 type AssistantPorts = {
   repository: StateRepositoryV1;
@@ -382,6 +384,173 @@ export class AionAssistantV1 {
     ].filter(Boolean).join("\n").slice(0, 4000);
     return this.proposeAction("aion.developer.task.v1", { instruction, mode: "read-only" }, { origin: "owner" });
   }
+  // --- Work-scoped relationship records -------------------------------------------------------
+  /**
+   * Relationship records live in WORK and nowhere else. Requiring the owner to be in the work
+   * workspace is the point: it makes storing employer and customer material a deliberate act
+   * rather than something that can happen while thinking about personal life.
+   */
+  #requireWorkWorkspace(state: AssistantStateV1): void {
+    if (state.settings.activeWorkspace !== "work") throw new Error("Customer records belong to the Work workspace. Switch to Work before creating or changing one.");
+  }
+  async createCustomer(input: Record<string, unknown> = {}): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const at = this.ports.clock.now();
+      const id = this.ports.ids.next("customer");
+      const customer = buildCustomer(input, { id, reference: `customer:${digestValue({ id }).slice(0, 16)}`, now: at, workspace: "work" });
+      customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "lifecycle", summary: `Relationship opened as ${customer.lifecycle}.`, detail: "", lifecycleAfter: customer.lifecycle, actor: "owner" });
+      state.customers.unshift(customer);
+      this.activity(state, "task", "customer.create", `Work relationship record created (${customer.origin}). No identity, credit, or banking material is stored.`, customer.id);
+      return structuredClone(customer);
+    });
+  }
+  async updateCustomer(id: string, change: Record<string, unknown> = {}): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const existing = find(state.customers, id, "Customer");
+      const at = this.ports.clock.now();
+      const updated = applyCustomerEdit(existing, change, at);
+      // History is never rewritten by an edit: the timeline and links are carried across intact.
+      updated.interactions = existing.interactions;
+      updated.appointments = existing.appointments;
+      updated.followUps = existing.followUps;
+      updated.taskIds = existing.taskIds; updated.routineIds = existing.routineIds; updated.planIds = existing.planIds;
+      updated.outcome = existing.outcome; updated.lifecycle = existing.lifecycle; updated.archived = existing.archived;
+      updated.lastContactAt = existing.lastContactAt; updated.createdAt = existing.createdAt; updated.provenance = existing.provenance;
+      state.customers = state.customers.map((entry) => entry.id === id ? updated : entry);
+      this.activity(state, "task", "customer.update", "Work relationship record edited; the timeline was preserved.", id);
+      return structuredClone(updated);
+    });
+  }
+  /** Appends to the timeline. An interaction is never edited or removed once recorded. */
+  async recordCustomerInteraction(id: string, input: Record<string, unknown> = {}): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const at = this.ports.clock.now();
+      const interaction = buildInteraction(input, { id: this.ports.ids.next("interaction"), now: at });
+      customer.interactions.push(interaction);
+      if (["call", "text", "email", "visit", "appointment"].includes(interaction.kind)) customer.lastContactAt = interaction.at;
+      if (interaction.lifecycleAfter) customer.lifecycle = interaction.lifecycleAfter;
+      customer.updatedAt = at;
+      this.activity(state, "task", "customer.interaction", `Relationship timeline appended (${interaction.kind}).`, id);
+      return structuredClone(customer);
+    });
+  }
+  /** Moves the relationship on and records why, keeping every earlier state in the timeline. */
+  async setCustomerLifecycle(id: string, lifecycle: string, summary = "Owner updated the relationship state."): Promise<CustomerV1> {
+    return this.recordCustomerInteraction(id, { kind: "lifecycle", summary, lifecycleAfter: lifecycle });
+  }
+  async addCustomerAppointment(id: string, input: Record<string, unknown> = {}): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const at = this.ports.clock.now();
+      const appointment = buildAppointment(input, { id: this.ports.ids.next("appointment"), now: at });
+      customer.appointments.push(appointment);
+      customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "appointment", summary: `${appointment.kind} scheduled for ${appointment.at}.`, detail: appointment.notes, lifecycleAfter: null, actor: "owner" });
+      customer.updatedAt = at;
+      this.activity(state, "task", "customer.appointment", `${appointment.kind} recorded for a work relationship.`, id);
+      return structuredClone(customer);
+    });
+  }
+  async setCustomerAppointmentStatus(id: string, appointmentId: string, status: string): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const appointment = find(customer.appointments, appointmentId, "Appointment");
+      const allowed = ["scheduled", "confirmed", "shown", "no-show", "rescheduled", "cancelled"];
+      if (!allowed.includes(status)) throw new Error(`Appointment status must be one of: ${allowed.join(", ")}.`);
+      const at = this.ports.clock.now();
+      appointment.status = status as CustomerAppointmentV1["status"];
+      if (status === "shown") customer.lastContactAt = at;
+      customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "appointment", summary: `Appointment marked ${status}.`, detail: "", lifecycleAfter: null, actor: "owner" });
+      customer.updatedAt = at;
+      this.activity(state, "task", "customer.appointment.status", `Appointment marked ${status}.`, id);
+      return structuredClone(customer);
+    });
+  }
+  async addCustomerFollowUp(id: string, input: Record<string, unknown> = {}): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const at = this.ports.clock.now();
+      const followUp = buildFollowUp(input, { id: this.ports.ids.next("follow-up"), now: at });
+      customer.followUps.push(followUp);
+      customer.nextAction = customer.nextAction || followUp.reason;
+      customer.nextActionAt = customer.nextActionAt ?? followUp.dueAt;
+      customer.updatedAt = at;
+      this.activity(state, "task", "customer.follow-up", "Follow-up scheduled for a work relationship.", id);
+      return structuredClone(customer);
+    });
+  }
+  async completeCustomerFollowUp(id: string, followUpId: string, outcome = "", status: "done" | "skipped" = "done"): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const followUp = find(customer.followUps, followUpId, "Follow-up");
+      if (followUp.status !== "open") throw new Error("Follow-up is no longer open.");
+      const at = this.ports.clock.now();
+      followUp.status = status; followUp.completedAt = at; followUp.outcome = outcome.slice(0, 2000);
+      if (status === "done") customer.lastContactAt = at;
+      customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "follow-up", summary: `Follow-up ${status}.`, detail: followUp.outcome, lifecycleAfter: null, actor: "owner" });
+      customer.updatedAt = at;
+      this.activity(state, "task", "customer.follow-up.close", `Follow-up ${status}.`, id);
+      return structuredClone(customer);
+    });
+  }
+  async setCustomerOutcome(id: string, outcome: "open" | "sold" | "lost", detail = ""): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      if (!["open", "sold", "lost"].includes(outcome)) throw new Error("Outcome must be open, sold, or lost.");
+      const at = this.ports.clock.now();
+      customer.outcome = { state: outcome, at: outcome === "open" ? null : at, detail: detail.slice(0, 2000) };
+      if (outcome !== "open") customer.lifecycle = outcome === "sold" ? "sold" : "lost";
+      customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "outcome", summary: `Outcome recorded: ${outcome}.`, detail: customer.outcome.detail, lifecycleAfter: customer.lifecycle, actor: "owner" });
+      customer.updatedAt = at;
+      this.activity(state, "task", "customer.outcome", `Relationship outcome recorded: ${outcome}.`, id);
+      return structuredClone(customer);
+    });
+  }
+  /** Archiving hides a relationship from day-to-day views. It never deletes the timeline. */
+  async setCustomerArchived(id: string, archived: boolean): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const at = this.ports.clock.now();
+      customer.archived = archived; customer.updatedAt = at;
+      if (archived && customer.lifecycle !== "sold" && customer.lifecycle !== "lost") customer.lifecycle = "inactive";
+      customer.interactions.push({ id: this.ports.ids.next("interaction"), at, kind: "lifecycle", summary: archived ? "Relationship archived; history retained." : "Relationship reactivated.", detail: "", lifecycleAfter: customer.lifecycle, actor: "owner" });
+      this.activity(state, "task", archived ? "customer.archive" : "customer.reactivate", archived ? "Work relationship archived; nothing was deleted." : "Work relationship reactivated.", id);
+      return structuredClone(customer);
+    });
+  }
+  async linkCustomerTask(id: string, taskId: string): Promise<CustomerV1> {
+    return this.mutate((state) => {
+      this.#requireWorkWorkspace(state);
+      const customer = find(state.customers, id, "Customer");
+      const task = find(state.tasks, taskId, "Task");
+      if (task.workspace !== "work") throw new Error("Only a Work task can be linked to a work relationship.");
+      if (!customer.taskIds.includes(taskId)) customer.taskIds.push(taskId);
+      customer.updatedAt = this.ports.clock.now();
+      this.activity(state, "task", "customer.link.task", "Task linked to a work relationship.", id);
+      return structuredClone(customer);
+    });
+  }
+  /** Relationship search. Work-scoped by construction: it reads only the customers collection. */
+  async findCustomers(query: CustomerQueryV1): Promise<CustomerV1[]> {
+    const state = await this.snapshot();
+    if (state.settings.activeWorkspace !== "work") throw new Error("Relationship search is only available in the Work workspace.");
+    return queryCustomers(state.customers, query, this.ports.clock.now());
+  }
+  async customerTimeline(id: string): Promise<{ customer: CustomerV1; last: CustomerInteractionV1 | null; nextAction: { action: string; at: IsoTimestamp | null } }> {
+    const state = await this.snapshot();
+    const customer = find(state.customers, id, "Customer");
+    return { customer, last: lastInteraction(customer), nextAction: { action: customer.nextAction, at: customer.nextActionAt } };
+  }
+
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
   async verifyPrivateBackup(destination: string, passphrase: string): Promise<AssistantStateV1> { const state = await this.ports.backup.restore(destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.verify", "Encrypted private backup integrity and restore validated.", null); }); return state; }
 }

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+﻿import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -83,7 +83,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       activeWorkspace: DEFAULT_WORKSPACE, workspaceLabels: { personal: "Personal", work: "Work" },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
-    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
+    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [], customers: [],
   };
 }
 
@@ -94,7 +94,7 @@ const WORKSPACE_SCOPED_COLLECTIONS = ["conversations", "memories", "tasks", "rou
  * The workspace migration.
  *
  * Deterministic, idempotent, and fail-closed. Every pre-workspace record is assigned the
- * documented default of PERSONAL and nothing else about it is touched — identifiers, provenance,
+ * documented default of PERSONAL and nothing else about it is touched â€” identifiers, provenance,
  * history, timestamps and cross-record links are carried through untouched, because the migration
  * only ever adds a missing field. It never creates a WORK record, so migration cannot move owner
  * material across the boundary. A record carrying an unrecognised workspace is an error rather
@@ -128,7 +128,7 @@ export function migrateStateV1(
 
   // A migration "applies" only when it actually assigned something. State that AION created
   // already workspace-aware needs nothing, so reopening it writes no revision and records no
-  // migration — which is what keeps a restart byte-identical.
+  // migration â€” which is what keeps a restart byte-identical.
   const total = Object.values(assigned).reduce((sum, count) => sum + count, 0);
   if (total === 0) return { state: draft, applied: false, record: null };
   const record: MigrationRecordV1 = { id: nextId("migration"), migration: WORKSPACE_MIGRATION, at: now, assigned, defaultWorkspace: DEFAULT_WORKSPACE };
@@ -148,6 +148,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (typeof clone.settings.developerBridgeId !== "string") clone.settings.developerBridgeId = "";
   if (!Array.isArray(clone.verifications)) clone.verifications = [];
   if (!Array.isArray(clone.migrations)) clone.migrations = [];
+  if (!Array.isArray(clone.customers)) clone.customers = [];
   return clone;
 }
 

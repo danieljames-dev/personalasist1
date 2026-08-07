@@ -228,6 +228,121 @@ export interface ImportReportV1 {
   warnings: string[];
 }
 
+/**
+ * Where a piece of information came from and, by implication, who it belongs to. Customer records
+ * created while doing a job are not the owner's personal property, and AION says so rather than
+ * blurring the two. The imported class exists so a future authorised employer-system import has a
+ * place to land; nothing produces it in this milestone.
+ */
+export type DataOriginV1 = "owner-created" | "employer-work" | "imported-employer-system";
+export const DATA_ORIGINS: readonly DataOriginV1[] = ["owner-created", "employer-work", "imported-employer-system"];
+
+/**
+ * A durable relationship lifecycle. States are not a workflow the record passes through and
+ * forgets: every transition is appended to the timeline, so a customer can go prospect → contact →
+ * appointment → visit → follow-up → sale → later follow-up without losing anything earlier.
+ */
+export type CustomerLifecycleV1 =
+  | "prospect" | "contacted" | "engaged" | "appointment-set" | "appointment-shown"
+  | "negotiating" | "sold" | "lost" | "follow-up" | "inactive";
+export const CUSTOMER_LIFECYCLES: readonly CustomerLifecycleV1[] = [
+  "prospect", "contacted", "engaged", "appointment-set", "appointment-shown",
+  "negotiating", "sold", "lost", "follow-up", "inactive",
+];
+
+export type ContactChannelV1 = "phone" | "text" | "email" | "in-person" | "other";
+export const CONTACT_CHANNELS: readonly ContactChannelV1[] = ["phone", "text", "email", "in-person", "other"];
+
+export interface ContactMethodV1 { channel: ContactChannelV1; label: string; value: string; }
+/** Descriptive interest only — a trade is described, never valued from financial records. */
+export interface CustomerInterestV1 { kind: "vehicle" | "trade" | "other"; description: string; notedAt: IsoTimestamp; }
+
+export interface CustomerInteractionV1 {
+  id: OpaqueId;
+  at: IsoTimestamp;
+  kind: "note" | "call" | "text" | "email" | "visit" | "appointment" | "follow-up" | "lifecycle" | "outcome";
+  summary: string;
+  detail: string;
+  /** Set when this interaction is the one that moved the relationship to a new state. */
+  lifecycleAfter: CustomerLifecycleV1 | null;
+  actor: "owner" | "aion";
+}
+
+export interface CustomerAppointmentV1 {
+  id: OpaqueId;
+  at: IsoTimestamp;
+  kind: "appointment" | "callback" | "delivery";
+  location: string;
+  status: "scheduled" | "confirmed" | "shown" | "no-show" | "rescheduled" | "cancelled";
+  notes: string;
+  createdAt: IsoTimestamp;
+}
+
+export interface CustomerFollowUpV1 {
+  id: OpaqueId;
+  dueAt: IsoTimestamp;
+  channel: ContactChannelV1;
+  reason: string;
+  status: "open" | "done" | "skipped";
+  outcome: string;
+  createdAt: IsoTimestamp;
+  completedAt: IsoTimestamp | null;
+}
+
+/**
+ * A durable, work-scoped relationship record.
+ *
+ * Deliberately not automotive-specific: vehicle interest is one kind of `interests` entry, and no
+ * field, state, or rule depends on a dealership, a manufacturer, or a particular employer. The
+ * shape is intended to be promotable into a broader relationship system later without redesign.
+ */
+export interface CustomerV1 {
+  id: OpaqueId;
+  /** Stable opaque reference that survives renames and is safe to quote in an audit trail. */
+  reference: string;
+  workspace: WorkspaceIdV1;
+  displayName: string;
+  lifecycle: CustomerLifecycleV1;
+  origin: DataOriginV1;
+  contactMethods: ContactMethodV1[];
+  communicationPreference: ContactChannelV1 | "unknown";
+  source: string;
+  notes: string;
+  interests: CustomerInterestV1[];
+  objections: string[];
+  preferences: string[];
+  appointments: CustomerAppointmentV1[];
+  followUps: CustomerFollowUpV1[];
+  nextAction: string;
+  nextActionAt: IsoTimestamp | null;
+  lastContactAt: IsoTimestamp | null;
+  /** Append-only relationship timeline. Nothing here is ever rewritten or removed. */
+  interactions: CustomerInteractionV1[];
+  taskIds: OpaqueId[];
+  routineIds: OpaqueId[];
+  planIds: OpaqueId[];
+  outcome: { state: "open" | "sold" | "lost"; at: IsoTimestamp | null; detail: string };
+  archived: boolean;
+  provenance: ProvenanceV1;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}
+
+/** A closed query shape. There is no free-text filter expression for a model to inject into. */
+export interface CustomerQueryV1 {
+  kind:
+    | "follow-up-due" | "not-contacted-since" | "appointments-on" | "interested-in"
+    | "awaiting-callback" | "in-stage" | "all";
+  /** An ISO date (YYYY-MM-DD) for date-based queries. */
+  onDate?: string;
+  /** Whole days for recency queries. */
+  days?: number;
+  /** Descriptive text for interest matching. Matched literally, never evaluated. */
+  text?: string;
+  stage?: CustomerLifecycleV1;
+  includeArchived?: boolean;
+}
+
 export interface SettingsV1 {
   providerId: string;
   model: string;
@@ -265,6 +380,8 @@ export interface AssistantStateV1 {
   verifications: VerificationRunV1[];
   /** Every migration that has run against this state, in order. Never rewritten. */
   migrations: MigrationRecordV1[];
+  /** Durable work-scoped relationship records. */
+  customers: CustomerV1[];
 }
 
 export interface StateRepositoryV1 {
