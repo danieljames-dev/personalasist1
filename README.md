@@ -30,6 +30,12 @@ choose which one AION uses. Developer tasks are approval-gated, confined to this
 read-only unless you approve a writing boundary; your instruction reaches the agent on its standard
 input and never becomes a command-line argument.
 
+AION separates **Personal and Work**. A Work workspace adds a phone-first Sales mode with durable
+customer relationships, deterministic coaching that invents no pricing or inventory facts, and your
+own daily metrics. Private phone access is off by default; when you turn it on, a device must be
+paired with a single-use code, sessions expire and are revocable, and AION never opens a public
+port or touches your router. `npm run aion:sales:demo` proves all of it on a fictional dealership.
+
 Owner data lives only in the Git-ignored `private/aion` directory and is excluded from source
 backups. See [the Command Center guide](docs/implementation/aion-command-center.md).
 

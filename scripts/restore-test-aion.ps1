@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 290,
+    [int]      $ExpectedTests = 346,
     [switch]   $DryRun
 )
 
@@ -150,6 +150,7 @@ $result = [ordered]@{
     careerDemoCommand = 'npm run career:demo'
     aionCommand      = 'npm run aion:test'
     aionDemoCommand  = 'npm run aion:demo'
+    salesDemoCommand = 'npm run aion:sales:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
@@ -159,6 +160,7 @@ $result = [ordered]@{
     careerDemoResult = $null
     aionResult = $null
     aionDemoResult = $null
+    salesDemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -483,6 +485,25 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'AION V1 demo left permanent private runtime state in the restored repository' }
     $result.aionDemoResult = 'PASS'
     Add-Step 'aion-demo-regression' 'PASS' 'complete synthetic V1 product proof, restart reload, deterministic rerun, and cleanup passed'
+
+    Write-Step "running npm run aion:sales:demo"
+    $salesOut = Join-Path $logDir "restore-$Timestamp.sales-demo.out.log"
+    $salesErr = Join-Path $logDir "restore-$Timestamp.sales-demo.err.log"
+    $salesExit = Invoke-Logged -CommandLine 'npm run aion:sales:demo' -WorkingDirectory $restoreDir -OutFile $salesOut -ErrFile $salesErr
+    if ($salesExit -ne 0) { throw "npm run aion:sales:demo failed with exit code $salesExit" }
+    $salesText = Get-Content -LiteralPath $salesOut -Raw
+    foreach ($required in @(
+        'Mobile Sales demo PASS',
+        'durable Work relationship records',
+        'Work and Personal stay separated',
+        'pairs with the one-time code',
+        'cannot mint a code',
+        'reloads the identical Work state')) {
+        if ($salesText -notmatch [regex]::Escape($required)) { throw "Mobile Sales demo evidence missing: $required" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'Mobile Sales demo left permanent private runtime state in the restored repository' }
+    $result.salesDemoResult = 'PASS'
+    Add-Step 'aion-sales-demo-regression' 'PASS' 'complete synthetic Mobile Sales proof, phone pairing, workspace isolation, and cleanup passed'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

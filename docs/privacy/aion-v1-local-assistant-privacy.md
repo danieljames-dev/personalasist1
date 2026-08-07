@@ -69,6 +69,33 @@ performs a dry run first, reports exact digests and duplicates, can be cancelled
 proceed if the source changed after the dry run, and never modifies the source. No real owner
 archive was imported during this milestone.
 
+## V1.1: workspaces, customer data, and phone access
+
+Work and Personal are separate stores. A work memory is invisible from Personal, no work content
+reaches a personal conversation, and no path promotes a work observation into Personal memory. The
+workspace migration adds a field and changes nothing else; it never moves a record across the
+boundary. It was built and tested only against a synthetic fixture reproducing the persisted schema
+shape with neutral invented values -- the live private state was never read, parsed, copied, or
+mutated during development, and this milestone does not migrate the running instance.
+
+Customer records belong to the owner's employer and their customer, and AION says so: every record
+carries a data origin defaulting to employer-work. AION refuses identity, credit, banking and
+financing material outright rather than merely not asking for it. Social-security numbers, licence
+data, credit scores and applications, bank and routing numbers, card numbers, financing accounts,
+income and dates of birth are rejected by field name, and free text is rejected when it looks like
+a social-security or payment-card number. Descriptive trade information is still accepted, because
+describing a trade is not retaining a finance record. No CRM, employer system, customer account,
+phone system, or email was contacted, and none can be.
+
+Phone access stores no secret. A pairing code and a session token exist only in the response that
+issues them; AION keeps SHA-256 digests. No secret appears in a URL, in Activity, or in a log.
+Revoking a device ends its access and changes no owner record. The service worker caches the
+application shell only, so no conversation, memory, task, relationship, Career, activity, or
+approval response is ever persisted by a phone that may later be lost.
+
+Every automated test, both demos, and all development used invented data: a fictional dealership,
+a fictional salesperson, fictional customers, and synthetic devices and sessions.
+
 ## Residual privacy risks
 
 - Live state is protected by OS file permissions and any disk encryption the owner has enabled;

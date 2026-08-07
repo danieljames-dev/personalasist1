@@ -111,6 +111,57 @@ The offline provider can hand a repository question to the developer agent: a `d
 Chat produces an ordinary read-only proposal that AION revalidates against the registry and queues
 for approval. It carries no extra authority, and no capability accepts shell text.
 
+## V1.1: workspaces, Sales, verification, and phone access
+
+**Workspace separation.** Every record that can hold owner content — conversations, memories,
+tasks, routines, plans, activity — carries a `workspace` of `personal` or `work`. Separation is
+enforced in four independent places: memory context is filtered to the conversation's own
+workspace, search never crosses the boundary, conflict detection groups *within* a workspace
+because the same statement in two workspaces is two facts rather than a conflict, and the UI
+renders every list through an explicit filter. A deterministic, idempotent, fail-closed migration
+assigns the documented default of `personal` to every pre-workspace record, adding a field and
+changing nothing else; it never creates a `work` record, so migration cannot move material across
+the boundary. It applies only when it actually assigns something, so reopening writes nothing.
+
+**Durable relationships.** `CustomerV1` is a long-lived work-scoped record — stable opaque
+reference, lifecycle, contacts, interests, objections, appointments, follow-ups, next action,
+linked tasks and plans, outcome, archival flag, provenance — with an append-only interaction
+timeline. Lifecycle changes, appointments, follow-ups and outcomes all append; an owner edit
+enumerates its editable fields, so the timeline, identifiers, provenance and outcome cannot be
+edited away. Nothing is automotive-specific: a vehicle is one kind of interest and the workplace
+name is a label the owner types. Identity, credit, banking and financing fields are refused by
+name, and free text that looks like a social-security or payment-card number is refused too.
+Records carry a `DataOriginV1`, defaulting to `employer-work`, so AION does not imply that
+customer information is the owner's personal property.
+
+**Deterministic coaching.** `sales-coach.ts` is pure templates over recorded material. No model is
+called, so it works offline and identically every time. Wherever a current commercial fact would
+be needed the template emits an explicit confirm marker instead of a number, and a test asserts no
+output contains a currency amount, a percentage, an APR, an MSRP, or an availability claim. Drafts
+state that AION sends nothing.
+
+**AION-owned verification.** `aion.verify.run.v1` accepts one field — an operation identifier from
+a fixed allowlist — and refuses `command`, `args`, `shell`, `cwd`, `env` and any unexpected field
+by name. The runner lives in the composition root beside the Career bridge, spawns with
+`shell: false` and a frozen argument vector, and reaches npm through its CLI entry point rather
+than a shell shim. Evidence is bounded, digested, and recordable only by an executed capability —
+the recording method is a true JavaScript private, because `server.mjs` is untyped and TypeScript's
+`private` would not have stopped it. That evidence then feeds a **read-only** developer-agent
+analysis, which is how "what is failing?" is answered without granting shell or write access.
+
+**Phone access.** Two independent things must hold before a non-loopback request is served: the
+owner has turned private access on, and the request carries a session from a pairing performed at
+the console. Network reachability is never authentication. Pairing codes are single-use and expire
+in ten minutes; issuing a new one invalidates the old. Only SHA-256 digests are stored, compared in
+constant time, so the state file grants no access. Bearer material travels in a header, never a
+URL. Sessions expire and are individually and collectively revocable, and revocation touches no
+owner record. Turning access off ends every live session immediately. Pairing is rate-limited per
+peer. A paired phone may drive AION but may never mint a code or change access settings. The bind
+address must be loopback or a private range; wildcards and public addresses are refused, and AION
+creates no tunnel and no router configuration. The service worker caches the application shell
+only — every `/api/` request is network-only, so no private response is ever persisted by a
+browser that may later be lost or revoked.
+
 ## Out of scope for V1
 
 This V1 does not close DG-3 or DG-4b, stabilize the Universal Object Contract, create normative

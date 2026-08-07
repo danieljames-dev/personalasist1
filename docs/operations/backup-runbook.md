@@ -211,6 +211,14 @@ The restored developer-agent suites probe only for locally installed Codex CLI a
 executables and read their versions. They never execute a developer task, so a restore test costs
 no model quota and modifies no repository.
 
+For the AION V1.1 milestone, success additionally means the isolated clone passed
+`npm run aion:sales:demo`. That demo must show a loopback-only start with phone access off, the
+WORK workspace, durable relationship records with an append-only timeline, workspace isolation in
+both directions, an allowlisted verification analysed by a read-only developer agent, a phone
+pairing with a one-time code, refusals when a phone tries to mint a code or change access settings,
+and a restart that reloads identical Work state with revoked devices still revoked. It must leave
+no `private/` state in the restored repository.
+
 Record in the drive log or asset register: date, commit hash, manifest path, and restore
 result. Then safely eject the drive through **Safely Remove Hardware** before
 disconnecting. Do not leave the drive permanently mounted — a permanently attached backup

@@ -425,6 +425,31 @@ approval-gated read-only developer task. It adds no new dependency, no network b
 service, no production claim, and no real owner-data ingestion; DG-3 and DG-4b remain Open, the
 Universal Object Contract remains Pre-stable, and normative fixtures remain unauthorized.
 
+The AION V1.1 Mobile Sales Work Mode milestone makes that surface usable from a phone and
+separates work from personal life. It adds explicit PERSONAL and WORK workspaces carried on every
+content record, with memory context, search, conflict detection and the UI all scoped to one
+workspace, and a deterministic, idempotent, fail-closed migration that assigns pre-workspace
+records the documented default without moving anything across the boundary. It adds durable
+work-scoped relationship records with an append-only timeline, a closed query shape for the daily
+questions, refusal of identity, credit, banking and financing material by field and by value, and
+a data-origin classification so customer information is never implied to be personal property. It
+adds deterministic template-driven sales coaching that states no commercial fact it was not given,
+routine templates that activate nothing on their own, owner-entered metrics labelled as the
+owner's own counts, and a phone-first Sales dashboard. It adds an AION-owned bounded verification
+capability with a fixed allowlist and no command field anywhere in its input, whose evidence feeds
+a read-only developer-agent analysis, so a failing suite can be explained without granting shell or
+write access. It adds device pairing with single-use short-lived codes, digest-only storage,
+header-only bearer material, expiring and individually revocable sessions, per-peer rate limiting,
+and a service worker that caches the application shell and never an API response. Private phone
+access is off by default, the bind address is restricted to loopback or a private range, and AION
+creates no tunnel, port forwarding, or router configuration.
+
+This milestone adds no CRM connection, no employer-system access, no customer communication, no job
+discovery, no submission, no telemetry, no live model call, no OS service, and no production claim.
+It does not close DG-3 or DG-4b, stabilize the Universal Object Contract, or create normative
+fixtures. Real owner-data ingestion remains owner-initiated and did not occur, and the owner's live
+private state was neither read nor migrated during development.
+
 The next action requires a separate Founder/CTO decision after review.
 
 No milestone enters production implementation until it has an approved specification,

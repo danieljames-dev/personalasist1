@@ -122,6 +122,43 @@ not shown, because determining it would require a paid call.
 In **Chat**, `developer: <question>` with the offline provider prepares a read-only developer-agent
 task for your approval — the model can only propose, and nothing runs until you approve it.
 
+## Workspaces
+
+A switcher at the top of the screen moves between **Personal** and **Work**. Records join the
+workspace they were created in and never move on their own. Memory context, search, and conflict
+detection all stay inside one workspace. You supply the Work label yourself.
+
+## Sales
+
+Built for a phone on a sales floor. The floor view leads with today -- appointments, follow-ups
+due, overdue callbacks -- then the next relationship with Open and Call Prep, then six quick
+actions that open inline: add prospect, note, follow-up, appointment, coach, metrics. Tabs cover
+TODAY, FOLLOW-UPS, APPOINTMENTS, PROSPECTS, COACH and METRICS.
+
+Opening a person shows stage, interest, last contact and next action, one-tap actions, and the
+durable timeline. Nothing is ever overwritten: every stage change, note, appointment and outcome
+appends. AION refuses identity, credit, banking and financing details, and stores only what you
+enter and are permitted to keep.
+
+Coaching is deterministic and offline. It never states a price, payment, rate, incentive, stock
+level, or dealership policy -- it marks those for you to confirm. Drafts are drafts: AION sends
+nothing. Metrics are your own counts, never a CRM figure.
+
+## Verify
+
+AION runs a fixed allowlist of read-only commands itself and hands the evidence to a read-only
+developer agent for analysis. That is how "what is failing?" gets answered without giving an agent
+a shell or write access.
+
+## Private phone access
+
+Off by default; AION binds `127.0.0.1`. Turning it on in Settings lets you create a one-time
+pairing code, valid for ten minutes and usable once. Type it on the phone. A private network is not
+enough on its own -- a device must be paired. Sessions expire, can be revoked individually or all
+at once, and revoking one changes none of your data. AION never opens a public port, creates a
+tunnel, or touches your router. Add AION to your home screen for a full-screen app; only the shell
+is cached, never your data.
+
 ## Verification
 
 | Command | Covers |

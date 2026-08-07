@@ -44,6 +44,24 @@ security of any remote provider the owner may later configure.
 | T14 | Unbounded requests or responses exhaust memory | 1 MiB request cap, 16 MiB state cap, 100 000-character message cap, import file and byte caps, capability timeouts and retry limits | Server suite: oversized body rejected |
 | T15 | Concurrent writes interleave and corrupt state | One serialized write queue plus expected-revision checks and atomic rename | Domain suite: revision conflict detection |
 
+## V1.1 threats and controls
+
+| # | Threat | Control | Evidence |
+| --- | --- | --- | --- |
+| T19 | A model causes an arbitrary command to run under the guise of "running the tests" | The verification capability accepts only an operation identifier from a fixed allowlist; `command`, `commandLine`, `args`, `argv`, `shell`, `script`, `exec`, `run`, `cwd`, `env`, `path` and any unexpected field are refused by name; identifiers are looked up, never parsed | Verification suite: every smuggling shape refused, including an identifier containing shell syntax |
+| T20 | Verification evidence is forged to make a failing suite look green | Evidence can only be produced by an executed, approved capability; the recording method is a true JavaScript private with no endpoint and no typed or untyped caller outside the class | Domain suite: the method is absent from the runtime surface |
+| T21 | Work material leaks into Personal, or the reverse | Workspace on every content record; memory context filtered to the conversation's workspace; search scoped; conflict grouping per workspace; UI filtered; relationships and coaching refuse outside Work | Domain, app and demo suites: search, context, and conflict isolation in both directions |
+| T22 | A migration silently loses or moves owner data | Deterministic, idempotent, fail-closed; adds a field and nothing else; never creates a Work record; unrecognised values refuse rather than guess | Migration suite: deep equality against the original after stripping only the added field |
+| T23 | Customer identity, credit, or financing material accumulates in AION | Prohibited fields refused by name; free text refused when it looks like a social-security or payment-card number; records default to an employer-work origin | Sales suite: ten field shapes and two text shapes refused |
+| T24 | Reaching AION over a VPN is treated as being the owner | Network reachability grants nothing; a non-loopback request additionally requires a session from a console pairing; every failure mode fails closed | Access suite: unpaired device refused 401 with the shell still served |
+| T25 | A pairing code or session token is captured from storage, a URL, or a log | Only SHA-256 digests are stored, compared in constant time; codes are single-use and ten-minute; bearer material is header-only; no secret reaches Activity | Access suite: state and activity greps, and a source assertion that no token is read from a query string |
+| T26 | A lost phone retains access, or revoking it damages data | Sessions expire and are individually and collectively revocable; turning access off ends every session at once; revocation touches no owner record | Access suite: memories, tasks and conversations byte-identical across a revoke |
+| T27 | Pairing is brute-forced | Per-peer failed-attempt counter, eight failures in fifteen minutes then a fifteen-minute block; the counter is committed even when the attempt is rejected | Access suite: twelve bad codes must produce a block |
+| T28 | A phone escalates itself to console authority | Loopback is decided from the socket, never a header; a paired device cannot mint a pairing code or change access settings | Access suite and demo: both refused 403 over the wire |
+| T29 | AION is exposed publicly, or configures the network on the owner's behalf | Loopback default; bind restricted to loopback or a private range; wildcards and public addresses refused; no tunnel, no port forwarding, no UPnP, and detection runs no configuring subcommand | Access suite: address validation and a source assertion on the detection module |
+| T30 | A browser cache outlives a revoked session and exposes private data | The service worker caches the application shell only; every `/api/` request is network-only with no cache read or write | Access suite: path exclusion, shell allowlist, and no API path in the cache list |
+| T31 | Source corruption hides a change from review | Repository-wide gate for byte-order marks, double-encoded characters, and raw control bytes, with a self-test proving the rule flags real damage and leaves legitimate Unicode alone | Source-hygiene suite |
+
 ## Residual risks
 
 - Anything with the owner's user account can read `private/aion`. AION relies on OS file
