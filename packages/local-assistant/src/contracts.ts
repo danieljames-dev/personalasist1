@@ -212,6 +212,8 @@ export interface SettingsV1 {
   importRoots: string[];
   exportRoot: string;
   credentialEnvironmentVariable: string;
+  /** Which registered developer-agent bridge the owner selected. Empty means AION's default. */
+  developerBridgeId: string;
   privacy: { includeMemoryByDefault: boolean; retainActivityDays: number };
 }
 
@@ -252,9 +254,53 @@ export interface CapabilityV1 {
 }
 export interface CapabilityRegistryV1 { get(id: string): CapabilityV1 | null; list(): readonly CapabilityV1[]; }
 
+/**
+ * A developer-agent task is either read-only or repository-writing. The mode is part of the
+ * capability input, so it is covered by the canonical digest the owner approves: an approval for a
+ * read-only task can never authorise a writing one. Absent means read-only, so it fails closed.
+ */
+export type DeveloperAgentModeV1 = "read-only" | "workspace-write";
+
+/**
+ * Executable availability and account health are deliberately separate. A CLI that answers its
+ * version probe proves only that the program exists; whether the owner is signed in — and whether
+ * any credit remains — is a different question. AION never determines remaining quota, because
+ * that would require a paid call.
+ */
+export interface DeveloperAgentStatusV1 {
+  bridgeId: string;
+  displayName: string;
+  available: boolean;
+  /** Executable *name* only. A full local path never reaches the browser, activity, or a backup. */
+  executable: string | null;
+  version: string | null;
+  account: "not-checked" | "signed-in" | "signed-out" | "unknown";
+  accountDetail: string;
+  detail: string;
+  modes: readonly DeveloperAgentModeV1[];
+}
+
 export interface DeveloperAgentBridgeV1 {
-  status(): Promise<{ available: boolean; executable: string | null; detail: string }>;
-  run(task: { repositoryRoot: string; instruction: string }, signal: AbortSignal): Promise<{ exitCode: number; summary: string }>;
+  readonly id: string;
+  readonly displayName: string;
+  /** `includeAccount` is opt-in so AION never probes an account on an ordinary state read. */
+  status(options?: { includeAccount?: boolean }): Promise<DeveloperAgentStatusV1>;
+  /**
+   * The exact command AION would run for a task in this mode, with the local repository path
+   * redacted. The instruction is deliberately absent from the vector: it travels on standard
+   * input, so no part of it can be read as an argument. The owner can see this before approving.
+   */
+  describe(mode: DeveloperAgentModeV1): { executable: string; args: readonly string[] };
+  run(task: { repositoryRoot: string; instruction: string; mode: DeveloperAgentModeV1 }, signal: AbortSignal): Promise<{ exitCode: number; summary: string }>;
+}
+
+/** The complete set of developer bridges AION found, and the one Settings currently selects. */
+export interface DeveloperAgentRegistryV1 {
+  list(): readonly DeveloperAgentBridgeV1[];
+  get(id: string): DeveloperAgentBridgeV1 | null;
+  selected(): DeveloperAgentBridgeV1;
+  /** An empty id restores AION's default preference. An unregistered id must fail closed. */
+  select(id: string): void;
 }
 
 export interface ImportSourceV1 {

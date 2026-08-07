@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  AionAssistantV1, DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
+  AionAssistantV1, ClaudeCodeCliDeveloperAgentBridgeV1, CodexCliDeveloperAgentBridgeV1,
+  DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
   DeveloperAgentCapabilityV1, FileStateRepositoryV1, InMemoryStateRepositoryV1,
-  LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1, StaticCapabilityRegistryV1,
+  LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
+  SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1,
   SyntheticDeveloperAgentBridgeV1, UnavailableDeveloperAgentBridgeV1,
 } from "../src/index.js";
-import type { ClockV1 } from "../src/index.js";
+import type { ClockV1, DeveloperAgentBridgeV1 } from "../src/index.js";
 
 /** A clock the test drives explicitly, for expiry and retention behaviour. */
 class SteppableClock implements ClockV1 {
@@ -18,17 +20,17 @@ class SteppableClock implements ClockV1 {
   advance(milliseconds: number): void { this.instant += milliseconds; }
 }
 
-async function fixture(overrides: { clock?: ClockV1; bridge?: SyntheticDeveloperAgentBridgeV1 | UnavailableDeveloperAgentBridgeV1 } = {}) {
+async function fixture(overrides: { clock?: ClockV1; bridges?: readonly DeveloperAgentBridgeV1[] } = {}) {
   const root = await mkdtemp(join(tmpdir(), "aion-assistant-test-"));
   const exports = join(root, "exports"); await mkdir(exports);
-  const developerBridge = overrides.bridge ?? new SyntheticDeveloperAgentBridgeV1();
+  const developerAgents = new SelectableDeveloperAgentRegistryV1(overrides.bridges ?? [new SyntheticDeveloperAgentBridgeV1()]);
   const service = new AionAssistantV1({
     repository: new InMemoryStateRepositoryV1(), clock: overrides.clock ?? new DeterministicClockV1(),
     ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
-    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerBridge, root)]),
-    importer: new LocalArchiveImportSourceV1(), backup: new NodePrivateBackupV1(exports), developerBridge,
+    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, root)]),
+    importer: new LocalArchiveImportSourceV1(), backup: new NodePrivateBackupV1(exports), developerAgents,
   });
-  return { root, exports, service };
+  return { root, exports, service, developerAgents };
 }
 
 test("offline chat persists history and uses enabled memory context", async () => {
@@ -199,8 +201,102 @@ test("the developer-agent capability is approval-gated and refuses foreign roots
   assert.equal(result.exitCode, 0);
 });
 
+test("Chat hands a repository question to the developer agent as a read-only proposal only", async () => {
+  const { service } = await fixture();
+  const conversation = await service.createConversation("Developer hand-off");
+  const turn = await service.sendMessage(conversation.id, "developer: review the repository and tell me what tests are failing");
+  assert.equal(turn.proposedActions.length, 1);
+  const [action] = turn.proposedActions;
+  assert.equal(action?.capabilityId, "aion.developer.task.v1");
+  assert.equal(action?.origin, "provider-proposal");
+  assert.equal(action?.state, "awaiting-approval", "a chat hand-off never executes on its own");
+  assert.equal(action?.input.mode, "read-only", "a chat hand-off can only ever propose a read-only task");
+  assert.match(String(action?.input.instruction), /what tests are failing/u);
+  assert.doesNotMatch(turn.message.content, /AION-PROPOSE/u, "the proposal line never reaches the stored message");
+
+  await assert.rejects(service.executeAction(action!.id), /one-shot/iu);
+  const approval = (await service.snapshot()).approvals.find((item) => item.actionId === action!.id)!;
+  await service.decideApproval(approval.id, true);
+  const result = await service.executeAction(action!.id) as { mode: string; exitCode: number };
+  assert.equal(result.mode, "read-only");
+  assert.equal(result.exitCode, 0);
+});
+
+test("a developer task defaults to read-only and its boundary is bound into the approval digest", async () => {
+  const { service } = await fixture();
+  const implied = await service.proposeAction("aion.developer.task.v1", { instruction: "List the failing tests" });
+  const explicit = await service.proposeAction("aion.developer.task.v1", { instruction: "List the failing tests", mode: "read-only" });
+  const writing = await service.proposeAction("aion.developer.task.v1", { instruction: "List the failing tests", mode: "workspace-write" });
+  assert.match(implied.approval!.summary, /read-only developer-agent task/u, "the owner is told the boundary before approving");
+  assert.match(writing.approval!.summary, /workspace-write developer-agent task/u);
+  assert.notEqual(implied.action.inputDigest, writing.action.inputDigest, "a writing task can never reuse a read-only approval");
+  assert.notEqual(explicit.action.inputDigest, writing.action.inputDigest);
+  await assert.rejects(service.proposeAction("aion.developer.task.v1", { instruction: "Anything", mode: "danger-full-access" }), /read-only or workspace-write/iu);
+
+  await service.decideApproval(implied.approval!.id, true);
+  const result = await service.executeAction(implied.action.id) as { mode: string; bridgeId: string; exitCode: number };
+  assert.equal(result.mode, "read-only", "an unstated boundary executes as read-only, never as writing");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.bridgeId, "synthetic");
+  await assert.rejects(service.executeAction(writing.action.id), /one-shot/iu, "the writing task still has no approval of its own");
+});
+
+test("Settings choose among the registered developer bridges and never invent one", async () => {
+  const named = (id: string, displayName: string): DeveloperAgentBridgeV1 => {
+    const inner = new SyntheticDeveloperAgentBridgeV1();
+    return { id, displayName, status: async () => ({ ...await inner.status(), bridgeId: id, displayName }), describe: (mode) => inner.describe(mode), run: (task, signal) => inner.run(task, signal) };
+  };
+  const { service, developerAgents } = await fixture({ bridges: [named("codex", "Codex CLI"), named("claude-code", "Claude Code CLI")] });
+  assert.deepEqual((await service.developerBridgeInventory()).map((entry) => entry.bridgeId), ["codex", "claude-code"]);
+  assert.equal((await service.developerBridgeStatus()).bridgeId, "codex", "the first registered bridge is AION's default");
+
+  await service.updateSettings({ developerBridgeId: "claude-code" });
+  assert.equal((await service.developerBridgeStatus()).bridgeId, "claude-code");
+  assert.equal(developerAgents.selected().id, "claude-code");
+  const proposed = await service.proposeAction("aion.developer.task.v1", { instruction: "Report the bounded status" });
+  assert.match(proposed.approval!.summary, /Claude Code CLI/u, "the approval names the bridge that will run");
+  await service.decideApproval(proposed.approval!.id, true);
+  assert.equal((await service.executeAction(proposed.action.id) as { bridgeId: string }).bridgeId, "claude-code");
+
+  await assert.rejects(service.updateSettings({ developerBridgeId: "not-installed" }), /not registered/iu);
+  assert.equal((await service.snapshot()).settings.developerBridgeId, "claude-code", "a rejected selection changes nothing");
+  await service.updateSettings({ developerBridgeId: "" });
+  assert.equal((await service.developerBridgeStatus()).bridgeId, "codex", "an empty selection restores AION's default");
+});
+
+test("account health is only checked when asked, and reports no account value", async () => {
+  const { service } = await fixture();
+  assert.equal((await service.developerBridgeStatus()).account, "signed-in");
+  const checked = await service.developerBridgeInventory(true);
+  assert.equal(checked.length, 1);
+  const activity = (await service.snapshot()).activity;
+  const record = activity.find((entry) => entry.action === "developer.health");
+  assert.ok(record, "an explicit health check is recorded in activity");
+  assert.doesNotMatch(record!.summary, /[\w.+-]+@[\w-]+\.[a-z]{2,}/iu, "no account address ever reaches activity");
+  assert.match(record!.summary, /no paid call was made/iu);
+  assert.equal(JSON.stringify(await service.snapshot()).includes("signed-in"), false, "bridge health is live, never persisted state");
+});
+
+test("a real CLI bridge reports a name rather than a local path and refuses unsupported work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aion-bridge-test-"));
+  const absent = join(root, "definitely-absent", process.platform === "win32" ? "claude.exe" : "claude");
+  for (const bridge of [new ClaudeCodeCliDeveloperAgentBridgeV1(root, absent), new CodexCliDeveloperAgentBridgeV1(root, absent)]) {
+    const status = await bridge.status({ includeAccount: true });
+    assert.equal(status.available, false, "a missing executable is reported unavailable, never fabricated");
+    assert.equal(status.executable, null);
+    assert.equal(status.account, "unknown");
+    assert.doesNotMatch(JSON.stringify(status), /[A-Za-z]:\\|\/tmp\//u, "no local path is ever reported");
+    await assert.rejects(bridge.run({ repositoryRoot: join(root, "elsewhere"), instruction: "x", mode: "read-only" }, new AbortController().signal), /approved repository root/iu);
+    await assert.rejects(bridge.run({ repositoryRoot: root, instruction: "   ", mode: "read-only" }, new AbortController().signal), /instruction is invalid/iu);
+    await assert.rejects(bridge.run({ repositoryRoot: root, instruction: "read\u0007the repository", mode: "read-only" }, new AbortController().signal), /control characters/iu);
+    await assert.rejects(bridge.run({ repositoryRoot: root, instruction: "read the repository", mode: "danger-full-access" as never }, new AbortController().signal), /mode is not supported/iu);
+  }
+  assert.throws(() => new ClaudeCodeCliDeveloperAgentBridgeV1("relative-root", absent), /explicit and normalized/iu);
+  assert.throws(() => new CodexCliDeveloperAgentBridgeV1(root, "  "), /must be explicit/iu);
+});
+
 test("an unavailable developer bridge reports truthfully and refuses to run", async () => {
-  const { service } = await fixture({ bridge: new UnavailableDeveloperAgentBridgeV1() });
+  const { service } = await fixture({ bridges: [new UnavailableDeveloperAgentBridgeV1()] });
   const status = await service.developerBridgeStatus();
   assert.equal(status.available, false);
   assert.equal(status.executable, null);
@@ -324,7 +420,8 @@ test("file-backed state uses an explicit private root, survives reload, and dete
   const ports = () => ({
     repository: new FileStateRepositoryV1(dataRoot), clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(),
     providers: [new DeterministicModelProviderV1()], capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
-    importer: new LocalArchiveImportSourceV1(), backup: new NodePrivateBackupV1(join(root, "exports")), developerBridge: new SyntheticDeveloperAgentBridgeV1(),
+    importer: new LocalArchiveImportSourceV1(), backup: new NodePrivateBackupV1(join(root, "exports")),
+    developerAgents: new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]),
   });
   const first = new AionAssistantV1(ports());
   await first.createTask({ title: "Persisted across a restart" });

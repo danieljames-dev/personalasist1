@@ -4,7 +4,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { promisify } from "node:util";
 import type {
   AssistantStateV1, CapabilityContextV1, CapabilityRegistryV1, CapabilityV1, ClockV1,
-  DeveloperAgentBridgeV1, IdGeneratorV1, ImportReportV1, ImportSourceV1, ModelProviderV1,
+  DeveloperAgentBridgeV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1, DeveloperAgentStatusV1,
+  IdGeneratorV1, ImportReportV1, ImportSourceV1, ModelProviderV1,
   ModelRequestV1, PrivateBackupV1, StateRepositoryV1,
 } from "./contracts.js";
 import { PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX } from "./contracts.js";
@@ -76,7 +77,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     settings: {
       providerId: "deterministic", model: "aion-offline-v1", remoteDisclosureAccepted: false,
       memoryContextEnabled: true, schedulerEnabled: true, externalActionsRequireApproval: true,
-      importRoots: [], exportRoot: "", credentialEnvironmentVariable: "",
+      importRoots: [], exportRoot: "", credentialEnvironmentVariable: "", developerBridgeId: "",
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [],
@@ -88,7 +89,11 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (state.schema !== "aion.local-assistant-state.v1" || !Number.isSafeInteger(state.revision) || (state.revision ?? -1) < 0) fail("Assistant state version is unsupported.");
   for (const key of ["conversations", "memories", "tasks", "routines", "plans", "actions", "approvals", "activity", "imports"] as const) if (!Array.isArray(state[key])) fail("Assistant state is incomplete.");
   if (!state.settings || typeof state.onboardingComplete !== "boolean") fail("Assistant settings are incomplete.");
-  return structuredClone(state as AssistantStateV1);
+  const clone = structuredClone(state as AssistantStateV1);
+  // Additive V1 settings default forward: state written before a setting existed keeps working
+  // without a migration, and never silently acquires a value the owner did not choose.
+  if (typeof clone.settings.developerBridgeId !== "string") clone.settings.developerBridgeId = "";
+  return clone;
 }
 
 export class InMemoryStateRepositoryV1 implements StateRepositoryV1 {
@@ -134,9 +139,14 @@ export class FileStateRepositoryV1 implements StateRepositoryV1 {
 }
 
 /**
- * Offline deterministic test provider. It performs no network or model call. Two scripted
- * owner prefixes exercise the proposal protocol so approval and memory review are testable
- * without a live provider: `propose: <text>` and `remember: <text>`.
+ * Offline deterministic test provider. It performs no network or model call. Three scripted owner
+ * prefixes exercise the proposal protocol so approval, memory review, and the developer-agent
+ * hand-off are usable and testable without a live provider: `propose: <text>`,
+ * `remember: <text>`, and `developer: <task>`.
+ *
+ * A `developer:` turn produces nothing but an ordinary read-only proposal. It carries no authority:
+ * AION revalidates it against the registry and opens an approval exactly as it would for any other
+ * proposal, and no capability accepts shell text.
  */
 export class DeterministicModelProviderV1 implements ModelProviderV1 {
   readonly id = "deterministic";
@@ -148,8 +158,12 @@ export class DeterministicModelProviderV1 implements ModelProviderV1 {
     const context = request.memoryContext.length ? ` I used ${request.memoryContext.length} enabled local memory record(s).` : "";
     const proposeMatch = latest.trim().match(/^propose:\s*(.+)$/isu);
     const rememberMatch = latest.trim().match(/^remember:\s*(.+)$/isu);
-    let response = `Offline response: ${latest.trim() || "Ready."}.${context}`;
+    const developerMatch = latest.trim().match(/^developer:\s*(.+)$/isu);
+    let response = developerMatch
+      ? `Offline response: I have prepared a read-only developer-agent task for your approval. Nothing runs until you approve it in Approvals, and the agent may not modify the repository.${context}`
+      : `Offline response: ${latest.trim() || "Ready."}.${context}`;
     if (proposeMatch) response += `\n${PROPOSE_ACTION_PREFIX}${JSON.stringify({ capabilityId: "aion.local.echo.v1", input: { text: proposeMatch[1]!.slice(0, 1000) } })}`;
+    if (developerMatch) response += `\n${PROPOSE_ACTION_PREFIX}${JSON.stringify({ capabilityId: "aion.developer.task.v1", input: { instruction: developerMatch[1]!.slice(0, 4000), mode: "read-only" } })}`;
     if (rememberMatch) response += `\n${PROPOSE_MEMORY_PREFIX}${JSON.stringify({ content: rememberMatch[1]!.slice(0, 2000), category: "semantic" })}`;
     for (const token of response.match(/\S+\s*/gu) ?? []) {
       if (request.signal?.aborted) throw new Error("Chat request cancelled.");
@@ -184,10 +198,41 @@ export class LocalEchoCapabilityV1 implements CapabilityV1 {
   async execute(input: Record<string, unknown>, _context: CapabilityContextV1, signal: AbortSignal): Promise<Record<string, unknown>> { if (signal.aborted) fail("Capability cancelled."); return { text: input.text, local: true }; }
 }
 
+const DEVELOPER_MODES: readonly DeveloperAgentModeV1[] = ["read-only", "workspace-write"];
+/** An absent or unrecognised mode resolves to read-only, so a developer task always fails safe. */
+export function developerAgentMode(value: unknown): DeveloperAgentModeV1 { return value === "workspace-write" ? "workspace-write" : "read-only"; }
+
+/**
+ * Every developer bridge AION discovered, plus the one Settings currently selects. Selection is
+ * owner policy: the registry itself never chooses a different bridge than the one it was told to
+ * use, and an unregistered identifier fails closed rather than silently falling back.
+ */
+export class SelectableDeveloperAgentRegistryV1 implements DeveloperAgentRegistryV1 {
+  private readonly bridges: readonly DeveloperAgentBridgeV1[];
+  private selectedId: string;
+  constructor(bridges: readonly DeveloperAgentBridgeV1[]) {
+    if (!bridges.length) fail("At least one developer-agent bridge is required.");
+    if (new Set(bridges.map((bridge) => bridge.id)).size !== bridges.length) fail("Duplicate developer-agent bridge identifier.");
+    this.bridges = [...bridges];
+    this.selectedId = this.bridges[0]!.id;
+  }
+  list(): readonly DeveloperAgentBridgeV1[] { return this.bridges; }
+  get(id: string): DeveloperAgentBridgeV1 | null { return this.bridges.find((bridge) => bridge.id === id) ?? null; }
+  selected(): DeveloperAgentBridgeV1 { return this.get(this.selectedId) ?? this.bridges[0]!; }
+  select(id: string): void {
+    if (!id) { this.selectedId = this.bridges[0]!.id; return; }
+    if (!this.get(id)) fail("Developer-agent bridge is not registered.");
+    this.selectedId = id;
+  }
+}
+
 /**
  * The only path from AION to a local developer agent. It is a normal registered capability, so
  * every run is validated, digest-bound, one-shot approved, activity-recorded, and cancellable.
  * The conversational model can at most propose it; it can never invoke or approve it.
+ *
+ * The requested mode is part of the input, so it is covered by the digest the owner approves: a
+ * read-only approval can never be spent on a repository-writing run.
  */
 export class DeveloperAgentCapabilityV1 implements CapabilityV1 {
   readonly id = "aion.developer.task.v1";
@@ -195,36 +240,63 @@ export class DeveloperAgentCapabilityV1 implements CapabilityV1 {
   readonly approval = "always" as const;
   readonly timeoutMs = 600_000;
   readonly maxRetries = 0;
-  constructor(private readonly bridge: DeveloperAgentBridgeV1, private readonly approvedRepositoryRoot: string) {
+  constructor(private readonly agents: DeveloperAgentRegistryV1, private readonly approvedRepositoryRoot: string) {
     normalizedAbsolute(approvedRepositoryRoot, "Approved repository root");
   }
   summarize(input: Record<string, unknown>): string {
-    return `Run one bounded developer-agent task in the single approved repository root (${String(input.instruction ?? "").length} instruction characters). No other directory is reachable.`;
+    const mode = developerAgentMode(input.mode);
+    const boundary = mode === "read-only"
+      ? "The agent may read the approved repository but may not modify it."
+      : "The agent may modify files inside the approved repository root.";
+    return `Run one ${mode} developer-agent task through ${this.agents.selected().displayName} in the single approved repository root (${String(input.instruction ?? "").length} instruction characters). ${boundary} No other directory is reachable, and the instruction is never treated as a command.`;
   }
   validate(input: Record<string, unknown>): void {
     if (typeof input.instruction !== "string" || !input.instruction.trim() || input.instruction.length > 4000) fail("Developer-agent instruction is invalid.");
+    if (input.mode !== undefined && !DEVELOPER_MODES.includes(input.mode as DeveloperAgentModeV1)) fail("Developer-agent mode must be read-only or workspace-write.");
     if (input.repositoryRoot !== undefined && input.repositoryRoot !== this.approvedRepositoryRoot) fail("Developer-agent task is outside the approved repository root.");
   }
   async execute(input: Record<string, unknown>, _context: CapabilityContextV1, signal: AbortSignal): Promise<Record<string, unknown>> {
-    const status = await this.bridge.status();
+    const bridge = this.agents.selected();
+    const status = await bridge.status();
     if (!status.available) fail("No supported local developer-agent executable is available.");
-    const result = await this.bridge.run({ repositoryRoot: this.approvedRepositoryRoot, instruction: String(input.instruction) }, signal);
-    return { exitCode: result.exitCode, summary: result.summary.slice(-20_000) };
+    const mode = developerAgentMode(input.mode);
+    if (!status.modes.includes(mode)) fail(`The selected developer bridge cannot run a ${mode} task.`);
+    const result = await bridge.run({ repositoryRoot: this.approvedRepositoryRoot, instruction: String(input.instruction), mode }, signal);
+    return { bridgeId: bridge.id, mode, exitCode: result.exitCode, summary: result.summary.slice(-20_000) };
   }
 }
 
 export class SyntheticDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 {
-  async status(): Promise<{ available: boolean; executable: string; detail: string }> { return { available: true, executable: "synthetic", detail: "Synthetic test bridge is ready." }; }
-  async run(task: { repositoryRoot: string; instruction: string }, signal: AbortSignal): Promise<{ exitCode: number; summary: string }> {
+  readonly id = "synthetic";
+  readonly displayName = "Synthetic test bridge";
+  async status(): Promise<DeveloperAgentStatusV1> {
+    return {
+      bridgeId: this.id, displayName: this.displayName, available: true, executable: "synthetic", version: "synthetic-1",
+      account: "signed-in", accountDetail: "Synthetic test bridge needs no account.", detail: "Synthetic test bridge is ready.", modes: DEVELOPER_MODES,
+    };
+  }
+  describe(mode: DeveloperAgentModeV1): { executable: string; args: readonly string[] } { return { executable: "synthetic", args: ["--sandbox", mode, "--instruction-on-stdin"] }; }
+  async run(task: { repositoryRoot: string; instruction: string; mode: DeveloperAgentModeV1 }, signal: AbortSignal): Promise<{ exitCode: number; summary: string }> {
     normalizedAbsolute(task.repositoryRoot, "Repository root");
     if (!task.instruction.trim() || task.instruction.length > 4000 || signal.aborted) fail("Developer-agent request is invalid or cancelled.");
-    return { exitCode: 0, summary: "Synthetic bounded developer task completed without modifying files." };
+    if (!DEVELOPER_MODES.includes(task.mode)) fail("Developer-agent mode is invalid.");
+    return { exitCode: 0, summary: `Synthetic bounded ${task.mode} developer task completed without modifying any file.` };
   }
 }
 
 export class UnavailableDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 {
-  constructor(private readonly detail = "No supported local developer-agent executable is configured.") {}
-  async status(): Promise<{ available: boolean; executable: null; detail: string }> { return { available: false, executable: null, detail: this.detail }; }
+  constructor(
+    private readonly detail = "No supported local developer-agent executable is configured.",
+    readonly id = "none",
+    readonly displayName = "No developer agent",
+  ) {}
+  async status(): Promise<DeveloperAgentStatusV1> {
+    return {
+      bridgeId: this.id, displayName: this.displayName, available: false, executable: null, version: null,
+      account: "unknown", accountDetail: "There is no executable to check.", detail: this.detail, modes: [],
+    };
+  }
+  describe(): { executable: string; args: readonly string[] } { return { executable: "", args: [] }; }
   async run(): Promise<never> { throw new Error(this.detail); }
 }
 
