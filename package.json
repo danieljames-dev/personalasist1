@@ -62,6 +62,12 @@
     "job-posting:test:operations": "npm run test:operations --workspace @aion/job-posting",
     "job-posting:test:persistence": "npm run test:persistence --workspace @aion/job-posting",
     "job-posting:test:architecture": "npm run test:architecture --workspace @aion/job-posting",
+    "job-matching:build": "npm run build --workspace @aion/job-matching",
+    "job-matching:typecheck": "npm run typecheck --workspace @aion/job-matching",
+    "job-matching:test": "npm run test --workspace @aion/job-matching",
+    "job-matching:test:unit": "npm run test:unit --workspace @aion/job-matching",
+    "job-matching:test:operations": "npm run test:operations --workspace @aion/job-matching",
+    "job-matching:test:architecture": "npm run test:architecture --workspace @aion/job-matching",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {

@@ -1,0 +1,33 @@
+{
+  "name": "@aion/job-matching",
+  "version": "0.1.0",
+  "description": "Transparent deterministic evidence-backed career matching",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "npm run build --workspace @aion/job-posting && tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "npm run build --workspace @aion/job-posting && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
+    "test:unit": "npm run build && npm run build:test && node --test \"dist-test/test/contracts.test.js\" \"dist-test/test/scoring.test.js\"",
+    "test:operations": "npm run build && npm run build:test && node --test \"dist-test/test/operations.test.js\"",
+    "test:architecture": "npm run build && node --test \"test/architecture-boundary.test.mjs\""
+  },
+  "dependencies": {
+    "@aion/career-evidence": "0.1.0",
+    "@aion/identity": "0.1.0",
+    "@aion/job-posting": "0.1.0",
+    "@aion/object": "0.1.0"
+  },
+  "engines": { "node": ">=22" },
+  "license": "UNLICENSED"
+}
