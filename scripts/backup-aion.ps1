@@ -18,7 +18,7 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
-    [int]      $ExpectedTests     = 163,
+    [int]      $ExpectedTests     = 188,
     [switch]   $DryRun
 )
 
@@ -84,6 +84,7 @@ $manifest = [ordered]@{
     objectCommand='npm run object:test'
     careerInputCommand='npm run career-input:test'
     careerEvidenceCommand='npm run career-evidence:test'
+    jobPostingCommand='npm run job-posting:test'
     expectedTests=$ExpectedTests; restoreResult=$null; outcome='FAILURE'; failureReason=$null
     dryRun=[bool]$DryRun
 }
@@ -206,8 +207,9 @@ try {
         $manifest.restoreResult.privacyBoundaryResult -ne 'PASS' -or $manifest.restoreResult.identityResult -ne 'PASS' -or
         $manifest.restoreResult.objectResult -ne 'PASS' -or $manifest.restoreResult.careerInputResult -ne 'PASS' -or
         $manifest.restoreResult.careerEvidenceResult -ne 'PASS' -or
+        $manifest.restoreResult.jobPostingResult -ne 'PASS' -or
         $manifest.restoreResult.exclusionResult -ne 'PASS') {
-        throw 'Mandatory collection, real-gate, privacy, Identity, Object, career-input, career-evidence, or exclusion restore evidence missing'
+        throw 'Mandatory collection, real-gate, privacy, Identity, Object, career-input, career-evidence, Job Posting, or exclusion restore evidence missing'
     }
     $manifest.outcome='SUCCESS'
     Write-Step 'BACKUP SUCCESS - durable refs restored and verified'

@@ -25,4 +25,7 @@ The privacy package has no Identity, Object, or career dependency. Phase 6 prefl
 content or complete path and performs no ingestion or persistence. No real owner career data was
 read. Phase 7 reads no real owner data and creates no permanent career Object. Future real inputs
 and Objects would remain under explicit ignored private roots and excluded from source backups.
-Phase 8 remains unauthorized.
+Phase 8 composes the same boundaries for one explicit Job Posting path, dry run, and synthetic
+temporary Object proof. It adds no directory discovery, source copy, network action, or real owner
+ingestion. Any future real Job Posting input and Object remain beneath explicit ignored private
+roots and excluded from source backups. Phase 9 remains unauthorized.

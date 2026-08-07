@@ -201,7 +201,21 @@ normative fixtures. Phase 6 is approved by CTO-DECISION-012.
 Phase 7 adds an explicit local catalogue, deterministic structured CareerFacts, exact provenance,
 conflict/supersession history, and evidence-backed profiles using the accepted bounded Object
 repository. All verification uses synthetic temporary data. No real owner career input or
-permanent career Object exists. Phase 8 remains unauthorized; DG-3 and DG-4b remain Open,
+permanent career Object exists. Phase 7 is approved by CTO-DECISION-013.
+
+## Sprint 3.0 Phase 8: explicit Job Posting import
+
+- [Job Posting Import Contract v1](contracts/job-posting-import-v1.md)
+- [Deterministic Job Posting import reference](implementation/job-posting-import.md)
+- [Job Posting import threat model](security/job-posting-import-threat-model.md)
+- [Phase 8 record](sprints/sprint-3.0-career-vertical-slice/phase-8-job-posting-import.md)
+- [Phase 8 architecture and security review](reviews/sprint-3.0-phase-8-job-posting-review.md) â€” APPROVE
+
+Phase 8 adds explicit structured JSON, Markdown, and text Job Posting import with closed payloads,
+exact source provenance, description-only unstructured handling, conservative currentness evidence,
+dry run, and atomic create/revision behavior. All proof uses synthetic temporary data. No real Job
+Posting, career data, permanent Object, or AI-assistant archive was read. Phase 9 matching,
+scoring, ranking, and drafting remain absent and unauthorized. DG-3 and DG-4b remain Open,
 normative fixtures remain unauthorized, and the Object Contract remains Pre-stable.
 
 ## Reviews

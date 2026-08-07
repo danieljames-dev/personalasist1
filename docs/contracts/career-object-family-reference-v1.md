@@ -1,11 +1,11 @@
 # Career Object Family Reference v1
 
-Status: **Pre-stable Phase 5 family boundary with bounded Phase 7 payload composition**
+Status: **Pre-stable Phase 5 family boundary with bounded Phase 7 and Phase 8 payload composition**
 
 Authority: Sprint 3 Phase 5 completion directive, ADR-007, and authorized Phase 7 composition
 
-Detailed career payload schemas: **Authorized only for CareerSource, CareerFact, and CareerProfile
-by Sprint 3 Phase 7; the remaining families stay deferred**
+Detailed career payload schemas: **Authorized for CareerSource, CareerFact, and CareerProfile by
+Sprint 3 Phase 7 and JobPosting by Sprint 3 Phase 8; match and draft families stay deferred**
 
 ## Purpose
 
@@ -29,11 +29,13 @@ schema/profile boundary are implemented without inventing résumé, employment-h
 posting, matching, or application fields. Any non-empty entity payload fails closed in that base
 registry.
 
-Phase 7 supplies a separate composed schema registry with closed non-empty payloads only for
-CareerSource, CareerFact, and CareerProfile. It delegates RelationshipObject validation to Phase 5
-and leaves JobPosting, JobMatchReport, and ApplicationDraft empty. See the
+Phase 7 supplies a composed schema registry with closed non-empty payloads for CareerSource,
+CareerFact, and CareerProfile. Phase 8 layers another registry with the closed JobPosting payload.
+Both delegate RelationshipObject validation to Phase 5 and leave JobMatchReport and
+ApplicationDraft empty. See the
 [catalogue](career-evidence-catalogue-v1.md), [fact](career-fact-v1.md), and
-[profile](career-profile-derivation-v1.md) contracts. Phase 8 remains unauthorized.
+[profile](career-profile-derivation-v1.md) contracts and the
+[Job Posting import contract](job-posting-import-v1.md). Phase 9 remains unauthorized.
 
 RelationshipObject is the only family with Phase 5 domain data. Its closed contract is defined in
 [RelationshipObject Reference v1](relationship-object-reference-v1.md). Family identifiers are

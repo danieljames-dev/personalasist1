@@ -64,6 +64,10 @@ isolated clone. The latter uses synthetic ignored directives, proves correct-HEA
 wrong-HEAD refusal, and never restores or executes a real pending directive.
 Phase 3 restores also run `npm run privacy-boundary:test`, including path/link/network checks and a
 synthetic proof that `private/` cannot be selected as untracked working data.
+Phase 8 restores additionally run the Identity, Object, career-input, career-evidence, and
+`npm run job-posting:test` focused regressions. The Job Posting suite uses only neutral synthetic
+temporary input and Object stores and must leave no permanent `private/career` or
+`private/object-store` state.
 
 ## Procedure — standalone restore test
 

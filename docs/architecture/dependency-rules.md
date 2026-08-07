@@ -18,6 +18,10 @@ Status: Accepted
    and career-input; it must not depend on Identity persistence, matching, drafting, Planner,
    Memory, model providers, networking, telemetry, database, vector-store, backup, or control-plane
    implementations.
+10. `job-posting` may depend on accepted Identity contracts, Object contracts/ports,
+    privacy-boundary, career-input, and the composed career-evidence schema registry. It must not
+    depend on Identity persistence, matching, scoring, ranking, drafting, Planner, Memory, model
+    providers, networking, telemetry, databases, vector stores, backup, or control-plane code.
 
 ```text
 apps -> adapters -> application -> domain -> contracts

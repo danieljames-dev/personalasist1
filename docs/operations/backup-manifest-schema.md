@@ -73,6 +73,8 @@ bundle must pass `git bundle verify`. Checksums prove later byte equality, not a
 | `realGateCommand` | string | Real repository-gate regression command |
 | `privacyBoundaryCommand` | string | Path, link, network, Git-ignore, and backup-exclusion regression command |
 | `careerInputCommand` | string | Versioned career contracts, template, preflight, and architecture-boundary tests |
+| `careerEvidenceCommand` | string | Synthetic catalogue, fact, profile, persistence, and architecture tests |
+| `jobPostingCommand` | string | Synthetic Job Posting contract, source, currentness, import, persistence, and architecture tests |
 | `expectedTests` | integer | Exact Node test count expected in restored verification |
 | `restoreResult` | object \| null | Embedded `aion.restore-test.v1` evidence |
 | `outcome` | string | `SUCCESS` or `FAILURE` |
@@ -102,6 +104,8 @@ restoreResult.collectionResult       == "PASS"
 restoreResult.realGateResult         == "PASS"
 restoreResult.privacyBoundaryResult  == "PASS"
 restoreResult.careerInputResult       == "PASS"
+restoreResult.careerEvidenceResult    == "PASS"
+restoreResult.jobPostingResult        == "PASS"
 ```
 
 Artifact presence alone never means success.
