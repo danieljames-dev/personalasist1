@@ -1,12 +1,12 @@
-import type {
+﻿import type {
   ActivityV1, AgentActionV1, ApprovalV1, AssistantStateV1, CapabilityRegistryV1, ChatMessageV1,
   ChatTurnV1, ClockV1, ConversationV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1,
   DeveloperAgentStatusV1, IdGeneratorV1, ImportReportV1,
   ImportSourceV1, MemoryV1, ModelProviderV1, PlanV1, PrivateBackupV1, RoutineV1, SettingsV1,
-  StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1,
+  MigrationRecordV1, StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1, WorkspaceIdV1,
 } from "./contracts.js";
-import { PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX } from "./contracts.js";
-import { createEmptyStateV1, digestValue } from "./adapters.js";
+import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, WORKSPACE_IDS } from "./contracts.js";
+import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
 
 type AssistantPorts = {
   repository: StateRepositoryV1;
@@ -62,7 +62,7 @@ const VERIFICATION_CAPABILITY_ID = "aion.verify.run.v1";
  */
 function salientEvidence(run: VerificationRunV1, budget = 2600): string {
   const lines = `${run.stdout}\n${run.stderr}`.split(/\r?\n/u);
-  const interesting = /^(?:not ok|#\s*(?:tests|pass|fail|skipped)|.*(?:error|Error|AssertionError|FAIL|failed|✗)\b)/u;
+  const interesting = /^(?:not ok|#\s*(?:tests|pass|fail|skipped)|.*(?:error|Error|AssertionError|FAIL|failed|âœ—)\b)/u;
   const failures = lines.filter((line) => interesting.test(line));
   const tail = lines.slice(-40);
   const selected = [...new Set([...failures, ...tail])].filter((line) => line.trim());
@@ -101,14 +101,34 @@ export class AionAssistantV1 {
     this.ready = this.initialize();
   }
   private async initialize(): Promise<void> {
-    this.state = await this.ports.repository.load() ?? createEmptyStateV1();
+    const loaded = await this.ports.repository.load();
+    this.state = loaded ?? createEmptyStateV1();
+    if (loaded) {
+      // Migrations run once, on load, before anything can read the state. A migration that
+      // changes nothing is not written, so opening AION repeatedly does not churn revisions.
+      const migrated = migrateStateV1(this.state, this.ports.clock.now(), (kind) => this.ports.ids.next(kind));
+      if (migrated.applied) {
+        const expected = this.state.revision;
+        const next = { ...migrated.state, revision: expected + 1 };
+        this.#recordMigration(next, migrated.record);
+        await this.ports.repository.save(expected, next);
+        this.state = next;
+      }
+    }
     // Restore the owner's bridge choice. A bridge that is no longer installed must not block
     // startup: AION keeps its default and reports the real availability in Settings.
     try { this.ports.developerAgents.select(this.state.settings.developerBridgeId); } catch { this.ports.developerAgents.select(""); }
   }
+  #recordMigration(state: AssistantStateV1, record: MigrationRecordV1 | null): void {
+    if (!record) return;
+    const moved = Object.entries(record.assigned).filter(([, count]) => count > 0).map(([name, count]) => `${count} ${name}`).join(", ");
+    this.activity(state, "settings", "state.migrate", `Applied ${record.migration}: ${moved || "no records needed assignment"}. Everything without a workspace became ${record.defaultWorkspace}; nothing moved between workspaces.`, null);
+  }
+  /** The workspace new records join and the one the UI is showing. */
+  private get workspace(): WorkspaceIdV1 { return this.state.settings.activeWorkspace ?? DEFAULT_WORKSPACE; }
   async snapshot(): Promise<AssistantStateV1> { await this.ready; return structuredClone(this.state); }
   private activity(state: AssistantStateV1, category: ActivityV1["category"], action: string, summary: string, subjectRef: string | null, outcome: ActivityV1["outcome"] = "success"): void {
-    state.activity.unshift({ id: this.ports.ids.next("activity"), at: this.ports.clock.now(), category, action, summary, subjectRef, outcome });
+    state.activity.unshift({ id: this.ports.ids.next("activity"), workspace: state.settings.activeWorkspace ?? DEFAULT_WORKSPACE, at: this.ports.clock.now(), category, action, summary, subjectRef, outcome });
     if (state.activity.length > 10_000) state.activity.length = 10_000;
   }
   /**
@@ -126,7 +146,9 @@ export class AionAssistantV1 {
     const groups = new Map<string, MemoryV1[]>();
     for (const memory of state.memories) {
       if (!memory.enabled) { memory.conflict = "none"; continue; }
-      const key = `${memory.category}\u0000${subjectKey(memory.content)}`;
+      // Grouped inside a workspace: the same subject in Personal and Work is two separate
+      // facts, not a conflict, and flagging them together would reveal a work record exists.
+      const key = `${memory.workspace}\u0000${memory.category}\u0000${subjectKey(memory.content)}`;
       groups.set(key, [...(groups.get(key) ?? []), memory]);
     }
     for (const group of groups.values()) {
@@ -155,6 +177,9 @@ export class AionAssistantV1 {
       if (next.providerId !== "deterministic" && next.providerId.startsWith("remote") && !next.remoteDisclosureAccepted) throw new Error("Remote-provider disclosure must be accepted before selection.");
       if (next.credentialEnvironmentVariable && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(next.credentialEnvironmentVariable)) throw new Error("Credential environment-variable name is invalid.");
       if (typeof next.developerBridgeId !== "string") throw new Error("Developer-agent bridge selection is invalid.");
+      if (!WORKSPACE_IDS.includes(next.activeWorkspace)) throw new Error("Workspace is not recognised.");
+      next.workspaceLabels = { ...state.settings.workspaceLabels, ...(input.workspaceLabels ?? {}) };
+      for (const id of WORKSPACE_IDS) next.workspaceLabels[id] = required(next.workspaceLabels[id], "Workspace label", 80);
       if (next.developerBridgeId && !this.ports.developerAgents.get(next.developerBridgeId)) throw new Error("Selected developer-agent bridge is not registered.");
       next.importRoots = unique(next.importRoots, "Import roots").map((root) => required(root, "Import root", 500));
       if (next.exportRoot) required(next.exportRoot, "Export root", 500);
@@ -193,7 +218,7 @@ export class AionAssistantV1 {
 
   async createConversation(title = "New conversation"): Promise<ConversationV1> {
     return this.mutate((state) => {
-      const at = this.ports.clock.now(); const conversation: ConversationV1 = { id: this.ports.ids.next("conversation"), title: required(title, "Conversation title", 200), state: "active", memoryContextEnabled: state.settings.memoryContextEnabled, createdAt: at, updatedAt: at, messages: [] };
+      const at = this.ports.clock.now(); const conversation: ConversationV1 = { id: this.ports.ids.next("conversation"), workspace: state.settings.activeWorkspace, title: required(title, "Conversation title", 200), state: "active", memoryContextEnabled: state.settings.memoryContextEnabled, createdAt: at, updatedAt: at, messages: [] };
       state.conversations.unshift(conversation); this.activity(state, "chat", "conversation.create", "Conversation created.", conversation.id); return structuredClone(conversation);
     });
   }
@@ -213,7 +238,9 @@ export class AionAssistantV1 {
     if (this.controllers.has(`chat:${conversationId}`)) throw new Error("This conversation already has a request in flight.");
     const controller = new AbortController(); this.controllers.set(`chat:${conversationId}`, controller); let response = "";
     try {
-      const memories = conversation.memoryContextEnabled ? snap.memories.filter((item) => item.enabled).slice(0, 20).map(({ id, content: memoryContent, category }) => ({ id, content: memoryContent, category })) : [];
+      // Memory context is scoped to the conversation's own workspace. Work material never reaches
+      // a personal conversation, and personal material never reaches a work one.
+      const memories = conversation.memoryContextEnabled ? snap.memories.filter((item) => item.enabled && item.workspace === conversation.workspace).slice(0, 20).map(({ id, content: memoryContent, category }) => ({ id, content: memoryContent, category })) : [];
       for await (const chunk of provider.stream({ conversationId, messages: conversation.messages, memoryContext: memories, model: snap.settings.model, signal: controller.signal })) {
         if (controller.signal.aborted) throw new Error("Chat request cancelled.");
         response += chunk; if (response.length > 100_000) throw new Error("Provider response exceeds the V1 size limit.");
@@ -242,9 +269,10 @@ export class AionAssistantV1 {
   cancelChat(conversationId: string): boolean { const controller = this.controllers.get(`chat:${conversationId}`); if (!controller) return false; controller.abort(); return true; }
 
   async createMemory(input: { content: string; category: MemoryV1["category"]; confirmation?: MemoryV1["confirmation"]; sourceRef?: string }): Promise<MemoryV1> {
-    return this.mutate((state) => { const at = this.ports.clock.now(); const memory: MemoryV1 = { id: this.ports.ids.next("memory"), content: required(input.content, "Memory", 20_000), category: input.category, confirmation: input.confirmation ?? "owner-confirmed", conflict: "none", enabled: true, createdAt: at, updatedAt: at, sourceTimestamp: at, provenance: { sourceType: input.confirmation === "unconfirmed" ? "provider-proposal" : "owner", sourceRef: required(input.sourceRef ?? "owner-entry", "Memory source", 500), recordedAt: at }, corrections: [] }; state.memories.unshift(memory); this.activity(state, "memory", "memory.create", `Memory ${memory.confirmation} created.`, memory.id); return structuredClone(memory); });
+    return this.mutate((state) => { const at = this.ports.clock.now(); const memory: MemoryV1 = { id: this.ports.ids.next("memory"), workspace: state.settings.activeWorkspace, content: required(input.content, "Memory", 20_000), category: input.category, confirmation: input.confirmation ?? "owner-confirmed", conflict: "none", enabled: true, createdAt: at, updatedAt: at, sourceTimestamp: at, provenance: { sourceType: input.confirmation === "unconfirmed" ? "provider-proposal" : "owner", sourceRef: required(input.sourceRef ?? "owner-entry", "Memory source", 500), recordedAt: at }, corrections: [] }; state.memories.unshift(memory); this.activity(state, "memory", "memory.create", `Memory ${memory.confirmation} created.`, memory.id); return structuredClone(memory); });
   }
-  async searchMemories(query: string): Promise<MemoryV1[]> { const needle = required(query, "Memory query", 500).toLocaleLowerCase(); const state = await this.snapshot(); return state.memories.filter((item) => item.enabled && `${item.category} ${item.content}`.toLocaleLowerCase().includes(needle)); }
+  /** Search never crosses the workspace boundary; pass an explicit workspace to look elsewhere. */
+  async searchMemories(query: string, workspace?: WorkspaceIdV1): Promise<MemoryV1[]> { const needle = required(query, "Memory query", 500).toLocaleLowerCase(); const state = await this.snapshot(); const scope = workspace ?? state.settings.activeWorkspace; if (!WORKSPACE_IDS.includes(scope)) throw new Error("Workspace is not recognised."); return state.memories.filter((item) => item.enabled && item.workspace === scope && `${item.category} ${item.content}`.toLocaleLowerCase().includes(needle)); }
   async correctMemory(id: string, content: string, reason: string): Promise<void> { await this.mutate((state) => { const item = find(state.memories, id, "Memory"); const next = required(content, "Memory correction", 20_000); const at = this.ports.clock.now(); item.corrections.push({ at, previousContent: item.content, correctedContent: next, reason: required(reason, "Correction reason", 500) }); item.content = next; item.confirmation = "owner-confirmed"; item.updatedAt = at; this.activity(state, "memory", "memory.correct", "Memory corrected with prior content preserved in history.", id); }); }
   async setMemoryEnabled(id: string, enabled: boolean): Promise<void> { await this.mutate((state) => { const item = find(state.memories, id, "Memory"); item.enabled = enabled; item.updatedAt = this.ports.clock.now(); this.activity(state, "memory", enabled ? "memory.enable" : "memory.disable", `Memory ${enabled ? "enabled" : "disabled"}.`, id); }); }
   async forgetMemory(id: string): Promise<void> { await this.mutate((state) => { find(state.memories, id, "Memory"); state.memories = state.memories.filter((item) => item.id !== id); this.activity(state, "memory", "memory.forget", "Memory content and correction history deleted.", id); }); }
@@ -262,20 +290,20 @@ export class AionAssistantV1 {
   }
 
   async createTask(input: { title: string; description?: string; priority?: TaskV1["priority"]; dueAt?: string | null; tags?: string[]; planId?: string | null; routineId?: string | null; provenance?: TaskV1["provenance"] }): Promise<TaskV1> {
-    return this.mutate((state) => { const at = this.ports.clock.now(); const task: TaskV1 = { id: this.ports.ids.next("task"), title: required(input.title, "Task title", 500), description: input.description ? required(input.description, "Task description", 10_000) : "", priority: input.priority ?? "normal", state: "ready", dueAt: iso(input.dueAt, "Task due date"), tags: unique(input.tags ?? [], "Task tags"), planId: input.planId ?? null, routineId: input.routineId ?? null, createdAt: at, completedAt: null, provenance: input.provenance ?? { sourceType: "owner", sourceRef: "owner-entry", recordedAt: at }, history: [{ at, actor: "owner", change: "created:ready" }] }; state.tasks.unshift(task); this.activity(state, "task", "task.create", "Task created.", task.id); return structuredClone(task); });
+    return this.mutate((state) => { const at = this.ports.clock.now(); const task: TaskV1 = { id: this.ports.ids.next("task"), workspace: state.settings.activeWorkspace, title: required(input.title, "Task title", 500), description: input.description ? required(input.description, "Task description", 10_000) : "", priority: input.priority ?? "normal", state: "ready", dueAt: iso(input.dueAt, "Task due date"), tags: unique(input.tags ?? [], "Task tags"), planId: input.planId ?? null, routineId: input.routineId ?? null, createdAt: at, completedAt: null, provenance: input.provenance ?? { sourceType: "owner", sourceRef: "owner-entry", recordedAt: at }, history: [{ at, actor: "owner", change: "created:ready" }] }; state.tasks.unshift(task); this.activity(state, "task", "task.create", "Task created.", task.id); return structuredClone(task); });
   }
   async updateTask(id: string, change: { title?: string; description?: string; priority?: TaskV1["priority"]; dueAt?: string | null; tags?: string[] }): Promise<void> { await this.mutate((state) => { const task = find(state.tasks, id, "Task"); if (change.title !== undefined) task.title = required(change.title, "Task title", 500); if (change.description !== undefined) task.description = change.description ? required(change.description, "Task description", 10_000) : ""; if (change.priority !== undefined) task.priority = change.priority; if (change.dueAt !== undefined) task.dueAt = iso(change.dueAt, "Task due date"); if (change.tags !== undefined) task.tags = unique(change.tags, "Task tags"); task.history.push({ at: this.ports.clock.now(), actor: "owner", change: "edited" }); this.activity(state, "task", "task.update", "Task updated.", id); }); }
   async transitionTask(id: string, next: TaskStateV1, reason = "owner transition"): Promise<void> { await this.mutate((state) => { const task = find(state.tasks, id, "Task"); if (!TASK_TRANSITIONS[task.state].includes(next)) throw new Error(`Task transition ${task.state} -> ${next} is invalid.`); const at = this.ports.clock.now(); task.state = next; task.completedAt = next === "completed" ? at : null; task.history.push({ at, actor: "owner", change: `${next}:${required(reason, "Task transition reason", 500)}` }); this.activity(state, "task", `task.${next}`, `Task moved to ${next}.`, id); }); }
 
   async createRoutine(input: { name: string; instructions: string; intervalMinutes: number; capabilityIds?: string[]; approvalPolicy?: RoutineV1["approvalPolicy"] }): Promise<RoutineV1> {
-    return this.mutate((state) => { if (!Number.isSafeInteger(input.intervalMinutes) || input.intervalMinutes < 1 || input.intervalMinutes > 525_600) throw new Error("Routine interval is invalid."); const at = this.ports.clock.now(); const capabilityIds = unique(input.capabilityIds ?? [], "Routine capabilities"); for (const id of capabilityIds) if (!this.ports.capabilities.get(id)) throw new Error("Routine requires an unknown capability."); const routine: RoutineV1 = { id: this.ports.ids.next("routine"), name: required(input.name, "Routine name", 500), instructions: required(input.instructions, "Routine instructions", 10_000), enabled: true, intervalMinutes: input.intervalMinutes, nextRunAt: new Date(Date.parse(at) + input.intervalMinutes * 60_000).toISOString(), lastRunAt: null, capabilityIds, approvalPolicy: input.approvalPolicy ?? "capability-default", createdAt: at, history: [{ at, actor: "owner", change: "created:enabled" }] }; state.routines.unshift(routine); this.activity(state, "routine", "routine.create", "Routine created and scheduled while AION is running.", routine.id); return structuredClone(routine); });
+    return this.mutate((state) => { if (!Number.isSafeInteger(input.intervalMinutes) || input.intervalMinutes < 1 || input.intervalMinutes > 525_600) throw new Error("Routine interval is invalid."); const at = this.ports.clock.now(); const capabilityIds = unique(input.capabilityIds ?? [], "Routine capabilities"); for (const id of capabilityIds) if (!this.ports.capabilities.get(id)) throw new Error("Routine requires an unknown capability."); const routine: RoutineV1 = { id: this.ports.ids.next("routine"), workspace: state.settings.activeWorkspace, name: required(input.name, "Routine name", 500), instructions: required(input.instructions, "Routine instructions", 10_000), enabled: true, intervalMinutes: input.intervalMinutes, nextRunAt: new Date(Date.parse(at) + input.intervalMinutes * 60_000).toISOString(), lastRunAt: null, capabilityIds, approvalPolicy: input.approvalPolicy ?? "capability-default", createdAt: at, history: [{ at, actor: "owner", change: "created:enabled" }] }; state.routines.unshift(routine); this.activity(state, "routine", "routine.create", "Routine created and scheduled while AION is running.", routine.id); return structuredClone(routine); });
   }
   async updateRoutine(id: string, change: { enabled?: boolean; intervalMinutes?: number }): Promise<void> { await this.mutate((state) => { const routine = find(state.routines, id, "Routine"); if (change.intervalMinutes !== undefined) { if (!Number.isSafeInteger(change.intervalMinutes) || change.intervalMinutes < 1 || change.intervalMinutes > 525_600) throw new Error("Routine interval is invalid."); routine.intervalMinutes = change.intervalMinutes; } if (change.enabled !== undefined) routine.enabled = change.enabled; const at = this.ports.clock.now(); routine.nextRunAt = routine.enabled ? new Date(Date.parse(at) + routine.intervalMinutes * 60_000).toISOString() : null; routine.history.push({ at, actor: "owner", change: `updated:${routine.enabled ? "enabled" : "disabled"}` }); this.activity(state, "routine", "routine.update", "Routine schedule updated.", id); }); }
   async runRoutine(id: string, reason: "manual" | "scheduled" = "manual"): Promise<void> { await this.mutate((state) => { const routine = find(state.routines, id, "Routine"); if (reason === "scheduled" && !routine.enabled) return; const at = this.ports.clock.now(); routine.lastRunAt = at; routine.nextRunAt = routine.enabled ? new Date(Date.parse(at) + routine.intervalMinutes * 60_000).toISOString() : null; routine.history.push({ at, actor: "aion", change: `run:${reason}` }); this.activity(state, "routine", "routine.run", `Routine ran locally (${reason}); ${routine.capabilityIds.length} capability proposal(s).`, id); }); }
   async tick(): Promise<number> { const state = await this.snapshot(); if (!state.settings.schedulerEnabled) return 0; const now = Date.parse(this.ports.clock.now()); const due = state.routines.filter((item) => item.enabled && item.nextRunAt && Date.parse(item.nextRunAt) <= now); for (const routine of due) await this.runRoutine(routine.id, "scheduled"); return due.length; }
 
   async createPlan(goal: string, steps: Array<{ title: string; description?: string; dependencies?: number[]; requiredCapabilities?: string[]; approvalRequired?: boolean; expectedOutput?: string }>): Promise<PlanV1> {
-    return this.mutate((state) => { if (!steps.length || steps.length > 100) throw new Error("Plan requires 1-100 steps."); const planId = this.ports.ids.next("plan"); const stepIds = steps.map(() => this.ports.ids.next("plan-step")); const plan: PlanV1 = { id: planId, goal: required(goal, "Plan goal", 2000), status: "proposed", createdAt: this.ports.clock.now(), provenance: { sourceType: "owner", sourceRef: "owner-plan", recordedAt: this.ports.clock.now() }, steps: steps.map((step, index) => { const dependencies = (step.dependencies ?? []).map((dependency) => { if (!Number.isSafeInteger(dependency) || dependency < 0 || dependency >= index) throw new Error("Plan dependencies must point to earlier steps."); return stepIds[dependency]!; }); const capabilities = unique(step.requiredCapabilities ?? [], "Plan capabilities"); for (const capability of capabilities) if (!this.ports.capabilities.get(capability)) throw new Error("Plan requires an unknown capability."); return { id: stepIds[index]!, order: index + 1, title: required(step.title, "Plan step title", 500), description: step.description ? required(step.description, "Plan step description", 5000) : "", dependencies, requiredCapabilities: capabilities, approvalRequired: step.approvalRequired ?? capabilities.some((id) => this.ports.capabilities.get(id)?.approval !== "never"), expectedOutput: required(step.expectedOutput ?? "Completed step", "Expected output", 1000), status: "proposed", blockedReason: null, taskId: null }; }) }; state.plans.unshift(plan); this.activity(state, "plan", "plan.create", "Reviewable plan proposal created; no execution authority granted.", plan.id, "pending"); return structuredClone(plan); });
+    return this.mutate((state) => { if (!steps.length || steps.length > 100) throw new Error("Plan requires 1-100 steps."); const planId = this.ports.ids.next("plan"); const stepIds = steps.map(() => this.ports.ids.next("plan-step")); const plan: PlanV1 = { id: planId, workspace: state.settings.activeWorkspace, goal: required(goal, "Plan goal", 2000), status: "proposed", createdAt: this.ports.clock.now(), provenance: { sourceType: "owner", sourceRef: "owner-plan", recordedAt: this.ports.clock.now() }, steps: steps.map((step, index) => { const dependencies = (step.dependencies ?? []).map((dependency) => { if (!Number.isSafeInteger(dependency) || dependency < 0 || dependency >= index) throw new Error("Plan dependencies must point to earlier steps."); return stepIds[dependency]!; }); const capabilities = unique(step.requiredCapabilities ?? [], "Plan capabilities"); for (const capability of capabilities) if (!this.ports.capabilities.get(capability)) throw new Error("Plan requires an unknown capability."); return { id: stepIds[index]!, order: index + 1, title: required(step.title, "Plan step title", 500), description: step.description ? required(step.description, "Plan step description", 5000) : "", dependencies, requiredCapabilities: capabilities, approvalRequired: step.approvalRequired ?? capabilities.some((id) => this.ports.capabilities.get(id)?.approval !== "never"), expectedOutput: required(step.expectedOutput ?? "Completed step", "Expected output", 1000), status: "proposed", blockedReason: null, taskId: null }; }) }; state.plans.unshift(plan); this.activity(state, "plan", "plan.create", "Reviewable plan proposal created; no execution authority granted.", plan.id, "pending"); return structuredClone(plan); });
   }
   async acceptPlan(id: string): Promise<void> { await this.mutate((state) => { const plan = find(state.plans, id, "Plan"); if (plan.status !== "proposed") throw new Error("Only proposed plans can be accepted."); plan.status = "accepted"; for (const step of plan.steps) step.status = "accepted"; this.activity(state, "plan", "plan.accept", "Plan accepted for reviewable task conversion.", id); }); }
   async convertPlanToTasks(id: string): Promise<TaskV1[]> { const snap = await this.snapshot(); const plan = find(snap.plans, id, "Plan"); if (plan.status !== "accepted") throw new Error("Plan must be accepted before task conversion."); const created: TaskV1[] = []; for (const step of plan.steps.filter((item) => !item.taskId)) created.push(await this.createTask({ title: step.title, description: step.description, planId: id, provenance: { sourceType: "plan", sourceRef: id, recordedAt: this.ports.clock.now() } })); await this.mutate((state) => { const current = find(state.plans, id, "Plan"); for (const [index, step] of current.steps.filter((item) => !item.taskId).entries()) { step.taskId = created[index]?.id ?? null; step.status = "converted"; } this.activity(state, "plan", "plan.convert", `${created.length} plan step(s) converted to Tasks.`, id); }); return created; }
@@ -315,7 +343,7 @@ export class AionAssistantV1 {
   }
   async importConversations(reportId: string, selectedRoot: string, selectedPath: string): Promise<ImportReportV1> {
     const snap = await this.snapshot(); const prior = find(snap.imports, reportId, "Import report"); if (prior.state !== "dry-run" || prior.platform === "career") throw new Error("A conversation dry run is required."); const result = await this.ports.importer.dryRun({ platform: prior.platform, selectedRoot, selectedPath, knownDigests: snap.imports.filter((item) => item.id !== reportId).flatMap((item) => item.items.map((entry) => entry.digest).filter(Boolean)) }); if (digestValue(result.items) !== digestValue(prior.items)) throw new Error("Import source changed after dry run; run a new dry run.");
-    return this.mutate((state) => { const report = find(state.imports, reportId, "Import report"); for (const imported of result.conversations) { const at = this.ports.clock.now(); const conversation: ConversationV1 = { id: this.ports.ids.next("conversation"), title: required(imported.title, "Imported conversation title", 500), state: "archived", memoryContextEnabled: false, createdAt: at, updatedAt: at, messages: imported.messages.map((message) => ({ id: this.ports.ids.next("message"), role: message.role, content: required(message.content, "Imported message", 100_000), createdAt: message.at && !Number.isNaN(Date.parse(message.at)) ? new Date(message.at).toISOString() : at, providerId: `import:${prior.platform}` })) }; state.conversations.push(conversation); report.importedConversationIds.push(conversation.id); } report.state = "imported"; this.activity(state, "import", "import.complete", `${report.importedConversationIds.length} conversation(s) imported with provenance.`, report.id); return structuredClone(report); });
+    return this.mutate((state) => { const report = find(state.imports, reportId, "Import report"); for (const imported of result.conversations) { const at = this.ports.clock.now(); const conversation: ConversationV1 = { id: this.ports.ids.next("conversation"), workspace: state.settings.activeWorkspace, title: required(imported.title, "Imported conversation title", 500), state: "archived", memoryContextEnabled: false, createdAt: at, updatedAt: at, messages: imported.messages.map((message) => ({ id: this.ports.ids.next("message"), role: message.role, content: required(message.content, "Imported message", 100_000), createdAt: message.at && !Number.isNaN(Date.parse(message.at)) ? new Date(message.at).toISOString() : at, providerId: `import:${prior.platform}` })) }; state.conversations.push(conversation); report.importedConversationIds.push(conversation.id); } report.state = "imported"; this.activity(state, "import", "import.complete", `${report.importedConversationIds.length} conversation(s) imported with provenance.`, report.id); return structuredClone(report); });
   }
   async cancelImport(reportId: string): Promise<void> { await this.mutate((state) => { const report = find(state.imports, reportId, "Import report"); if (report.state !== "dry-run") throw new Error("Only a dry run can be cancelled."); report.state = "cancelled"; this.activity(state, "import", "import.cancel", "Import cancelled before source mutation.", report.id); }); }
   /**

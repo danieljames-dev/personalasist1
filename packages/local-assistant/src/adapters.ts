@@ -5,11 +5,12 @@ import { promisify } from "node:util";
 import type {
   AssistantStateV1, CapabilityContextV1, CapabilityRegistryV1, CapabilityV1, ClockV1,
   DeveloperAgentBridgeV1, DeveloperAgentModeV1, DeveloperAgentRegistryV1, DeveloperAgentStatusV1,
-  IdGeneratorV1, ImportReportV1, ImportSourceV1, ModelProviderV1,
-  ModelRequestV1, PrivateBackupV1, StateRepositoryV1,
+  IdGeneratorV1, ImportReportV1, ImportSourceV1, MigrationRecordV1, ModelProviderV1,
+  ModelRequestV1, PrivateBackupV1, SettingsV1, StateRepositoryV1,
   VerificationOperationIdV1, VerificationOperationV1, VerificationRunV1, VerificationRunnerV1,
+  WorkspaceIdV1,
 } from "./contracts.js";
-import { PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS } from "./contracts.js";
+import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS, WORKSPACE_IDS } from "./contracts.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -79,11 +80,62 @@ export function createEmptyStateV1(): AssistantStateV1 {
       providerId: "deterministic", model: "aion-offline-v1", remoteDisclosureAccepted: false,
       memoryContextEnabled: true, schedulerEnabled: true, externalActionsRequireApproval: true,
       importRoots: [], exportRoot: "", credentialEnvironmentVariable: "", developerBridgeId: "",
+      activeWorkspace: DEFAULT_WORKSPACE, workspaceLabels: { personal: "Personal", work: "Work" },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
     },
-    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [],
+    conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
   };
 }
+
+/** Record types that carry owner content and therefore must carry a workspace. */
+const WORKSPACE_SCOPED_COLLECTIONS = ["conversations", "memories", "tasks", "routines", "plans", "activity"] as const;
+
+/**
+ * The workspace migration.
+ *
+ * Deterministic, idempotent, and fail-closed. Every pre-workspace record is assigned the
+ * documented default of PERSONAL and nothing else about it is touched — identifiers, provenance,
+ * history, timestamps and cross-record links are carried through untouched, because the migration
+ * only ever adds a missing field. It never creates a WORK record, so migration cannot move owner
+ * material across the boundary. A record carrying an unrecognised workspace is an error rather
+ * than something to guess at.
+ */
+export function migrateStateV1(
+  state: AssistantStateV1,
+  now: string,
+  nextId: (kind: string) => string,
+): { state: AssistantStateV1; applied: boolean; record: MigrationRecordV1 | null } {
+  const draft = structuredClone(state);
+  if (!Array.isArray(draft.migrations)) draft.migrations = [];
+  const assigned: Record<string, number> = {};
+  for (const collection of WORKSPACE_SCOPED_COLLECTIONS) {
+    const records = draft[collection] as unknown as Array<{ workspace?: unknown; id?: unknown }>;
+    if (!Array.isArray(records)) fail("Assistant state is incomplete.");
+    let count = 0;
+    for (const record of records) {
+      if (record.workspace === undefined || record.workspace === null) { record.workspace = DEFAULT_WORKSPACE; count += 1; continue; }
+      if (!WORKSPACE_IDS.includes(record.workspace as WorkspaceIdV1)) fail(`Assistant state contains an unrecognised workspace on a ${collection} record; refusing to guess.`);
+    }
+    assigned[collection] = count;
+  }
+  const settings = draft.settings as SettingsV1;
+  let settingsAssigned = 0;
+  if (settings.activeWorkspace === undefined) { settings.activeWorkspace = DEFAULT_WORKSPACE; settingsAssigned += 1; }
+  if (!WORKSPACE_IDS.includes(settings.activeWorkspace)) fail("Assistant settings name an unrecognised active workspace.");
+  if (!settings.workspaceLabels || typeof settings.workspaceLabels !== "object") { settings.workspaceLabels = { personal: "Personal", work: "Work" }; settingsAssigned += 1; }
+  for (const id of WORKSPACE_IDS) if (typeof settings.workspaceLabels[id] !== "string" || !settings.workspaceLabels[id]) { settings.workspaceLabels[id] = id === "personal" ? "Personal" : "Work"; settingsAssigned += 1; }
+  assigned.settings = settingsAssigned;
+
+  // A migration "applies" only when it actually assigned something. State that AION created
+  // already workspace-aware needs nothing, so reopening it writes no revision and records no
+  // migration — which is what keeps a restart byte-identical.
+  const total = Object.values(assigned).reduce((sum, count) => sum + count, 0);
+  if (total === 0) return { state: draft, applied: false, record: null };
+  const record: MigrationRecordV1 = { id: nextId("migration"), migration: WORKSPACE_MIGRATION, at: now, assigned, defaultWorkspace: DEFAULT_WORKSPACE };
+  draft.migrations.push(record);
+  return { state: draft, applied: true, record };
+}
+export const WORKSPACE_MIGRATION = "aion.workspace-separation.v1";
 export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!value || typeof value !== "object") fail("Assistant state is malformed.");
   const state = value as Partial<AssistantStateV1>;
@@ -95,6 +147,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   // without a migration, and never silently acquires a value the owner did not choose.
   if (typeof clone.settings.developerBridgeId !== "string") clone.settings.developerBridgeId = "";
   if (!Array.isArray(clone.verifications)) clone.verifications = [];
+  if (!Array.isArray(clone.migrations)) clone.migrations = [];
   return clone;
 }
 

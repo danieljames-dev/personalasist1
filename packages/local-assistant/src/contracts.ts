@@ -1,8 +1,28 @@
-export type OpaqueId = string;
+﻿export type OpaqueId = string;
 export type IsoTimestamp = string;
 
 export interface ClockV1 { now(): IsoTimestamp; }
 export interface IdGeneratorV1 { next(kind: string): OpaqueId; }
+
+/**
+ * Workspace separation. Work material stays in WORK unless the owner explicitly moves it, and
+ * nothing is ever copied between workspaces implicitly â€” not memory context, not search results,
+ * and not prospect information. Every record that can hold owner content carries its workspace.
+ */
+export type WorkspaceIdV1 = "personal" | "work";
+export const WORKSPACE_IDS: readonly WorkspaceIdV1[] = ["personal", "work"];
+/** The documented default every pre-workspace record migrates to. */
+export const DEFAULT_WORKSPACE: WorkspaceIdV1 = "personal";
+
+/** One recorded, deterministic state migration. Kept so a migration is auditable, not implicit. */
+export interface MigrationRecordV1 {
+  id: OpaqueId;
+  migration: string;
+  at: IsoTimestamp;
+  /** Per record type, how many records the migration assigned. Zero means nothing needed it. */
+  assigned: Record<string, number>;
+  defaultWorkspace: WorkspaceIdV1;
+}
 
 export interface ProvenanceV1 {
   sourceType: "owner" | "provider-proposal" | "routine" | "plan" | "import" | "system";
@@ -26,6 +46,7 @@ export interface ChatMessageV1 {
 
 export interface ConversationV1 {
   id: OpaqueId;
+  workspace: WorkspaceIdV1;
   title: string;
   state: "active" | "archived";
   memoryContextEnabled: boolean;
@@ -67,6 +88,7 @@ export interface MemoryCorrectionV1 {
 
 export interface MemoryV1 {
   id: OpaqueId;
+  workspace: WorkspaceIdV1;
   content: string;
   category: "semantic" | "procedural" | "episodic" | "strategic";
   confirmation: "owner-confirmed" | "unconfirmed";
@@ -82,6 +104,7 @@ export interface MemoryV1 {
 export type TaskStateV1 = "proposed" | "ready" | "in-progress" | "blocked" | "completed" | "cancelled";
 export interface TaskV1 {
   id: OpaqueId;
+  workspace: WorkspaceIdV1;
   title: string;
   description: string;
   priority: "low" | "normal" | "high" | "urgent";
@@ -98,6 +121,7 @@ export interface TaskV1 {
 
 export interface RoutineV1 {
   id: OpaqueId;
+  workspace: WorkspaceIdV1;
   name: string;
   instructions: string;
   enabled: boolean;
@@ -126,6 +150,7 @@ export interface PlanStepV1 {
 
 export interface PlanV1 {
   id: OpaqueId;
+  workspace: WorkspaceIdV1;
   goal: string;
   status: "proposed" | "accepted" | "completed" | "cancelled";
   createdAt: IsoTimestamp;
@@ -173,6 +198,7 @@ export interface ApprovalV1 {
 
 export interface ActivityV1 {
   id: OpaqueId;
+  workspace: WorkspaceIdV1;
   at: IsoTimestamp;
   category: "chat" | "memory" | "task" | "routine" | "plan" | "approval" | "agent" | "career" | "import" | "export" | "provider" | "settings" | "failure";
   action: string;
@@ -214,6 +240,10 @@ export interface SettingsV1 {
   credentialEnvironmentVariable: string;
   /** Which registered developer-agent bridge the owner selected. Empty means AION's default. */
   developerBridgeId: string;
+  /** The workspace new records are created in and the UI is showing. */
+  activeWorkspace: WorkspaceIdV1;
+  /** Owner-supplied display names, e.g. a workplace label. Never inferred, never invented. */
+  workspaceLabels: Record<WorkspaceIdV1, string>;
   privacy: { includeMemoryByDefault: boolean; retainActivityDays: number };
 }
 
@@ -233,6 +263,8 @@ export interface AssistantStateV1 {
   imports: ImportReportV1[];
   /** Evidence from allowlisted verification runs, newest first. Bounded on every write. */
   verifications: VerificationRunV1[];
+  /** Every migration that has run against this state, in order. Never rewritten. */
+  migrations: MigrationRecordV1[];
 }
 
 export interface StateRepositoryV1 {
@@ -265,8 +297,8 @@ export type DeveloperAgentModeV1 = "read-only" | "workspace-write";
 
 /**
  * Executable availability and account health are deliberately separate. A CLI that answers its
- * version probe proves only that the program exists; whether the owner is signed in — and whether
- * any credit remains — is a different question. AION never determines remaining quota, because
+ * version probe proves only that the program exists; whether the owner is signed in â€” and whether
+ * any credit remains â€” is a different question. AION never determines remaining quota, because
  * that would require a paid call.
  */
 export interface DeveloperAgentStatusV1 {
@@ -308,7 +340,7 @@ export interface DeveloperAgentRegistryV1 {
 /**
  * The complete set of verification operations AION will ever run, as a closed union.
  *
- * This is the whole point of the type: a caller — including a model — selects an operation by
+ * This is the whole point of the type: a caller â€” including a model â€” selects an operation by
  * identifier. There is no command string, no argument list, and no shell anywhere in the input, so
  * there is nothing for instruction text to be injected into. AION owns the actual commands.
  */

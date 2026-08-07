@@ -14,6 +14,9 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 header > div { display: flex; align-items: center; gap: .6rem; }
 .mark { display: grid; place-items: center; width: 1.9rem; height: 1.9rem; border-radius: .55rem; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
 header small { color: var(--muted); }
+.switch { display: flex; gap: .2rem; padding: .2rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; }
+.switch button { background: transparent; color: var(--muted); border-radius: 999px; padding: .3rem .8rem; font-size: .85rem; font-weight: 500; }
+.switch button.active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .local, .remote { font-size: .82rem; padding: .25rem .6rem; border-radius: 999px; border: 1px solid var(--line); }
 .local { color: var(--accent); }
 .remote { color: var(--warn); border-color: var(--warn); }

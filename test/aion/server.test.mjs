@@ -208,6 +208,45 @@ test("the verification loop runs end to end over the loopback API without any sh
   });
 });
 
+test("Personal and Work stay separated across the API and the rendered UI", async () => {
+  await withServer(async ({ base }) => {
+    await post(base, { type: "onboarding.complete" });
+    const personalMemory = await (await post(base, { type: "memory.create", memory: { content: "Personal preference: mornings", category: "semantic" } })).json();
+    const personalTask = await (await post(base, { type: "task.create", task: { title: "Personal task" } })).json();
+    assert.equal(personalMemory.result.workspace, "personal", "records join the active workspace");
+
+    await post(base, { type: "settings.update", settings: { activeWorkspace: "work", workspaceLabels: { personal: "Personal", work: "Lakeland Toyota" } } });
+    const workMemory = await (await post(base, { type: "memory.create", memory: { content: "Personal preference: mornings", category: "semantic" } })).json();
+    assert.equal(workMemory.result.workspace, "work");
+
+    // The same statement in two workspaces is two separate facts, not a conflict.
+    const state = (await (await fetch(`${base}/api/state`)).json()).state;
+    assert.equal(state.memories.every((m) => m.conflict === "none"), true, "an identical subject in another workspace is not a conflict");
+    assert.equal(state.settings.workspaceLabels.work, "Lakeland Toyota", "the workplace label is owner-supplied");
+
+    const workSearch = await (await post(base, { type: "memory.search", query: "mornings" })).json();
+    assert.equal(workSearch.result.length, 1, "search never crosses the boundary");
+    assert.equal(workSearch.result[0].id, workMemory.result.id);
+    assert.equal(workSearch.result[0].id !== personalMemory.result.id, true);
+
+    await post(base, { type: "settings.update", settings: { activeWorkspace: "personal" } });
+    const personalSearch = await (await post(base, { type: "memory.search", query: "mornings" })).json();
+    assert.equal(personalSearch.result.length, 1);
+    assert.equal(personalSearch.result[0].id, personalMemory.result.id);
+
+    assert.equal((await post(base, { type: "settings.update", settings: { activeWorkspace: "confidential" } })).status, 400, "an unknown workspace is refused");
+    const tasks = (await (await fetch(`${base}/api/state`)).json()).state.tasks;
+    assert.equal(tasks.find((t) => t.id === personalTask.result.id).workspace, "personal");
+
+    // The UI must never render another workspace's records.
+    const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
+    assert.match(js, /const scoped = /u, "the UI has an explicit workspace filter");
+    for (const collection of ["s.conversations", "s.tasks", "s.routines", "s.memories", "s.plans"]) {
+      assert.match(js, new RegExp(`cards\\(scoped\\(${collection.replace(".", "\\.")}\\)`, "u"), `${collection} is rendered through the workspace filter`);
+    }
+  });
+});
+
 test("UI exposes every required owner-facing area and needs no hosted dependency", async () => {
   const html = await readFile(join(repositoryRoot, "apps/aion/public/index.html"), "utf8");
   const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
