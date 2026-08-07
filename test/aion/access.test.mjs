@@ -185,11 +185,13 @@ test("remote-access status is truthful about what is actually installed", async 
   assert.match(absent.detail, /does not search your computer/u);
   assert.match(absent.detail, /never create a tunnel or change your router/u);
 
-  const status = await remoteAccessStatus({ remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 } }, "127.0.0.1",
+  const loopbackOnly = [{ address: "127.0.0.1", port: 31415, state: "listening", scope: "loopback", detail: "" }];
+  const status = await remoteAccessStatus({ remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 } }, loopbackOnly,
     { AION_TAILSCALE_PATH: "C:\\synthetic\\absent\\tailscale.exe" }, "win32");
   assert.equal(status.enabled, false);
   assert.equal(status.loopbackOnly, true);
   assert.equal(status.publiclyExposed, false);
+  assert.equal(status.configurationApplied, true, "loopback-only is the applied configuration when access is off");
   assert.match(status.summary, /reachable only from this computer/u);
   assert.doesNotMatch(JSON.stringify(status), /[A-Za-z]:\\/u, "no local path reaches the browser");
 

@@ -7,7 +7,7 @@ import {
   AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
   FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
-  VerificationCapabilityV1, digestValue,
+  VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
@@ -202,12 +202,21 @@ export async function createAionServer(options = {}) {
     }
   }
 
-  const server = createServer(async (request, response) => {
+  /*
+   * One request handler, potentially several listeners.
+   *
+   * `boundPort` is captured once at listen time rather than read from a particular server,
+   * because every listener shares the same port and a request may arrive on any of them.
+   */
+  let boundPort = 0;
+  let listeners = [];
+
+  const handler = async (request, response) => {
     try {
-      const address = server.address();
+      const address = { port: boundPort };
       const settings = (await service.snapshot()).settings;
       const remote = settings.remoteAccess;
-      if (!address || typeof address === "string" || !sameOrigin(request, address, remote.enabled ? remote.bindAddress : null)) {
+      if (!boundPort || !sameOrigin(request, address, remote.enabled ? remote.bindAddress : null)) {
         return json(response, 403, { error: "Request origin is not allowed." });
       }
       const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
@@ -256,7 +265,7 @@ export async function createAionServer(options = {}) {
           developerBridge: await service.developerBridgeStatus(), developerBridges: await service.developerBridgeInventory(),
           verificationOperations: verificationRunner.operations(),
           salesRoutineTemplates: service.salesRoutineTemplates(),
-          remoteAccess: await remoteAccessStatus(settings, address.address),
+          remoteAccess: await remoteAccessStatus(settings, listeners),
           devices: await service.deviceInventory(),
           // A phone knows it is a phone, so the UI can hide what only the console may change.
           viewer: loopback ? "console" : "device",
@@ -285,13 +294,72 @@ export async function createAionServer(options = {}) {
     } catch (error) {
       return json(response, 400, { error: privacySafe(error instanceof Error ? error.message : "Request failed.") });
     }
+  };
+
+  const server = createServer(handler);
+  const servers = [server];
+
+  /** Binds one server to one exact host. Never a wildcard: the host is always explicit. */
+  const bind = (target, host, port) => new Promise((resolveBind, reject) => {
+    const onError = (error) => { target.off("listening", onListening); reject(error); };
+    const onListening = () => { target.off("error", onError); resolveBind(); };
+    target.once("error", onError);
+    target.listen(port, host, onListening);
   });
 
   const tick = setInterval(() => void service.tick().catch(() => {}), 30_000); tick.unref();
   server.on("close", () => clearInterval(tick));
   return {
-    server, service, repositoryRoot, dataRoot, exportRoot,
-    async listen(port = 0) { await new Promise((resolveListen, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", () => { server.off("error", reject); resolveListen(); }); }); return server.address(); },
-    async close() { await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose())); },
+    server, servers, service, repositoryRoot, dataRoot, exportRoot,
+    get listeners() { return listeners.map((entry) => ({ ...entry })); },
+    /**
+     * Applies the persisted access configuration to the actual listeners.
+     *
+     * Loopback is bound first and unconditionally, so AION is always reachable from this
+     * computer. Only when the owner has enabled private access *and* supplied a validated
+     * private address different from loopback is a second listener added, on that exact
+     * address and the same port. A wildcard is never used, and a failure to bind the private
+     * address never widens the bind -- it is recorded and reported, and loopback survives.
+     */
+    async listen(port = 0) {
+      await bind(server, "127.0.0.1", port);
+      boundPort = server.address().port;
+      listeners = [{ address: "127.0.0.1", port: boundPort, state: "listening", scope: "loopback", detail: "Reachable from this computer only." }];
+
+      const remote = (await service.snapshot()).settings.remoteAccess;
+      if (remote?.enabled) {
+        let host = null;
+        try { host = validateBindAddress(remote.bindAddress); }
+        catch (error) {
+          listeners.push({ address: String(remote.bindAddress ?? ""), port: boundPort, state: "refused", scope: "private", detail: privacySafe(error.message) });
+        }
+        if (host && host !== "127.0.0.1") {
+          const extra = createServer(handler);
+          try {
+            await bind(extra, host, boundPort);
+            servers.push(extra);
+            listeners.push({ address: host, port: boundPort, state: "listening", scope: "private", detail: "Reachable from a paired device on this private network. Pairing is still required." });
+          } catch (error) {
+            try { extra.close(); } catch { /* it never bound */ }
+            const why = error.code === "EADDRNOTAVAIL" ? "that address does not belong to this computer right now"
+              : error.code === "EADDRINUSE" ? "another program is already using that address and port"
+                : error.code === "EACCES" ? "the operating system refused permission to bind it"
+                  : `the operating system reported ${String(error.code ?? "an error")}`;
+            listeners.push({ address: host, port: boundPort, state: "failed", scope: "private", detail: `AION could not listen on ${host}: ${why}. Loopback is unaffected and AION did not widen the bind.` });
+          }
+        } else if (host === "127.0.0.1") {
+          listeners.push({ address: host, port: boundPort, state: "loopback-only", scope: "private", detail: "Private access is on, but the configured address is loopback, so no other device can reach AION. Enter this computer's private network address in Settings." });
+        }
+      }
+      return server.address();
+    },
+    /** Closes every listener, so a private listener never outlives the process that made it. */
+    async close() {
+      await Promise.all(servers.map((target) => new Promise((resolveClose, reject) => {
+        if (!target.listening) return resolveClose();
+        target.close((error) => error ? reject(error) : resolveClose());
+      })));
+      listeners = [];
+    },
   };
 }

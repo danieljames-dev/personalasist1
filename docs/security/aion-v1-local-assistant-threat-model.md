@@ -61,6 +61,7 @@ security of any remote provider the owner may later configure.
 | T29 | AION is exposed publicly, or configures the network on the owner's behalf | Loopback default; bind restricted to loopback or a private range; wildcards and public addresses refused; no tunnel, no port forwarding, no UPnP, and detection runs no configuring subcommand | Access suite: address validation and a source assertion on the detection module |
 | T30 | A browser cache outlives a revoked session and exposes private data | The service worker caches the application shell only; every `/api/` request is network-only with no cache read or write | Access suite: path exclusion, shell allowlist, and no API path in the cache list |
 | T31 | Source corruption hides a change from review | Repository-wide gate for byte-order marks, double-encoded characters, and raw control bytes, with a self-test proving the rule flags real damage and leaves legitimate Unicode alone | Source-hygiene suite |
+| T32 | Saved access configuration does not match the running listeners, so the owner believes phone access works when nothing is bound | Listeners are derived from the persisted setting at startup; status and the startup message report actual listeners and mark `configurationApplied` false when they differ; a private bind failure is stated with its cause | Bind-runtime suite: configuration observably changes the listener set, and a failed private bind reports NOT working while loopback survives |
 
 ## Residual risks
 

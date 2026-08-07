@@ -152,7 +152,19 @@ a shell or write access.
 
 ## Private phone access
 
-Off by default; AION binds `127.0.0.1`. Turning it on in Settings lets you create a one-time
+Off by default; AION binds `127.0.0.1` only.
+
+Turning it on and entering your computer's private network address makes AION bind a **second**
+listener on exactly that address, keeping loopback. It never widens to a wildcard, never binds a
+public address, and never creates a tunnel or changes your router. **Restart AION after changing
+the bind address** -- listeners are established at startup.
+
+The startup message and Settings report the listeners AION *actually has*, not the address you
+saved. If the private address cannot be bound -- it no longer belongs to this computer, something
+else holds the port, or the operating system refuses -- AION keeps working on loopback, says
+plainly that private access is not active, and explains why. It will not fall back to a wider bind.
+
+Turning it on in Settings lets you create a one-time
 pairing code, valid for ten minutes and usable once. Type it on the phone. A private network is not
 enough on its own -- a device must be paired. Sessions expire, can be revoked individually or all
 at once, and revoking one changes none of your data. AION never opens a public port, creates a

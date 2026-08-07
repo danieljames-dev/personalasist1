@@ -69,20 +69,45 @@ export async function detectPrivateNetwork(env = process.env, platform = process
   };
 }
 
-/** The truthful summary Settings shows, combining the owner's setting with what is installed. */
-export async function remoteAccessStatus(settings, boundAddress, env = process.env, platform = process.platform) {
+/**
+ * The truthful summary Settings shows.
+ *
+ * This describes the listeners AION *actually has*, not the configuration it was asked for. Those
+ * are different things, and conflating them is exactly what made a saved private address look
+ * like working phone access when nothing was listening on it.
+ */
+export async function remoteAccessStatus(settings, listeners = [], env = process.env, platform = process.platform) {
   const network = await detectPrivateNetwork(env, platform);
   const enabled = settings.remoteAccess?.enabled === true;
+  const configured = settings.remoteAccess?.bindAddress ?? "127.0.0.1";
+  const live = listeners.filter((entry) => entry.state === "listening");
+  const privateLive = live.filter((entry) => entry.scope === "private");
+  const problem = listeners.find((entry) => entry.state === "failed" || entry.state === "refused" || entry.state === "loopback-only");
+  const port = live[0]?.port ?? null;
+
+  const summary = (() => {
+    if (!enabled) return "Private phone access is off. AION is reachable only from this computer.";
+    if (privateLive.length) {
+      return `Private phone access is on and AION is listening on ${privateLive.map((entry) => `${entry.address}:${entry.port}`).join(" and ")} as well as loopback. A paired device is still required; being on the network grants nothing by itself.`;
+    }
+    if (problem) return `Private phone access is on but NOT working: ${problem.detail} AION is still reachable from this computer.`;
+    return "Private phone access is on but no private listener is active. Restart AION so the setting takes effect.";
+  })();
+
   return {
     enabled,
-    bindAddress: settings.remoteAccess?.bindAddress ?? "127.0.0.1",
-    boundAddress,
+    /** What the owner asked for. */
+    bindAddress: configured,
+    /** What AION actually bound. Empty means nothing but loopback. */
+    listeners: listeners.map((entry) => ({ ...entry })),
+    boundAddress: live.map((entry) => entry.address).join(", ") || "none",
+    port,
     sessionDays: settings.remoteAccess?.sessionDays ?? 30,
-    loopbackOnly: !enabled || boundAddress === "127.0.0.1",
+    loopbackOnly: privateLive.length === 0,
+    /** True when the owner asked for private access but AION does not actually have it. */
+    configurationApplied: !enabled || privateLive.length > 0,
     privateNetwork: network,
-    summary: enabled
-      ? `Private phone access is on. AION is reachable at ${boundAddress} on this machine and on any private network you already control. A paired device is still required; network reachability alone grants nothing.`
-      : "Private phone access is off. AION is reachable only from this computer.",
-    publiclyExposed: false,
+    summary,
+    publiclyExposed: live.some((entry) => ["0.0.0.0", "::", "*"].includes(entry.address)),
   };
 }

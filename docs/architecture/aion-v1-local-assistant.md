@@ -158,8 +158,11 @@ URL. Sessions expire and are individually and collectively revocable, and revoca
 owner record. Turning access off ends every live session immediately. Pairing is rate-limited per
 peer. A paired phone may drive AION but may never mint a code or change access settings. The bind
 address must be loopback or a private range; wildcards and public addresses are refused, and AION
-creates no tunnel and no router configuration. The service worker caches the application shell
-only — every `/api/` request is network-only, so no private response is ever persisted by a
+creates no tunnel and no router configuration. Listeners are established from the persisted setting at startup, not written into the listen
+call: one request handler and one listener per approved address. Loopback binds first and
+unconditionally; a validated private address adds a second listener on the same port. A private
+bind failure is recorded and surfaced, and never widens the bind. The service worker caches the
+application shell only — every `/api/` request is network-only, so no private response is ever persisted by a
 browser that may later be lost or revoked.
 
 ## Out of scope for V1
