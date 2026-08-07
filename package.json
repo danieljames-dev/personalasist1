@@ -9,7 +9,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present && npm run career:test",
     "test:backup-refs": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-backup-ref-policy.ps1",
     "control-plane:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane.ps1",
     "control-plane:test-collections": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-control-plane-collections.ps1",
@@ -74,6 +74,16 @@
     "application-preparation:test:unit": "npm run test:unit --workspace @aion/application-preparation",
     "application-preparation:test:operations": "npm run test:operations --workspace @aion/application-preparation",
     "application-preparation:test:architecture": "npm run test:architecture --workspace @aion/application-preparation",
+    "career:build": "npm run application-preparation:build",
+    "career:init": "npm run career:build && node apps/career-cli.mjs init",
+    "career:ingest": "npm run career:build && node apps/career-cli.mjs ingest",
+    "career:profile": "npm run career:build && node apps/career-cli.mjs profile",
+    "career:job:import": "npm run career:build && node apps/career-cli.mjs job:import",
+    "career:match": "npm run career:build && node apps/career-cli.mjs match",
+    "career:draft": "npm run career:build && node apps/career-cli.mjs draft",
+    "career:export": "npm run career:build && node apps/career-cli.mjs export",
+    "career:demo": "npm run career:build && node apps/career-cli.mjs demo",
+    "career:test": "npm run career:build && node --test \"test/career-cli/**/*.test.mjs\"",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {
