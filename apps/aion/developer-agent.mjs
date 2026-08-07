@@ -65,12 +65,17 @@ async function firstInstalled(candidates) {
  * Builds one bridge per supported developer agent that is actually installed and answers its own
  * local version probe. The preference order below is only AION's default; Settings lets the owner
  * choose any registered bridge, and the registry never substitutes a different one.
+ *
+ * `options.claudeCandidates` and `options.codexCandidates` inject the candidate lists. A test that
+ * is about *absence* must supply them, because the default lists intentionally include real
+ * documented install locations — otherwise an assertion about the unavailable path would silently
+ * stop running on any machine where a developer agent happens to be installed.
  */
-export async function resolveDeveloperAgentBridges(repositoryRoot, env = process.env) {
+export async function resolveDeveloperAgentBridges(repositoryRoot, env = process.env, options = {}) {
   const bridges = [];
-  const claude = await firstInstalled(claudeCodeCandidates(env));
+  const claude = await firstInstalled(options.claudeCandidates ?? claudeCodeCandidates(env));
   if (claude) bridges.push(new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude));
-  const codex = await firstInstalled(developerAgentCandidates(env));
+  const codex = await firstInstalled(options.codexCandidates ?? developerAgentCandidates(env));
   if (codex) bridges.push(new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex));
 
   const confirmed = [];
@@ -85,6 +90,6 @@ export async function resolveDeveloperAgentBridges(repositoryRoot, env = process
 }
 
 /** Backwards-compatible single-bridge resolution: the bridge AION would select by default. */
-export async function resolveDeveloperAgentBridge(repositoryRoot, env = process.env) {
-  return (await resolveDeveloperAgentBridges(repositoryRoot, env)).selected();
+export async function resolveDeveloperAgentBridge(repositoryRoot, env = process.env, options = {}) {
+  return (await resolveDeveloperAgentBridges(repositoryRoot, env, options)).selected();
 }

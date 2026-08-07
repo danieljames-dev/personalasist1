@@ -41,6 +41,19 @@ test("all required replaceable ports remain explicit", () => {
   }
 });
 
+test("source files are plain text: no NUL or stray control bytes that would defeat review", async () => {
+  // A single NUL byte makes Git treat a source file as binary, so it silently stops producing a
+  // textual diff — the change becomes unreviewable. Control characters belong in escapes.
+  const allowed = new Set([0x09, 0x0a, 0x0d]);
+  for (const name of files) {
+    const bytes = await readFile(new URL(name, root));
+    for (const [index, byte] of bytes.entries()) {
+      if (byte < 0x20 && !allowed.has(byte)) assert.fail(`${name} contains a raw control byte 0x${byte.toString(16).padStart(2, "0")} at offset ${index}; write it as an escape sequence instead`);
+      if (byte === 0x7f) assert.fail(`${name} contains a raw delete byte at offset ${index}`);
+    }
+  }
+});
+
 test("no owner-identifying value, credential, or machine path is embedded in the source", () => {
   assert.doesNotMatch(source, /[\w.+-]+@[\w-]+\.[a-z]{2,}/iu, "no email address may appear in source");
   assert.doesNotMatch(source, /[A-Za-z]:\\Users\\/u, "no machine-specific path may appear in source");

@@ -37,25 +37,55 @@ test("an owner override is honoured only when it is an explicit normalized absol
   assert.equal(claudeCodeCandidates({ AION_CLAUDE_CODE_PATH: "C:\\synthetic\\claude\\claude.exe" }, "win32", "C:\\synthetic\\home")[0], "C:\\synthetic\\claude\\claude.exe");
 });
 
-test("discovery finds nothing when no documented location exists and reports unavailable truthfully", async () => {
+/**
+ * Injected empty candidate lists. This is the only honest way to test the absent path: the default
+ * lists deliberately contain real documented install locations, so a test that relied on them
+ * would stop asserting anything the moment a developer agent was installed on the machine.
+ */
+const NOTHING_INSTALLED = { claudeCandidates: [], codexCandidates: [] };
+const ABSENT_PATHS = {
+  claudeCandidates: ["C:\\synthetic\\definitely\\absent\\claude.exe"],
+  codexCandidates: ["C:\\synthetic\\definitely\\absent\\codex.exe"],
+};
+
+test("with no candidate installed, discovery reports unavailable truthfully and unconditionally", async () => {
   assert.deepEqual(developerAgentCandidates({}, "win32", "x64"), [], "no environment means no Codex candidate");
-  const bridge = await resolveDeveloperAgentBridge(repositoryRoot, absentEnvironment);
-  const status = await bridge.status();
-  assert.equal(typeof status.available, "boolean");
-  if (!status.available) {
-    assert.equal(status.executable, null);
-    assert.match(status.detail, /does not search your computer|is available on this computer/u);
+  for (const [label, injected] of [["no candidates at all", NOTHING_INSTALLED], ["candidates that do not exist", ABSENT_PATHS]]) {
+    const bridge = await resolveDeveloperAgentBridge(repositoryRoot, absentEnvironment, injected);
+    const status = await bridge.status({ includeAccount: true });
+    assert.equal(status.available, false, `${label}: availability is never fabricated`);
+    assert.equal(status.executable, null, `${label}: no executable is reported`);
+    assert.equal(status.version, null);
+    assert.deepEqual(status.modes, [], `${label}: an unavailable bridge offers no task boundary`);
+    assert.match(status.detail, /does not search your computer/u);
+    await assert.rejects(bridge.run({ repositoryRoot, instruction: "anything", mode: "read-only" }, new AbortController().signal), /No supported local developer-agent executable/u);
   }
 });
 
 test("the registry reports every bridge, and an unregistered selection fails closed", async () => {
-  const registry = await resolveDeveloperAgentBridges(repositoryRoot, absentEnvironment);
-  assert.ok(registry.list().length >= 1, "there is always at least a truthful unavailable bridge");
-  assert.equal(new Set(registry.list().map((bridge) => bridge.id)).size, registry.list().length, "bridge identifiers are unique");
+  const registry = await resolveDeveloperAgentBridges(repositoryRoot, absentEnvironment, NOTHING_INSTALLED);
+  assert.equal(registry.list().length, 1, "exactly one truthful unavailable bridge when nothing is installed");
+  assert.equal(registry.list()[0].id, "none");
   assert.equal(registry.selected(), registry.list()[0], "the default selection is AION's first preference");
   assert.throws(() => registry.select("definitely-not-installed"), /not registered/iu);
+  assert.throws(() => registry.select("claude-code"), /not registered/iu, "a bridge that is not installed cannot be selected");
   registry.select("");
   assert.equal(registry.selected(), registry.list()[0], "an empty selection restores the default");
+});
+
+test("real discovery on this machine is reported truthfully, whatever is installed", async () => {
+  // Deliberately exercises the real documented locations. It asserts internal consistency rather
+  // than a particular outcome, so it is correct on a machine with or without a developer agent.
+  const registry = await resolveDeveloperAgentBridges(repositoryRoot);
+  assert.ok(registry.list().length >= 1, "there is always at least a truthful unavailable bridge");
+  assert.equal(new Set(registry.list().map((bridge) => bridge.id)).size, registry.list().length, "bridge identifiers are unique");
+  for (const bridge of registry.list()) {
+    const status = await bridge.status();
+    assert.equal(status.bridgeId, bridge.id);
+    assert.equal(status.available, status.executable !== null, "availability and a reported executable agree");
+    assert.equal(status.modes.length > 0, status.available, "only an available bridge offers task boundaries");
+    assert.equal(status.account, "not-checked", "an ordinary status read never probes an account");
+  }
 });
 
 test("a resolved bridge refuses tasks aimed outside the one approved repository root", async () => {
