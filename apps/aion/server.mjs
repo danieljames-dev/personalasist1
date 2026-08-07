@@ -75,8 +75,16 @@ async function body(request) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Request body must be a JSON object.");
   return parsed;
 }
-/** True only for a socket whose peer is this machine. Never inferred from a header. */
-function isLoopbackPeer(request) {
+/**
+ * True only for a socket whose peer is this machine. Never inferred from a header, because a
+ * header is attacker-controlled and would let any request claim to be the console.
+ *
+ * `treatPeerAsRemote` is a composition-root switch used by the test suite and the demo to exercise
+ * the phone path from a loopback socket. It is not a runtime setting and cannot be reached from
+ * the API, so no request can turn itself into a console session or the reverse.
+ */
+function isLoopbackPeer(request, treatPeerAsRemote) {
+  if (treatPeerAsRemote) return false;
   const remote = request.socket?.remoteAddress ?? "";
   return remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
 }
@@ -213,7 +221,7 @@ export async function createAionServer(options = {}) {
        * Everything fails closed: access off, no token, unknown token, expired or revoked session,
        * or a revoked device all land in the same place.
        */
-      const loopback = isLoopbackPeer(request);
+      const loopback = isLoopbackPeer(request, options.treatPeerAsRemote === true);
       let device = null;
       if (!loopback) {
         if (!remote.enabled) return json(response, 403, { error: "Private phone access is turned off." });
