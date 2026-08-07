@@ -68,6 +68,12 @@
     "job-matching:test:unit": "npm run test:unit --workspace @aion/job-matching",
     "job-matching:test:operations": "npm run test:operations --workspace @aion/job-matching",
     "job-matching:test:architecture": "npm run test:architecture --workspace @aion/job-matching",
+    "application-preparation:build": "npm run build --workspace @aion/application-preparation",
+    "application-preparation:typecheck": "npm run typecheck --workspace @aion/application-preparation",
+    "application-preparation:test": "npm run test --workspace @aion/application-preparation",
+    "application-preparation:test:unit": "npm run test:unit --workspace @aion/application-preparation",
+    "application-preparation:test:operations": "npm run test:operations --workspace @aion/application-preparation",
+    "application-preparation:test:architecture": "npm run test:architecture --workspace @aion/application-preparation",
     "verify": "npm run typecheck && npm test"
   },
   "engines": {
