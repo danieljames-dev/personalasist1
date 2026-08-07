@@ -9,7 +9,8 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&
 const short = (value, length = 16) => `${String(value ?? "").slice(0, length)}…`;
 
 async function api(type, payload = {}) {
-  const response = await fetch("/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type, ...payload }) });
+  // `type` is written last on purpose: a payload field can never displace the action being called.
+  const response = await fetch("/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...payload, type }) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error);
   return data.result;
@@ -53,7 +54,7 @@ async function sendStreamed(id, content) {
 
 function chatArea(s) {
   return `<h1>Chat</h1><p class="lead">Offline by default. Memory context is explicit per conversation, and the model can only propose actions or memories.</p>
-<p class="hint">Try <code>propose: check the local echo</code> or <code>remember: preferred timezone: UTC</code> with the offline provider to exercise approvals and unconfirmed memories.</p>
+<p class="hint">With the offline provider, <code>propose: check the local echo</code> and <code>remember: preferred timezone: UTC</code> exercise approvals and unconfirmed memories. <code>developer: review the repository and tell me what tests are failing</code> prepares a <em>read-only</em> developer-agent task for your approval — nothing runs until you approve it, and the agent may not modify anything.</p>
 <form data-form="conversation"><label>Conversation title<input name="title" value="New conversation" maxlength="200"></label><button>Create conversation</button></form>
 ${cards(s.conversations, (c) => `<article class="card"><h2>${esc(c.title)}</h2><p class="meta">${esc(c.state)} · ${c.messages.length} messages · memory context ${c.memoryContextEnabled ? "on" : "off"} · updated ${esc(c.updatedAt)}</p>
 <div class="thread">${c.messages.slice(-8).map((m) => `<p class="msg ${esc(m.role)}"><b>${esc(m.role)}${m.providerId ? ` · ${esc(m.providerId)}` : ""}:</b> ${esc(m.content)}</p>`).join("")}${streaming && openConversation === c.id ? `<p class="msg assistant streaming"><b>assistant:</b> ${esc(streaming)}<span class="cursor">▍</span></p>` : ""}</div>
@@ -115,7 +116,9 @@ function approvalsArea(s) {
 <ul>${capabilities.map((c) => `<li><code>${esc(c.id)}</code> — ${esc(c.privacy)} · approval ${esc(c.approval)} · timeout ${c.timeoutMs} ms · ${c.maxRetries} retries</li>`).join("")}</ul></div>
 <form data-form="action"><label>Propose a bounded local echo<input name="text" required maxlength="1000"></label><button>Propose action</button></form>
 <form data-form="developer-task"><label>Propose a bounded developer-agent task<textarea name="instruction" maxlength="4000"></textarea></label>
-<p class="meta">Bridge: ${esc(model.developerBridge.detail)}${model.developerBridge.available ? "" : " — proposals will be rejected at execution."}</p><button>Propose developer task</button></form>
+<label>Task boundary<select name="mode"><option value="read-only">read-only — the agent may read this repository but not change it</option><option value="workspace-write">workspace-write — the agent may modify files inside this repository</option></select></label>
+<p class="meta">Selected bridge: ${esc(model.developerBridge.displayName)} — ${esc(model.developerBridge.detail)}${model.developerBridge.available ? "" : " Proposals will be rejected at execution."}</p>
+<p class="meta">The boundary you choose is part of the approval digest, so a read-only approval can never be spent on a writing run. Your instruction is sent to the agent on its standard input and is never treated as a command.</p><button>Propose developer task</button></form>
 <h2>Pending and decided approvals</h2>
 ${cards(s.approvals, (a) => `<article class="card"><h2>${esc(a.capabilityId)}</h2><p>${esc(a.summary)}</p>
 <p class="meta">${esc(a.state)} · digest ${esc(short(a.inputDigest))} · requested ${esc(a.requestedAt)} · expires ${esc(a.expiresAt)}${a.decidedAt ? ` · decided ${esc(a.decidedAt)}` : ""}</p>
@@ -140,7 +143,8 @@ function careerArea() {
 <form data-form="career"><label>Command<select name="command"><option value="init">init — create the private workspace and blank templates</option><option value="ingest">ingest — import one evidence file</option><option value="profile">profile — build the CareerProfile</option><option value="job:import">job:import — import one Job Posting you supply</option><option value="match">match — transparent scoring against a posting</option><option value="draft">draft — prepare owner-review materials</option><option value="export">export — write a local export bundle</option><option value="demo">demo — neutral synthetic walkthrough</option></select></label>
 <label>Workflow root (absolute, not needed for demo)<input name="root" maxlength="4096"></label>
 <label>Value — evidence file, posting file, Job Posting id, Match id, or export path<input name="value" maxlength="4096"></label>
-<label>Source type (ingest only)<input name="type" maxlength="64" placeholder="optional"></label>
+<p class="hint">Run <code>init</code> first. Evidence files and Job Postings must then be placed inside <code>&lt;workflow root&gt;\private\input\</code> — the Career engine refuses any file outside that approved input root, and <code>init</code> writes blank templates there for you to fill in.</p>
+<label>Source type (ingest only)<input name="sourceType" maxlength="64" placeholder="optional"></label>
 <label><input type="checkbox" name="dryRun" checked> Dry run first (no writes)</label><button>Run command</button></form>
 <p class="meta">Review CareerFacts, provenance, conflicts, and transparent match scoring in the command output below. Every prepared document is marked draft and requires your review. Application submission does not exist in AION.</p></div>
 <div class="card"><h2>Output</h2><pre id="careerOutput">Run a command to see its output. Local paths are removed before display.</pre></div>`;
@@ -161,6 +165,7 @@ ${r.state === "dry-run" ? `<form data-form="import-execute"><input type="hidden"
 
 function settingsArea(s) {
   const p = model.providers ?? [];
+  const bridges = model.developerBridges ?? [];
   return `<h1>Settings</h1><p class="lead">Local privacy, provider, and data controls. AION stores the <em>name</em> of a credential environment variable, never its value.</p>
 <form data-form="settings">
 <label>Provider<select name="providerId">${p.map((x) => `<option value="${esc(x.id)}" ${x.id === s.settings.providerId ? "selected" : ""}>${esc(x.id)} — ${esc(x.location)}${x.available ? ", ready" : ", unavailable"}</option>`).join("")}</select></label>
@@ -172,14 +177,18 @@ function settingsArea(s) {
 <label><input type="checkbox" name="externalActionsRequireApproval" ${s.settings.externalActionsRequireApproval ? "checked" : ""}> Require an approval for every proposed action (capabilities marked always or external always require one regardless)</label>
 <label>Activity retention (days)<input name="retainActivityDays" type="number" min="1" max="3650" value="${s.settings.privacy.retainActivityDays}"></label>
 <label>Credential environment-variable name<input name="credentialEnvironmentVariable" value="${esc(s.settings.credentialEnvironmentVariable)}" maxlength="128" placeholder="AION_PROVIDER_TOKEN"></label>
+<label>Developer-agent bridge<select name="developerBridgeId"><option value="" ${s.settings.developerBridgeId ? "" : "selected"}>AION default — ${esc(model.developerBridge.displayName)}</option>${bridges.map((b) => `<option value="${esc(b.bridgeId)}" ${b.bridgeId === s.settings.developerBridgeId ? "selected" : ""}>${esc(b.displayName)}${b.available ? "" : " — unavailable"}</option>`).join("")}</select></label>
 <label>Approved import roots (one per line)<textarea name="importRoots" maxlength="8000">${esc(s.settings.importRoots.join("\n"))}</textarea></label>
 <label>Export root<input name="exportRoot" value="${esc(s.settings.exportRoot)}" maxlength="500"></label>
 <button>Save settings</button></form>
 <div class="card"><h2>Encrypted private backup</h2><p>Authenticated AES-256-GCM with a scrypt-derived key. Your passphrase and the derived key are never stored or logged, and every backup is decrypted and verified immediately after it is written.</p>
 <form data-form="backup"><label>Destination file inside the export root<input name="destination" required maxlength="4096"></label><label>Passphrase (12+ characters)<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Create and verify backup</button></form>
 <form data-form="backup-verify"><label>Verify an existing backup<input name="destination" required maxlength="4096"></label><label>Passphrase<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Verify restore</button></form></div>
+<div class="card"><h2>Developer-agent bridges</h2><p>AION checks only documented install locations; it never searches your computer. An installed executable is not the same thing as a usable account, so the two are reported separately. Checking account health is a local sign-in question and never a paid call, and AION never reads or stores the account address or organisation.</p>
+${bridges.length ? `<ul>${bridges.map((b) => `<li><b>${esc(b.displayName)}</b>${b.selected ? " · selected" : ""} — ${b.available ? "installed" : "unavailable"}${b.executable ? ` (<code>${esc(b.executable)}</code>${b.version ? `, ${esc(b.version)}` : ""})` : ""}<br><span class="meta">${esc(b.detail)}</span><br><span class="meta">Account: ${esc(b.account)} — ${esc(b.accountDetail)}</span>
+${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <code>${esc(c.executable)} ${esc(c.args.join(" "))}</code> — your instruction is written to standard input, never to this list.</span>`).join("")}</li>`).join("")}</ul>` : `<p class="empty">No developer-agent bridge was found.</p>`}
+<div class="actions"><button data-do="developer-health">Check developer-agent account health</button></div></div>
 <div class="card"><h2>Data locations</h2><p class="meta">Assistant state: <code>${esc(model.dataRoot)}</code> · exports and private backups: <code>${esc(model.exportRoot)}</code>. Both are inside the ignored private directory and are excluded from Git and from source backups.</p>
-<p class="meta">Developer-agent bridge: ${model.developerBridge.available ? "available" : "unavailable"} — ${esc(model.developerBridge.detail)}</p>
 <div class="actions"><button data-do="state-export">Export all local data</button></div></div>`;
 }
 
@@ -226,6 +235,7 @@ document.addEventListener("click", async (event) => {
     if (verb === "memory-delete") await api("memory.delete", { id });
     if (verb === "memory-export") { download("aion-memories.json", (await api("memory.export")).export); toast("Memories exported to your browser downloads."); return; }
     if (verb === "state-export") { download("aion-local-export.json", (await api("state.export")).export); toast("Complete local export written. It is plaintext — store it carefully."); return; }
+    if (verb === "developer-health") { const result = await api("developer.health"); toast(`${result.bridges.filter((b) => b.available).length} bridge(s) installed, ${result.bridges.filter((b) => b.account === "signed-in").length} signed in. No paid call was made.`); }
     if (verb === "plan-accept") await api("plan.accept", { id });
     if (verb === "plan-convert") { const tasks = await api("plan.convert", { id }); toast(`${tasks.length} task(s) created.`); }
     if (verb === "approve") await api("approval.decide", { id, approve: value === "true" });
@@ -258,13 +268,13 @@ document.addEventListener("submit", async (event) => {
     if (kind === "memory-search") { const found = await api("memory.search", { query: d.query }); toast(`${found.length} enabled memory record(s) matched.`); return; }
     if (kind === "plan") await api("plan.create", { goal: d.goal, steps: d.steps.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).map((title) => ({ title })) });
     if (kind === "action") await api("action.propose", { capabilityId: "aion.local.echo.v1", input: { text: d.text } });
-    if (kind === "developer-task") await api("action.propose", { capabilityId: "aion.developer.task.v1", input: { instruction: d.instruction } });
+    if (kind === "developer-task") await api("action.propose", { capabilityId: "aion.developer.task.v1", input: { instruction: d.instruction, mode: d.mode === "workspace-write" ? "workspace-write" : "read-only" } });
     if (kind === "import") await api("import.dry-run", { platform: d.platform, root: d.root, path: d.path });
     if (kind === "import-execute") await api("import.execute", { id: d.id, root: d.root, path: d.path });
     if (kind === "backup") { const result = await api("backup.create", { destination: d.destination, passphrase: d.passphrase }); toast(`Backup written and verified (${result.bytes} bytes).`); }
     if (kind === "backup-verify") { await api("backup.verify", { destination: d.destination, passphrase: d.passphrase }); toast("Backup decrypted, authenticated, and restored successfully."); }
     if (kind === "career") {
-      const result = await api("career.run", { command: d.command, root: d.root, value: d.value, type: d.type, dryRun: d.dryRun === "on" });
+      const result = await api("career.run", { command: d.command, root: d.root, value: d.value, sourceType: d.sourceType, dryRun: d.dryRun === "on" });
       await load();
       const output = document.querySelector("#careerOutput");
       if (output) output.textContent = result.output || "The command produced no output.";
@@ -279,6 +289,7 @@ document.addEventListener("submit", async (event) => {
         schedulerEnabled: form.schedulerEnabled.checked,
         externalActionsRequireApproval: form.externalActionsRequireApproval.checked,
         credentialEnvironmentVariable: d.credentialEnvironmentVariable,
+        developerBridgeId: d.developerBridgeId ?? "",
         importRoots: d.importRoots.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
         exportRoot: d.exportRoot,
         privacy: { includeMemoryByDefault: form.includeMemoryByDefault.checked, retainActivityDays: Number(d.retainActivityDays) },

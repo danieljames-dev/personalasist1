@@ -6,9 +6,9 @@ import { promisify } from "node:util";
 import {
   AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
   FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
-  RandomIdGeneratorV1, StaticCapabilityRegistryV1, SystemClockV1,
+  RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
 } from "../../packages/local-assistant/dist/index.js";
-import { resolveDeveloperAgentBridge } from "./developer-agent.mjs";
+import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 
 const ASSETS = new Map([["/", ["index.html", "text/html; charset=utf-8"]], ["/app.js", ["app.js", "text/javascript; charset=utf-8"]], ["/styles.css", ["styles.css", "text/css; charset=utf-8"]]]);
 const MAX_BODY = 1024 * 1024;
@@ -37,7 +37,9 @@ async function runCareer(repositoryRoot, input) {
   if (input.command !== "demo") args.push("--root", absolute(input.root, "Career root"));
   const valueFlag = { ingest: "--input", "job:import": "--input", match: "--job", draft: "--match", export: "--output" }[input.command];
   if (valueFlag) { if (typeof input.value !== "string" || !input.value.trim() || input.value.length > 4096) throw new Error("Career command requires an explicit value."); args.push(valueFlag, input.value); }
-  if (input.type && input.command === "ingest") { if (!/^[a-z][a-z0-9-]{0,63}$/u.test(input.type)) throw new Error("Career source type is invalid."); args.push("--type", input.type); }
+  // Deliberately `sourceType`, not `type`: the transport envelope already owns `type`, and a
+  // Career field of the same name would overwrite the action being dispatched.
+  if (input.sourceType && input.command === "ingest") { if (!/^[a-z][a-z0-9-]{0,63}$/u.test(input.sourceType)) throw new Error("Career source type is invalid."); args.push("--type", input.sourceType); }
   if (input.dryRun && input.command !== "demo") args.push("--dry-run");
   try {
     const result = await runFile(process.execPath, args, { cwd: repositoryRoot, timeout: 300_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, shell: false });
@@ -71,7 +73,8 @@ export async function createAionServer(options = {}) {
   const repositoryRoot = resolve(options.repositoryRoot ?? resolve(import.meta.dirname, "..", ".."));
   const dataRoot = resolve(options.dataRoot ?? join(repositoryRoot, "private", "aion"));
   const exportRoot = resolve(options.exportRoot ?? join(dataRoot, "exports"));
-  const developerBridge = options.developerBridge ?? await resolveDeveloperAgentBridge(repositoryRoot);
+  const developerAgents = options.developerAgents
+    ?? (options.developerBridge ? new SelectableDeveloperAgentRegistryV1([options.developerBridge]) : await resolveDeveloperAgentBridges(repositoryRoot));
   const service = new AionAssistantV1({
     repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
     providers: options.providers ?? [
@@ -79,9 +82,9 @@ export async function createAionServer(options = {}) {
       new BoundaryModelProviderV1("remote-generic", "remote", "Configure an approved remote adapter and a session credential before this boundary can be used. AION ships no remote client."),
       new BoundaryModelProviderV1("local-model", "local", "No supported local model runtime is configured on this computer."),
     ],
-    capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerBridge, repositoryRoot)]),
+    capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
-    backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerBridge,
+    backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
   });
 
   async function dispatch(input) {
@@ -112,6 +115,7 @@ export async function createAionServer(options = {}) {
       case "plan.accept": return service.acceptPlan(input.id);
       case "plan.convert": return service.convertPlanToTasks(input.id);
       case "action.propose": return service.proposeAction(input.capabilityId, input.input ?? {});
+      case "developer.health": return { bridges: await service.developerBridgeInventory(true) };
       case "action.execute": return service.executeAction(input.id);
       case "action.cancel": return service.cancelAction(input.id);
       case "approval.decide": return service.decideApproval(input.id, input.approve === true);
@@ -142,7 +146,8 @@ export async function createAionServer(options = {}) {
       if (request.method === "GET" && url.pathname === "/api/state") {
         return json(response, 200, {
           state: await service.snapshot(), providers: await service.providerHealth(), capabilities: service.capabilities(),
-          developerBridge: await service.developerBridgeStatus(), dataRoot: "private/aion", exportRoot: "private/aion/exports",
+          developerBridge: await service.developerBridgeStatus(), developerBridges: await service.developerBridgeInventory(),
+          dataRoot: "private/aion", exportRoot: "private/aion/exports",
         });
       }
       if (request.method === "POST" && url.pathname === "/api/chat/stream") {

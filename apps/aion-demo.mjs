@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, StaticCapabilityRegistryV1,
-  SyntheticDeveloperAgentBridgeV1,
+  DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
+  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
 } from "../packages/local-assistant/dist/index.js";
 import { createAionServer } from "./aion/server.mjs";
 
@@ -23,13 +23,13 @@ const steps = [];
 function proved(label) { steps.push(label); console.log(`  ok  ${label}`); }
 
 async function open(dataRoot, exportRoot) {
-  const bridge = new SyntheticDeveloperAgentBridgeV1();
+  const developerAgents = new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]);
   const app = await createAionServer({
     repositoryRoot, dataRoot, exportRoot,
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(),
     providers: [new DeterministicModelProviderV1()],
-    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(bridge, repositoryRoot)]),
-    developerBridge: bridge,
+    capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot)]),
+    developerAgents,
   });
   const address = await app.listen(0);
   assert.equal(address.address, "127.0.0.1", "the Command Center must bind loopback only");
@@ -127,9 +127,33 @@ async function scenario(root, announce) {
     say("a model proposal earns no authority: it is validated, queued for approval, and can be denied");
 
     const bridgeTask = await call("action.propose", { capabilityId: "aion.developer.task.v1", input: { instruction: "Report the bounded synthetic developer status" } });
+    assert.match(bridgeTask.approval.summary, /read-only developer-agent task/u, "an unstated boundary is read-only, and the owner is told so before approving");
+    const writingTask = await call("action.propose", { capabilityId: "aion.developer.task.v1", input: { instruction: "Report the bounded synthetic developer status", mode: "workspace-write" } });
+    assert.notEqual(bridgeTask.action.inputDigest, writingTask.action.inputDigest, "a read-only approval can never be spent on a writing run");
     await call("approval.decide", { id: bridgeTask.approval.id, approve: true });
-    assert.equal((await call("action.execute", { id: bridgeTask.action.id })).exitCode, 0);
-    say("the developer-agent bridge runs only as an approved, repository-scoped capability");
+    const bridgeResult = await call("action.execute", { id: bridgeTask.action.id });
+    assert.equal(bridgeResult.exitCode, 0);
+    assert.equal(bridgeResult.mode, "read-only");
+    await assert.rejects(call("action.execute", { id: writingTask.action.id }), /one-shot/u);
+    await call("approval.decide", { id: (await view()).state.approvals.find((a) => a.actionId === writingTask.action.id).id, approve: false });
+    say("a developer-agent task is read-only unless the owner approves a writing boundary, and the boundary is bound into the approval digest");
+
+    const handoff = await call("chat.send", { id: conversation, content: "developer: review the repository and tell me what tests are failing" });
+    assert.equal(handoff.proposedActions[0].capabilityId, "aion.developer.task.v1");
+    assert.equal(handoff.proposedActions[0].input.mode, "read-only");
+    assert.equal(handoff.proposedActions[0].state, "awaiting-approval");
+    const handoffApproval = (await view()).state.approvals.find((a) => a.actionId === handoff.proposedActions[0].id);
+    await call("approval.decide", { id: handoffApproval.id, approve: true });
+    assert.equal((await call("action.execute", { id: handoff.proposedActions[0].id })).exitCode, 0);
+    say("a repository question asked in Chat becomes an approval-gated read-only developer-agent task and reports back, with no copy/paste between tools");
+
+    const inventory = (await view()).developerBridges;
+    assert.ok(inventory.length >= 1 && inventory.some((entry) => entry.selected), "Settings can see every discovered bridge and which one is selected");
+    for (const entry of inventory) {
+      assert.equal(entry.account, "signed-in", "executable availability and account health are reported separately");
+      for (const command of entry.commands) assert.equal(command.args.includes("Report the bounded synthetic developer status"), false, "instruction text is never an argument");
+    }
+    say("every discovered developer bridge discloses its exact argument vector, and no instruction text ever becomes an argument");
 
     const archive = join(imports, "conversations.json");
     await writeFile(archive, JSON.stringify([{ title: "Imported neutral chat", mapping: {
