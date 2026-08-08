@@ -30,6 +30,8 @@ const BUSINESS = "Harbourline Goods";        // fictional
 const SUPPLIER = "Ridgeway Supply";          // fictional
 const steps = [];
 const proved = (label) => { steps.push(label); console.log(`  ok  ${label}`); };
+/** Prints a refusal in AION's own words, so the evidence is what it said rather than a paraphrase. */
+const because = (message) => console.log(`      ${message}`);
 
 /** A scripted research corpus. Reserved `.invalid` names; the provider opens no socket. */
 const CORPUS = {
@@ -135,6 +137,7 @@ try {
   const verdict = await call("research.check-url", { url: "http://169.254.169.254/latest/meta-data/" });
   assert.equal(verdict.allowed, false);
   proved("the URL guard refuses your own network and the cloud metadata address before any request is made");
+  because(verdict.reason);
 
   await call("research.approve", { id: job.id });
   const completed = await call("research.run", { id: job.id });
@@ -237,8 +240,9 @@ try {
   await call("project.advance", { id: project.id, stage: "owner-approved", reason: "Looks right to me." });
   await call("project.deployment", { id: project.id, deployment: { target: "a public host", summary: "Put it where the clinic can use it.", consequences: "Anyone with the address could read notes. This cannot be undone once seen." } });
   await call("project.approve", { id: project.id, stage: "deployed", note: "I accept the consequences." });
-  await refuse("project.advance", { id: project.id, stage: "deployed", reason: "go" }, /AION cannot deploy/u);
-  proved("AION prepares and records a deployment and then refuses to perform one: approving intent does not conjure a capability");
+  const denied = await refuse("project.advance", { id: project.id, stage: "deployed", reason: "go" }, /AION cannot deploy/u);
+  proved("AION cannot deploy: it prepares and records a deployment, and then refuses to perform one");
+  because(denied);
 
   // --- The command router -----------------------------------------------------------------
   const routed = await call("command.route", { text: "Run the AION verification suite and have Claude analyze the result." });

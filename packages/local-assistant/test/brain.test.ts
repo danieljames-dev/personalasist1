@@ -250,6 +250,30 @@ test("brain policy governs an ordinary chat turn, not only the Brain screen", as
   await assert.rejects(() => service.sendMessage(conversation.id, "Hello"), /Local Only is set|offline/iu);
 });
 
+test("Local Only vetoes a third-party provider without breaking an ordinary local chat", async () => {
+  // The regression this guards: Local Only must veto the *chosen* endpoint when it is a third
+  // party, and must not veto a local one merely because the primary endpoint is a different
+  // local one. Getting that wrong refuses an offline chat with a message about third parties.
+  const service = await assistant([new DeterministicModelProviderV1(), new BoundaryModelProviderV1("remote-generic", "remote", "A remote boundary provider.")]);
+  const conversation = await service.createConversation("Local Only check");
+  await service.updateBrainSettings({ mode: "local-only" });
+  assert.equal((await service.brainSettings()).primaryEndpointId, OFFLINE_ENDPOINT_ID);
+
+  // The selected provider is "deterministic"; the primary endpoint is "deterministic-offline".
+  // Two different local identifiers, and the chat must still run.
+  const local = await service.chatDisclosure(conversation.id);
+  assert.equal(local.allowed, true, "an ordinary local chat is unaffected by Local Only");
+  assert.equal(local.endpoint?.id, "deterministic");
+  assert.equal(local.requiresDisclosure, false);
+  const turn = await service.sendMessage(conversation.id, "Hello");
+  assert.ok(turn.message.content.length > 0);
+
+  await service.updateSettings({ remoteDisclosureAccepted: true, providerId: "remote-generic" });
+  const vetoed = await service.chatDisclosure(conversation.id);
+  assert.equal(vetoed.allowed, false, "and a third party is still vetoed");
+  assert.match(vetoed.reason, /remote-generic is a third-party service/u);
+});
+
 test("the brain boundary states that a model owns no history", () => {
   assert.deepEqual(BRAIN_BOUNDARY.modelOwns, []);
   assert.ok(BRAIN_BOUNDARY.aionOwns.includes("Memory"));

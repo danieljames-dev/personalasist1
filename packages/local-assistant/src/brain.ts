@@ -478,12 +478,18 @@ export function routeSelectedProvider(settings: BrainSettingsV1, endpoint: Brain
   const endpoints = settings.endpoints.some((entry) => entry.id === endpoint.id)
     ? settings.endpoints
     : [...settings.endpoints, endpoint];
-  const mode: RouterModeV1 = settings.mode === "local-only" ? "local-only" : "manual";
-  const scoped: BrainSettingsV1 = { ...settings, mode, manualEndpointId: endpoint.id, endpoints };
+  /*
+   * Local Only is the one mode that can veto the owner's explicit choice, and it does so only
+   * when the chosen endpoint is the thing Local Only exists to exclude. An owner-controlled
+   * endpoint is routed as the deliberate selection it is -- routing it through the Local Only
+   * branch instead would let the router pick a *different* owner-controlled endpoint and then
+   * report the mismatch as a refusal, which would break an ordinary local chat with a message
+   * about third parties that had nothing to do with what happened.
+   */
+  const vetoed = settings.mode === "local-only" && !isOwnerControlled(endpoint);
+  const scoped: BrainSettingsV1 = { ...settings, mode: vetoed ? "local-only" : "manual", manualEndpointId: endpoint.id, endpoints };
   const decision = routeRequest(scoped, request);
-  // In Local Only the router ignores `manualEndpointId`, so a refusal there means the chosen
-  // endpoint was excluded rather than merely outranked. Say which, so the message is actionable.
-  if (settings.mode === "local-only" && decision.allowed && decision.endpoint?.id !== endpoint.id) {
+  if (vetoed) {
     return { ...decision, allowed: false, endpoint: null, disclosure: null, requiresDisclosure: false, requiresApproval: false,
       reason: `Local Only is set and ${endpoint.label} is a third-party service, so AION will not use it. Choose a local or owner-controlled endpoint, or change the mode.` };
   }
