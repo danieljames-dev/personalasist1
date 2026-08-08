@@ -7,7 +7,7 @@ import type {
   IsoTimestamp, RelationshipQueryV1, RelationshipV1, SalesCountsV1, SalesMetricsEntryV1,
   MigrationRecordV1, StateRepositoryV1, TaskStateV1, TaskV1, VerificationRunV1, WorkspaceIdV1,
 } from "./contracts.js";
-import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, SALES_COUNT_KEYS } from "./contracts.js";
+import { DEFAULT_WORKSPACE, SALES_COUNT_KEYS } from "./contracts.js";
 import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
 import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buildInteraction, lastInteraction, queryCustomers } from "./sales.js";
 import { buildRelationship, queryRelationships } from "./relationships.js";
@@ -17,10 +17,14 @@ import { buildClaim, promoteClaim, supersedeClaim } from "./knowledge.js";
 import type { BrainEndpointV1, BrainHealthV1, BrainRuntimePortV1, BrainRuntimeV1, BrainSettingsV1, RouterModeV1, RoutingDecisionV1, RoutingRequestV1 } from "./brain.js";
 import {
   BRAIN_BOUNDARY, BRAIN_RUNTIMES, OFFLINE_ENDPOINT_ID, ROUTER_MODES, buildEndpoint,
-  endpointForProvider, independenceReport, rentedGpuEndpoint, routeRequest, routeSelectedProvider,
+  endpointForProvider, independenceReport, isOwnerControlled, rentedGpuEndpoint, routeRequest,
+  routeSelectedProvider,
 } from "./brain.js";
 import type { EvaluationCaseResultV1, EvaluationCaseV1, EvaluationRunV1 } from "./evaluation.js";
-import { EVALUATION_SUITE, compareEvaluations, runEvaluationSuite, summariseEvaluation } from "./evaluation.js";
+import { EVALUATION_SUITE, EVALUATION_VERSION, compareEvaluations, detectDegenerateResponses, runEvaluationSuite, summariseEvaluation } from "./evaluation.js";
+import { CompositeCanonicalInferenceV1, bindInferenceEnvelope, redactInferenceDetail } from "./canonical-inference.js";
+import type { CodeSandboxPortV1 } from "./code-sandbox.js";
+import { splitStructuredProposals } from "./structured-output.js";
 import type { OpportunityLinkKindV1, OpportunityV1 } from "./product-studio.js";
 import {
   applyOpportunityEdit, buildCompetitorNote, buildExperiment, buildOpportunity, buildSpecification,
@@ -82,6 +86,11 @@ type AssistantPorts = {
    * rented one — a machine it cannot health-check is a machine it cannot honestly call ready.
    */
   brainRuntime?: BrainRuntimePortV1;
+  /**
+   * Optional. Evaluator-only code sandbox. Ordinary Chat never resolves this port.
+   * Absent means code cases grade structurally only.
+   */
+  codeSandbox?: CodeSandboxPortV1;
 };
 
 /**
@@ -168,24 +177,13 @@ function salientEvidence(run: VerificationRunV1, budget = 2600): string {
 }
 
 /**
- * Splits provider text into the message the owner sees and the proposals AION must revalidate.
+ * Production structured-output split — same canonical parser as evaluation.
  * Proposal lines are never stored in the message body and never carry execution authority.
+ * Reasoning/thinking text must not be passed here.
  */
 function splitProviderProposals(response: string): { body: string; actions: Array<{ capabilityId: unknown; input: unknown }>; memories: Array<{ content: unknown; category: unknown }>; malformed: number } {
-  const kept: string[] = []; const actions = []; const memories = []; let malformed = 0;
-  for (const line of response.split(/\r?\n/u)) {
-    const isAction = line.startsWith(PROPOSE_ACTION_PREFIX);
-    const isMemory = line.startsWith(PROPOSE_MEMORY_PREFIX);
-    if (!isAction && !isMemory) { kept.push(line); continue; }
-    const payload = line.slice((isAction ? PROPOSE_ACTION_PREFIX : PROPOSE_MEMORY_PREFIX).length).trim();
-    let parsed: unknown;
-    try { parsed = JSON.parse(payload); } catch { malformed += 1; continue; }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { malformed += 1; continue; }
-    const record = parsed as Record<string, unknown>;
-    if (isAction) actions.push({ capabilityId: record.capabilityId, input: record.input });
-    else memories.push({ content: record.content, category: record.category });
-  }
-  return { body: kept.join("\n").trim(), actions, memories, malformed };
+  const split = splitStructuredProposals(response);
+  return { body: split.body, actions: split.actions, memories: split.memories, malformed: split.malformed };
 }
 
 export class AionAssistantV1 {
@@ -362,74 +360,130 @@ export class AionAssistantV1 {
   }
   async deleteConversation(id: string): Promise<void> { await this.mutate((state) => { find(state.conversations, id, "Conversation"); state.conversations = state.conversations.filter((item) => item.id !== id); this.activity(state, "chat", "conversation.delete", "Conversation deleted.", id); }); }
   /**
-   * Streams one provider turn. Chunks are yielded to the caller as they arrive; the assistant
-   * message and any revalidated proposals are persisted once the turn completes.
+   * Streams one Chat turn through the canonical inference path.
+   *
+   * Routing produces a binding execution contract. The selected endpoint, context limits, and
+   * disclosure originate from that decision — Chat does not recompute them, and does not call a
+   * ModelProviderV1 port directly after routing has completed.
    */
   async *streamMessage(conversationId: string, content: string): AsyncGenerator<string, ChatTurnV1, void> {
     const body = required(content, "Message", 100_000);
     await this.mutate((state) => { const conversation = find(state.conversations, conversationId, "Conversation"); const message: ChatMessageV1 = { id: this.ports.ids.next("message"), role: "owner", content: body, createdAt: this.ports.clock.now(), providerId: null }; conversation.messages.push(message); conversation.updatedAt = message.createdAt; this.activity(state, "chat", "message.owner", "Owner message stored locally.", conversationId); });
-    const snap = await this.snapshot(); const conversation = find(snap.conversations, conversationId, "Conversation"); const provider = this.ports.providers.find((item) => item.id === snap.settings.providerId); if (!provider) throw new Error("Configured provider is unavailable.");
-    if (provider.location === "remote" && !snap.settings.remoteDisclosureAccepted) throw new Error("Remote-provider disclosure is not accepted.");
-    /*
-     * Brain policy governs this turn, not just the Brain screen.
-     *
-     * The owner already chose a provider in Settings and that choice is respected, but offline
-     * mode and Local Only are not preferences the chat path gets to ignore. Routing the explicit
-     * choice through the same function the Brain screen uses is what stops a second, quieter
-     * policy growing here.
-     */
-    const decision = this.#routeChat(snap, conversation, provider);
-    if (!decision.allowed) throw new Error(decision.reason);
-    if (decision.requiresDisclosure && decision.disclosure && !snap.settings.remoteDisclosureAccepted) {
+    const snap = await this.snapshot();
+    const conversation = find(snap.conversations, conversationId, "Conversation");
+    const decision = this.#routeChat(snap, conversation);
+    if (!decision.allowed || !decision.endpoint || !decision.context) throw new Error(decision.reason);
+    if (decision.requiresApproval && decision.disclosure && !isOwnerControlled(decision.endpoint) && !snap.settings.remoteDisclosureAccepted) {
       throw new Error(`${decision.disclosure.statement} Accept the remote-provider disclosure in Settings before this can run.`);
     }
     if (this.controllers.has(`chat:${conversationId}`)) throw new Error("This conversation already has a request in flight.");
-    const controller = new AbortController(); this.controllers.set(`chat:${conversationId}`, controller); let response = "";
+    const controller = new AbortController();
+    this.controllers.set(`chat:${conversationId}`, controller);
+    const endpointId = decision.endpoint.id;
     try {
-      // Memory context is scoped to the conversation's own workspace. Work material never reaches
-      // a personal conversation, and personal material never reaches a work one.
-      const memories = conversation.memoryContextEnabled ? snap.memories.filter((item) => item.enabled && item.workspace === conversation.workspace).slice(0, 20).map(({ id, content: memoryContent, category }) => ({ id, content: memoryContent, category })) : [];
-      for await (const chunk of provider.stream({ conversationId, messages: conversation.messages, memoryContext: memories, model: snap.settings.model, signal: controller.signal })) {
+      if (controller.signal.aborted) throw new Error("Chat request cancelled.");
+      const envelope = bindInferenceEnvelope(decision, {
+        conversationId,
+        messages: conversation.messages,
+        memories: snap.memories,
+        workspace: conversation.workspace,
+        memoryContextEnabled: conversation.memoryContextEnabled,
+        purpose: "chat",
+      });
+      const inference = new CompositeCanonicalInferenceV1(this.ports.brainRuntime ?? null, this.ports.providers);
+      let answerRaw = "";
+      for await (const chunk of inference.stream(envelope, controller.signal)) {
         if (controller.signal.aborted) throw new Error("Chat request cancelled.");
-        response += chunk; if (response.length > 100_000) throw new Error("Provider response exceeds the V1 size limit.");
-        yield chunk;
+        // Reasoning is isolated with zero authority: never yielded to the UI as authoritative text
+        // and never passed to the structured-action parser.
+        if (chunk.channel !== "answer") continue;
+        answerRaw += chunk.text;
+        if (answerRaw.length > 100_000) throw new Error("Provider response exceeds the V1 size limit.");
+        yield chunk.text;
       }
-      const split = splitProviderProposals(response);
-      const message = await this.mutate((state) => { const current = find(state.conversations, conversationId, "Conversation"); const stored: ChatMessageV1 = { id: this.ports.ids.next("message"), role: "assistant", content: required(split.body, "Provider response", 100_000), createdAt: this.ports.clock.now(), providerId: provider.id }; current.messages.push(stored); current.updatedAt = stored.createdAt; this.activity(state, "chat", "message.assistant", `${provider.location} provider response stored (${provider.id}).`, conversationId); if (split.malformed) this.activity(state, "failure", "proposal.discard", `${split.malformed} malformed provider proposal(s) discarded.`, conversationId, "failed"); return structuredClone(stored); });
-      const proposedActions: AgentActionV1[] = []; const proposedMemories: MemoryV1[] = [];
+      const split = splitProviderProposals(answerRaw);
+      const message = await this.mutate((state) => {
+        const current = find(state.conversations, conversationId, "Conversation");
+        const stored: ChatMessageV1 = {
+          id: this.ports.ids.next("message"),
+          role: "assistant",
+          content: required(split.body, "Provider response", 100_000),
+          createdAt: this.ports.clock.now(),
+          providerId: endpointId,
+        };
+        current.messages.push(stored);
+        current.updatedAt = stored.createdAt;
+        this.activity(state, "chat", "message.assistant", `Brain endpoint response stored (${endpointId}).`, conversationId);
+        if (split.malformed) this.activity(state, "failure", "proposal.discard", `${split.malformed} malformed provider proposal(s) discarded.`, conversationId, "failed");
+        return structuredClone(stored);
+      });
+      const proposedActions: AgentActionV1[] = [];
+      const proposedMemories: MemoryV1[] = [];
       for (const proposal of split.actions) {
-        try { proposedActions.push((await this.proposeAction(required(proposal.capabilityId, "Proposed capability", 200), proposal.input && typeof proposal.input === "object" && !Array.isArray(proposal.input) ? proposal.input as Record<string, unknown> : {}, { origin: "provider-proposal", conversationId })).action); }
-        catch { await this.mutate((state) => { this.activity(state, "failure", "proposal.reject", "A provider action proposal failed validation and was rejected.", conversationId, "denied"); }); }
+        try {
+          proposedActions.push((await this.proposeAction(
+            required(proposal.capabilityId, "Proposed capability", 200),
+            proposal.input && typeof proposal.input === "object" && !Array.isArray(proposal.input) ? proposal.input as Record<string, unknown> : {},
+            { origin: "provider-proposal", conversationId },
+          )).action);
+        } catch {
+          await this.mutate((state) => { this.activity(state, "failure", "proposal.reject", "A provider action proposal failed validation and was rejected.", conversationId, "denied"); });
+        }
       }
       for (const proposal of split.memories) {
-        try { proposedMemories.push(await this.createMemory({ content: required(proposal.content, "Proposed memory", 20_000), category: MEMORY_CATEGORIES.includes(proposal.category as MemoryV1["category"]) ? proposal.category as MemoryV1["category"] : "semantic", confirmation: "unconfirmed", sourceRef: `conversation:${conversationId}` })); }
-        catch { await this.mutate((state) => { this.activity(state, "failure", "proposal.reject", "A provider memory proposal failed validation and was rejected.", conversationId, "denied"); }); }
+        try {
+          proposedMemories.push(await this.createMemory({
+            content: required(proposal.content, "Proposed memory", 20_000),
+            category: MEMORY_CATEGORIES.includes(proposal.category as MemoryV1["category"]) ? proposal.category as MemoryV1["category"] : "semantic",
+            confirmation: "unconfirmed",
+            sourceRef: `conversation:${conversationId}`,
+          }));
+        } catch {
+          await this.mutate((state) => { this.activity(state, "failure", "proposal.reject", "A provider memory proposal failed validation and was rejected.", conversationId, "denied"); });
+        }
       }
       return { message, proposedActions, proposedMemories };
     } catch (error) {
-      await this.mutate((state) => { this.activity(state, "failure", "chat.failed", "Chat request failed or was cancelled; private content omitted.", conversationId, "failed"); }); throw error;
-    } finally { this.controllers.delete(`chat:${conversationId}`); }
+      const detail = redactInferenceDetail(error instanceof Error ? error.message : error);
+      await this.mutate((state) => { this.activity(state, "failure", "chat.failed", `Chat request failed or was cancelled; private content omitted. ${detail}`, conversationId, "failed"); });
+      throw error instanceof Error ? error : new Error(detail);
+    } finally {
+      this.controllers.delete(`chat:${conversationId}`);
+    }
   }
   /**
-   * The routing decision for one chat turn.
+   * The binding routing decision for one chat turn.
    *
-   * A provider configured before the endpoint registry existed is represented as an endpoint from
-   * what AION actually knows about it — its declared location — rather than being exempted from
-   * policy for having been configured earlier.
+   * Uses the Brain router as selector plus policy authority. decision.endpoint is the endpoint
+   * that will actually execute — it is not discarded.
+   *
+   * Compatibility: legacy settings.providerId remains a non-destructive selection signal. When it
+   * names a fixed non-floor provider port, that selection is the binding subject and still passes
+   * through brain vetoes (Local Only, offline). When it names the deterministic floor, routeRequest
+   * chooses among registered Brain endpoints so a configured local/owner endpoint can become the
+   * real Chat path.
    */
-  #routeChat(state: AssistantStateV1, conversation: ConversationV1, provider: ModelProviderV1): RoutingDecisionV1 {
+  #routeChat(state: AssistantStateV1, conversation: ConversationV1): RoutingDecisionV1 {
     const workspace = requireWorkspace(state.workspaces, conversation.workspace);
-    const endpoint = state.brain.endpoints.find((entry) => entry.id === provider.id)
-      ?? endpointForProvider(provider, state.settings.model, this.ports.clock.now());
     const memoryIncluded = conversation.memoryContextEnabled && state.memories.some((item) => item.enabled && item.workspace === conversation.workspace);
-    return routeSelectedProvider(state.brain, endpoint, {
+    const request = {
       workspace: workspace.id,
       workspaceLabel: workspace.label,
-      needs: ["conversation"],
+      needs: ["conversation"] as const,
       includesMemory: memoryIncluded,
       includesWorkOrCustomerInformation: workspace.kind === "work",
       contextClasses: ["this conversation", ...(memoryIncluded ? ["enabled Memory records for this workspace"] : [])],
-    });
+    };
+    const provider = this.ports.providers.find((item) => item.id === state.settings.providerId);
+    const legacyNonFloor = provider
+      && provider.id !== "deterministic"
+      && provider.id !== OFFLINE_ENDPOINT_ID;
+    if (legacyNonFloor) {
+      const endpoint = state.brain.endpoints.find((entry) => entry.id === provider.id)
+        ?? endpointForProvider(provider, state.settings.model, this.ports.clock.now());
+      return routeSelectedProvider(state.brain, endpoint, request);
+    }
+    return routeRequest(state.brain, request);
   }
   /**
    * What would leave the machine if this conversation were continued right now. The Command Center
@@ -438,9 +492,7 @@ export class AionAssistantV1 {
   async chatDisclosure(conversationId: string): Promise<RoutingDecisionV1> {
     const state = await this.snapshot();
     const conversation = find(state.conversations, conversationId, "Conversation");
-    const provider = this.ports.providers.find((item) => item.id === state.settings.providerId);
-    if (!provider) throw new Error("Configured provider is unavailable.");
-    return this.#routeChat(state, conversation, provider);
+    return this.#routeChat(state, conversation);
   }
   async sendMessage(conversationId: string, content: string): Promise<ChatTurnV1> {
     const turn = this.streamMessage(conversationId, content);
@@ -1096,14 +1148,22 @@ export class AionAssistantV1 {
    * to send to a third-party endpoint. Results are evidence about a configuration on a day, and the
    * summary says exactly that rather than implying something about the model in general.
    */
-  async recordEvaluation(endpointId: string, results: readonly EvaluationCaseResultV1[], startedAt: string): Promise<EvaluationRunV1> {
+  async recordEvaluation(endpointId: string, results: readonly EvaluationCaseResultV1[], startedAt: string, extras: { degenerateResponse?: boolean; status?: EvaluationRunV1["status"]; codeGradingMode?: EvaluationRunV1["codeGradingMode"] } = {}): Promise<EvaluationRunV1> {
     return this.mutate((state) => {
       const endpoint = find(state.brain.endpoints, endpointId, "Endpoint");
-      const run = summariseEvaluation(results, {
+      const codeMode = extras.codeGradingMode
+        ?? results.find((entry) => entry.codeGradingMode)?.codeGradingMode
+        ?? "structural";
+      const summaryContext: Parameters<typeof summariseEvaluation>[1] = {
         id: this.ports.ids.next("evaluation"), endpointId, endpointLabel: endpoint.label, model: endpoint.model,
         runtime: endpoint.runtime, location: endpoint.location, isFloor: endpoint.id === OFFLINE_ENDPOINT_ID,
         startedAt, completedAt: this.ports.clock.now(),
-      });
+        evaluatorVersion: EVALUATION_VERSION,
+        codeGradingMode: codeMode,
+        degenerateResponse: extras.degenerateResponse === true,
+      };
+      if (extras.status) summaryContext.status = extras.status;
+      const run = summariseEvaluation(results, summaryContext);
       state.evaluations.unshift(run);
       if (state.evaluations.length > 50) state.evaluations.length = 50;
       this.activity(state, "provider", "brain.evaluate", run.summary, run.id, run.passed === run.total ? "success" : "failed");
@@ -1113,13 +1173,9 @@ export class AionAssistantV1 {
   /**
    * Runs the suite against one configured endpoint and records the result.
    *
-   * The same function, the same fixtures, and the same order for the deterministic floor, a local
-   * runtime, and a machine rented by the minute. A rented endpoint is an ordinary registered
-   * endpoint by the time it gets here, which is exactly why it needs no special path: if it needed
-   * one, "measured against the same suite" would not be true.
-   *
-   * Evaluating a rented endpoint counts as using it, so the idle timeout is reset — otherwise a
-   * long benchmark would be stopped halfway through for inactivity.
+   * Evaluation drains the same streaming-first brain runtime path Chat uses. Code cases use the
+   * evaluator-only CodeSandboxPort when configured; otherwise structural-only grading is persisted
+   * and disclosed. A rented endpoint is an ordinary registered endpoint by the time it gets here.
    */
   async evaluateEndpoint(endpointId: string, signal?: AbortSignal): Promise<EvaluationRunV1> {
     const runtime = this.ports.brainRuntime;
@@ -1130,14 +1186,22 @@ export class AionAssistantV1 {
     const startedAt = this.ports.clock.now();
     const session = endpoint.rental ? state.gpuSessions.find((entry) => entry.id === endpoint.rental?.gpuSessionId) : undefined;
     if (session) await this.touchGpuSession(session.id);
-    const results = await runEvaluationSuite(endpoint, EVALUATION_SUITE, runtime, { ...(signal ? { signal } : {}), redact: redactCredentials });
-    const run = await this.recordEvaluation(endpointId, results, startedAt);
+    const controller = signal ?? new AbortController().signal;
+    if (controller.aborted) throw new Error("Evaluation cancelled.");
+    const results = await runEvaluationSuite(endpoint, EVALUATION_SUITE, runtime, {
+      signal: controller,
+      redact: (value) => redactInferenceDetail(redactCredentials(value)),
+      sandbox: this.ports.codeSandbox ?? null,
+    });
+    const degenerate = detectDegenerateResponses(results.map((entry) => entry.excerpt));
+    const codeMode = results.find((entry) => entry.codeGradingMode)?.codeGradingMode ?? "structural";
+    const run = await this.recordEvaluation(endpointId, results, startedAt, { degenerateResponse: degenerate, codeGradingMode: codeMode });
     if (session) {
       await this.touchGpuSession(session.id);
       await this.mutate((draft) => {
         const stored = draft.gpuSessions.find((entry) => entry.id === session.id);
         if (!stored) return;
-        stored.events.push({ at: this.ports.clock.now(), event: "evaluated", detail: `${run.passed}/${run.total} synthetic cases passed, median ${run.medianLatencyMs} ms. Measured on the same suite as the deterministic floor.` });
+        stored.events.push({ at: this.ports.clock.now(), event: "evaluated", detail: `${run.passed}/${run.total} synthetic cases passed, median ${run.medianLatencyMs} ms. Evaluator ${run.evaluatorVersion}, code grading ${run.codeGradingMode}. Measured on the same suite as the deterministic floor.` });
       });
     }
     return run;

@@ -637,16 +637,40 @@ export class InProcessBrainRuntimeV1 implements BrainRuntimePortV1 {
   }
   /** Nothing to detect: this adapter is the provider, and it is always already here. */
   async detect(): Promise<Array<{ runtime: BrainRuntimeV1; baseUrl: string; models: string[]; detail: string }>> { return []; }
-  async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
+  async *stream(
+    endpoint: BrainEndpointV1,
+    request: {
+      prompt: string;
+      context: readonly string[];
+      messages?: readonly { role: string; content: string }[];
+      memoryContext?: readonly { id: string; content: string; category: string }[];
+      signal: AbortSignal;
+    },
+  ): AsyncIterable<import("./brain.js").BrainStreamChunkV1> {
     if (!this.supports(endpoint)) fail("The in-process evaluator serves the offline provider only. Use a transport adapter for an endpoint with an address.");
-    const startedAt = Date.now();
-    // The evaluation case is one prompt with optional context, so it is presented as a single
-    // owner turn plus the context the harness declared. No conversation and no history.
-    const messages = [{ id: "evaluation", role: "owner" as const, content: request.prompt, createdAt: this.now(), providerId: null }];
-    const memoryContext = request.context.map((content, index) => ({ id: `context-${index}`, content, category: "semantic" as const }));
-    let text = "";
+    if (request.signal.aborted) throw new Error("Inference cancelled.");
+    const messages = request.messages?.length
+      ? request.messages.map((message, index) => ({
+        id: `evaluation-${index}`,
+        role: (message.role === "assistant" ? "assistant" : "owner") as "owner" | "assistant",
+        content: message.content,
+        createdAt: this.now(),
+        providerId: null,
+      }))
+      : [{ id: "evaluation", role: "owner" as const, content: request.prompt, createdAt: this.now(), providerId: null }];
+    const memoryContext = (request.memoryContext?.length
+      ? request.memoryContext
+      : request.context.map((content, index) => ({ id: `context-${index}`, content, category: "semantic" as const }))
+    ).map((entry) => ({ id: entry.id, content: entry.content, category: (entry.category as "semantic") || "semantic" as const }));
     for await (const chunk of this.provider.stream({ conversationId: "evaluation", messages, memoryContext, model: endpoint.model, signal: request.signal })) {
-      text += chunk;
+      yield { channel: "answer", text: chunk };
+    }
+  }
+  async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
+    const startedAt = Date.now();
+    let text = "";
+    for await (const chunk of this.stream(endpoint, request)) {
+      if (chunk.channel === "answer") text += chunk.text;
       if (text.length > 100_000) break;
     }
     return { text, latencyMs: Date.now() - startedAt };
@@ -685,6 +709,24 @@ export class CompositeBrainRuntimeV1 implements BrainRuntimePortV1 {
     const found = [];
     for (const adapter of this.adapters) found.push(...await adapter.detect(signal));
     return found;
+  }
+  async *stream(
+    endpoint: BrainEndpointV1,
+    request: {
+      prompt: string;
+      context: readonly string[];
+      messages?: readonly { role: string; content: string }[];
+      memoryContext?: readonly { id: string; content: string; category: string }[];
+      signal: AbortSignal;
+    },
+  ): AsyncIterable<import("./brain.js").BrainStreamChunkV1> {
+    const adapter = this.#forEndpoint(endpoint);
+    if (typeof adapter.stream === "function") {
+      for await (const chunk of adapter.stream(endpoint, request)) yield chunk;
+      return;
+    }
+    const result = await adapter.complete(endpoint, request);
+    if (result.text) yield { channel: "answer", text: result.text };
   }
   async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
     return this.#forEndpoint(endpoint).complete(endpoint, request);

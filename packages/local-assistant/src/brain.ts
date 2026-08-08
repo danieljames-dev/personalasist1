@@ -756,12 +756,23 @@ export function independenceReport(settings: BrainSettingsV1): {
  * and provenance system; the model receives selected context for one turn and owns no history.
  */
 /**
+ * One streamed inference chunk from a brain runtime adapter.
+ *
+ * Reasoning/thinking is a separate channel with zero authority. Only answer text is eligible for
+ * structured control parsing or durable conversation storage.
+ */
+export interface BrainStreamChunkV1 {
+  channel: "answer" | "reasoning";
+  text: string;
+}
+
+/**
  * The port an adapter implements to actually reach a runtime.
  *
- * Deliberately three narrow operations rather than a client: ask an endpoint whether it is there,
- * look for runtimes on this computer at their documented addresses, and run one bounded
- * completion. No streaming, no sessions, no model management — anything more would put decisions
- * in the adapter that belong in the policy above.
+ * Streaming-first: `stream` is the canonical primitive when the adapter can provide it.
+ * `complete` remains a bounded drain-and-measure operation for evaluation and health probes.
+ * No sessions, no model management — anything more would put decisions in the adapter that belong
+ * in the policy above.
  */
 export interface BrainRuntimePortV1 {
   /**
@@ -781,7 +792,21 @@ export interface BrainRuntimePortV1 {
    * addresses, never a search of the computer, and it starts nothing and installs nothing.
    */
   detect(signal: AbortSignal): Promise<Array<{ runtime: BrainRuntimeV1; baseUrl: string; models: string[]; detail: string }>>;
-  /** One bounded completion, used by the evaluation harness. */
+  /**
+   * Preferred streaming primitive. When present, Chat and evaluation both drain this path.
+   * Reasoning channels must never be treated as executable control output.
+   */
+  stream?(
+    endpoint: BrainEndpointV1,
+    request: {
+      prompt: string;
+      context: readonly string[];
+      messages?: readonly { role: string; content: string }[];
+      memoryContext?: readonly { id: string; content: string; category: string }[];
+      signal: AbortSignal;
+    },
+  ): AsyncIterable<BrainStreamChunkV1>;
+  /** Bounded drain-and-measure wrapper around the stream (or a single completion). */
   complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }>;
 }
 

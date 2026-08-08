@@ -91,7 +91,7 @@ export const OPEN_MODEL_PROFILES: readonly ModelProfileV1[] = [
 
 /** A model small enough to be worth trying on an ordinary laptop, for the local tier. */
 export const LOCAL_MODEL_PROFILES: readonly ModelProfileV1[] = [
-  { id: "qwen3-4b", family: "Qwen", minimumVramGb: 4, contextTokens: 32_768, note: "Runs on modest hardware, including CPU-only with patience. A sensible first local model." },
+  { id: "qwen3:4b-instruct", family: "Qwen", minimumVramGb: 4, contextTokens: 32_768, note: "Non-thinking instruct variant. The recommended first CPU/local benchmark — not the thinking-only qwen3:4b tag." },
   { id: "llama-3.2-3b", family: "Llama", minimumVramGb: 3, contextTokens: 8_192, note: "Very small. Useful for routing and classification rather than reasoning." },
   { id: "mistral-7b", family: "Mistral", minimumVramGb: 6, contextTokens: 32_768, note: "A common baseline local model. Needs about 6 GB quantised." },
   { id: "qwen3-8b", family: "Qwen", minimumVramGb: 8, contextTokens: 32_768, note: "Noticeably better than the 4B at structured output, if the machine can hold it." },
