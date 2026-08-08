@@ -159,51 +159,149 @@ export async function detectLocalRuntimes(signal) {
 }
 
 /**
- * One bounded completion, used by the evaluation harness.
+ * Streaming-first HTTP completion.
  *
- * There is no streaming and no conversation state: a case is one prompt in, one string out, so the
- * measurement is of the endpoint rather than of AION's plumbing around it.
+ * Ollama uses NDJSON (`stream: true`). OpenAI-compatible runtimes use SSE. Partial chunks are
+ * buffered; one HTTP chunk is never assumed to be one JSON object. AbortSignal propagates,
+ * including already-aborted. Reasoning/thinking fields are emitted on a separate channel with
+ * zero authority.
  */
-export async function completeOnce(endpoint, { prompt, context = [], signal }) {
+export async function *streamOnce(endpoint, { prompt, context = [], signal }) {
+  if (signal?.aborted) throw new Error("Inference cancelled.");
   const base = validateEndpointUrl(endpoint.baseUrl, endpoint.location);
   const token = credential(endpoint);
   const system = context.length ? `Context you may use:\n${context.join("\n")}` : "";
-  const startedAt = Date.now();
+  const messages = [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }];
+  const headers = {
+    accept: "application/json",
+    "content-type": "application/json",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  };
 
-  if (endpoint.runtime === "ollama") {
-    const result = await request(new URL("/api/chat", base).toString(), {
-      method: "POST", timeoutMs: COMPLETION_TIMEOUT_MS, signal,
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      body: {
-        model: endpoint.model, stream: false,
-        messages: [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }],
-      },
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMPLETION_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (signal?.aborted) throw new Error("Inference cancelled.");
+    if (endpoint.runtime === "ollama") {
+      const response = await globalThis.fetch(new URL("/api/chat", base).toString(), {
+        method: "POST",
+        signal: controller.signal,
+        redirect: "error",
+        headers,
+        body: JSON.stringify({ model: endpoint.model, stream: true, messages }),
+      });
+      if (!response.ok) throw new Error(`The endpoint answered with status ${response.status}.`);
+      yield * parseOllamaNdjson(response, controller.signal);
+      return;
+    }
+
+    const response = await globalThis.fetch(new URL("/v1/chat/completions", base).toString(), {
+      method: "POST",
+      signal: controller.signal,
+      redirect: "error",
+      headers,
+      body: JSON.stringify({ model: endpoint.model, stream: true, messages }),
     });
-    if (!result.ok) throw new Error(`The endpoint answered with status ${result.status}.`);
-    const parsed = JSON.parse(result.text);
-    return { text: String(parsed?.message?.content ?? ""), latencyMs: Date.now() - startedAt };
+    if (!response.ok) throw new Error(`The endpoint answered with status ${response.status}.`);
+    yield * parseOpenAiSse(response, controller.signal);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
+}
 
-  const result = await request(new URL("/v1/chat/completions", base).toString(), {
-    method: "POST", timeoutMs: COMPLETION_TIMEOUT_MS, signal,
-    headers: token ? { authorization: `Bearer ${token}` } : {},
-    body: {
-      model: endpoint.model, stream: false,
-      messages: [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }],
-    },
-  });
-  if (!result.ok) throw new Error(`The endpoint answered with status ${result.status}.`);
-  const parsed = JSON.parse(result.text);
-  return { text: String(parsed?.choices?.[0]?.message?.content ?? ""), latencyMs: Date.now() - startedAt };
+async function *parseOllamaNdjson(response, signal) {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let total = 0;
+  for (;;) {
+    if (signal.aborted) { await reader.cancel(); throw new Error("Inference cancelled."); }
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error("Provider response exceeds the V1 size limit."); }
+    buffer += decoder.decode(value, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      let parsed;
+      try { parsed = JSON.parse(line); }
+      catch { throw new Error("Malformed Ollama NDJSON frame."); }
+      const thinking = parsed?.message?.thinking;
+      if (typeof thinking === "string" && thinking) yield { channel: "reasoning", text: thinking };
+      const content = parsed?.message?.content;
+      if (typeof content === "string" && content) yield { channel: "answer", text: content };
+      if (parsed?.done) return;
+    }
+  }
+  const tail = buffer.trim();
+  if (tail) {
+    try {
+      const parsed = JSON.parse(tail);
+      const thinking = parsed?.message?.thinking;
+      if (typeof thinking === "string" && thinking) yield { channel: "reasoning", text: thinking };
+      const content = parsed?.message?.content;
+      if (typeof content === "string" && content) yield { channel: "answer", text: content };
+    } catch { throw new Error("Malformed Ollama NDJSON frame."); }
+  }
+}
+
+async function *parseOpenAiSse(response, signal) {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let total = 0;
+  for (;;) {
+    if (signal.aborted) { await reader.cancel(); throw new Error("Inference cancelled."); }
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error("Provider response exceeds the V1 size limit."); }
+    buffer += decoder.decode(value, { stream: true });
+    let separator;
+    while ((separator = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, separator).replace(/\r$/u, "");
+      buffer = buffer.slice(separator + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data) continue;
+      if (data === "[DONE]") return;
+      let parsed;
+      try { parsed = JSON.parse(data); }
+      catch { throw new Error("Malformed OpenAI-compatible SSE frame."); }
+      const delta = parsed?.choices?.[0]?.delta ?? {};
+      const reasoning = delta.reasoning_content ?? delta.reasoning ?? parsed?.choices?.[0]?.message?.reasoning;
+      if (typeof reasoning === "string" && reasoning) yield { channel: "reasoning", text: reasoning };
+      const content = delta.content ?? parsed?.choices?.[0]?.message?.content;
+      if (typeof content === "string" && content) yield { channel: "answer", text: content };
+    }
+  }
 }
 
 /**
- * Runs the synthetic evaluation suite against one endpoint.
- *
- * The loop itself lives in the domain package, so the deterministic floor, a local runtime, and a
- * machine rented by the minute are all measured by literally the same function rather than by two
- * implementations that could drift apart. This wrapper adds only the transport-layer redaction:
- * an error from an HTTP adapter can carry a local path or a key, and neither belongs in evidence.
+ * One bounded completion as a thin drain of the streaming primitive.
+ */
+export async function completeOnce(endpoint, request) {
+  const startedAt = Date.now();
+  let text = "";
+  for await (const chunk of streamOnce(endpoint, request)) {
+    if (chunk.channel === "answer") text += chunk.text;
+    if (text.length > 100_000) throw new Error("Provider response exceeds the V1 size limit.");
+  }
+  return { text, latencyMs: Date.now() - startedAt };
+}
+
+/**
+ * Active evaluation entry point. Uses the domain suite loop with transport redaction.
+ * Dead-path note: callers must use this (or service.evaluateEndpoint) rather than a parallel
+ * scorer. Redaction is active on the evaluation error path.
  */
 export async function runEvaluation(endpoint, suite, runtime, signal) {
   return runEvaluationSuite(endpoint, suite, runtime, { ...(signal ? { signal } : {}), redact: safeDetail });
@@ -219,5 +317,6 @@ export class HttpBrainRuntimeV1 {
   supports(endpoint) { return endpoint.runtime !== "deterministic-offline" && Boolean(endpoint.baseUrl); }
   probe(endpoint, signal) { return probeEndpoint(endpoint, signal, this.now); }
   detect(signal) { return detectLocalRuntimes(signal); }
+  stream(endpoint, request) { return streamOnce(endpoint, request); }
   complete(endpoint, request_) { return completeOnce(endpoint, request_); }
 }

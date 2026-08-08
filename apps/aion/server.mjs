@@ -11,6 +11,7 @@ import {
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
 import { HttpBrainRuntimeV1 } from "./brain-runtime.mjs";
+import { createDockerCodeSandboxV1 } from "./code-sandbox.mjs";
 import { DEFAULT_VAST_CREDENTIAL_VARIABLE, VastAiInfrastructureV1 } from "./vast-ai.mjs";
 import { PublicUrlResearchProviderV1, SearxngSearchProviderV1 } from "./research-fetch.mjs";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
@@ -152,12 +153,14 @@ export async function createAionServer(options = {}) {
     : null);
   const brainRuntime = options.brainRuntime
     ?? new CompositeBrainRuntimeV1(new InProcessBrainRuntimeV1(offlineProvider), new HttpBrainRuntimeV1());
+  const codeSandbox = options.codeSandbox ?? createDockerCodeSandboxV1();
   const service = new AionAssistantV1({
     repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
     providers,
     capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
+    codeSandbox,
     /*
      * V1.3 activates real public-URL research, and the guards around it are unchanged.
      *
