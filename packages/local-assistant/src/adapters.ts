@@ -16,6 +16,8 @@ import type { BrainEndpointV1, BrainHealthV1, BrainRuntimePortV1, BrainRuntimeV1
 import { defaultBrainSettings, offlineEndpoint } from "./brain.js";
 import type { ResearchLimitsV1, ResearchProviderV1, ResearchScopeV1, ResearchSourceV1 } from "./research.js";
 import type { BuildPipelinePortV1, PipelineRunV1, PipelineStepV1 } from "./projects.js";
+import type { GpuInfrastructurePortV1, GpuOfferV1, GpuSessionStateV1 } from "./gpu.js";
+import { normaliseOffer } from "./gpu.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -94,7 +96,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
     workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
-    brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [],
+    brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
@@ -241,6 +243,8 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.evaluations)) clone.evaluations = [];
   if (!Array.isArray(clone.lessons)) clone.lessons = [];
   if (!Array.isArray(clone.projects)) clone.projects = [];
+  if (!Array.isArray(clone.gpuProposals)) clone.gpuProposals = [];
+  if (!Array.isArray(clone.gpuSessions)) clone.gpuSessions = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
@@ -631,6 +635,81 @@ export class CompositeBrainRuntimeV1 implements BrainRuntimePortV1 {
   }
   async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
     return this.#forEndpoint(endpoint).complete(endpoint, request);
+  }
+}
+
+/**
+ * The GPU infrastructure AION ships with: none.
+ *
+ * Same reasoning as the research provider. A default that could already rent hardware would make
+ * every spending control in `gpu.ts` a description rather than a boundary. Configuring a provider
+ * is an owner act, and so is naming the environment variable its credential lives in.
+ */
+export class UnavailableGpuInfrastructureV1 implements GpuInfrastructurePortV1 {
+  readonly provider = "synthetic" as const;
+  constructor(private readonly detail = "No GPU infrastructure provider is configured. AION rents nothing until you configure one and name the environment variable holding its credential.") {}
+  async credentialStatus(): Promise<{ configured: boolean; variableName: string; detail: string }> {
+    return { configured: false, variableName: "", detail: this.detail };
+  }
+  async discover(): Promise<GpuOfferV1[]> { fail(this.detail); }
+  async start(): Promise<never> { fail(this.detail); }
+  async stop(): Promise<never> { fail(this.detail); }
+  async status(): Promise<never> { fail(this.detail); }
+}
+
+/**
+ * A deterministic GPU provider for tests and the demo. It rents nothing, spends nothing, and
+ * opens no socket: offers come from a scripted table and an "instance" is a string.
+ *
+ * It exists so the whole money path — discovery, scoring, a bounded proposal, approval, the stop
+ * conditions, teardown — can be proved end to end without a card being charged. Every test of the
+ * spending boundary runs against this.
+ */
+export class SyntheticGpuInfrastructureV1 implements GpuInfrastructurePortV1 {
+  readonly provider = "synthetic" as const;
+  private started = new Map<string, { offerRef: string; stopped: boolean }>();
+  constructor(
+    private readonly offers: ReadonlyArray<Record<string, unknown>> = [],
+    private readonly options: { credentialConfigured?: boolean; variableName?: string } = {},
+  ) {}
+  async credentialStatus(): Promise<{ configured: boolean; variableName: string; detail: string }> {
+    const variableName = this.options.variableName ?? "AION_SYNTHETIC_GPU_TOKEN";
+    const configured = this.options.credentialConfigured !== false;
+    return {
+      configured, variableName,
+      detail: configured
+        ? `A synthetic credential reference is configured as ${variableName}. No real value exists and nothing is stored.`
+        : `${variableName} is not set. AION reads the value only at the moment of a request and never stores it.`,
+    };
+  }
+  async discover(filter: { minimumVramGb: number; maxHourlyCents: number; minimumReliability: number | null; limit: number }, signal: AbortSignal): Promise<GpuOfferV1[]> {
+    if (signal.aborted) fail("Discovery cancelled.");
+    const at = "2030-01-01T00:00:00.000Z";
+    return this.offers
+      .map((raw) => normaliseOffer(raw, "synthetic", at))
+      .filter((offer) => offer.vramGb * offer.gpuCount >= filter.minimumVramGb)
+      .filter((offer) => offer.hourlyCents + offer.storageCentsPerHour <= filter.maxHourlyCents)
+      .filter((offer) => filter.minimumReliability === null || offer.reliability === null || offer.reliability >= filter.minimumReliability)
+      .slice(0, Math.max(1, filter.limit));
+  }
+  async start(request: { offerRef: string; modelId: string; runtime: string }, signal: AbortSignal): Promise<{ instanceRef: string; detail: string }> {
+    if (signal.aborted) fail("Provisioning cancelled.");
+    const instanceRef = `synthetic-instance-${this.started.size + 1}`;
+    this.started.set(instanceRef, { offerRef: request.offerRef, stopped: false });
+    return { instanceRef, detail: `Synthetic instance for ${request.modelId} on ${request.runtime}. Nothing was rented and nothing was charged.` };
+  }
+  async stop(instanceRef: string): Promise<{ stopped: boolean; detail: string }> {
+    const entry = this.started.get(instanceRef);
+    if (!entry) return { stopped: false, detail: "That synthetic instance does not exist." };
+    entry.stopped = true;
+    return { stopped: true, detail: "Synthetic instance stopped and torn down." };
+  }
+  async status(instanceRef: string): Promise<{ state: GpuSessionStateV1; detail: string; endpointUrl: string | null }> {
+    const entry = this.started.get(instanceRef);
+    if (!entry) return { state: "failed", detail: "That synthetic instance does not exist.", endpointUrl: null };
+    return entry.stopped
+      ? { state: "stopped", detail: "Synthetic instance is stopped.", endpointUrl: null }
+      : { state: "running", detail: "Synthetic instance is running.", endpointUrl: "https://synthetic-gpu.invalid/v1" };
   }
 }
 

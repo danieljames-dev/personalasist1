@@ -41,6 +41,15 @@ import {
 } from "./projects.js";
 import type { RoutingResultV1 } from "./command-router.js";
 import { assertNoExecutableText, routeCommand } from "./command-router.js";
+import type {
+  ExperimentRecommendationV1, GpuInfrastructurePortV1, GpuOfferV1, GpuProvisioningProposalV1,
+  GpuRequirementV1, GpuSessionV1, ModelProfileV1, OfferAssessmentV1,
+} from "./gpu.js";
+import {
+  LOCAL_MODEL_PROFILES, OPEN_MODEL_PROFILES, V13_BUDGET_CEILING_CENTS, assessOffer,
+  buildProvisioningProposal, describeProposal, estimatedCents, recommendExperiments,
+  redactCredentials, revalidateProposal, runtimeMinutes, sessionStanding, shutdownDecision,
+} from "./gpu.js";
 import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
@@ -58,6 +67,8 @@ type AssistantPorts = {
   research?: ResearchProviderV1;
   /** Optional. Absent means AION cannot build or preview anything, which is also the default. */
   pipeline?: BuildPipelinePortV1;
+  /** Optional. Absent means AION can rent nothing and spend nothing, which is also the default. */
+  gpu?: GpuInfrastructurePortV1;
 };
 const TASK_TRANSITIONS: Record<TaskStateV1, readonly TaskStateV1[]> = {
   proposed: ["ready", "cancelled"], ready: ["in-progress", "blocked", "completed", "cancelled"],
@@ -159,6 +170,14 @@ export class AionAssistantV1 {
     // Restore the owner's bridge choice. A bridge that is no longer installed must not block
     // startup: AION keeps its default and reports the real availability in Settings.
     try { this.ports.developerAgents.select(this.state.settings.developerBridgeId); } catch { this.ports.developerAgents.select(""); }
+    /*
+     * Enforce rented-GPU stop conditions on startup, before anything else runs.
+     *
+     * If AION was closed or crashed while a session was live, its deadline is still in the state
+     * file and this is where it gets honoured. That is the whole reason the deadline is stored
+     * rather than held in a timer: whatever starts next reaches the same conclusion.
+     */
+    if (this.ports.gpu) void this.enforceGpuLimits().catch(() => {});
   }
   #recordMigration(state: AssistantStateV1, record: MigrationRecordV1 | null): void {
     if (!record) return;
@@ -403,7 +422,14 @@ export class AionAssistantV1 {
   }
   async updateRoutine(id: string, change: { enabled?: boolean; intervalMinutes?: number }): Promise<void> { await this.mutate((state) => { const routine = find(state.routines, id, "Routine"); if (change.intervalMinutes !== undefined) { if (!Number.isSafeInteger(change.intervalMinutes) || change.intervalMinutes < 1 || change.intervalMinutes > 525_600) throw new Error("Routine interval is invalid."); routine.intervalMinutes = change.intervalMinutes; } if (change.enabled !== undefined) routine.enabled = change.enabled; const at = this.ports.clock.now(); routine.nextRunAt = routine.enabled ? new Date(Date.parse(at) + routine.intervalMinutes * 60_000).toISOString() : null; routine.history.push({ at, actor: "owner", change: `updated:${routine.enabled ? "enabled" : "disabled"}` }); this.activity(state, "routine", "routine.update", "Routine schedule updated.", id); }); }
   async runRoutine(id: string, reason: "manual" | "scheduled" = "manual"): Promise<void> { await this.mutate((state) => { const routine = find(state.routines, id, "Routine"); if (reason === "scheduled" && !routine.enabled) return; const at = this.ports.clock.now(); routine.lastRunAt = at; routine.nextRunAt = routine.enabled ? new Date(Date.parse(at) + routine.intervalMinutes * 60_000).toISOString() : null; routine.history.push({ at, actor: "aion", change: `run:${reason}` }); this.activity(state, "routine", "routine.run", `Routine ran locally (${reason}); ${routine.capabilityIds.length} capability proposal(s).`, id); }); }
-  async tick(): Promise<number> { const state = await this.snapshot(); if (!state.settings.schedulerEnabled) return 0; const now = Date.parse(this.ports.clock.now()); const due = state.routines.filter((item) => item.enabled && item.nextRunAt && Date.parse(item.nextRunAt) <= now); for (const routine of due) await this.runRoutine(routine.id, "scheduled"); return due.length; }
+  /**
+   * The ordinary tick. Routine scheduling is gated on the owner's setting; GPU stop conditions are
+   * not, because a rented instance costs money whether or not the scheduler is switched on.
+   */
+  async tick(): Promise<number> {
+    await this.enforceGpuLimits();
+    const state = await this.snapshot(); if (!state.settings.schedulerEnabled) return 0; const now = Date.parse(this.ports.clock.now()); const due = state.routines.filter((item) => item.enabled && item.nextRunAt && Date.parse(item.nextRunAt) <= now); for (const routine of due) await this.runRoutine(routine.id, "scheduled"); return due.length;
+  }
 
   async createPlan(goal: string, steps: Array<{ title: string; description?: string; dependencies?: number[]; requiredCapabilities?: string[]; approvalRequired?: boolean; expectedOutput?: string }>): Promise<PlanV1> {
     return this.mutate((state) => { if (!steps.length || steps.length > 100) throw new Error("Plan requires 1-100 steps."); const planId = this.ports.ids.next("plan"); const stepIds = steps.map(() => this.ports.ids.next("plan-step")); const plan: PlanV1 = { id: planId, workspace: state.settings.activeWorkspace, goal: required(goal, "Plan goal", 2000), status: "proposed", createdAt: this.ports.clock.now(), provenance: { sourceType: "owner", sourceRef: "owner-plan", recordedAt: this.ports.clock.now() }, steps: steps.map((step, index) => { const dependencies = (step.dependencies ?? []).map((dependency) => { if (!Number.isSafeInteger(dependency) || dependency < 0 || dependency >= index) throw new Error("Plan dependencies must point to earlier steps."); return stepIds[dependency]!; }); const capabilities = unique(step.requiredCapabilities ?? [], "Plan capabilities"); for (const capability of capabilities) if (!this.ports.capabilities.get(capability)) throw new Error("Plan requires an unknown capability."); return { id: stepIds[index]!, order: index + 1, title: required(step.title, "Plan step title", 500), description: step.description ? required(step.description, "Plan step description", 5000) : "", dependencies, requiredCapabilities: capabilities, approvalRequired: step.approvalRequired ?? capabilities.some((id) => this.ports.capabilities.get(id)?.approval !== "never"), expectedOutput: required(step.expectedOutput ?? "Completed step", "Expected output", 1000), status: "proposed", blockedReason: null, taskId: null }; }) }; state.plans.unshift(plan); this.activity(state, "plan", "plan.create", "Reviewable plan proposal created; no execution authority granted.", plan.id, "pending"); return structuredClone(plan); });
@@ -1232,6 +1258,250 @@ export class AionAssistantV1 {
     });
     assertNoExecutableText(result);
     return result;
+  }
+
+  // --- Rented GPU capacity ------------------------------------------------------------------------
+  /**
+   * Whether a GPU provider credential is configured, by name only.
+   *
+   * AION never searches for a credential. This asks the configured adapter whether the environment
+   * variable it was told to read is present, and reports the variable's *name*. The value is never
+   * read into anything AION stores, displayed, or logged.
+   */
+  async gpuCredentialStatus(): Promise<{ provider: string; configured: boolean; variableName: string; detail: string }> {
+    const port = this.ports.gpu;
+    if (!port) return { provider: "none", configured: false, variableName: "", detail: "No GPU infrastructure provider is configured. AION rents nothing until you configure one." };
+    const status = await port.credentialStatus();
+    return { provider: port.provider, ...status, detail: redactCredentials(status.detail) };
+  }
+  /**
+   * Discovers capacity and scores it against what the work needs.
+   *
+   * Capability first, then price: an offer that cannot hold the model is ineligible at any price.
+   * Discovery reads; it never starts anything, and the recommendations are explicitly three
+   * framings of an experiment rather than one "best" machine.
+   */
+  async discoverGpuOffers(input: Record<string, unknown> = {}): Promise<{
+    requirement: GpuRequirementV1;
+    assessments: OfferAssessmentV1[];
+    recommendations: ExperimentRecommendationV1[];
+    ceilingCents: number;
+    note: string;
+  }> {
+    const port = this.ports.gpu;
+    if (!port) throw new Error("No GPU infrastructure provider is configured, so there is nothing to discover.");
+    const credential = await port.credentialStatus();
+    if (!credential.configured) {
+      throw new Error(`${redactCredentials(credential.detail)} Set ${credential.variableName || "the provider's credential environment variable"} in the shell that starts AION, then try again. AION stores only the variable name.`);
+    }
+    const modelId = required(input.modelId ?? "qwen3-14b", "Model", 200);
+    const profile = OPEN_MODEL_PROFILES.find((entry) => entry.id === modelId);
+    const requirement: GpuRequirementV1 = {
+      modelId,
+      minimumVramGb: Number.isSafeInteger(input.minimumVramGb) ? input.minimumVramGb as number : profile?.minimumVramGb ?? 16,
+      maxHourlyCents: Number.isSafeInteger(input.maxHourlyCents) ? input.maxHourlyCents as number : 120,
+      minimumReliability: Number.isSafeInteger(input.minimumReliability) ? input.minimumReliability as number : null,
+      runtime: required(input.runtime ?? "vllm", "Runtime", 100),
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const offers = await port.discover({ ...requirement, limit: Number.isSafeInteger(input.limit) ? input.limit as number : 20 }, controller.signal);
+      const assessments = offers.map((offer) => assessOffer(offer, requirement));
+      const recommendations = recommendExperiments(assessments, requirement);
+      await this.mutate((state) => {
+        this.activity(state, "provider", "gpu.discover", `Looked at ${offers.length} ${port.provider} offer(s) for ${modelId}: ${assessments.filter((entry) => entry.eligible).length} could hold it. Nothing was started and nothing was charged.`, null);
+      });
+      return {
+        requirement, assessments, recommendations, ceilingCents: V13_BUDGET_CEILING_CENTS,
+        note: `Discovery only. The ceiling for this milestone is ${V13_BUDGET_CEILING_CENTS} cents in total, and every recommendation is sized well inside it. VRAM figures for open models are owner-editable planning estimates, not guarantees.`,
+      };
+    } finally { clearTimeout(timer); }
+  }
+  /**
+   * Prepares a bounded provisioning proposal.
+   *
+   * Preparing is not approving and approving is not starting. The proposal carries a digest over
+   * the money-bearing fields, so an approval cannot later be spent on a different offer, a
+   * different price, or a longer run.
+   */
+  async proposeGpuProvisioning(input: Record<string, unknown> = {}): Promise<GpuProvisioningProposalV1 & { disclosure: string }> {
+    const port = this.ports.gpu;
+    if (!port) throw new Error("No GPU infrastructure provider is configured.");
+    const offer = input.offer as GpuOfferV1 | undefined;
+    if (!offer || typeof offer !== "object") throw new Error("A provisioning proposal needs the exact offer it is for.");
+    return this.mutate((state) => {
+      const proposal = buildProvisioningProposal(
+        {
+          offer, modelId: String(input.modelId ?? ""), runtime: String(input.runtime ?? "vllm"),
+          maxRuntimeMinutes: Number(input.maxRuntimeMinutes ?? 30),
+          maxSpendCents: Number(input.maxSpendCents ?? 0),
+          idleTimeoutMinutes: Number(input.idleTimeoutMinutes ?? 10),
+        },
+        { id: this.ports.ids.next("gpu-proposal"), now: this.ports.clock.now(), digest: digestValue },
+      );
+      state.gpuProposals.unshift(proposal);
+      if (state.gpuProposals.length > 100) state.gpuProposals.length = 100;
+      this.activity(state, "approval", "gpu.propose", `${describeProposal(proposal)} Nothing has been rented; this is waiting for your decision.`, proposal.id, "pending");
+      return { ...structuredClone(proposal), disclosure: describeProposal(proposal) };
+    });
+  }
+  /** Owner-only. Approving binds the exact quoted numbers and nothing else. */
+  async decideGpuProposal(id: string, approve: boolean): Promise<GpuProvisioningProposalV1> {
+    return this.mutate((state) => {
+      const proposal = find(state.gpuProposals, id, "GPU proposal");
+      if (proposal.state !== "pending") throw new Error(`That proposal is ${proposal.state} and can no longer be decided.`);
+      proposal.state = approve ? "approved" : "denied";
+      proposal.decidedAt = this.ports.clock.now();
+      this.activity(state, "approval", approve ? "gpu.approve" : "gpu.deny", approve
+        ? `You approved at most ${proposal.maxRuntimeMinutes} minutes and at most ${proposal.maxSpendCents} cents on ${proposal.gpuName}. AION cannot raise either.`
+        : "GPU provisioning denied. Nothing was rented.", id, approve ? "success" : "denied");
+      return structuredClone(proposal);
+    });
+  }
+  /**
+   * Starts an approved session.
+   *
+   * Three things must hold and each is checked here: the proposal is approved, the price has not
+   * moved beyond what was approved, and the digest still matches the offer being started. The
+   * hard-stop deadline is computed now and *stored*, so it survives AION being closed or crashing —
+   * the failure being designed against is not a bug, it is an instance nobody remembered.
+   */
+  async startGpuSession(proposalId: string): Promise<GpuSessionV1> {
+    const port = this.ports.gpu;
+    if (!port) throw new Error("No GPU infrastructure provider is configured.");
+    const snapshot = await this.snapshot();
+    const proposal = find(snapshot.gpuProposals, proposalId, "GPU proposal");
+    if (proposal.state !== "approved") throw new Error(`Provisioning needs an approved proposal; this one is ${proposal.state}.`);
+
+    // Re-check the market before spending. A price that moved invalidates the approval rather
+    // than quietly costing more than the owner agreed to.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const offers = await port.discover({ minimumVramGb: 1, maxHourlyCents: 1_000_000, minimumReliability: null, limit: 200 }, controller.signal);
+      const current = offers.find((entry) => entry.offerRef === proposal.offerRef) ?? null;
+      const revalidated = revalidateProposal(proposal, current, this.ports.clock.now());
+      if (revalidated.state === "invalidated") {
+        await this.mutate((state) => {
+          const stored = find(state.gpuProposals, proposalId, "GPU proposal");
+          stored.state = "invalidated"; stored.invalidationReason = revalidated.invalidationReason; stored.decidedAt = this.ports.clock.now();
+          this.activity(state, "failure", "gpu.invalidated", `Provisioning refused: ${revalidated.invalidationReason} Nothing was rented.`, proposalId, "denied");
+        });
+        throw new Error(revalidated.invalidationReason ?? "The approved proposal is no longer valid.");
+      }
+
+      const started = await port.start({ offerRef: proposal.offerRef, modelId: proposal.modelId, runtime: proposal.runtime }, controller.signal);
+      return await this.mutate((state) => {
+        const stored = find(state.gpuProposals, proposalId, "GPU proposal");
+        stored.state = "consumed";
+        const at = this.ports.clock.now();
+        const session: GpuSessionV1 = {
+          id: this.ports.ids.next("gpu-session"), provider: port.provider, proposalId,
+          instanceRef: started.instanceRef, state: "running",
+          gpuName: proposal.gpuName, vramGb: proposal.vramGb, modelId: proposal.modelId, runtime: proposal.runtime,
+          endpointId: null,
+          hourlyCents: proposal.quotedHourlyCents + proposal.quotedStorageCentsPerHour,
+          maxRuntimeMinutes: proposal.maxRuntimeMinutes, maxSpendCents: proposal.maxSpendCents,
+          idleTimeoutMinutes: proposal.idleTimeoutMinutes,
+          hardStopAt: new Date(Date.parse(at) + proposal.maxRuntimeMinutes * 60_000).toISOString(),
+          startedAt: at, stoppedAt: null, lastActivityAt: at,
+          measuredMinutes: 0, estimatedCents: 0, teardownConfirmed: false,
+          events: [
+            { at: proposal.proposedAt, event: "proposed", detail: describeProposal(proposal) },
+            { at: proposal.decidedAt ?? at, event: "approved", detail: `Owner approved at most ${proposal.maxRuntimeMinutes} minutes and ${proposal.maxSpendCents} cents.` },
+            { at, event: "started", detail: redactCredentials(started.detail) },
+          ],
+        };
+        state.gpuSessions.unshift(session);
+        this.activity(state, "provider", "gpu.start", `Rented GPU session started on ${session.gpuName}. It must be gone by ${session.hardStopAt}; that deadline is stored, not held in a timer.`, session.id);
+        return structuredClone(session);
+      });
+    } finally { clearTimeout(timer); }
+  }
+  /** Records that a session did some work, which is what the idle timeout measures against. */
+  async touchGpuSession(id: string): Promise<void> {
+    await this.mutate((state) => {
+      const session = state.gpuSessions.find((entry) => entry.id === id);
+      if (session && session.state === "running") session.lastActivityAt = this.ports.clock.now();
+    });
+  }
+  /**
+   * Stops a session and confirms teardown.
+   *
+   * `teardownConfirmed` is only ever set from the provider actually saying it stopped. If it says
+   * otherwise, the session records that plainly and tells the owner to look themselves, because a
+   * machine AION believes is off while it is still billing is the worst possible outcome.
+   */
+  async stopGpuSession(id: string, reason = "owner stop"): Promise<GpuSessionV1> {
+    const port = this.ports.gpu;
+    if (!port) throw new Error("No GPU infrastructure provider is configured.");
+    const snapshot = await this.snapshot();
+    const session = find(snapshot.gpuSessions, id, "GPU session");
+    if (!session.instanceRef) throw new Error("That session never started, so there is nothing to stop.");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    let outcome: { stopped: boolean; detail: string };
+    try { outcome = await port.stop(session.instanceRef, controller.signal); }
+    catch (error) { outcome = { stopped: false, detail: redactCredentials(error instanceof Error ? error.message : "the provider did not answer") }; }
+    finally { clearTimeout(timer); }
+
+    return this.mutate((state) => {
+      const stored = find(state.gpuSessions, id, "GPU session");
+      const at = this.ports.clock.now();
+      stored.stoppedAt = at;
+      stored.measuredMinutes = runtimeMinutes({ ...stored, stoppedAt: at }, at);
+      stored.estimatedCents = estimatedCents({ ...stored, stoppedAt: at }, at);
+      stored.state = outcome.stopped ? "stopped" : "failed";
+      stored.teardownConfirmed = outcome.stopped;
+      stored.events.push({ at, event: "stop-requested", detail: reason });
+      stored.events.push({ at, event: outcome.stopped ? "teardown-confirmed" : "failed", detail: redactCredentials(outcome.detail) });
+      this.activity(state, outcome.stopped ? "provider" : "failure", "gpu.stop",
+        outcome.stopped
+          ? `Rented session stopped after ${stored.measuredMinutes} minute(s), about ${stored.estimatedCents} cents. Teardown confirmed by the provider.`
+          : `AION asked the provider to stop the session and did NOT get confirmation: ${redactCredentials(outcome.detail)} Check the provider console yourself — it may still be billing.`,
+        id, outcome.stopped ? "success" : "failed");
+      return structuredClone(stored);
+    });
+  }
+  /**
+   * Enforces every stop condition from stored state.
+   *
+   * Called on the ordinary scheduler tick and on startup, so a session outlives neither its
+   * deadline nor the process that created it. Reading the deadline from state rather than from a
+   * timer is the whole design: whatever runs next reaches the same conclusion.
+   */
+  async enforceGpuLimits(healthy = true): Promise<Array<{ sessionId: string; trigger: string; stopped: boolean }>> {
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    const results: Array<{ sessionId: string; trigger: string; stopped: boolean }> = [];
+    for (const session of state.gpuSessions.filter((entry) => entry.state === "running")) {
+      const decision = shutdownDecision(session, now, healthy);
+      if (!decision.stop) continue;
+      try {
+        await this.stopGpuSession(session.id, `${decision.trigger}: ${decision.reason}`);
+        results.push({ sessionId: session.id, trigger: decision.trigger, stopped: true });
+      } catch {
+        results.push({ sessionId: session.id, trigger: decision.trigger, stopped: false });
+      }
+    }
+    return results;
+  }
+  async gpuSessions(): Promise<Array<GpuSessionV1 & { standing: string; decision: ReturnType<typeof shutdownDecision> }>> {
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    return state.gpuSessions.map((entry) => ({ ...structuredClone(entry), standing: sessionStanding(entry, now), decision: shutdownDecision(entry, now) }));
+  }
+  async gpuProposals(): Promise<Array<GpuProvisioningProposalV1 & { disclosure: string }>> {
+    const state = await this.snapshot();
+    return state.gpuProposals.map((entry) => ({ ...structuredClone(entry), disclosure: describeProposal(entry) }));
+  }
+  /** Model profiles as owner-editable planning estimates, labelled as such wherever shown. */
+  modelProfiles(): { local: readonly ModelProfileV1[]; rented: readonly ModelProfileV1[]; ceilingCents: number; note: string } {
+    return {
+      local: LOCAL_MODEL_PROFILES, rented: OPEN_MODEL_PROFILES, ceilingCents: V13_BUDGET_CEILING_CENTS,
+      note: "VRAM figures are planning estimates for a common quantisation, not guarantees. AION did not measure them and does not download anything.",
+    };
   }
 
   // --- Governed research ------------------------------------------------------------------------

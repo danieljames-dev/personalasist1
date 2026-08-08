@@ -1,5 +1,6 @@
 import type { BrainSettingsV1 } from "./brain.js";
 import type { EvaluationRunV1 } from "./evaluation.js";
+import type { GpuProvisioningProposalV1, GpuSessionV1 } from "./gpu.js";
 import type { LessonV1 } from "./learning.js";
 import type { DevelopmentProjectV1 } from "./projects.js";
 import type { OpportunityV1 } from "./product-studio.js";
@@ -538,6 +539,10 @@ export interface AssistantStateV1 {
   lessons: LessonV1[];
   /** Development projects, from an idea through to something the owner can look at. */
   projects: DevelopmentProjectV1[];
+  /** Bounded rented-GPU provisioning proposals. Newest first; nothing here has been paid for. */
+  gpuProposals: GpuProvisioningProposalV1[];
+  /** Rented GPU sessions. Their stop deadlines live here, not in a timer that dies with AION. */
+  gpuSessions: GpuSessionV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
