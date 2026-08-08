@@ -172,18 +172,25 @@ test("no machine-specific private address is committed, and the startup path rea
   const run = promisify(execFile);
   const { stdout } = await run("git", ["ls-files"], { cwd: repositoryRoot, maxBuffer: 8 * 1024 * 1024 });
   /*
-   * Production source only. The bind address is owner-supplied configuration, so shipped code has
-   * no legitimate reason to contain any private address at all -- which is a sharper rule than
-   * hunting for one particular address, and it cannot be satisfied by hard-coding a different one.
-   * Test files may use documented example addresses; those are fixtures, not configuration.
+   * Runtime source only. The bind address is owner-supplied configuration, so shipped code has no
+   * legitimate reason to contain any private address at all -- a sharper rule than hunting for one
+   * particular address, and one that cannot be satisfied by hard-coding a different one.
+   *
+   * Tests and demos are excused because they are fixtures rather than configuration: a demo that
+   * proves AION refuses to research the router has to name an address that looks like a router.
+   * The exemption is by path and is deliberately narrow -- everything that actually runs when the
+   * owner starts AION is still held to the strict rule.
    */
-  const production = stdout.split(/\r?\n/u).filter((f) =>
-    /\.(ts|mjs|cjs|js)$/u.test(f) && (f.startsWith("apps/") || f.startsWith("scripts/") || /^packages\/[^/]+\/src\//u.test(f)) && !/[./]test\./u.test(f));
-  assert.ok(production.length >= 5, "the production file list resolved");
+  const isFixture = (f) => /[./]test\./u.test(f) || /(?:^|\/)[\w-]*demo\.mjs$/u.test(f);
+  const runtime = stdout.split(/\r?\n/u).filter((f) =>
+    /\.(ts|mjs|cjs|js)$/u.test(f) && (f.startsWith("apps/") || f.startsWith("scripts/") || /^packages\/[^/]+\/src\//u.test(f)) && !isFixture(f));
+  assert.ok(runtime.length >= 5, "the runtime file list resolved");
+  assert.ok(runtime.includes("apps/aion/server.mjs") && runtime.includes("apps/aion-command-center.mjs"), "the startup path is covered by the strict rule");
+  assert.equal(runtime.some((f) => f.endsWith("-demo.mjs")), false, "demos are excused as fixtures");
 
   const privateAddress = /\b(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b/u;
   const offenders = [];
-  for (const file of production) {
+  for (const file of runtime) {
     const text = await readFile(join(repositoryRoot, file), "utf8");
     const line = text.split(/\r?\n/u).findIndex((entry) => privateAddress.test(entry));
     if (line >= 0) offenders.push(`${file}:${line + 1}`);

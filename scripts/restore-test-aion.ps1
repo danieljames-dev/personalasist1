@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 355,
+    [int]      $ExpectedTests = 455,
     [switch]   $DryRun
 )
 
@@ -151,6 +151,7 @@ $result = [ordered]@{
     aionCommand      = 'npm run aion:test'
     aionDemoCommand  = 'npm run aion:demo'
     salesDemoCommand = 'npm run aion:sales:demo'
+    v12DemoCommand   = 'npm run aion:v12:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
@@ -161,6 +162,7 @@ $result = [ordered]@{
     aionResult = $null
     aionDemoResult = $null
     salesDemoResult = $null
+    v12DemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -504,6 +506,27 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'Mobile Sales demo left permanent private runtime state in the restored repository' }
     $result.salesDemoResult = 'PASS'
     Add-Step 'aion-sales-demo-regression' 'PASS' 'complete synthetic Mobile Sales proof, phone pairing, workspace isolation, and cleanup passed'
+
+    Write-Step "running npm run aion:v12:demo"
+    $v12Out = Join-Path $logDir "restore-$Timestamp.v12-demo.out.log"
+    $v12Err = Join-Path $logDir "restore-$Timestamp.v12-demo.err.log"
+    $v12Exit = Invoke-Logged -CommandLine 'npm run aion:v12:demo' -WorkingDirectory $restoreDir -OutFile $v12Out -ErrFile $v12Err
+    if ($v12Exit -ne 0) { throw "npm run aion:v12:demo failed with exit code $v12Exit" }
+    $v12Text = Get-Content -LiteralPath $v12Out -Raw
+    foreach ($required in @(
+        'AION V1.2 demo PASS',
+        'a new workspace starts genuinely empty',
+        'identity and payment material is refused',
+        'never treats a capability preference as consent',
+        'AION cannot deploy',
+        'natural language never becomes shell syntax',
+        'every configured model is deleted and AION still holds',
+        'with no model configured at all')) {
+        if ($v12Text -notmatch [regex]::Escape($required)) { throw "V1.2 demo evidence missing: $required" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.2 demo left permanent private runtime state in the restored repository' }
+    $result.v12DemoResult = 'PASS'
+    Add-Step 'aion-v12-demo-regression' 'PASS' 'complete synthetic V1.2 proof: workspaces, Relationship Core, Product Studio, governed research, model independence, learning, projects, and the command router'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"
