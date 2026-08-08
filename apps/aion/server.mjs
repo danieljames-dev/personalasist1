@@ -8,9 +8,11 @@ import {
   FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   CompositeBrainRuntimeV1, InProcessBrainRuntimeV1,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
-  UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
+  UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
 import { HttpBrainRuntimeV1, runEvaluation } from "./brain-runtime.mjs";
+import { DEFAULT_VAST_CREDENTIAL_VARIABLE, VastAiInfrastructureV1 } from "./vast-ai.mjs";
+import { PublicUrlResearchProviderV1, SearxngSearchProviderV1 } from "./research-fetch.mjs";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
@@ -29,6 +31,8 @@ const MAX_BODY = 1024 * 1024;
 const ASSET_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const CAREER_COMMANDS = new Set(["init", "ingest", "profile", "job:import", "match", "draft", "export", "demo"]);
 const runFile = promisify(execFile);
+/** The environment variable naming an owner-controlled search instance. Optional. */
+const SEARCH_VARIABLE = "AION_SEARCH_BASE_URL";
 
 /** Removes absolute local paths from any text that reaches the browser, logs, or activity. */
 function privacySafe(text) {
@@ -139,6 +143,13 @@ export async function createAionServer(options = {}) {
    */
   const providers = options.providers ?? defaultProviders();
   const offlineProvider = providers.find((entry) => entry.id === "deterministic") ?? providers[0];
+  /*
+   * An owner-controlled search instance, if one is configured. SearXNG is the reference because
+   * the owner can run it themselves; no commercial search API is required or assumed.
+   */
+  const searchProvider = options.searchProvider ?? (process.env[SEARCH_VARIABLE]?.trim()
+    ? new SearxngSearchProviderV1(process.env[SEARCH_VARIABLE].trim())
+    : null);
   const brainRuntime = options.brainRuntime
     ?? new CompositeBrainRuntimeV1(new InProcessBrainRuntimeV1(offlineProvider), new HttpBrainRuntimeV1());
   const service = new AionAssistantV1({
@@ -147,13 +158,28 @@ export async function createAionServer(options = {}) {
     capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
-    // AION ships with no research provider at all. A default that could already reach the
-    // internet would make "governed research" a label rather than a property.
-    research: options.research ?? new UnavailableResearchProviderV1(),
+    /*
+     * V1.3 activates real public-URL research, and the guards around it are unchanged.
+     *
+     * Having a provider does not mean AION browses. A job still needs to be proposed with an
+     * explicit non-local scope, approved by the owner, and bounded by its own limits; the
+     * default scope is local-only, so the ordinary path still makes no request. What changed is
+     * that an approved public-web job can now actually read the pages the owner named.
+     */
+    research: options.research ?? new PublicUrlResearchProviderV1(),
     // No build pipeline by default either. A pipeline that ran a project's own build commands
     // would be the shell exposure the rest of the design exists to avoid, so it stays an explicit
     // future capability rather than something that arrives switched on.
     pipeline: options.pipeline,
+    /*
+     * GPU infrastructure is wired only when the owner has deliberately set the named credential
+     * variable. AION does not search for a key and does not accept one pasted into Chat; the
+     * variable's presence is the whole of the detection. Provisioning stays off regardless:
+     * discovery and pricing are authorised, renting is not.
+     */
+    gpu: options.gpu ?? (process.env[DEFAULT_VAST_CREDENTIAL_VARIABLE]?.trim()
+      ? new VastAiInfrastructureV1({ allowProvisioning: false })
+      : new UnavailableGpuInfrastructureV1(`No GPU infrastructure provider is configured. Set ${DEFAULT_VAST_CREDENTIAL_VARIABLE} in the shell that starts AION to enable Vast.ai discovery. AION stores only the variable name, never the value, and will still not rent anything without an approved bounded proposal.`)),
   });
 
   async function dispatch(input) {
@@ -239,6 +265,16 @@ export async function createAionServer(options = {}) {
       case "project.list": return { projects: await service.projects() };
       // The command router. Resolving proposes; it never executes and never creates anything.
       case "command.route": return service.route(input.text);
+      // Rented GPU capacity. Discovery and pricing only; renting needs an approved proposal.
+      case "gpu.credential": return service.gpuCredentialStatus();
+      case "gpu.discover": return service.discoverGpuOffers(input.filter ?? {});
+      case "gpu.propose": return service.proposeGpuProvisioning(input.proposal ?? {});
+      case "gpu.decide": return service.decideGpuProposal(input.id, input.approve === true);
+      case "gpu.start": return service.startGpuSession(input.id);
+      case "gpu.stop": return service.stopGpuSession(input.id, input.reason ?? "owner stop");
+      case "gpu.enforce": return { stopped: await service.enforceGpuLimits() };
+      case "gpu.sessions": return { sessions: await service.gpuSessions(), proposals: await service.gpuProposals() };
+      case "gpu.models": return service.modelProfiles();
       // The brain. Endpoints are owner-configured; AION never adds one it merely detected.
       case "brain.endpoint.add": return service.addBrainEndpoint(input.endpoint ?? {});
       case "brain.endpoint.remove": return service.removeBrainEndpoint(input.id);
@@ -269,6 +305,12 @@ export async function createAionServer(options = {}) {
       case "research.adopt": return service.adoptResearchFinding(input.id, input.findingId, input.opportunityId);
       case "research.list": return { jobs: await service.researchJobs() };
       case "research.check-url": return service.checkResearchUrl(String(input.url ?? ""));
+      case "research.search": {
+        // Search is entirely optional. Without a configured instance, public-URL research still
+        // works, which is the whole point of keeping the search tier replaceable.
+        if (!searchProvider) throw new Error(`No search provider is configured. Set ${SEARCH_VARIABLE} to a SearXNG-compatible base URL to enable discovery, or supply the URLs yourself — research works either way.`);
+        return { results: await searchProvider.search(String(input.question ?? ""), Number(input.limit ?? 8), AbortSignal.timeout(30_000)) };
+      }
       // Sales-facing relationship operations. Every one of these refuses outside the Work workspace.
       case "customer.create": return service.createCustomer(input.customer ?? {});
       case "customer.update": return service.updateCustomer(input.id, input.change ?? {});
@@ -375,6 +417,10 @@ export async function createAionServer(options = {}) {
           projects: await service.projects(),
           brainBoundary: service.brainBoundary(),
           adaptationBoundary: service.adaptationBoundary(),
+          gpu: { credential: await service.gpuCredentialStatus(), sessions: await service.gpuSessions(), proposals: await service.gpuProposals(), models: service.modelProfiles() },
+          search: searchProvider
+            ? { configured: true, ...(await searchProvider.health()) }
+            : { configured: false, available: false, detail: `No search provider is configured. Set ${SEARCH_VARIABLE} to a SearXNG-compatible base URL if you want discovery; research works without it when you supply the URLs.` },
           // A phone knows it is a phone, so the UI can hide what only the console may change.
           viewer: loopback ? "console" : "device",
           dataRoot: "private/aion", exportRoot: "private/aion/exports",
