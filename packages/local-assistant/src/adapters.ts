@@ -14,6 +14,7 @@ import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFI
 import { builtInWorkspaces } from "./workspaces.js";
 import { defaultBrainSettings, offlineEndpoint } from "./brain.js";
 import type { ResearchLimitsV1, ResearchProviderV1, ResearchScopeV1, ResearchSourceV1 } from "./research.js";
+import type { BuildPipelinePortV1, PipelineRunV1, PipelineStepV1 } from "./projects.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -92,7 +93,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
     workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
-    brain: defaultBrainSettings(GENESIS), evaluations: [],
+    brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
@@ -237,6 +238,8 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   // state file somehow arrives without it.
   if (!clone.brain.endpoints.some((entry) => entry.id === "deterministic-offline")) clone.brain.endpoints = [offlineEndpoint(GENESIS), ...clone.brain.endpoints];
   if (!Array.isArray(clone.evaluations)) clone.evaluations = [];
+  if (!Array.isArray(clone.lessons)) clone.lessons = [];
+  if (!Array.isArray(clone.projects)) clone.projects = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
@@ -534,6 +537,32 @@ export class SyntheticResearchProviderV1 implements ResearchProviderV1 {
       }));
     const unresolved = findings.length ? [] : [`Nothing in the supplied sources addresses "${request.question}".`];
     return { sources, findings, unresolved, costCents: 0 };
+  }
+}
+
+/**
+ * A deterministic build pipeline for tests and the demo. It starts no process and writes no file:
+ * each step returns a scripted outcome, so the project stage machine — which refuses a review
+ * without evidence and a preview without a build — can be proved without a real toolchain.
+ *
+ * `canPublish` is false and the type pins it to false, so a pipeline that could put something
+ * where other people can reach it cannot satisfy this port without changing the port.
+ */
+export class SyntheticBuildPipelineV1 implements BuildPipelinePortV1 {
+  readonly id = "synthetic";
+  readonly canPublish = false as const;
+  constructor(private readonly outcomes: Partial<Record<PipelineStepV1, "passed" | "failed">> = {}) {}
+  async run(step: PipelineStepV1, project: { id: string; title: string }, signal: AbortSignal): Promise<Omit<PipelineRunV1, "id" | "step">> {
+    if (signal.aborted) fail("Pipeline cancelled.");
+    const outcome = this.outcomes[step] ?? "passed";
+    const at = "2030-01-01T00:00:00.000Z";
+    return {
+      startedAt: at, completedAt: at, outcome,
+      output: `synthetic ${step} for "${project.title}" ${outcome}. No process was started and no file was written.`,
+      // Loopback only, and a port nothing is actually listening on: a synthetic preview is a
+      // record that a preview would exist, not a service anyone can reach.
+      previewUrl: step === "preview" && outcome === "passed" ? "http://127.0.0.1:0/preview" : null,
+    };
   }
 }
 

@@ -134,6 +134,10 @@ export async function createAionServer(options = {}) {
     // AION ships with no research provider at all. A default that could already reach the
     // internet would make "governed research" a label rather than a property.
     research: options.research ?? new UnavailableResearchProviderV1(),
+    // No build pipeline by default either. A pipeline that ran a project's own build commands
+    // would be the shell exposure the rest of the design exists to avoid, so it stays an explicit
+    // future capability rather than something that arrives switched on.
+    pipeline: options.pipeline,
   });
 
   async function dispatch(input) {
@@ -193,6 +197,26 @@ export async function createAionServer(options = {}) {
       case "opportunity.specify": return service.setOpportunitySpecification(input.id, input.specification ?? {});
       case "opportunity.assess": return service.assessOpportunity(input.id);
       case "opportunity.list": return { opportunities: await service.opportunities() };
+      // Learning. A lesson carries its class, so a suggestion is never quoted as settled practice.
+      case "lesson.record": return service.recordLesson(input.lesson ?? {});
+      case "lesson.promote": return service.promoteLesson(input.id, input.to, input.reason);
+      case "lesson.outcome": return service.recordLessonOutcome(input.id, input.outcome ?? {});
+      case "lesson.enable": return service.setLessonEnabled(input.id, input.enabled === true);
+      case "lesson.list": return { lessons: await service.lessons(input.scope ?? {}), summary: await service.learningSummary() };
+      case "lesson.boundary": return service.adaptationBoundary();
+      // Development projects. Stages are not skipped and no agent authorises itself.
+      case "project.create": return service.createProject(input.project ?? {});
+      case "project.specify": return service.setProjectSpecification(input.id, input.specification ?? {});
+      case "project.plan": return service.setProjectPlan(input.id, input.steps ?? []);
+      case "project.proposal": return service.recordAgentProposal(input.id, input.proposal ?? {});
+      case "project.verification": return service.attachProjectVerification(input.id, input.verificationId);
+      case "project.step": return service.runProjectStep(input.id, input.step);
+      case "project.approve": return service.approveProjectStage(input.id, input.stage, input.note ?? "");
+      case "project.advance": return service.advanceProject(input.id, input.stage, input.reason);
+      case "project.deployment": return service.prepareDeployment(input.id, input.deployment ?? {});
+      case "project.list": return { projects: await service.projects() };
+      // The command router. Resolving proposes; it never executes and never creates anything.
+      case "command.route": return service.route(input.text);
       // The brain. Endpoints are owner-configured; AION never adds one it merely detected.
       case "brain.endpoint.add": return service.addBrainEndpoint(input.endpoint ?? {});
       case "brain.endpoint.remove": return service.removeBrainEndpoint(input.id);

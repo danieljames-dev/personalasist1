@@ -28,6 +28,18 @@ import {
 } from "./product-studio.js";
 import type { ResearchJobV1, ResearchProviderV1, UrlVerdictV1 } from "./research.js";
 import { applyResearchResult, buildResearchJob, evaluateResearchUrl, researchSummary } from "./research.js";
+import type { LessonScopeV1, LessonStandingV1, LessonV1 } from "./learning.js";
+import {
+  ADAPTATION_BOUNDARY, applicableLessons, assertLessonClaimClass, buildLesson, learningSummary,
+  lessonStanding, recordLessonOutcome,
+} from "./learning.js";
+import type { BuildPipelinePortV1, DevelopmentProjectV1, PipelineRunV1, PipelineStepV1 } from "./projects.js";
+import {
+  PIPELINE_STEPS, advanceProject, approveProjectStage, buildAgentProposal, buildDeploymentProposal,
+  buildProject, buildProjectSpecification, projectStanding,
+} from "./projects.js";
+import type { RoutingResultV1 } from "./command-router.js";
+import { assertNoExecutableText, routeCommand } from "./command-router.js";
 import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
@@ -43,6 +55,8 @@ type AssistantPorts = {
   developerAgents: DeveloperAgentRegistryV1;
   /** Optional. Absent means AION has no way to research anything, which is the default. */
   research?: ResearchProviderV1;
+  /** Optional. Absent means AION cannot build or preview anything, which is also the default. */
+  pipeline?: BuildPipelinePortV1;
 };
 const TASK_TRANSITIONS: Record<TaskStateV1, readonly TaskStateV1[]> = {
   proposed: ["ready", "cancelled"], ready: ["in-progress", "blocked", "completed", "cancelled"],
@@ -958,6 +972,212 @@ export class AionAssistantV1 {
   evaluationSuite(): readonly EvaluationCaseV1[] { return EVALUATION_SUITE; }
   /** What AION owns and what a model does not. Stated as data so the UI cannot drift from it. */
   brainBoundary(): typeof BRAIN_BOUNDARY { return BRAIN_BOUNDARY; }
+
+  // --- Learning ---------------------------------------------------------------------------------
+  /**
+   * Records a lesson.
+   *
+   * The claim rules apply unchanged: a model proposing a lesson produces a hypothesis or an
+   * inference, never a learned strategy, and only the owner promotes it. That is the difference
+   * between AION learning and AION being talked into believing something.
+   */
+  async recordLesson(input: Record<string, unknown> = {}, actor: "owner" | "provider-proposal" | "routine" = "owner"): Promise<LessonV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, state.settings.activeWorkspace);
+      const claim = buildClaim(
+        { class: input.class ?? (actor === "owner" ? "learned-strategy" : "hypothesis"), statement: input.statement, confidence: input.confidence, supportedBy: input.supportedBy },
+        { id: this.ports.ids.next("claim"), workspace: workspace.id, now: this.ports.clock.now(), actor, sourceRef: actor === "owner" ? "owner-entry" : `${actor}:lesson` },
+      );
+      assertLessonClaimClass(claim);
+      const lesson = buildLesson(input, { id: this.ports.ids.next("lesson"), claim, now: this.ports.clock.now() });
+      state.lessons.unshift(lesson);
+      if (state.lessons.length > 2000) state.lessons.length = 2000;
+      this.activity(state, "memory", "lesson.record", `Recorded a ${claim.class} lesson in "${workspace.label}". Its class travels with it, so a suggestion is never quoted as settled practice.`, lesson.id);
+      return structuredClone(lesson);
+    });
+  }
+  /** Owner-only promotion, using the same path and the same history as any other claim. */
+  async promoteLesson(id: string, to: string, reason: string): Promise<LessonV1> {
+    return this.mutate((state) => {
+      const lesson = find(state.lessons, id, "Lesson");
+      assertSameWorkspace(lesson, state.settings.activeWorkspace, "lesson");
+      const promoted = { ...structuredClone(lesson), claim: promoteClaim(lesson.claim, to, reason, this.ports.clock.now()), updatedAt: this.ports.clock.now() };
+      state.lessons = state.lessons.map((entry) => entry.id === id ? promoted : entry);
+      this.activity(state, "memory", "lesson.promote", `You promoted a lesson from ${lesson.claim.class} to ${promoted.claim.class}.`, id);
+      return structuredClone(promoted);
+    });
+  }
+  /** Records what happened when a lesson was followed. "Did not work" counts the same as "worked". */
+  async recordLessonOutcome(id: string, input: Record<string, unknown> = {}): Promise<LessonV1> {
+    return this.mutate((state) => {
+      const lesson = find(state.lessons, id, "Lesson");
+      assertSameWorkspace(lesson, state.settings.activeWorkspace, "lesson");
+      const updated = recordLessonOutcome(lesson, input, this.ports.clock.now());
+      state.lessons = state.lessons.map((entry) => entry.id === id ? updated : entry);
+      const standing = lessonStanding(updated);
+      this.activity(state, "memory", "lesson.outcome", `Outcome recorded. ${standing.summary}`, id, standing.stillRecommended ? "success" : "denied");
+      return structuredClone(updated);
+    });
+  }
+  async setLessonEnabled(id: string, enabled: boolean): Promise<LessonV1> {
+    return this.mutate((state) => {
+      const lesson = find(state.lessons, id, "Lesson");
+      assertSameWorkspace(lesson, state.settings.activeWorkspace, "lesson");
+      const updated = { ...structuredClone(lesson), enabled, updatedAt: this.ports.clock.now() };
+      state.lessons = state.lessons.map((entry) => entry.id === id ? updated : entry);
+      this.activity(state, "memory", enabled ? "lesson.enable" : "lesson.disable", enabled ? "Lesson re-enabled." : "Lesson turned off. It is kept so the history is intact.", id);
+      return structuredClone(updated);
+    });
+  }
+  /** The lessons AION would actually offer here, ordered by track record rather than by age. */
+  async lessons(scope: { kind?: LessonScopeV1; subjectRef?: string } = {}): Promise<Array<LessonV1 & { standing: LessonStandingV1 }>> {
+    const state = await this.snapshot();
+    return applicableLessons(state.lessons, { workspace: state.settings.activeWorkspace, ...scope });
+  }
+  async learningSummary(): Promise<ReturnType<typeof learningSummary>> {
+    const state = await this.snapshot();
+    return learningSummary(state.lessons.filter((entry) => entry.workspace === state.settings.activeWorkspace));
+  }
+  /** The declared, unimplemented adaptation boundary. Stated as data so a change has to argue with it. */
+  adaptationBoundary(): typeof ADAPTATION_BOUNDARY { return ADAPTATION_BOUNDARY; }
+
+  // --- Development projects ----------------------------------------------------------------------
+  #findProject(state: AssistantStateV1, id: string): DevelopmentProjectV1 {
+    const found = find(state.projects, id, "Project");
+    assertSameWorkspace(found, state.settings.activeWorkspace, "project");
+    return found;
+  }
+  #replaceProject(state: AssistantStateV1, updated: DevelopmentProjectV1): DevelopmentProjectV1 {
+    state.projects = state.projects.map((entry) => entry.id === updated.id ? updated : entry);
+    return structuredClone(updated);
+  }
+  async createProject(input: Record<string, unknown> = {}): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const workspace = requireWorkspace(state.workspaces, state.settings.activeWorkspace);
+      if (state.projects.length >= 200) throw new Error("AION holds at most 200 projects.");
+      if (input.opportunityId) assertSameWorkspace(find(state.opportunities, String(input.opportunityId), "Opportunity"), workspace.id, "opportunity");
+      const project = buildProject(input, { id: this.ports.ids.next("project"), workspace: workspace.id, now: this.ports.clock.now() });
+      state.projects.unshift(project);
+      this.activity(state, "plan", "project.create", `Project "${project.title}" opened in "${workspace.label}" at the idea stage.`, project.id);
+      return structuredClone(project);
+    });
+  }
+  async setProjectSpecification(id: string, input: Record<string, unknown> = {}): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      const updated = { ...structuredClone(project), specification: buildProjectSpecification(input, this.ports.clock.now()), updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "project.specify", `Specification written for "${project.title}".`, id);
+      return this.#replaceProject(state, updated);
+    });
+  }
+  async setProjectPlan(id: string, steps: readonly string[]): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      const cleaned = (steps ?? []).map((step) => required(step, "Plan step", 2000));
+      if (!cleaned.length || cleaned.length > 100) throw new Error("A project plan needs between 1 and 100 steps.");
+      const updated = { ...structuredClone(project), planSteps: cleaned, updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "project.plan", `${cleaned.length} plan step(s) recorded for "${project.title}".`, id);
+      return this.#replaceProject(state, updated);
+    });
+  }
+  /**
+   * Records a developer-agent proposal against a project. It grants nothing: running it still goes
+   * through the ordinary capability, digest, and one-shot approval machinery.
+   */
+  async recordAgentProposal(id: string, input: Record<string, unknown> = {}): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      const proposal = buildAgentProposal({ bridgeId: this.ports.developerAgents.selected().id, ...input }, { id: this.ports.ids.next("proposal"), now: this.ports.clock.now() });
+      const updated = { ...structuredClone(project), proposals: [...project.proposals, proposal], updatedAt: this.ports.clock.now() };
+      this.activity(state, "agent", "project.proposal", `${proposal.bridgeId} proposed a ${proposal.mode} change to "${project.title}". It grants nothing; running it still needs its own approval.`, id, "pending");
+      return this.#replaceProject(state, updated);
+    });
+  }
+  /** Attaches evidence from an allowlisted verification run that actually happened. */
+  async attachProjectVerification(id: string, verificationId: string): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      find(state.verifications, verificationId, "Verification run");
+      const updated = { ...structuredClone(project), verificationIds: project.verificationIds.includes(verificationId) ? project.verificationIds : [...project.verificationIds, verificationId], updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "project.verification", `Verification evidence attached to "${project.title}".`, id);
+      return this.#replaceProject(state, updated);
+    });
+  }
+  /** Runs one pipeline step, chosen from a closed set. Nothing here accepts a command. */
+  async runProjectStep(id: string, step: string): Promise<DevelopmentProjectV1> {
+    const pipeline = this.ports.pipeline;
+    if (!pipeline) throw new Error("No build pipeline is configured, so AION cannot build or preview anything.");
+    if (!PIPELINE_STEPS.includes(step as PipelineStepV1)) throw new Error(`A pipeline step must be one of: ${PIPELINE_STEPS.join(", ")}.`);
+    const snapshot = await this.snapshot();
+    const project = this.#findProject(snapshot, id);
+    const controller = new AbortController();
+    this.controllers.set(`pipeline:${id}`, controller);
+    try {
+      const run = await pipeline.run(step as PipelineStepV1, { id: project.id, title: project.title }, controller.signal);
+      return await this.mutate((state) => {
+        const current = this.#findProject(state, id);
+        const record: PipelineRunV1 = { id: this.ports.ids.next("pipeline-run"), step: step as PipelineStepV1, ...run };
+        const updated = { ...structuredClone(current), runs: [...current.runs, record].slice(-100), updatedAt: this.ports.clock.now() };
+        this.activity(state, "plan", "project.pipeline", `Pipeline step "${step}" ${record.outcome} for "${current.title}".${record.previewUrl ? ` Preview at ${record.previewUrl}, reachable from this computer only.` : ""}`, id, record.outcome === "passed" ? "success" : "failed");
+        return this.#replaceProject(state, updated);
+      });
+    } finally { this.controllers.delete(`pipeline:${id}`); }
+  }
+  /** Owner-only, and for one exact stage. There is no actor parameter because there is no choice. */
+  async approveProjectStage(id: string, stage: string, note = ""): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      const updated = approveProjectStage(project, stage, note, this.ports.clock.now());
+      this.activity(state, "approval", "project.approve", `You approved the "${stage}" stage of "${project.title}".`, id);
+      return this.#replaceProject(state, updated);
+    });
+  }
+  async advanceProject(id: string, stage: string, reason: string): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      const updated = advanceProject(project, stage, reason, this.ports.clock.now());
+      this.activity(state, "plan", "project.stage", `"${project.title}" moved from ${project.stage} to ${updated.stage}.`, id);
+      return this.#replaceProject(state, updated);
+    });
+  }
+  /**
+   * Prepares a deployment. This writes down what would happen; it does not create the ability to
+   * do it, and `advanceProject` still refuses the deployed stage.
+   */
+  async prepareDeployment(id: string, input: Record<string, unknown> = {}): Promise<DevelopmentProjectV1> {
+    return this.mutate((state) => {
+      const project = this.#findProject(state, id);
+      const deployment = buildDeploymentProposal(input, { id: this.ports.ids.next("deployment"), now: this.ports.clock.now() });
+      const updated = { ...structuredClone(project), deployment, updatedAt: this.ports.clock.now() };
+      this.activity(state, "plan", "project.deployment", `A deployment to ${deployment.target} was written down for "${project.title}". AION cannot carry it out: no capability in this milestone performs a deployment.`, id, "pending");
+      return this.#replaceProject(state, updated);
+    });
+  }
+  async projects(): Promise<Array<DevelopmentProjectV1 & { standing: string }>> {
+    const state = await this.snapshot();
+    return state.projects
+      .filter((entry) => entry.workspace === state.settings.activeWorkspace)
+      .map((entry) => ({ ...structuredClone(entry), standing: projectStanding(entry) }));
+  }
+
+  // --- The command router ------------------------------------------------------------------------
+  /**
+   * Turns one ordinary sentence into typed proposals.
+   *
+   * Nothing is executed and nothing is created. The result is what AION believes was meant, in a
+   * form the owner can check before any of it happens — and the safety assertion runs on the way
+   * out, so a payload that somehow carried shell-shaped text never reaches a caller.
+   */
+  async route(sentence: string): Promise<RoutingResultV1> {
+    const state = await this.snapshot();
+    const workspace = requireWorkspace(state.workspaces, state.settings.activeWorkspace);
+    const result = routeCommand(required(sentence, "Message", 4000), {
+      workspaceLabel: workspace.label,
+      workspaces: state.workspaces.filter((entry) => !entry.archived).map(({ id, label }) => ({ id, label })),
+    });
+    assertNoExecutableText(result);
+    return result;
+  }
 
   // --- Governed research ------------------------------------------------------------------------
   /**

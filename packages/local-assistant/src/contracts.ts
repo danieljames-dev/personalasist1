@@ -1,5 +1,7 @@
 import type { BrainSettingsV1 } from "./brain.js";
 import type { EvaluationRunV1 } from "./evaluation.js";
+import type { LessonV1 } from "./learning.js";
+import type { DevelopmentProjectV1 } from "./projects.js";
 import type { OpportunityV1 } from "./product-studio.js";
 import type { ResearchJobV1 } from "./research.js";
 import type { WorkspaceV1 } from "./workspaces.js";
@@ -532,6 +534,10 @@ export interface AssistantStateV1 {
   brain: BrainSettingsV1;
   /** Evidence from the synthetic model evaluation harness, newest first. Bounded on every write. */
   evaluations: EvaluationRunV1[];
+  /** What AION has learned, outside any model, so replacing the model loses none of it. */
+  lessons: LessonV1[];
+  /** Development projects, from an idea through to something the owner can look at. */
+  projects: DevelopmentProjectV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
