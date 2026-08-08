@@ -545,7 +545,9 @@ try {
         'benchmarked in-process, with no endpoint address invented',
         'AION can rent nothing',
         'refused before the owner ever sees it',
-        'stop deadline is stored rather than held in a timer',
+        # V1.3-R1 strengthened this line: there are now two stored deadlines, the readiness
+        # allowance as well as the hard stop, and the demo names both.
+        'readiness allowance and the hard stop are stored rather than held in timers',
         'confirms teardown with the provider rather than assuming it',
         'refuses your own network and the cloud metadata address',
         'AION does not pick a side',
