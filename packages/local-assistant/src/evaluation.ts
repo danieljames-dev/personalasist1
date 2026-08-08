@@ -42,7 +42,16 @@ export type EvaluationCheckV1 =
   | { kind: "jsonHasKeys"; keys: readonly string[] }
   | { kind: "lineCountAtMost"; value: number }
   | { kind: "lineCountAtLeast"; value: number }
-  | { kind: "maxCharacters"; value: number };
+  | { kind: "maxCharacters"; value: number }
+  /**
+   * Fails when the answer is mostly the question read back.
+   *
+   * Discovered while establishing the deterministic floor's baseline: a provider that echoes its
+   * prompt passes "contains X" for every X the prompt happened to mention. Three cases were being
+   * scored as capability when they were measuring repetition, which would have inflated the floor
+   * and understated every real model measured against it.
+   */
+  | { kind: "notEcho" };
 
 export interface EvaluationCaseV1 {
   id: string;
@@ -78,7 +87,7 @@ export const EVALUATION_SUITE: readonly EvaluationCaseV1[] = [
     dimension: "instruction-following",
     prompt: "Answer only with the word ACKNOWLEDGED.",
     context: [],
-    checks: [{ kind: "contains", value: "ACKNOWLEDGED" }, { kind: "maxCharacters", value: 60 }],
+    checks: [{ kind: "contains", value: "ACKNOWLEDGED" }, { kind: "maxCharacters", value: 60 }, { kind: "notEcho" }],
     rationale: "Short exact answers are what the command router depends on.",
   },
   {
@@ -102,7 +111,7 @@ export const EVALUATION_SUITE: readonly EvaluationCaseV1[] = [
     dimension: "planning",
     prompt: "A parcel must be collected, weighed, labelled, and posted. List the steps in the order they must happen, one per line.",
     context: [],
-    checks: [{ kind: "lineCountAtLeast", value: 4 }, { kind: "contains", value: "collect" }, { kind: "contains", value: "post" }],
+    checks: [{ kind: "lineCountAtLeast", value: 4 }, { kind: "contains", value: "collect" }, { kind: "contains", value: "post" }, { kind: "notEcho" }],
     rationale: "Planner steps depend on order actually being respected rather than restated.",
   },
   {
@@ -153,7 +162,7 @@ export const EVALUATION_SUITE: readonly EvaluationCaseV1[] = [
     dimension: "code",
     prompt: "Write a JavaScript function named sumOf that takes an array of numbers and returns their total. Code only.",
     context: [],
-    checks: [{ kind: "contains", value: "sumOf" }, { kind: "contains", value: "function" }],
+    checks: [{ kind: "contains", value: "sumOf" }, { kind: "contains", value: "function" }, { kind: "contains", value: "return" }, { kind: "notEcho" }],
     rationale: "The developer-agent bridge is optional; a local model that can handle small code tasks removes a dependency.",
   },
   {
@@ -183,6 +192,16 @@ export interface EvaluationRunV1 {
   endpointId: string;
   endpointLabel: string;
   model: string;
+  /** How the completion was obtained, so a baseline is attributable rather than anonymous. */
+  runtime: string;
+  /** local-machine, owner-controlled-host, or third-party-service. */
+  location: string;
+  /**
+   * True for the deterministic offline provider. The floor is the reference every other run is
+   * read against, and it is not expected to win — marking it keeps a comparison from being read
+   * as "the floor lost" when what it actually shows is "here is what beating nothing looks like".
+   */
+  isFloor: boolean;
   startedAt: IsoTimestamp;
   completedAt: IsoTimestamp;
   results: EvaluationCaseResultV1[];
@@ -197,11 +216,25 @@ export interface EvaluationRunV1 {
 
 function normalize(value: string): string { return value.replace(/\r\n/gu, "\n").trim(); }
 
-export function applyCheck(check: EvaluationCheckV1, response: string): EvaluationCheckResultV1 {
+/** The distinctive words of a prompt, used to notice an answer that is merely the question back. */
+function significantWords(value: string): string[] {
+  return [...new Set(value.toLocaleLowerCase().match(/[a-z]{4,}/gu) ?? [])];
+}
+
+export function applyCheck(check: EvaluationCheckV1, response: string, context: { prompt?: string } = {}): EvaluationCheckResultV1 {
   const text = normalize(response);
   const lower = text.toLocaleLowerCase();
   const result = (passed: boolean, detail: string): EvaluationCheckResultV1 => ({ check, passed, detail });
   switch (check.kind) {
+    case "notEcho": {
+      const prompt = normalize(context.prompt ?? "");
+      if (!prompt) return result(true, "no prompt to compare against");
+      const words = significantWords(prompt);
+      if (!words.length) return result(true, "the prompt has no distinctive words");
+      const repeated = words.filter((word) => lower.includes(word)).length;
+      const share = repeated / words.length;
+      return result(share < 0.8, `expected an answer rather than the question read back (${Math.round(share * 100)}% of the prompt's distinctive words reappeared)`);
+    }
     case "contains":
       return result(lower.includes(check.value.toLocaleLowerCase()), `expected to contain "${check.value}"`);
     case "excludes":
@@ -242,7 +275,7 @@ export function scoreCase(evaluationCase: EvaluationCaseV1, response: string, la
   if (error) {
     return { caseId: evaluationCase.id, dimension: evaluationCase.dimension, passed: false, latencyMs, checks: [], excerpt: "", error };
   }
-  const checks = evaluationCase.checks.map((check) => applyCheck(check, response));
+  const checks = evaluationCase.checks.map((check) => applyCheck(check, response, { prompt: evaluationCase.prompt }));
   return {
     caseId: evaluationCase.id,
     dimension: evaluationCase.dimension,
@@ -263,7 +296,7 @@ function median(values: readonly number[]): number {
 
 export function summariseEvaluation(
   results: readonly EvaluationCaseResultV1[],
-  context: { id: OpaqueId; endpointId: string; endpointLabel: string; model: string; startedAt: IsoTimestamp; completedAt: IsoTimestamp },
+  context: { id: OpaqueId; endpointId: string; endpointLabel: string; model: string; runtime: string; location: string; isFloor: boolean; startedAt: IsoTimestamp; completedAt: IsoTimestamp },
 ): EvaluationRunV1 {
   const byDimension = EVALUATION_DIMENSIONS.map((dimension) => {
     const scoped = results.filter((entry) => entry.dimension === dimension);
@@ -278,8 +311,18 @@ export function summariseEvaluation(
     passed,
     total: results.length,
     medianLatencyMs: median(results.map((entry) => entry.latencyMs)),
-    summary: `${passed} of ${results.length} synthetic cases passed on ${context.endpointLabel} (${context.model}).${weakest && weakest.passed < weakest.total ? ` Weakest dimension: ${weakest.dimension} at ${weakest.passed}/${weakest.total}.` : ""} This measures the fixtures in this repository on the day it ran, not the model in general.`,
+    summary: `${passed} of ${results.length} synthetic cases passed on ${context.endpointLabel} (${context.model}, ${context.runtime}).${weakest && weakest.passed < weakest.total ? ` Weakest dimension: ${weakest.dimension} at ${weakest.passed}/${weakest.total}.` : ""}${context.isFloor ? " This is the deterministic floor: the reference every other model is read against, not a competitor." : ""} This measures the fixtures in this repository on the day it ran, not the model in general.`,
   };
+}
+
+/**
+ * The floor run, if one has been recorded.
+ *
+ * Kept as its own lookup because a comparison without it is not a comparison — it is a list of
+ * numbers with nothing to be better than.
+ */
+export function floorBaseline(runs: readonly EvaluationRunV1[]): EvaluationRunV1 | null {
+  return runs.find((run) => run.isFloor) ?? null;
 }
 
 /**
@@ -290,17 +333,26 @@ export function summariseEvaluation(
  * what is known from what is guessed. A high total with a failing hallucination score is called
  * out rather than averaged away.
  */
-export function compareEvaluations(runs: readonly EvaluationRunV1[]): Array<{ endpointId: string; endpointLabel: string; passed: number; total: number; hallucinationResistance: string; medianLatencyMs: number; note: string }> {
+export function compareEvaluations(runs: readonly EvaluationRunV1[]): Array<{ endpointId: string; endpointLabel: string; location: string; isFloor: boolean; passed: number; total: number; versusFloor: string; hallucinationResistance: string; medianLatencyMs: number; note: string }> {
+  const floor = floorBaseline(runs);
   return [...runs]
     .sort((a, b) => (b.passed / Math.max(1, b.total)) - (a.passed / Math.max(1, a.total)) || a.medianLatencyMs - b.medianLatencyMs)
     .map((run) => {
       const hallucination = run.byDimension.find((entry) => entry.dimension === "hallucination-resistance");
       const shaky = hallucination && hallucination.passed < hallucination.total;
+      const versusFloor = !floor
+        ? "no floor baseline recorded — run the deterministic floor first or this number means nothing"
+        : run.isFloor
+          ? "this is the floor"
+          : `${run.passed - floor.passed >= 0 ? "+" : ""}${run.passed - floor.passed} case(s) against the floor`;
       return {
         endpointId: run.endpointId,
         endpointLabel: run.endpointLabel,
+        location: run.location,
+        isFloor: run.isFloor,
         passed: run.passed,
         total: run.total,
+        versusFloor,
         hallucinationResistance: hallucination ? `${hallucination.passed}/${hallucination.total}` : "not measured",
         medianLatencyMs: run.medianLatencyMs,
         note: shaky

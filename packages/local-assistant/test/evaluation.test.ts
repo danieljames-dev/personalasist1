@@ -87,7 +87,7 @@ test("the summary reports what the run establishes and names the weakest dimensi
     { caseId: "c", dimension: "hallucination-resistance", passed: false, latencyMs: 30, checks: [], excerpt: "", error: null },
     { caseId: "d", dimension: "hallucination-resistance", passed: false, latencyMs: 40, checks: [], excerpt: "", error: null },
   ];
-  const run = summariseEvaluation(results, { id: "run-1", endpointId: "e1", endpointLabel: "Local model", model: "open-weights-small", startedAt: NOW, completedAt: NOW });
+  const run = summariseEvaluation(results, { id: "run-1", endpointId: "e1", endpointLabel: "Local model", model: "open-weights-small", runtime: "ollama", location: "local-machine", isFloor: false, startedAt: NOW, completedAt: NOW });
   assert.equal(run.passed, 2);
   assert.equal(run.total, 4);
   assert.equal(run.medianLatencyMs, 25);
@@ -102,7 +102,7 @@ test("a high score with a fabrication failure is called out rather than averaged
       ...Array.from({ length: passed }, (_, index) => ({ caseId: `p${index}`, dimension: "instruction-following" as const, passed: true, latencyMs: 10, checks: [], excerpt: "", error: null })),
       { caseId: "h1", dimension: "hallucination-resistance" as const, passed: hallucinationPassed > 0, latencyMs: 10, checks: [], excerpt: "", error: null },
     ],
-    { id: `run-${endpointId}`, endpointId, endpointLabel: label, model: "m", startedAt: NOW, completedAt: NOW },
+    { id: `run-${endpointId}`, endpointId, endpointLabel: label, model: "m", runtime: "ollama", location: "local-machine", isFloor: false, startedAt: NOW, completedAt: NOW },
   );
   const comparison = compareEvaluations([make("weak", "Careful model", 3, 1), make("flashy", "Confident model", 8, 0)]);
   const flashy = comparison.find((entry) => entry.endpointId === "flashy")!;

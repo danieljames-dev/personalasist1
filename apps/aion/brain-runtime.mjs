@@ -221,6 +221,11 @@ export async function runEvaluation(endpoint, suite, runtime, signal) {
 /** The adapter, as the port the policy module declares. */
 export class HttpBrainRuntimeV1 {
   constructor(now = () => new Date().toISOString()) { this.now = now; }
+  /**
+   * Anything with an address. The offline provider has none by design, so it is served by the
+   * in-process adapter instead -- inventing a URL for it would make its benchmark meaningless.
+   */
+  supports(endpoint) { return endpoint.runtime !== "deterministic-offline" && Boolean(endpoint.baseUrl); }
   probe(endpoint, signal) { return probeEndpoint(endpoint, signal, this.now); }
   detect(signal) { return detectLocalRuntimes(signal); }
   complete(endpoint, request_) { return completeOnce(endpoint, request_); }

@@ -568,6 +568,16 @@ export function independenceReport(settings: BrainSettingsV1): {
  * in the adapter that belong in the policy above.
  */
 export interface BrainRuntimePortV1 {
+  /**
+   * Whether this adapter can run a completion for an endpoint at all.
+   *
+   * The offline provider has no address, deliberately, and an address-based adapter cannot serve
+   * it. Rather than inventing a fake endpoint so the evaluator has something to talk to — which
+   * would make the whole measurement a lie — an adapter declares what it can handle and the
+   * evaluator picks one that can. This is the seam that lets the same fixture suite measure the
+   * deterministic floor, a local runtime, and an owner-controlled remote endpoint fairly.
+   */
+  supports(endpoint: BrainEndpointV1): boolean;
   /** Asks one configured endpoint whether it is reachable and what models it reports. */
   probe(endpoint: BrainEndpointV1, signal: AbortSignal): Promise<BrainHealthV1>;
   /**

@@ -12,6 +12,7 @@ import type {
 } from "./contracts.js";
 import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS, WORKSPACE_IDS } from "./contracts.js";
 import { builtInWorkspaces } from "./workspaces.js";
+import type { BrainEndpointV1, BrainHealthV1, BrainRuntimePortV1, BrainRuntimeV1 } from "./brain.js";
 import { defaultBrainSettings, offlineEndpoint } from "./brain.js";
 import type { ResearchLimitsV1, ResearchProviderV1, ResearchScopeV1, ResearchSourceV1 } from "./research.js";
 import type { BuildPipelinePortV1, PipelineRunV1, PipelineStepV1 } from "./projects.js";
@@ -548,6 +549,91 @@ export class SyntheticResearchProviderV1 implements ResearchProviderV1 {
  * `canPublish` is false and the type pins it to false, so a pipeline that could put something
  * where other people can reach it cannot satisfy this port without changing the port.
  */
+/**
+ * The in-process evaluator for the deterministic offline provider.
+ *
+ * The floor has no endpoint address and must never be given a fake one: an evaluation that talked
+ * to an invented URL would be measuring the invention. So this adapter runs the provider directly,
+ * in this process, through the same `ModelProviderV1` port Chat uses — the thing being measured is
+ * the thing that actually answers.
+ *
+ * It exists so the floor has a *number*. Without one, "the local model is better" is a claim
+ * rather than a measurement, and choosing a model on reputation is exactly what the evaluation
+ * harness was built to avoid. The floor is not expected to score well; it is expected to score
+ * honestly.
+ */
+export class InProcessBrainRuntimeV1 implements BrainRuntimePortV1 {
+  constructor(
+    private readonly provider: ModelProviderV1,
+    private readonly now: () => string = () => new Date().toISOString(),
+  ) {}
+  /** Only the offline provider. Anything with an address belongs to a transport adapter. */
+  supports(endpoint: BrainEndpointV1): boolean {
+    return endpoint.runtime === "deterministic-offline" && !endpoint.baseUrl;
+  }
+  async probe(endpoint: BrainEndpointV1): Promise<BrainHealthV1> {
+    const health = await this.provider.health();
+    return {
+      available: health.available, detail: health.detail, checkedAt: this.now(), latencyMs: 0,
+      installedModels: [endpoint.model],
+    };
+  }
+  /** Nothing to detect: this adapter is the provider, and it is always already here. */
+  async detect(): Promise<Array<{ runtime: BrainRuntimeV1; baseUrl: string; models: string[]; detail: string }>> { return []; }
+  async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
+    if (!this.supports(endpoint)) fail("The in-process evaluator serves the offline provider only. Use a transport adapter for an endpoint with an address.");
+    const startedAt = Date.now();
+    // The evaluation case is one prompt with optional context, so it is presented as a single
+    // owner turn plus the context the harness declared. No conversation and no history.
+    const messages = [{ id: "evaluation", role: "owner" as const, content: request.prompt, createdAt: this.now(), providerId: null }];
+    const memoryContext = request.context.map((content, index) => ({ id: `context-${index}`, content, category: "semantic" as const }));
+    let text = "";
+    for await (const chunk of this.provider.stream({ conversationId: "evaluation", messages, memoryContext, model: endpoint.model, signal: request.signal })) {
+      text += chunk;
+      if (text.length > 100_000) break;
+    }
+    return { text, latencyMs: Date.now() - startedAt };
+  }
+}
+
+/**
+ * Routes each endpoint to the first adapter that can serve it.
+ *
+ * This is what makes "evaluate every endpoint with the same suite" true rather than aspirational:
+ * the harness asks for a completion, and the composition root decides whether that means an
+ * in-process call or an HTTP request. An endpoint no adapter supports is refused by name rather
+ * than quietly skipped, because a silently missing measurement looks the same as a passing one.
+ */
+export class CompositeBrainRuntimeV1 implements BrainRuntimePortV1 {
+  private readonly adapters: readonly BrainRuntimePortV1[];
+  constructor(...adapters: readonly BrainRuntimePortV1[]) {
+    if (!adapters.length) fail("At least one brain runtime adapter is required.");
+    this.adapters = adapters;
+  }
+  #forEndpoint(endpoint: BrainEndpointV1): BrainRuntimePortV1 {
+    const adapter = this.adapters.find((entry) => entry.supports(endpoint));
+    if (!adapter) fail(`No configured runtime adapter can reach "${endpoint.label}" (${endpoint.runtime}). AION will not invent a transport for it.`);
+    return adapter;
+  }
+  supports(endpoint: BrainEndpointV1): boolean { return this.adapters.some((entry) => entry.supports(endpoint)); }
+  /*
+   * `probe` and `complete` are async so that "no adapter can serve this" arrives as a rejection
+   * rather than a synchronous throw. The port declares a Promise, and a caller that only attached
+   * a `.catch()` would otherwise never see the failure at all.
+   */
+  async probe(endpoint: BrainEndpointV1, signal: AbortSignal): Promise<BrainHealthV1> {
+    return this.#forEndpoint(endpoint).probe(endpoint, signal);
+  }
+  async detect(signal: AbortSignal): Promise<Array<{ runtime: BrainRuntimeV1; baseUrl: string; models: string[]; detail: string }>> {
+    const found = [];
+    for (const adapter of this.adapters) found.push(...await adapter.detect(signal));
+    return found;
+  }
+  async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
+    return this.#forEndpoint(endpoint).complete(endpoint, request);
+  }
+}
+
 export class SyntheticBuildPipelineV1 implements BuildPipelinePortV1 {
   readonly id = "synthetic";
   readonly canPublish = false as const;

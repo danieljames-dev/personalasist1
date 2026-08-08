@@ -1007,6 +1007,7 @@ export class AionAssistantV1 {
       const endpoint = find(state.brain.endpoints, endpointId, "Endpoint");
       const run = summariseEvaluation(results, {
         id: this.ports.ids.next("evaluation"), endpointId, endpointLabel: endpoint.label, model: endpoint.model,
+        runtime: endpoint.runtime, location: endpoint.location, isFloor: endpoint.id === OFFLINE_ENDPOINT_ID,
         startedAt, completedAt: this.ports.clock.now(),
       });
       state.evaluations.unshift(run);

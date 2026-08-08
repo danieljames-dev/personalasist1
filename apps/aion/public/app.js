@@ -318,7 +318,7 @@ ${independence ? `<div class="card ${independence.independent ? "" : "warnbox"}"
 <div class="card"><h2>Endpoints</h2>
 ${brain.endpoints.map((e) => `<p class="meta"><b>${esc(e.label)}</b> — ${badge(e)} · ${esc(e.runtime)} · model ${esc(e.model)}${e.hostLabel ? ` · ${esc(e.hostLabel)}` : ""}${e.credentialEnvironmentVariable ? ` · credential from ${esc(e.credentialEnvironmentVariable)} (name only)` : ""}
 <br>${e.lastHealth ? `${e.lastHealth.available ? "reachable" : "not reachable"} — ${esc(e.lastHealth.detail)}` : "not checked yet"}
-<button data-do="brain-health" data-id="${esc(e.id)}">Check</button>${e.id === "deterministic-offline" ? "" : `<button data-do="brain-evaluate" data-id="${esc(e.id)}">Evaluate</button><button data-do="brain-remove" data-id="${esc(e.id)}" class="danger">Remove</button>`}</p>`).join("")}
+<button data-do="brain-health" data-id="${esc(e.id)}">Check</button><button data-do="brain-evaluate" data-id="${esc(e.id)}">Evaluate</button>${e.id === "deterministic-offline" ? "" : `<button data-do="brain-remove" data-id="${esc(e.id)}" class="danger">Remove</button>`}</p>`).join("")}
 <div class="actions"><button data-do="brain-detect">Look for a runtime on this computer</button></div>
 <p class="meta">Detection checks a short list of documented loopback addresses. It installs nothing, downloads nothing, and searches no part of your computer. Adding what it finds is up to you.</p></div>
 <form data-form="brain-endpoint"><h2>Add an endpoint</h2>

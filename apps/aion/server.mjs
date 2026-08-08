@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import {
   AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
   FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
+  CompositeBrainRuntimeV1, InProcessBrainRuntimeV1,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
@@ -113,6 +114,14 @@ function bearerToken(request) {
   return match ? match[1] : "";
 }
 
+/** The providers AION ships with. None of them requires a credential or a network. */
+function defaultProviders() {
+  return [
+    new DeterministicModelProviderV1(),
+    new BoundaryModelProviderV1("remote-generic", "remote", "Configure an approved remote adapter and a session credential before this boundary can be used. AION ships no remote client."),
+    new BoundaryModelProviderV1("local-model", "local", "No supported local model runtime is configured on this computer."),
+  ];
+}
 export async function createAionServer(options = {}) {
   const repositoryRoot = resolve(options.repositoryRoot ?? resolve(import.meta.dirname, "..", ".."));
   const dataRoot = resolve(options.dataRoot ?? join(repositoryRoot, "private", "aion"));
@@ -120,14 +129,21 @@ export async function createAionServer(options = {}) {
   const developerAgents = options.developerAgents
     ?? (options.developerBridge ? new SelectableDeveloperAgentRegistryV1([options.developerBridge]) : await resolveDeveloperAgentBridges(repositoryRoot));
   const verificationRunner = options.verificationRunner ?? new AllowlistedVerificationRunnerV1(repositoryRoot, digestValue);
-  const brainRuntime = options.brainRuntime ?? new HttpBrainRuntimeV1();
+  /*
+   * The floor is evaluated in-process; everything with an address goes over HTTP.
+   *
+   * The offline provider deliberately has no URL, so giving it one purely to satisfy an
+   * address-based evaluator would mean benchmarking the invention rather than the provider.
+   * The composite picks whichever adapter can actually serve each endpoint, and refuses by
+   * name when none can.
+   */
+  const providers = options.providers ?? defaultProviders();
+  const offlineProvider = providers.find((entry) => entry.id === "deterministic") ?? providers[0];
+  const brainRuntime = options.brainRuntime
+    ?? new CompositeBrainRuntimeV1(new InProcessBrainRuntimeV1(offlineProvider), new HttpBrainRuntimeV1());
   const service = new AionAssistantV1({
     repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
-    providers: options.providers ?? [
-      new DeterministicModelProviderV1(),
-      new BoundaryModelProviderV1("remote-generic", "remote", "Configure an approved remote adapter and a session credential before this boundary can be used. AION ships no remote client."),
-      new BoundaryModelProviderV1("local-model", "local", "No supported local model runtime is configured on this computer."),
-    ],
+    providers,
     capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
