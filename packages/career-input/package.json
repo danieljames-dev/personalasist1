@@ -20,11 +20,11 @@
     "build": "npm run build --workspace @aion/object && npm run build --workspace @aion/privacy-boundary && tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "npm run build --workspace @aion/object && npm run build --workspace @aion/privacy-boundary && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
-    "test:unit": "npm run build && npm run build:test && node --test \"dist-test/test/contracts.test.js\"",
-    "test:preflight": "npm run build && npm run build:test && node --test \"dist-test/test/preflight.test.js\"",
-    "test:templates": "npm run build && npm run build:test && node --test \"dist-test/test/templates.test.js\"",
-    "test:architecture": "npm run build && node --test \"test/architecture-boundary.test.mjs\""
+    "test": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
+    "test:unit": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/contracts.test.js\"",
+    "test:preflight": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/preflight.test.js\"",
+    "test:templates": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/templates.test.js\"",
+    "test:architecture": "npm run build && node --test --test-reporter=tap \"test/architecture-boundary.test.mjs\""
   },
   "dependencies": {
     "@aion/object": "0.1.0",

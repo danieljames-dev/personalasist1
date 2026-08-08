@@ -20,10 +20,10 @@
     "build": "tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "npm run build --workspace @aion/privacy-boundary && npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
-    "test:unit": "npm run build && npm run build:test && node --test \"dist-test/test/contracts.test.js\" \"dist-test/test/bootstrap.test.js\"",
-    "test:persistence": "npm run build && npm run build:test && node --test \"dist-test/test/file-repository.test.js\"",
-    "test:cli": "npm run build && npm run build --workspace @aion/privacy-boundary && node --test \"test/cli.test.mjs\" \"test/architecture-boundary.test.mjs\""
+    "test": "npm run build --workspace @aion/privacy-boundary && npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
+    "test:unit": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/contracts.test.js\" \"dist-test/test/bootstrap.test.js\"",
+    "test:persistence": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/file-repository.test.js\"",
+    "test:cli": "npm run build && npm run build --workspace @aion/privacy-boundary && node --test --test-reporter=tap \"test/cli.test.mjs\" \"test/architecture-boundary.test.mjs\""
   },
   "engines": {
     "node": ">=22"

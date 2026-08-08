@@ -18,13 +18,14 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
-    [int]      $ExpectedTests     = 586,
+    [int]      $ExpectedTests     = -1,
     [switch]   $DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'backup-ref-policy.ps1')
+. (Join-Path $PSScriptRoot 'parse-verify-summary.ps1')
 
 $ForbiddenPatterns = @(
     'private/', '.aion-local/', 'node_modules', 'dist/', 'dist-test/', '*.tsbuildinfo', '*.tgz',
@@ -47,6 +48,9 @@ function Get-Sha256 { param([string]$Path) (Get-FileHash -LiteralPath $Path -Alg
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
 if (-not $RepositoryPath) { $RepositoryPath = Split-Path -Parent $PSScriptRoot }
 $RepositoryPath = (Resolve-Path -LiteralPath $RepositoryPath).Path
+if ($ExpectedTests -lt 0) {
+    $ExpectedTests = Get-AionExpectedVerifyPassCount -RepositoryPath $RepositoryPath
+}
 
 $mirrorRoot    = Join-Path $BackupRoot 'repository-mirror'
 $mirrorPath    = Join-Path $mirrorRoot 'AION.git'

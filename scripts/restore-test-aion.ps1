@@ -65,12 +65,13 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 586,
+    [int]      $ExpectedTests = -1,
     [switch]   $DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'parse-verify-summary.ps1')
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,6 +112,13 @@ function Invoke-Logged {
 if (-not $Timestamp)        { $Timestamp        = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'") }
 if (-not $MirrorPath)       { $MirrorPath       = Join-Path $BackupRoot 'repository-mirror\AION.git' }
 if (-not $RestoreTestsRoot) { $RestoreTestsRoot = Join-Path $BackupRoot 'restore-tests' }
+if (-not $ActiveRepositoryPath) {
+    # Used only to resolve the authoritative expected-count file when ExpectedTests is defaulted.
+    $ActiveRepositoryPath = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
+}
+if ($ExpectedTests -lt 0) {
+    $ExpectedTests = Get-AionExpectedVerifyPassCount -RepositoryPath $ActiveRepositoryPath
+}
 
 $restoreDir = Join-Path $RestoreTestsRoot "restore-$Timestamp"
 $logDir     = Join-Path $BackupRoot 'logs'
@@ -291,9 +299,11 @@ try {
     Add-Step 'npm-ci' 'PASS' "exit 0"
 
     # ---------------------------------------------------------------------
-    # 4. npm run verify - require the declared count / 0 failed
+    # 4. npm run verify - TAP-owned reporter; fail-closed on count / fails / parse
     # ---------------------------------------------------------------------
-    Write-Step "running npm run verify"
+    # Package scripts force `node --test --test-reporter=tap` so recovery never depends on
+    # whether stdout is a TTY or on Unicode spec-reporter decorations.
+    Write-Step "running npm run verify (TAP reporter owned by package scripts)"
     $vOut = Join-Path $logDir "restore-$Timestamp.verify.out.log"
     $vErr = Join-Path $logDir "restore-$Timestamp.verify.err.log"
     $vCode = Invoke-Logged -CommandLine 'npm run verify' -WorkingDirectory $restoreDir -OutFile $vOut -ErrFile $vErr
@@ -302,18 +312,14 @@ try {
     if (Test-Path $vOut) { $verifyText += (Get-Content $vOut -Raw) }
     if (Test-Path $vErr) { $verifyText += (Get-Content $vErr -Raw) }
 
-    $passMatches = [regex]::Matches($verifyText, '(?m)^#\s*pass\s+(\d+)\s*$')
-    $failMatches = [regex]::Matches($verifyText, '(?m)^#\s*fail\s+(\d+)\s*$')
-    $result.testsPassed = [int](($passMatches | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
-    $result.testsFailed = [int](($failMatches | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
+    $summary = Get-AionVerifySummary -VerifyText $verifyText
+    $result.testsPassed = [int]$summary.testsPassed
+    $result.testsFailed = [int]$summary.testsFailed
 
     if ($vCode -ne 0) { throw "npm run verify failed with exit code $vCode (see $vErr)" }
-    if ($result.testsPassed -ne $ExpectedTests) {
-        throw "expected $ExpectedTests passing tests, observed '$($result.testsPassed)'. A DECREASE means tests were lost; an INCREASE means -ExpectedTests is stale. Neither is tolerated."
-    }
-    if ($result.testsFailed -ne 0)  { throw "expected 0 failing tests, observed '$($result.testsFailed)'" }
+    Assert-AionVerifySummary -Summary ([hashtable]$summary) -ExpectedPass $ExpectedTests -ExpectedFail 0
 
-    Add-Step 'npm-run-verify' 'PASS' "$ExpectedTests passed / 0 failed"
+    Add-Step 'npm-run-verify' 'PASS' "$ExpectedTests passed / 0 failed (TAP)"
 
     # ---------------------------------------------------------------------
     # 5. Backup-ref regression test

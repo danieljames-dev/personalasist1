@@ -20,14 +20,14 @@
     "build": "npm run build --workspace @aion/career-input && npm run build --workspace @aion/object && tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "npm run build --workspace @aion/career-input && npm run build --workspace @aion/object && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "npm run build && npm run build:test && node --test \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
-    "test:unit": "npm run build && npm run build:test && node --test \"dist-test/test/contracts.test.js\"",
-    "test:catalogue": "npm run build && npm run build:test && node --test \"dist-test/test/catalogue.test.js\"",
-    "test:facts": "npm run build && npm run build:test && node --test \"dist-test/test/facts.test.js\"",
-    "test:profile": "npm run build && npm run build:test && node --test \"dist-test/test/profile.test.js\"",
-    "test:operations": "npm run build && npm run build:test && node --test \"dist-test/test/operations.test.js\"",
-    "test:persistence": "npm run build && npm run build:test && node --test \"dist-test/test/persistence.test.js\"",
-    "test:architecture": "npm run build && node --test \"test/architecture-boundary.test.mjs\""
+    "test": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
+    "test:unit": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/contracts.test.js\"",
+    "test:catalogue": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/catalogue.test.js\"",
+    "test:facts": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/facts.test.js\"",
+    "test:profile": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/profile.test.js\"",
+    "test:operations": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/operations.test.js\"",
+    "test:persistence": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/persistence.test.js\"",
+    "test:architecture": "npm run build && node --test --test-reporter=tap \"test/architecture-boundary.test.mjs\""
   },
   "dependencies": {
     "@aion/career-input": "0.1.0",
