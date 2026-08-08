@@ -107,3 +107,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: .86rem; }
   .facts { grid-template-columns: 1fr 1fr; }
   .tl { grid-template-columns: 5.2rem 1fr; }
 }
+
+/* V1.2 areas. The same shell as Sales: tap targets first, and a nav that wraps on a phone. */
+label.inline { display: inline-flex; align-items: center; gap: .3rem; margin: 0 .7rem .3rem 0; font-size: .85rem; color: var(--muted); }
+label.inline input { width: auto; }
+@media (max-width: 860px) {
+  nav { gap: .35rem; }
+  nav button { flex: 1 1 auto; min-width: 6.5rem; text-align: center; padding: .55rem .5rem; }
+}

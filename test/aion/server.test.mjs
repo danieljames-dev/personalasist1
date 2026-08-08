@@ -316,11 +316,19 @@ test("UI exposes every required owner-facing area and needs no hosted dependency
   const html = await readFile(join(repositoryRoot, "apps/aion/public/index.html"), "utf8");
   const js = await readFile(join(repositoryRoot, "apps/aion/public/app.js"), "utf8");
   const css = await readFile(join(repositoryRoot, "apps/aion/public/styles.css"), "utf8");
-  for (const area of ["Sales", "Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"]) {
+  for (const area of ["Sales", "People", "Chat", "Brain", "Studio", "Research", "Projects", "Learning", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"]) {
     assert.match(js, new RegExp(`"${area}"`, "u"), `the ${area} area must exist`);
   }
   for (const [name, text] of [["index.html", html], ["app.js", js], ["styles.css", css]]) {
-    assert.doesNotMatch(text, /https?:\/\//u, `${name} must not reference a remote origin`);
+    /*
+     * No remote origin. Loopback is exempt because a loopback address is definitionally not a
+     * hosted dependency -- the Brain screen has to be able to show what a local runtime address
+     * looks like. Anything else with a scheme is a reference to somebody else's server.
+     */
+    const origins = [...text.matchAll(/https?:\/\/([^\s"'`)<>]+)/gu)]
+      .map((match) => match[1])
+      .filter((host) => !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:[/?#]|$)/u.test(host));
+    assert.deepEqual(origins, [], `${name} must not reference a remote origin`);
     assert.doesNotMatch(text, /@import\s+url\(|\b(?:cdn|googleapis|gstatic|unpkg|jsdelivr|googletagmanager)\b|gtag\s*\(|\banalytics\.(?:js|track)\b/i, `${name} must not load a hosted dependency`);
   }
   assert.match(js, /esc\(/u, "rendered values must be escaped");

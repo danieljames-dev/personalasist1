@@ -1,5 +1,5 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Sales", "Chat", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"];
+const areas = ["Sales", "People", "Chat", "Brain", "Studio", "Research", "Projects", "Learning", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"];
 let model = null;
 let area = "Chat";
 let streaming = "";
@@ -248,6 +248,8 @@ ${sheet(s)}
 
 /** One inline sheet at a time, so a quick action never navigates away from the floor view. */
 let openSheet = null;
+/** The last honest assessment the owner asked for. Held in memory; nothing is stored. */
+let assessment = null;
 function sheet(s) {
   if (!openSheet) return "";
   const people = active(s);
@@ -278,6 +280,138 @@ function sheet(s) {
 <label>Why<input name="summary" maxlength="500" value="Owner updated the relationship state."></label>
 <div class="actions"><button>Update</button><button data-do="sheet-close" type="button">Cancel</button></div></form>`;
   return "";
+}
+
+// --- V1.2 areas. Same responsive shell as Sales: tap targets first, no second application. -----
+
+/** The label of the workspace currently in view, so every area can say where it is. */
+const here = (s) => s.settings.workspaceLabels?.[s.settings.activeWorkspace] ?? s.settings.activeWorkspace;
+
+function peopleArea(s) {
+  const scopedPeople = (s.relationships ?? []).filter((r) => r.workspace === s.settings.activeWorkspace && !r.archived);
+  if (openCustomer) return customerDetail(s);
+  return `<div class="sales"><header class="sales-head"><p class="meta">AION — ${esc(here(s)).toUpperCase()}</p><h1>People</h1>
+<div class="today"><span><b>${scopedPeople.length}</b> in this workspace</span></div></header>
+<p class="hint">Prospects, customers, contacts, partners, vendors, and support contacts are one kind of record with a declared type. Nothing here is visible from another workspace, and AION never stores identity, credit, banking, or financing material about anyone.</p>
+<form data-form="relationship" class="quick-form"><label>Name or alias<input name="displayName" required maxlength="200"></label>
+<label>Type<select name="relationshipType">${["contact", "prospect", "customer", "lead", "partner", "vendor", "support-contact", "other"].map((t) => `<option>${t}</option>`).join("")}</select></label>
+<label>Organisation<input name="organisation" maxlength="200"></label>
+<label>Role<input name="role" maxlength="200"></label>
+<button>Add to ${esc(here(s))}</button></form>
+<div class="list">${scopedPeople.length ? scopedPeople.map((r) => customerRow(r, `${r.relationshipType}${r.organisation ? ` · ${r.organisation}` : ""}${r.lastContactAt ? ` · last ${ago(r.lastContactAt)}` : ""}`)).join("") : `<div class="empty">Nobody recorded in ${esc(here(s))} yet.</div>`}</div></div>`;
+}
+
+function brainArea(s) {
+  const brain = s.brain ?? { mode: "local-preferred", endpoints: [], offlineMode: false, remoteFallbackEnabled: false };
+  const independence = model.independence ?? null;
+  const runs = s.evaluations ?? [];
+  const badge = (e) => e.location === "local-machine" ? "local" : e.location === "owner-controlled-host" ? "yours" : "third party";
+  return `<h1>Brain</h1><p class="lead">AION owns what it knows. A model is a replaceable reasoning provider, and removing every one of them changes nothing in your Memory, Tasks, relationships, or anything else.</p>
+${independence ? `<div class="card ${independence.independent ? "" : "warnbox"}"><h2>Independence</h2><p>${esc(independence.summary)}</p>
+<p class="meta">${independence.ownerControlledEndpoints} endpoint(s) you control · ${independence.thirdPartyEndpoints} third-party · offline floor ${independence.offlineFloorPresent ? "present" : "MISSING"}</p></div>` : ""}
+<form data-form="brain-settings"><label>Routing mode<select name="mode">${["local-only", "local-preferred", "manual", "maximum-capability"].map((m) => `<option value="${m}" ${m === brain.mode ? "selected" : ""}>${m.replace(/-/gu, " ")}</option>`).join("")}</select></label>
+<label>Primary endpoint<select name="primaryEndpointId">${brain.endpoints.map((e) => `<option value="${esc(e.id)}" ${e.id === brain.primaryEndpointId ? "selected" : ""}>${esc(e.label)} — ${badge(e)}</option>`).join("")}</select></label>
+<label><input type="checkbox" name="offlineMode" ${brain.offlineMode ? "checked" : ""}> Offline mode — no inference leaves this computer, not even to a host you control</label>
+<label><input type="checkbox" name="remoteFallbackEnabled" ${brain.remoteFallbackEnabled ? "checked" : ""}> Allow AION to propose a third-party endpoint when nothing you control can do the work</label>
+<p class="meta">Maximum Capability prefers the strongest endpoint. It is never consent to send private context out: a third-party endpoint still discloses what would leave and still needs your approval.</p>
+<button>Save brain policy</button></form>
+<div class="card"><h2>Endpoints</h2>
+${brain.endpoints.map((e) => `<p class="meta"><b>${esc(e.label)}</b> — ${badge(e)} · ${esc(e.runtime)} · model ${esc(e.model)}${e.hostLabel ? ` · ${esc(e.hostLabel)}` : ""}${e.credentialEnvironmentVariable ? ` · credential from ${esc(e.credentialEnvironmentVariable)} (name only)` : ""}
+<br>${e.lastHealth ? `${e.lastHealth.available ? "reachable" : "not reachable"} — ${esc(e.lastHealth.detail)}` : "not checked yet"}
+<button data-do="brain-health" data-id="${esc(e.id)}">Check</button>${e.id === "deterministic-offline" ? "" : `<button data-do="brain-evaluate" data-id="${esc(e.id)}">Evaluate</button><button data-do="brain-remove" data-id="${esc(e.id)}" class="danger">Remove</button>`}</p>`).join("")}
+<div class="actions"><button data-do="brain-detect">Look for a runtime on this computer</button></div>
+<p class="meta">Detection checks a short list of documented loopback addresses. It installs nothing, downloads nothing, and searches no part of your computer. Adding what it finds is up to you.</p></div>
+<form data-form="brain-endpoint"><h2>Add an endpoint</h2>
+<label>Name<input name="label" required maxlength="80" placeholder="Home GPU"></label>
+<label>Runtime<select name="runtime">${["ollama", "llama-cpp", "vllm", "openai-compatible"].map((r) => `<option>${r}</option>`).join("")}</select></label>
+<label>Where it runs<select name="location"><option value="local-machine">this computer</option><option value="owner-controlled-host">a machine or rented GPU I control</option><option value="third-party-service">a third-party service</option></select></label>
+<label>Address<input name="baseUrl" required maxlength="2048" placeholder="http://127.0.0.1:11434"></label>
+<label>Model<input name="model" required maxlength="200"></label>
+<label>Host label (your own note)<input name="hostLabel" maxlength="120"></label>
+<label>Credential environment-variable NAME (never the value)<input name="credentialEnvironmentVariable" maxlength="128" placeholder="AION_GPU_TOKEN"></label>
+<label>Context tokens<input name="contextTokens" type="number" min="512" max="10000000" value="8192"></label>
+<label>${["reasoning", "code", "structuredJson", "toolProposal", "vision", "embeddings"].map((f) => `<label class="inline"><input type="checkbox" name="${f}"> ${f}</label>`).join(" ")}</label>
+<button>Add endpoint</button></form>
+${runs.length ? `<div class="card"><h2>Evaluation evidence</h2><p class="meta">Deterministic synthetic fixtures. This measures the cases in this repository on the day it ran, not the model in general.</p>
+${runs.slice(0, 10).map((r) => `<p class="meta"><b>${esc(r.endpointLabel)}</b> — ${r.passed}/${r.total} · median ${r.medianLatencyMs} ms<br>${esc(r.summary)}</p>`).join("")}</div>` : ""}`;
+}
+
+function studioArea(s) {
+  const list = (s.opportunities ?? []).filter((o) => o.workspace === s.settings.activeWorkspace && !o.archived);
+  return `<h1>Product Studio</h1><p class="lead">An idea is not a product and a hunch is not a market. AION scores an opportunity on what is actually established about it, and never invents market evidence — it has no way to know what customers want.</p>
+<form data-form="opportunity"><label>Title<input name="title" required maxlength="200"></label>
+<label>Problem<textarea name="problem" maxlength="4000"></textarea></label>
+<label>Target customer<input name="targetCustomer" maxlength="2000"></label>
+<label>Problem severity 0-10<input name="problemSeverity" type="number" min="0" max="10" value="5"></label>
+<label>Reachability 0-10<input name="reachability" type="number" min="0" max="10" value="5"></label>
+<label>Your advantage 0-10<input name="ownerAdvantage" type="number" min="0" max="10" value="5"></label>
+<label>Effort 0-10<input name="effort" type="number" min="0" max="10" value="5"></label>
+<button>Open opportunity in ${esc(here(s))}</button></form>
+${cards(list, (o) => `<article class="card"><h2>${esc(o.title)}</h2><p>${esc(o.problem)}</p>
+<p class="meta">${esc(o.stage)} · ${o.claims.length} claim(s) · ${o.experiments.length} experiment(s) · ${o.competitors.length} competitor note(s)</p>
+${o.claims.length ? `<details><summary>Claims</summary>${o.claims.map((c) => `<p class="meta"><b>${esc(c.class)}</b> ${esc(c.statement)}${c.supersededBy ? " · superseded" : ""}${c.promotions.length ? ` · was ${esc(c.promotions[0].from)}` : ""}</p>`).join("")}</details>` : ""}
+<form data-form="claim"><input type="hidden" name="id" value="${esc(o.id)}">
+<label>Record a claim<input name="statement" required maxlength="4000"></label>
+<label>What kind<select name="class">${["assumption", "hypothesis", "observation", "inference", "fact"].map((c) => `<option>${c}</option>`).join("")}</select></label>
+<label>What it rests on (comma separated; required for observation, inference)<input name="supportedBy" maxlength="2000"></label>
+<button>Record</button></form>
+<div class="actions"><button data-do="assess" data-id="${esc(o.id)}">Assess honestly</button></div>
+${assessment && assessment.id === o.id ? `<div class="card coach"><h2>Score ${assessment.data.score.total}/100</h2><p>${esc(assessment.data.score.explanation)}</p>
+<p class="warn">${esc(assessment.data.caution)}</p>
+${assessment.data.openQuestions.length ? `<p class="meta">Still open: ${assessment.data.openQuestions.map((q) => esc(q)).join(" · ")}</p>` : ""}
+<div class="actions"><button data-do="assess-close">Close</button></div></div>` : ""}</article>`, "No opportunities yet. Open one above; it will score zero until something is established about it.")}`;
+}
+
+function researchArea(s) {
+  const jobs = (s.researchJobs ?? []).filter((j) => j.workspace === s.settings.activeWorkspace);
+  return `<h1>Research</h1><p class="lead">Research is a job, not a background capability: a written question, a declared scope, hard limits, your approval, and a record of exactly what was consulted. Proposing runs nothing.</p>
+<p class="hint">AION ships with no research provider at all, so it cannot reach the internet until you configure one you control. Every finding must cite a source AION actually retrieved, and no finding is ever a fact.</p>
+<form data-form="research"><label>Question<input name="question" required maxlength="2000"></label>
+<label>Scope<select name="scope"><option value="local-only">local only — nothing leaves this computer</option><option value="owner-supplied-sources">only the sources I supply</option><option value="public-web">the public web</option></select></label>
+<label>Sources I supply (one per line)<textarea name="seedReferences" maxlength="8000"></textarea></label>
+<label>At most this many sources<input name="maxSources" type="number" min="0" max="50" value="8"></label>
+<label>At most this many cents<input name="maxCostCents" type="number" min="0" max="10000" value="0"></label>
+<button>Propose research job</button></form>
+<form data-form="url-check"><label>Check whether AION would fetch a URL<input name="url" maxlength="2048" placeholder="a public https address"></label><button>Check</button></form>
+${cards(jobs, (j) => `<article class="card"><h2>${esc(j.question)}</h2>
+<p class="meta">${esc(j.state)} · ${esc(j.scope)} · ${j.sources.length} source(s) · ${j.findings.length} finding(s) · ${j.costCents} cent(s)${j.outputDigest ? ` · digest ${esc(short(j.outputDigest))}` : ""}</p>
+${j.findings.map((f) => `<p class="meta"><b>${esc(f.class)}</b> ${esc(f.statement)}${f.caveat ? ` — ${esc(f.caveat)}` : ""}</p>`).join("")}
+${j.unresolved.length ? `<p class="warn">${j.unresolved.map((u) => esc(u)).join(" ")}</p>` : ""}
+<div class="actions">${j.state === "proposed" ? `<button data-do="research-approve" data-id="${esc(j.id)}">Approve</button>` : ""}${j.state === "approved" ? `<button data-do="research-run" data-id="${esc(j.id)}">Run</button>` : ""}</div></article>`, "No research jobs yet.")}`;
+}
+
+function projectsArea(s) {
+  // Projects come from the API with their honest standing line already computed.
+  const list = model.projects ?? (s.projects ?? []).filter((p) => p.workspace === s.settings.activeWorkspace);
+  return `<h1>Projects</h1><p class="lead">From an idea to something you can look at. Stages are not skipped, a review needs evidence behind it, and an implementation stage needs your approval naming that stage — no agent raises its own authority.</p>
+<p class="hint">AION cannot deploy. Putting something where other people can reach it is irreversible, and this build ships no capability that does it.</p>
+<form data-form="project"><label>Title<input name="title" required maxlength="200"></label><label>Summary<textarea name="summary" maxlength="4000"></textarea></label><button>Open project in ${esc(here(s))}</button></form>
+${cards(list, (p) => `<article class="card"><h2>${esc(p.title)}</h2><p class="meta">${esc(p.standing ?? p.stage)}</p>
+${p.runs.length ? `<details><summary>Pipeline runs</summary>${p.runs.map((r) => `<p class="meta">${esc(r.step)} · ${esc(r.outcome)}${r.previewUrl ? ` · ${esc(r.previewUrl)}` : ""}</p>`).join("")}</details>` : ""}
+${p.proposals.length ? `<details><summary>Agent proposals</summary>${p.proposals.map((x) => `<p class="meta">${esc(x.bridgeId)} · ${esc(x.mode)} · ${esc(x.summary)}</p>`).join("")}</details>` : ""}
+<form data-form="project-advance"><input type="hidden" name="id" value="${esc(p.id)}">
+<label>Move to<select name="stage">${["specification", "plan", "tasks", "implementation", "verification", "review", "preview", "owner-approved", "abandoned"].map((x) => `<option>${x}</option>`).join("")}</select></label>
+<label>Why<input name="reason" required maxlength="1000"></label><button>Advance</button></form>
+<div class="actions"><button data-do="project-approve" data-id="${esc(p.id)}" data-stage="implementation">Approve implementation</button>
+${["install", "build", "test", "preview"].map((step) => `<button data-do="project-step" data-id="${esc(p.id)}" data-step="${step}">${step}</button>`).join("")}</div></article>`, "No projects yet.")}`;
+}
+
+function learningArea(s) {
+  const lessons = model.lessons ?? [];
+  const summary = model.learningSummary ?? null;
+  return `<h1>Learning</h1><p class="lead">AION learns in records outside any model. Replace the model and none of this is lost, because none of it was ever inside the model.</p>
+${summary ? `<div class="card"><h2>What AION has learned</h2><p>${esc(summary.summary)}</p></div>` : ""}
+<p class="hint">AION does not fine-tune anything and does not train on your data. A lesson a model proposed stays a hypothesis until you promote it.</p>
+<form data-form="lesson"><label>What you learned<input name="statement" required maxlength="4000"></label>
+<label>What to do differently<textarea name="guidance" maxlength="4000"></textarea></label>
+<label>What it rests on (comma separated)<input name="supportedBy" maxlength="2000"></label>
+<button>Record lesson in ${esc(here(s))}</button></form>
+${cards(lessons, (l) => `<article class="card"><h2>${esc(l.claim.class)}</h2><p>${esc(l.claim.statement)}</p>
+${l.guidance ? `<p class="meta">${esc(l.guidance)}</p>` : ""}
+<p class="meta">${esc(l.standing.summary)}</p>
+<div class="actions"><button data-do="lesson-outcome" data-id="${esc(l.id)}" data-result="worked">It worked</button>
+<button data-do="lesson-outcome" data-id="${esc(l.id)}" data-result="did-not-work">It did not</button>
+<button data-do="lesson-disable" data-id="${esc(l.id)}" class="danger">Turn off</button></div></article>`, "Nothing learned yet. AION will not pretend otherwise.")}`;
 }
 
 function approvalsArea(s) {
@@ -390,6 +524,12 @@ ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <c
 
 function page() {
   const s = model.state;
+  if (area === "People") return peopleArea(s);
+  if (area === "Brain") return brainArea(s);
+  if (area === "Studio") return studioArea(s);
+  if (area === "Research") return researchArea(s);
+  if (area === "Projects") return projectsArea(s);
+  if (area === "Learning") return learningArea(s);
   if (area === "Chat") return chatArea(s);
   if (area === "Tasks") return tasksArea(s);
   if (area === "Routines") return routinesArea(s);
@@ -427,7 +567,7 @@ function render() {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
-  const { area: target, action, do: verb, id, state, enabled, value, workspace, tab, sheet: sheetName, kind, followup, appt, status, template, archived } = button.dataset;
+  const { area: target, action, do: verb, id, state, enabled, value, workspace, tab, sheet: sheetName, kind, followup, appt, status, template, archived, step, stage, result } = button.dataset;
   if (!target && !action && !verb && !workspace) return; // a plain form submit button; the submit handler owns it
   event.preventDefault();
   try {
@@ -439,6 +579,18 @@ document.addEventListener("click", async (event) => {
     if (verb === "customer-open") { openCustomer = id; coachPanel = null; render(); return; }
     if (verb === "customer-close") { openCustomer = null; coachPanel = null; render(); return; }
     if (verb === "coach-close") { coachPanel = null; render(); return; }
+    if (verb === "assess-close") { assessment = null; render(); return; }
+    if (verb === "assess") { assessment = { id, data: await api("opportunity.assess", { id }) }; render(); return; }
+    if (verb === "brain-health") { const endpoint = await api("brain.health", { id }); toast(`${endpoint.label}: ${endpoint.lastHealth.detail}`); }
+    if (verb === "brain-detect") { const found = await api("brain.detect"); toast(found.runtimes.length ? found.runtimes.map((r) => r.detail).join(" ") : "Nothing is listening on any documented local runtime address. AION installed nothing and searched nothing."); return; }
+    if (verb === "brain-remove") { await api("brain.endpoint.remove", { id }); toast("Endpoint removed. Nothing AION knows was affected."); }
+    if (verb === "brain-evaluate") { const run = await api("brain.evaluate", { id }); toast(run.summary); }
+    if (verb === "research-approve") await api("research.approve", { id });
+    if (verb === "research-run") { const job = await api("research.run", { id }); toast(`${job.findings.length} finding(s) from ${job.sources.length} source(s). None of them is a fact yet.`); }
+    if (verb === "project-step") { await api("project.step", { id, step }); }
+    if (verb === "project-approve") { await api("project.approve", { id, stage, note: "Approved from the Command Center." }); toast(`You approved the ${stage} stage.`); }
+    if (verb === "lesson-outcome") { await api("lesson.outcome", { id, outcome: { result } }); }
+    if (verb === "lesson-disable") { await api("lesson.enable", { id, enabled: false }); toast("Lesson turned off. It is kept so the history is intact."); }
     if (verb === "coach") { const output = await api("coach", { kind, input: { customerId: id, onDate: today() } }); coachPanel = { for: id ?? null, output }; render(); return; }
     if (verb === "followup-done") { await api("customer.followup.complete", { id, followUpId: followup, outcome: "Completed from the floor." }); }
     if (verb === "appt-status") { await api("customer.appointment.status", { id, appointmentId: appt, status }); }
@@ -499,6 +651,52 @@ document.addEventListener("submit", async (event) => {
       toast(`Paired as "${data.result.label}".`);
       await load();
       return;
+    }
+    if (kind === "relationship") {
+      const created = await api("relationship.create", { relationship: { displayName: d.displayName, relationshipType: d.relationshipType, organisation: d.organisation, role: d.role } });
+      openCustomer = created.id; toast(`Added to ${model.state.settings.workspaceLabels?.[model.state.settings.activeWorkspace] ?? "this workspace"}.`);
+    }
+    if (kind === "brain-settings") {
+      await api("brain.settings", { change: { mode: d.mode, primaryEndpointId: d.primaryEndpointId, offlineMode: form.offlineMode.checked, remoteFallbackEnabled: form.remoteFallbackEnabled.checked } });
+      toast(form.offlineMode.checked ? "Offline mode is on. No inference leaves this computer." : "Brain policy saved.");
+    }
+    if (kind === "brain-endpoint") {
+      await api("brain.endpoint.add", { endpoint: {
+        label: d.label, runtime: d.runtime, location: d.location, baseUrl: d.baseUrl, model: d.model,
+        hostLabel: d.hostLabel, credentialEnvironmentVariable: d.credentialEnvironmentVariable,
+        capabilities: {
+          contextTokens: Number(d.contextTokens || 8192),
+          ...Object.fromEntries(["reasoning", "code", "structuredJson", "toolProposal", "vision", "embeddings"].map((f) => [f, form[f].checked])),
+        },
+      } });
+      toast("Endpoint added. AION stores the name of the credential variable, never its value.");
+    }
+    if (kind === "opportunity") {
+      await api("opportunity.create", { opportunity: {
+        title: d.title, problem: d.problem, targetCustomer: d.targetCustomer,
+        problemSeverity: Number(d.problemSeverity), reachability: Number(d.reachability),
+        ownerAdvantage: Number(d.ownerAdvantage), effort: Number(d.effort),
+      } });
+      toast("Opportunity opened. It scores zero until something is actually established about it.");
+    }
+    if (kind === "claim") {
+      await api("opportunity.claim", { id: d.id, claim: { class: d.class, statement: d.statement, supportedBy: d.supportedBy.split(",").map((x) => x.trim()).filter(Boolean) } });
+      toast(`Recorded a ${d.class}. Its class is stored, so a guess is never later quoted as a finding.`);
+    }
+    if (kind === "research") {
+      await api("research.propose", { job: {
+        question: d.question, scope: d.scope,
+        seedReferences: d.seedReferences.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
+        limits: { maxSources: Number(d.maxSources || 0), maxCostCents: Number(d.maxCostCents || 0) },
+      } });
+      toast("Research job proposed. Nothing runs until you approve it.");
+    }
+    if (kind === "url-check") { const verdict = await api("research.check-url", { url: d.url }); toast(verdict.reason); return; }
+    if (kind === "project") { await api("project.create", { project: { title: d.title, summary: d.summary } }); toast("Project opened at the idea stage."); }
+    if (kind === "project-advance") { await api("project.advance", { id: d.id, stage: d.stage, reason: d.reason }); toast(`Moved to ${d.stage}.`); }
+    if (kind === "lesson") {
+      await api("lesson.record", { lesson: { statement: d.statement, guidance: d.guidance, supportedBy: d.supportedBy.split(",").map((x) => x.trim()).filter(Boolean) } });
+      toast("Lesson recorded.");
     }
     if (kind === "prospect") {
       const created = await api("customer.create", { customer: { displayName: d.displayName, source: d.source, communicationPreference: d.communicationPreference, interests: d.interest ? [{ kind: "vehicle", description: d.interest }] : [] } });

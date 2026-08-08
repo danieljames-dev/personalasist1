@@ -346,6 +346,13 @@ export async function createAionServer(options = {}) {
           salesRoutineTemplates: service.salesRoutineTemplates(),
           remoteAccess: await remoteAccessStatus(settings, listeners),
           devices: await service.deviceInventory(),
+          // V1.2 surfaces. Everything here is already workspace-scoped by the service.
+          independence: await service.independence(),
+          lessons: await service.lessons(),
+          learningSummary: await service.learningSummary(),
+          projects: await service.projects(),
+          brainBoundary: service.brainBoundary(),
+          adaptationBoundary: service.adaptationBoundary(),
           // A phone knows it is a phone, so the UI can hide what only the console may change.
           viewer: loopback ? "console" : "device",
           dataRoot: "private/aion", exportRoot: "private/aion/exports",

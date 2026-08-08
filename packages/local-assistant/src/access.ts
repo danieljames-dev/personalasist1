@@ -166,3 +166,88 @@ export function validateBindAddress(value: string): string {
   if (!privateIpv4 && !privateIpv6) fail("Only a loopback or private-network address may be bound. AION never exposes itself to the public internet.");
   return address;
 }
+
+/**
+ * What kind of network an accepted bind address actually is.
+ *
+ * Getting to AION from a coffee shop needs a private overlay network — Tailscale, WireGuard, or
+ * something equivalent the owner runs — because the alternatives are opening a router port or
+ * creating a public tunnel, and AION does neither. What it can do is recognise the address ranges
+ * those overlays hand out and describe them honestly, so the owner knows whether the address they
+ * typed will work away from home or only on their own Wi-Fi.
+ *
+ * This classifies. It does not install, configure, sign in, bring an interface up, or change any
+ * network setting, and reachability still grants nothing: a paired session is required on every
+ * non-loopback request whatever kind of network carried it.
+ */
+export type BindScopeV1 = "loopback" | "local-network" | "overlay" | "link-local";
+
+export interface BindAddressClassificationV1 {
+  address: string;
+  scope: BindScopeV1;
+  /** Whether this address can be reached from outside the building. */
+  worksAwayFromHome: boolean;
+  /** The technology that ordinarily hands out this range, when there is a usual one. */
+  likelyProvider: string;
+  detail: string;
+}
+
+export function classifyBindAddress(value: string): BindAddressClassificationV1 {
+  const address = validateBindAddress(value);
+  const lower = address.toLowerCase();
+  const octets = address.split(".").map((part) => Number(part));
+
+  if (address === "127.0.0.1" || address === "::1") {
+    return {
+      address, scope: "loopback", worksAwayFromHome: false, likelyProvider: "this computer",
+      detail: "Loopback. Only this computer can reach AION, which is the default and needs no network of any kind.",
+    };
+  }
+  if (octets.length === 4 && octets[0] === 100 && octets[1]! >= 64 && octets[1]! <= 127) {
+    return {
+      address, scope: "overlay", worksAwayFromHome: true, likelyProvider: "Tailscale or another CGNAT-range overlay",
+      detail: "This is in the shared carrier-grade range (100.64/10) that private overlay networks such as Tailscale hand out. If that overlay is running on both this computer and your phone, AION is reachable from anywhere the overlay reaches. AION did not create it, does not manage it, and will not sign in to it — and a paired session is still required.",
+    };
+  }
+  if (/^fd/u.test(lower)) {
+    return {
+      address, scope: "overlay", worksAwayFromHome: true, likelyProvider: "WireGuard or another unique-local overlay",
+      detail: "A unique-local IPv6 address, which is what a WireGuard-style overlay usually assigns. Reachable wherever that overlay reaches. AION neither configured nor manages it, and a paired session is still required.",
+    };
+  }
+  if (/^fe80/u.test(lower) || (octets.length === 4 && octets[0] === 169 && octets[1] === 254)) {
+    return {
+      address, scope: "link-local", worksAwayFromHome: false, likelyProvider: "an unconfigured interface",
+      detail: "A link-local address. These are assigned when an interface has no proper configuration, so this will usually stop working without warning. Prefer your actual private-network address.",
+    };
+  }
+  return {
+    address, scope: "local-network", worksAwayFromHome: false, likelyProvider: "your home or office router",
+    detail: "A private network address. Your phone can reach AION while it is on the same network, and not otherwise. To reach AION away from home, run a private overlay network you control and bind the address it gives this computer — AION will not open a router port or create a public tunnel.",
+  };
+}
+
+/**
+ * What AION will and will not do about networking, stated as data.
+ *
+ * These are refusals rather than missing features, and they are listed here so the Command Center,
+ * the docs, and the tests all read from the same place instead of each describing the boundary in
+ * their own words and slowly disagreeing.
+ */
+export const NETWORK_BOUNDARY = {
+  willNot: [
+    "install or configure Tailscale, WireGuard, or any other network software",
+    "sign in to an overlay network or read its state",
+    "open a port on your router or ask UPnP to",
+    "create a public tunnel or a relay",
+    "bind a wildcard address",
+    "treat being on the network as authentication",
+  ],
+  will: [
+    "bind loopback always",
+    "additionally bind one exact private address you name",
+    "tell you honestly whether that address works away from home",
+    "require a paired session on every non-loopback request",
+  ],
+  statement: "Reaching AION over any network is not authentication. An overlay decides which machines can open a socket; it says nothing about who is holding the phone, so a paired session is required either way.",
+} as const;

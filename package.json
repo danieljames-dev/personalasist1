@@ -90,7 +90,8 @@
     "aion:server:test": "npm run aion:build --silent && node --test \"test/aion/**/*.test.mjs\"",
     "aion:demo": "npm run career:build --silent && npm run aion:build --silent && node apps/aion-demo.mjs",
     "verify": "npm run typecheck && npm test",
-    "aion:sales:demo": "npm run aion:build --silent && node apps/aion-sales-demo.mjs"
+    "aion:sales:demo": "npm run aion:build --silent && node apps/aion-sales-demo.mjs",
+    "aion:v12:demo": "npm run aion:build --silent && node apps/aion-v12-demo.mjs"
   },
   "engines": {
     "node": ">=22"

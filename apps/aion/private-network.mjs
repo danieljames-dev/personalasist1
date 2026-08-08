@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { NETWORK_BOUNDARY, classifyBindAddress } from "../../packages/local-assistant/dist/index.js";
 
 /**
  * Private-network detection.
@@ -32,6 +33,26 @@ export function tailscaleCandidates(env = process.env, platform = process.platfo
   return candidates.filter((candidate) => !/\.(?:cmd|ps1|bat|sh)$/u.test(candidate));
 }
 
+/**
+ * Documented WireGuard install locations. Same rule: a fixed list, one stat each, no search.
+ *
+ * Supporting a second overlay is the point rather than a convenience. AION should not have a
+ * favourite piece of network software any more than it should have a favourite model vendor.
+ */
+export function wireguardCandidates(env = process.env, platform = process.platform) {
+  const candidates = [];
+  const override = env.AION_WIREGUARD_PATH?.trim();
+  if (override && isAbsolute(override) && resolve(override) === override) candidates.push(override);
+  if (platform === "win32") {
+    for (const base of [env.ProgramFiles, env["ProgramFiles(x86)"]].filter(Boolean)) candidates.push(join(base, "WireGuard", "wg.exe"));
+  } else if (platform === "darwin") {
+    candidates.push("/usr/local/bin/wg", "/opt/homebrew/bin/wg");
+  } else {
+    candidates.push("/usr/bin/wg", "/usr/local/bin/wg");
+  }
+  return candidates.filter((candidate) => !/\.(?:cmd|ps1|bat|sh)$/u.test(candidate));
+}
+
 function probe(file, args) {
   return new Promise((resolveResult) => {
     const child = execFile(file, args, { timeout: PROBE_TIMEOUT_MS, windowsHide: true, shell: false, maxBuffer: 256 * 1024 },
@@ -45,27 +66,33 @@ function probe(file, args) {
  * plainly rather than implying AION could reach the phone if only it tried harder.
  */
 export async function detectPrivateNetwork(env = process.env, platform = process.platform) {
-  for (const candidate of tailscaleCandidates(env, platform)) {
-    try {
-      if (!(await stat(candidate)).isFile()) continue;
-    } catch { continue; }
-    const version = await probe(candidate, ["version"]);
-    if (version === null) continue;
-    return {
-      tool: "tailscale",
-      available: true,
-      // Executable name only: a full path would carry the owner's user name to the browser.
-      executable: basename(candidate),
-      version: version.slice(0, 80),
-      detail: "A Tailscale CLI is installed. AION has not read your tailnet, signed in, or changed any network setting, and it will not. To use it, turn on private phone access and enter the private address you want AION to bind.",
-    };
+  const tools = [
+    { tool: "tailscale", candidates: tailscaleCandidates(env, platform), args: ["version"], label: "A Tailscale CLI" },
+    { tool: "wireguard", candidates: wireguardCandidates(env, platform), args: ["--version"], label: "A WireGuard CLI" },
+  ];
+  for (const entry of tools) {
+    for (const candidate of entry.candidates) {
+      try {
+        if (!(await stat(candidate)).isFile()) continue;
+      } catch { continue; }
+      const version = await probe(candidate, entry.args);
+      if (version === null) continue;
+      return {
+        tool: entry.tool,
+        available: true,
+        // Executable name only: a full path would carry the owner's user name to the browser.
+        executable: basename(candidate),
+        version: version.slice(0, 80),
+        detail: `${entry.label} is installed. AION has not read its configuration, signed in, brought an interface up, or changed any network setting, and it will not. To use it, turn on private phone access and enter the private address you want AION to bind.`,
+      };
+    }
   }
   return {
     tool: "none",
     available: false,
     executable: null,
     version: null,
-    detail: "No supported private-network tool was found. AION checked only documented Tailscale install locations and does not search your computer. Private phone access still works over a network you already control -- enter that private address yourself -- and AION will never create a tunnel or change your router.",
+    detail: "No supported private-network tool was found. AION checked only documented Tailscale and WireGuard install locations and does not search your computer. Private phone access still works over a network you already control -- enter that private address yourself -- and AION will never create a tunnel or change your router.",
   };
 }
 
@@ -80,6 +107,10 @@ export async function remoteAccessStatus(settings, listeners = [], env = process
   const network = await detectPrivateNetwork(env, platform);
   const enabled = settings.remoteAccess?.enabled === true;
   const configured = settings.remoteAccess?.bindAddress ?? "127.0.0.1";
+  // What kind of network the configured address actually is, so "will this work from the car park"
+  // has an answer before the owner drives to the car park to find out.
+  let classification = null;
+  try { classification = classifyBindAddress(configured); } catch { classification = null; }
   const live = listeners.filter((entry) => entry.state === "listening");
   const privateLive = live.filter((entry) => entry.scope === "private");
   const problem = listeners.find((entry) => entry.state === "failed" || entry.state === "refused" || entry.state === "loopback-only");
@@ -88,7 +119,10 @@ export async function remoteAccessStatus(settings, listeners = [], env = process
   const summary = (() => {
     if (!enabled) return "Private phone access is off. AION is reachable only from this computer.";
     if (privateLive.length) {
-      return `Private phone access is on and AION is listening on ${privateLive.map((entry) => `${entry.address}:${entry.port}`).join(" and ")} as well as loopback. A paired device is still required; being on the network grants nothing by itself.`;
+      const reach = classification?.worksAwayFromHome
+        ? `That address is on ${classification.likelyProvider}, so a paired phone can reach AION from anywhere that overlay reaches.`
+        : "That address only works while your phone is on the same network; to reach AION away from home, run a private overlay network you control and bind the address it gives this computer.";
+      return `Private phone access is on and AION is listening on ${privateLive.map((entry) => `${entry.address}:${entry.port}`).join(" and ")} as well as loopback. ${reach} A paired device is still required; being on the network grants nothing by itself.`;
     }
     if (problem) return `Private phone access is on but NOT working: ${problem.detail} AION is still reachable from this computer.`;
     return "Private phone access is on but no private listener is active. Restart AION so the setting takes effect.";
@@ -98,6 +132,9 @@ export async function remoteAccessStatus(settings, listeners = [], env = process
     enabled,
     /** What the owner asked for. */
     bindAddress: configured,
+    /** What kind of network that address is, and whether it reaches beyond this building. */
+    addressScope: classification,
+    boundary: NETWORK_BOUNDARY,
     /** What AION actually bound. Empty means nothing but loopback. */
     listeners: listeners.map((entry) => ({ ...entry })),
     boundAddress: live.map((entry) => entry.address).join(", ") || "none",
