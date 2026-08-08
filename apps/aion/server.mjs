@@ -9,6 +9,7 @@ import {
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
+import { HttpBrainRuntimeV1, runEvaluation } from "./brain-runtime.mjs";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
@@ -119,6 +120,7 @@ export async function createAionServer(options = {}) {
   const developerAgents = options.developerAgents
     ?? (options.developerBridge ? new SelectableDeveloperAgentRegistryV1([options.developerBridge]) : await resolveDeveloperAgentBridges(repositoryRoot));
   const verificationRunner = options.verificationRunner ?? new AllowlistedVerificationRunnerV1(repositoryRoot, digestValue);
+  const brainRuntime = options.brainRuntime ?? new HttpBrainRuntimeV1();
   const service = new AionAssistantV1({
     repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
     providers: options.providers ?? [
@@ -191,6 +193,28 @@ export async function createAionServer(options = {}) {
       case "opportunity.specify": return service.setOpportunitySpecification(input.id, input.specification ?? {});
       case "opportunity.assess": return service.assessOpportunity(input.id);
       case "opportunity.list": return { opportunities: await service.opportunities() };
+      // The brain. Endpoints are owner-configured; AION never adds one it merely detected.
+      case "brain.endpoint.add": return service.addBrainEndpoint(input.endpoint ?? {});
+      case "brain.endpoint.remove": return service.removeBrainEndpoint(input.id);
+      case "brain.settings": return service.updateBrainSettings(input.change ?? {});
+      case "brain.route": return service.routeBrain(input.request ?? { workspace: "", needs: ["conversation"], includesMemory: false, includesWorkOrCustomerInformation: false, contextClasses: [] });
+      case "brain.independence": return service.independence();
+      case "brain.boundary": return service.brainBoundary();
+      case "brain.health": {
+        const settings = await service.brainSettings();
+        const endpoint = settings.endpoints.find((entry) => entry.id === input.id);
+        if (!endpoint) throw new Error("Endpoint is not registered.");
+        return service.recordEndpointHealth(endpoint.id, await brainRuntime.probe(endpoint, AbortSignal.timeout(15_000)));
+      }
+      case "brain.detect": return { runtimes: await brainRuntime.detect(AbortSignal.timeout(20_000)) };
+      case "brain.evaluate": {
+        const settings = await service.brainSettings();
+        const endpoint = settings.endpoints.find((entry) => entry.id === input.id);
+        if (!endpoint) throw new Error("Endpoint is not registered.");
+        return service.recordEvaluation(endpoint.id, await runEvaluation(endpoint, service.evaluationSuite(), brainRuntime), new Date().toISOString());
+      }
+      case "brain.comparison": return { comparison: await service.modelComparison(), runs: await service.evaluations() };
+      case "chat.disclosure": return service.chatDisclosure(input.id);
       // Governed research. Proposing runs nothing; a job runs only after the owner approves it.
       case "research.propose": return service.proposeResearchJob(input.job ?? {});
       case "research.approve": return service.approveResearchJob(input.id);

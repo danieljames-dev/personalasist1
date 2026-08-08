@@ -4,6 +4,8 @@ export * from "./service.js";
 export * from "./developer-bridge.js";
 export * from "./autonomy.js";
 export * from "./workspaces.js";
+export * from "./brain.js";
+export * from "./evaluation.js";
 export * from "./knowledge.js";
 export * from "./relationships.js";
 export * from "./product-studio.js";

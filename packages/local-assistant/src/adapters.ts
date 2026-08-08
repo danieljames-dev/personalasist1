@@ -12,6 +12,7 @@ import type {
 } from "./contracts.js";
 import { DEFAULT_WORKSPACE, PROPOSE_ACTION_PREFIX, PROPOSE_MEMORY_PREFIX, VERIFICATION_OPERATION_IDS, WORKSPACE_IDS } from "./contracts.js";
 import { builtInWorkspaces } from "./workspaces.js";
+import { defaultBrainSettings, offlineEndpoint } from "./brain.js";
 import type { ResearchLimitsV1, ResearchProviderV1, ResearchScopeV1, ResearchSourceV1 } from "./research.js";
 
 const scrypt = promisify(scryptCallback);
@@ -91,6 +92,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
     workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
+    brain: defaultBrainSettings(GENESIS), evaluations: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
@@ -230,6 +232,11 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.relationships)) clone.relationships = [];
   if (!Array.isArray(clone.opportunities)) clone.opportunities = [];
   if (!Array.isArray(clone.researchJobs)) clone.researchJobs = [];
+  if (!clone.brain || typeof clone.brain !== "object" || !Array.isArray(clone.brain.endpoints)) clone.brain = defaultBrainSettings(GENESIS);
+  // The offline provider is AION's floor and cannot be configured away, so it is restored if a
+  // state file somehow arrives without it.
+  if (!clone.brain.endpoints.some((entry) => entry.id === "deterministic-offline")) clone.brain.endpoints = [offlineEndpoint(GENESIS), ...clone.brain.endpoints];
+  if (!Array.isArray(clone.evaluations)) clone.evaluations = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };

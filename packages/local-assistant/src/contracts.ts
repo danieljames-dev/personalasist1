@@ -1,3 +1,5 @@
+import type { BrainSettingsV1 } from "./brain.js";
+import type { EvaluationRunV1 } from "./evaluation.js";
 import type { OpportunityV1 } from "./product-studio.js";
 import type { ResearchJobV1 } from "./research.js";
 import type { WorkspaceV1 } from "./workspaces.js";
@@ -526,6 +528,10 @@ export interface AssistantStateV1 {
   opportunities: OpportunityV1[];
   /** Governed research jobs, newest first. Bounded on every write. */
   researchJobs: ResearchJobV1[];
+  /** Which endpoints AION may reason on, and the policy governing when each may be used. */
+  brain: BrainSettingsV1;
+  /** Evidence from the synthetic model evaluation harness, newest first. Bounded on every write. */
+  evaluations: EvaluationRunV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */

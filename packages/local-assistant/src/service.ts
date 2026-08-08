@@ -14,6 +14,13 @@ import { buildRelationship, queryRelationships } from "./relationships.js";
 import type { WorkspaceV1 } from "./workspaces.js";
 import { applyWorkspaceEdit, assertSameWorkspace, buildBrandProduct, buildWorkspace, requireWorkspace } from "./workspaces.js";
 import { buildClaim, promoteClaim, supersedeClaim } from "./knowledge.js";
+import type { BrainEndpointV1, BrainHealthV1, BrainSettingsV1, RouterModeV1, RoutingDecisionV1, RoutingRequestV1 } from "./brain.js";
+import {
+  BRAIN_BOUNDARY, OFFLINE_ENDPOINT_ID, ROUTER_MODES, buildEndpoint, endpointForProvider,
+  independenceReport, routeRequest, routeSelectedProvider,
+} from "./brain.js";
+import type { EvaluationCaseResultV1, EvaluationCaseV1, EvaluationRunV1 } from "./evaluation.js";
+import { EVALUATION_SUITE, compareEvaluations, summariseEvaluation } from "./evaluation.js";
 import type { OpportunityV1 } from "./product-studio.js";
 import {
   applyOpportunityEdit, buildCompetitorNote, buildExperiment, buildOpportunity, buildSpecification,
@@ -271,6 +278,19 @@ export class AionAssistantV1 {
     await this.mutate((state) => { const conversation = find(state.conversations, conversationId, "Conversation"); const message: ChatMessageV1 = { id: this.ports.ids.next("message"), role: "owner", content: body, createdAt: this.ports.clock.now(), providerId: null }; conversation.messages.push(message); conversation.updatedAt = message.createdAt; this.activity(state, "chat", "message.owner", "Owner message stored locally.", conversationId); });
     const snap = await this.snapshot(); const conversation = find(snap.conversations, conversationId, "Conversation"); const provider = this.ports.providers.find((item) => item.id === snap.settings.providerId); if (!provider) throw new Error("Configured provider is unavailable.");
     if (provider.location === "remote" && !snap.settings.remoteDisclosureAccepted) throw new Error("Remote-provider disclosure is not accepted.");
+    /*
+     * Brain policy governs this turn, not just the Brain screen.
+     *
+     * The owner already chose a provider in Settings and that choice is respected, but offline
+     * mode and Local Only are not preferences the chat path gets to ignore. Routing the explicit
+     * choice through the same function the Brain screen uses is what stops a second, quieter
+     * policy growing here.
+     */
+    const decision = this.#routeChat(snap, conversation, provider);
+    if (!decision.allowed) throw new Error(decision.reason);
+    if (decision.requiresDisclosure && decision.disclosure && !snap.settings.remoteDisclosureAccepted) {
+      throw new Error(`${decision.disclosure.statement} Accept the remote-provider disclosure in Settings before this can run.`);
+    }
     if (this.controllers.has(`chat:${conversationId}`)) throw new Error("This conversation already has a request in flight.");
     const controller = new AbortController(); this.controllers.set(`chat:${conversationId}`, controller); let response = "";
     try {
@@ -297,6 +317,38 @@ export class AionAssistantV1 {
     } catch (error) {
       await this.mutate((state) => { this.activity(state, "failure", "chat.failed", "Chat request failed or was cancelled; private content omitted.", conversationId, "failed"); }); throw error;
     } finally { this.controllers.delete(`chat:${conversationId}`); }
+  }
+  /**
+   * The routing decision for one chat turn.
+   *
+   * A provider configured before the endpoint registry existed is represented as an endpoint from
+   * what AION actually knows about it — its declared location — rather than being exempted from
+   * policy for having been configured earlier.
+   */
+  #routeChat(state: AssistantStateV1, conversation: ConversationV1, provider: ModelProviderV1): RoutingDecisionV1 {
+    const workspace = requireWorkspace(state.workspaces, conversation.workspace);
+    const endpoint = state.brain.endpoints.find((entry) => entry.id === provider.id)
+      ?? endpointForProvider(provider, state.settings.model, this.ports.clock.now());
+    const memoryIncluded = conversation.memoryContextEnabled && state.memories.some((item) => item.enabled && item.workspace === conversation.workspace);
+    return routeSelectedProvider(state.brain, endpoint, {
+      workspace: workspace.id,
+      workspaceLabel: workspace.label,
+      needs: ["conversation"],
+      includesMemory: memoryIncluded,
+      includesWorkOrCustomerInformation: workspace.kind === "work",
+      contextClasses: ["this conversation", ...(memoryIncluded ? ["enabled Memory records for this workspace"] : [])],
+    });
+  }
+  /**
+   * What would leave the machine if this conversation were continued right now. The Command Center
+   * shows this before the owner types, so a disclosure is never something they meet mid-sentence.
+   */
+  async chatDisclosure(conversationId: string): Promise<RoutingDecisionV1> {
+    const state = await this.snapshot();
+    const conversation = find(state.conversations, conversationId, "Conversation");
+    const provider = this.ports.providers.find((item) => item.id === state.settings.providerId);
+    if (!provider) throw new Error("Configured provider is unavailable.");
+    return this.#routeChat(state, conversation, provider);
   }
   async sendMessage(conversationId: string, content: string): Promise<ChatTurnV1> {
     const turn = this.streamMessage(conversationId, content);
@@ -804,6 +856,108 @@ export class AionAssistantV1 {
     const state = await this.snapshot();
     return state.opportunities.filter((entry) => entry.workspace === state.settings.activeWorkspace).map((entry) => structuredClone(entry));
   }
+
+  // --- The brain: endpoints, routing policy, and evidence ---------------------------------------
+  /**
+   * Adds an inference endpoint the owner controls, or a third-party one they have decided to use.
+   *
+   * AION never discovers an endpoint and adds it silently. Detection reports what is listening at
+   * a documented loopback address; turning that into a configured endpoint is an owner act.
+   */
+  async addBrainEndpoint(input: Record<string, unknown> = {}): Promise<BrainEndpointV1> {
+    return this.mutate((state) => {
+      const endpoint = buildEndpoint(input, { id: this.ports.ids.next("endpoint"), now: this.ports.clock.now(), existing: state.brain.endpoints });
+      state.brain.endpoints = [...state.brain.endpoints, endpoint];
+      this.activity(state, "provider", "brain.endpoint.add", `Endpoint "${endpoint.label}" added: ${endpoint.runtime} at ${endpoint.location === "local-machine" ? "this computer" : endpoint.location === "owner-controlled-host" ? `a host you control (${endpoint.hostLabel || "unlabelled"})` : "a third-party service"}, model ${endpoint.model}.${endpoint.credentialEnvironmentVariable ? ` A credential is read from ${endpoint.credentialEnvironmentVariable}; its value is never stored.` : ""}`, endpoint.id);
+      return structuredClone(endpoint);
+    });
+  }
+  async removeBrainEndpoint(id: string): Promise<void> {
+    await this.mutate((state) => {
+      if (id === OFFLINE_ENDPOINT_ID) throw new Error("The offline provider is AION's floor and cannot be removed. It is what keeps AION usable with every credential deleted.");
+      const endpoint = find(state.brain.endpoints, id, "Endpoint");
+      state.brain.endpoints = state.brain.endpoints.filter((entry) => entry.id !== id);
+      if (state.brain.primaryEndpointId === id) state.brain.primaryEndpointId = OFFLINE_ENDPOINT_ID;
+      if (state.brain.manualEndpointId === id) state.brain.manualEndpointId = "";
+      this.activity(state, "provider", "brain.endpoint.remove", `Endpoint "${endpoint.label}" removed. Nothing AION knows was affected: a model is a reasoning provider, not where your information lives.`, id);
+    });
+  }
+  /**
+   * Changes routing policy. The two rules that make the policy worth having are enforced on the
+   * way in: an endpoint that does not exist cannot be made primary, and turning on remote
+   * proprietary fallback is recorded as the deliberate decision it is.
+   */
+  async updateBrainSettings(change: Record<string, unknown> = {}): Promise<BrainSettingsV1> {
+    return this.mutate((state) => {
+      const next: BrainSettingsV1 = structuredClone(state.brain);
+      if (change.mode !== undefined) {
+        if (!ROUTER_MODES.includes(change.mode as RouterModeV1)) throw new Error(`Routing mode must be one of: ${ROUTER_MODES.join(", ")}.`);
+        next.mode = change.mode as RouterModeV1;
+      }
+      for (const key of ["primaryEndpointId", "manualEndpointId"] as const) {
+        if (change[key] === undefined) continue;
+        const id = String(change[key] ?? "");
+        if (id) find(next.endpoints, id, "Endpoint");
+        next[key] = id;
+      }
+      if (change.offlineMode !== undefined) next.offlineMode = change.offlineMode === true;
+      if (change.remoteFallbackEnabled !== undefined) next.remoteFallbackEnabled = change.remoteFallbackEnabled === true;
+      if (next.mode === "manual" && !next.manualEndpointId) throw new Error("Manual mode needs an endpoint. AION will not choose one for you.");
+      state.brain = next;
+      this.activity(state, "provider", "brain.settings", `Brain policy: ${next.mode}${next.offlineMode ? ", offline mode on — no inference leaves this computer" : ""}. Remote proprietary fallback is ${next.remoteFallbackEnabled ? "ON, so AION may propose a third-party endpoint when nothing you control can do the work" : "off, so AION will not propose a third-party endpoint on its own"}.`, null);
+      return structuredClone(next);
+    });
+  }
+  /** Records what a probe found. Health is evidence, so it is stored rather than recomputed. */
+  async recordEndpointHealth(id: string, health: BrainHealthV1): Promise<BrainEndpointV1> {
+    return this.mutate((state) => {
+      const endpoint = find(state.brain.endpoints, id, "Endpoint");
+      endpoint.lastHealth = structuredClone(health);
+      this.activity(state, "provider", "brain.health", `Endpoint "${endpoint.label}" is ${health.available ? "reachable" : "not reachable"}: ${health.detail}${health.installedModels.length ? ` Models reported: ${health.installedModels.slice(0, 10).join(", ")}.` : ""}`, id, health.available ? "success" : "failed");
+      return structuredClone(endpoint);
+    });
+  }
+  async brainSettings(): Promise<BrainSettingsV1> { return structuredClone((await this.snapshot()).brain); }
+  /** Where a piece of work would run, and what would leave the machine if it did. */
+  async routeBrain(request: Omit<RoutingRequestV1, "workspaceLabel">): Promise<RoutingDecisionV1> {
+    const state = await this.snapshot();
+    const workspace = requireWorkspace(state.workspaces, request.workspace || state.settings.activeWorkspace);
+    return routeRequest(state.brain, { ...request, workspace: workspace.id, workspaceLabel: workspace.label });
+  }
+  /** The acceptance criterion answered against the real configuration, not against an intention. */
+  async independence(): Promise<ReturnType<typeof independenceReport>> { return independenceReport((await this.snapshot()).brain); }
+
+  /**
+   * Records one evaluation run.
+   *
+   * The harness is deterministic and its fixtures are synthetic, so a run is reproducible and safe
+   * to send to a third-party endpoint. Results are evidence about a configuration on a day, and the
+   * summary says exactly that rather than implying something about the model in general.
+   */
+  async recordEvaluation(endpointId: string, results: readonly EvaluationCaseResultV1[], startedAt: string): Promise<EvaluationRunV1> {
+    return this.mutate((state) => {
+      const endpoint = find(state.brain.endpoints, endpointId, "Endpoint");
+      const run = summariseEvaluation(results, {
+        id: this.ports.ids.next("evaluation"), endpointId, endpointLabel: endpoint.label, model: endpoint.model,
+        startedAt, completedAt: this.ports.clock.now(),
+      });
+      state.evaluations.unshift(run);
+      if (state.evaluations.length > 50) state.evaluations.length = 50;
+      this.activity(state, "provider", "brain.evaluate", run.summary, run.id, run.passed === run.total ? "success" : "failed");
+      return structuredClone(run);
+    });
+  }
+  async evaluations(): Promise<EvaluationRunV1[]> { return (await this.snapshot()).evaluations.map((entry) => structuredClone(entry)); }
+  /** The most recent run per endpoint, ranked on the evidence rather than on vendor claims. */
+  async modelComparison(): Promise<ReturnType<typeof compareEvaluations>> {
+    const state = await this.snapshot();
+    const latest = new Map<string, EvaluationRunV1>();
+    for (const run of state.evaluations) if (!latest.has(run.endpointId)) latest.set(run.endpointId, run);
+    return compareEvaluations([...latest.values()]);
+  }
+  evaluationSuite(): readonly EvaluationCaseV1[] { return EVALUATION_SUITE; }
+  /** What AION owns and what a model does not. Stated as data so the UI cannot drift from it. */
+  brainBoundary(): typeof BRAIN_BOUNDARY { return BRAIN_BOUNDARY; }
 
   // --- Governed research ------------------------------------------------------------------------
   /**

@@ -150,8 +150,9 @@ export function isPrivateIpv4(host: string): boolean {
  * Stated as an allowlist rather than a list of bad prefixes, because the bad prefixes are the part
  * that gets out of date. Global unicast is 2000::/3; loopback, link-local, unique-local,
  * multicast, IPv4-mapped and every reserved block fall outside it and are refused. The mapped form
- * matters in particular: `http://[::ffff:10.0.0.5]/` is normalised by the URL parser to
- * `::ffff:a00:5`, so a rule that only recognised the dotted spelling would let it through.
+ * matters in particular: a private IPv4 written inside an IPv4-mapped IPv6 literal is normalised
+ * by the URL parser into hex, so a rule that only recognised the dotted spelling would miss it.
+ * The concrete case is exercised in the research test suite.
  */
 export function isPrivateIpv6(host: string): boolean {
   const address = host.replace(/^\[|\]$/gu, "").toLowerCase();
