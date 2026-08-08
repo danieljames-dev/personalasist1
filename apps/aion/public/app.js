@@ -355,8 +355,18 @@ ${o.claims.length ? `<details><summary>Claims</summary>${o.claims.map((c) => `<p
 <label>What kind<select name="class">${["assumption", "hypothesis", "observation", "inference", "fact"].map((c) => `<option>${c}</option>`).join("")}</select></label>
 <label>What it rests on (comma separated; required for observation, inference)<input name="supportedBy" maxlength="2000"></label>
 <button>Record</button></form>
+${o.taskIds.length || o.planIds.length ? `<div class="card"><h2>Linked work</h2>
+${o.taskIds.map((id) => { const t = scoped(s.tasks).find((x) => x.id === id); return `<p class="meta">task · ${t ? `${esc(t.title)} — ${esc(t.state)}` : "a task that no longer exists"} <button data-do="unlink" data-id="${esc(o.id)}" data-kind="task" data-ref="${esc(id)}">Unlink</button></p>`; }).join("")}
+${o.planIds.map((id) => { const p = scoped(s.plans).find((x) => x.id === id); return `<p class="meta">plan · ${p ? `${esc(p.goal)} — ${esc(p.status)}` : "a plan that no longer exists"} <button data-do="unlink" data-id="${esc(o.id)}" data-kind="plan" data-ref="${esc(id)}">Unlink</button></p>`; }).join("")}
+<p class="meta">Unlinking removes the reference only. The task or plan keeps its own history.</p></div>` : ""}
+${scoped(s.tasks).some((t) => !o.taskIds.includes(t.id)) || scoped(s.plans).some((p) => !o.planIds.includes(p.id)) ? `<form data-form="opportunity-link"><input type="hidden" name="id" value="${esc(o.id)}">
+<label>Link work from ${esc(here(s))}<select name="ref">
+${scoped(s.tasks).filter((t) => !o.taskIds.includes(t.id)).map((t) => `<option value="task:${esc(t.id)}">task · ${esc(t.title)} (${esc(t.state)})</option>`).join("")}
+${scoped(s.plans).filter((p) => !o.planIds.includes(p.id)).map((p) => `<option value="plan:${esc(p.id)}">plan · ${esc(p.goal)}</option>`).join("")}
+</select></label><button>Link</button></form>` : ""}
 <div class="actions"><button data-do="assess" data-id="${esc(o.id)}">Assess honestly</button></div>
 ${assessment && assessment.id === o.id ? `<div class="card coach"><h2>Score ${assessment.data.score.total}/100</h2><p>${esc(assessment.data.score.explanation)}</p>
+<p class="meta">${esc(assessment.data.linkedWork.summary)}</p>
 <p class="warn">${esc(assessment.data.caution)}</p>
 ${assessment.data.openQuestions.length ? `<p class="meta">Still open: ${assessment.data.openQuestions.map((q) => esc(q)).join(" · ")}</p>` : ""}
 <div class="actions"><button data-do="assess-close">Close</button></div></div>` : ""}</article>`, "No opportunities yet. Open one above; it will score zero until something is established about it.")}`;
@@ -567,7 +577,7 @@ function render() {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
-  const { area: target, action, do: verb, id, state, enabled, value, workspace, tab, sheet: sheetName, kind, followup, appt, status, template, archived, step, stage, result } = button.dataset;
+  const { area: target, action, do: verb, id, state, enabled, value, workspace, tab, sheet: sheetName, kind, followup, appt, status, template, archived, step, stage, result, ref } = button.dataset;
   if (!target && !action && !verb && !workspace) return; // a plain form submit button; the submit handler owns it
   event.preventDefault();
   try {
@@ -580,6 +590,7 @@ document.addEventListener("click", async (event) => {
     if (verb === "customer-close") { openCustomer = null; coachPanel = null; render(); return; }
     if (verb === "coach-close") { coachPanel = null; render(); return; }
     if (verb === "assess-close") { assessment = null; render(); return; }
+    if (verb === "unlink") { await api(kind === "plan" ? "opportunity.plan.unlink" : "opportunity.task.unlink", { id, ...(kind === "plan" ? { planId: ref } : { taskId: ref }) }); assessment = null; toast("Unlinked. The " + kind + " itself is untouched."); }
     if (verb === "assess") { assessment = { id, data: await api("opportunity.assess", { id }) }; render(); return; }
     if (verb === "brain-health") { const endpoint = await api("brain.health", { id }); toast(`${endpoint.label}: ${endpoint.lastHealth.detail}`); }
     if (verb === "brain-detect") { const found = await api("brain.detect"); toast(found.runtimes.length ? found.runtimes.map((r) => r.detail).join(" ") : "Nothing is listening on any documented local runtime address. AION installed nothing and searched nothing."); return; }
@@ -678,6 +689,12 @@ document.addEventListener("submit", async (event) => {
         ownerAdvantage: Number(d.ownerAdvantage), effort: Number(d.effort),
       } });
       toast("Opportunity opened. It scores zero until something is actually established about it.");
+    }
+    if (kind === "opportunity-link") {
+      const [linkKind, linkId] = String(d.ref).split(":");
+      await api(linkKind === "plan" ? "opportunity.plan.link" : "opportunity.task.link", { id: d.id, ...(linkKind === "plan" ? { planId: linkId } : { taskId: linkId }) });
+      assessment = null;
+      toast("Linked. Product Studio holds a reference; the " + linkKind + " keeps its own history.");
     }
     if (kind === "claim") {
       await api("opportunity.claim", { id: d.id, claim: { class: d.class, statement: d.statement, supportedBy: d.supportedBy.split(",").map((x) => x.trim()).filter(Boolean) } });

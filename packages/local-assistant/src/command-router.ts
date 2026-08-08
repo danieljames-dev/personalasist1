@@ -34,13 +34,14 @@ export type CommandIntentV1 =
   | "follow-up.draft"
   | "research.propose"
   | "opportunity.create"
+  | "opportunity.link"
   | "workspace.switch"
   | "chat";
 
 export const COMMAND_INTENTS: readonly CommandIntentV1[] = [
   "verification", "developer-task", "task.create", "routine.propose", "memory.propose",
   "plan.request", "relationship.action", "follow-up.draft", "research.propose",
-  "opportunity.create", "workspace.switch", "chat",
+  "opportunity.create", "opportunity.link", "workspace.switch", "chat",
 ];
 
 /**
@@ -107,6 +108,11 @@ const RULES: readonly IntentRuleV1[] = [
     intent: "opportunity.create", action: "opportunity.create",
     triggers: ["product idea", "new opportunity", "opportunity for", "i have an idea for", "start an opportunity"],
     autonomyLevel: 1, requiresApproval: false,
+  },
+  {
+    intent: "opportunity.link", action: "opportunity.task.link",
+    triggers: ["link the task", "link this task", "link a task", "attach the task", "link the plan", "link this plan", "link a plan", "attach the plan", "tie this to the opportunity"],
+    autonomyLevel: 2, requiresApproval: true,
   },
   {
     intent: "follow-up.draft", action: "coach",
@@ -188,9 +194,25 @@ function verificationOperation(sentence: string): VerificationOperationIdV1 | nu
   return null;
 }
 
-function buildPayload(rule: IntentRuleV1, sentence: string, trigger: string, context: RouterContextV1): { payload: Record<string, unknown>; summary: string } | null {
+function buildPayload(rule: IntentRuleV1, sentence: string, trigger: string, context: RouterContextV1): { payload: Record<string, unknown>; summary: string; action?: string } | null {
   const subject = subjectAfter(sentence, trigger);
   switch (rule.intent) {
+    case "opportunity.link": {
+      /*
+       * The router proposes the *operation*, never the operands.
+       *
+       * Turning "link the task to the opportunity" into two identifiers would mean guessing which
+       * task and which opportunity from prose, and a wrong guess here silently attaches work to
+       * the wrong idea. So the proposal arrives with empty references and the owner picks both.
+       * That is the whole reason the payload has named fields rather than a writable array.
+       */
+      const plan = trigger.includes("plan");
+      return {
+        action: plan ? "opportunity.plan.link" : "opportunity.task.link",
+        payload: plan ? { id: "", planId: "" } : { id: "", taskId: "" },
+        summary: `Link a ${plan ? "plan" : "task"} to an opportunity in ${context.workspaceLabel}. AION will not guess which two — choose them in Product Studio, and both must be in this workspace.`,
+      };
+    }
     case "verification": {
       const operationId = verificationOperation(sentence);
       if (!operationId) return null;
@@ -252,7 +274,7 @@ export function routeCommand(sentence: string, context: RouterContextV1): Routin
   const input = normalise(sentence);
   const lower = input.toLocaleLowerCase();
   const considered: RoutingResultV1["considered"] = [];
-  const matches: Array<{ rule: IntentRuleV1; trigger: string; at: number; payload: Record<string, unknown>; summary: string }> = [];
+  const matches: Array<{ rule: IntentRuleV1; trigger: string; at: number; payload: Record<string, unknown>; summary: string; action?: string }> = [];
 
   for (const rule of RULES) {
     const blocked = rule.blockers?.find((phrase) => lower.includes(phrase));
@@ -307,7 +329,7 @@ export function routeCommand(sentence: string, context: RouterContextV1): Routin
     if (seen.has(match.rule.intent)) continue;
     seen.add(match.rule.intent);
     proposals.push({
-      intent: match.rule.intent, action: match.rule.action, payload: match.payload,
+      intent: match.rule.intent, action: match.action ?? match.rule.action, payload: match.payload,
       autonomyLevel: match.rule.autonomyLevel, requiresApproval: match.rule.requiresApproval,
       summary: match.summary,
     });

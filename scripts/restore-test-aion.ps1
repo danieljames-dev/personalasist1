@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 456,
+    [int]      $ExpectedTests = 474,
     [switch]   $DryRun
 )
 
@@ -520,6 +520,8 @@ try {
         'never treats a capability preference as consent',
         'AION cannot deploy',
         'natural language never becomes shell syntax',
+        'an opportunity links to a Task and a Plan',
+        'a cross-workspace link is refused',
         'every configured model is deleted and AION still holds',
         'with no model configured at all')) {
         if ($v12Text -notmatch [regex]::Escape($required)) { throw "V1.2 demo evidence missing: $required" }

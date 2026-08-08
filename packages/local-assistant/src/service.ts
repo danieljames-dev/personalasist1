@@ -21,10 +21,11 @@ import {
 } from "./brain.js";
 import type { EvaluationCaseResultV1, EvaluationCaseV1, EvaluationRunV1 } from "./evaluation.js";
 import { EVALUATION_SUITE, compareEvaluations, summariseEvaluation } from "./evaluation.js";
-import type { OpportunityV1 } from "./product-studio.js";
+import type { OpportunityLinkKindV1, OpportunityV1 } from "./product-studio.js";
 import {
   applyOpportunityEdit, buildCompetitorNote, buildExperiment, buildOpportunity, buildSpecification,
-  completeExperiment, opportunityAssessment,
+  completeExperiment, linkOpportunityRecord, linkedWorkSummary, opportunityAssessment,
+  unlinkOpportunityRecord,
 } from "./product-studio.js";
 import type { ResearchJobV1, ResearchProviderV1, UrlVerdictV1 } from "./research.js";
 import { applyResearchResult, buildResearchJob, evaluateResearchUrl, researchSummary } from "./research.js";
@@ -860,11 +861,64 @@ export class AionAssistantV1 {
       return this.#replaceOpportunity(state, updated);
     });
   }
+  /**
+   * Links a Task or Plan to an opportunity, or unlinks one.
+   *
+   * The two checks that make this a link rather than an arbitrary write happen here, because only
+   * the service can see the other collections: the referenced record must exist, and it must be in
+   * the same workspace as the opportunity. Both refuse before anything is written, so a failed
+   * link leaves the opportunity exactly as it was.
+   *
+   * Deliberately *not* reachable through `updateOpportunity`: the generic editor still refuses
+   * `taskIds` and `planIds` by name, so there is no path that sets a link without these checks.
+   */
+  async #changeOpportunityLink(
+    id: string,
+    kind: OpportunityLinkKindV1,
+    recordId: string,
+    direction: "link" | "unlink",
+  ): Promise<OpportunityV1> {
+    return this.mutate((state) => {
+      const opportunity = this.#findOpportunity(state, id);
+      // Shape before existence, so a malformed reference reads as malformed rather than as a
+      // record that could not be found. They are different problems with different fixes.
+      if (typeof recordId !== "string" || !recordId.trim() || recordId.length > 200) {
+        throw new Error(`A ${kind} reference is required, and must be an identifier of at most 200 characters.`);
+      }
+      if (direction === "link") {
+        // Resolve against the right collection, and refuse a reference that does not resolve.
+        // An unlink deliberately skips this: a reference to something already gone must still be
+        // removable, or a deleted record would strand a link nobody could clear.
+        const record = kind === "task"
+          ? find(state.tasks, recordId, "Task")
+          : find(state.plans, recordId, "Plan");
+        assertSameWorkspace(record, opportunity.workspace, kind);
+      }
+      const result = direction === "link"
+        ? linkOpportunityRecord(opportunity, kind, recordId, this.ports.clock.now())
+        : unlinkOpportunityRecord(opportunity, kind, recordId, this.ports.clock.now());
+      if (result.changed) {
+        this.activity(state, "plan", `opportunity.${kind}.${direction}`, `${result.summary} Product Studio holds a reference; the ${kind} itself is unchanged and keeps its own history.`, id);
+      }
+      return this.#replaceOpportunity(state, result.opportunity);
+    });
+  }
+  async linkOpportunityTask(id: string, taskId: string): Promise<OpportunityV1> { return this.#changeOpportunityLink(id, "task", taskId, "link"); }
+  async unlinkOpportunityTask(id: string, taskId: string): Promise<OpportunityV1> { return this.#changeOpportunityLink(id, "task", taskId, "unlink"); }
+  async linkOpportunityPlan(id: string, planId: string): Promise<OpportunityV1> { return this.#changeOpportunityLink(id, "plan", planId, "link"); }
+  async unlinkOpportunityPlan(id: string, planId: string): Promise<OpportunityV1> { return this.#changeOpportunityLink(id, "plan", planId, "unlink"); }
+
   /** The honest read: the score, the arithmetic behind it, and what is still only assumed. */
-  async assessOpportunity(id: string): Promise<ReturnType<typeof opportunityAssessment> & { opportunity: OpportunityV1 }> {
+  async assessOpportunity(id: string): Promise<ReturnType<typeof opportunityAssessment> & { opportunity: OpportunityV1; linkedWork: ReturnType<typeof linkedWorkSummary> }> {
     const state = await this.snapshot();
     const opportunity = this.#findOpportunity(state, id);
-    return { ...opportunityAssessment(opportunity), opportunity };
+    return {
+      ...opportunityAssessment(opportunity),
+      opportunity,
+      // Reported from the live records rather than from the link count, so "three tasks" cannot
+      // hide "all three cancelled".
+      linkedWork: linkedWorkSummary(opportunity, state.tasks, state.plans),
+    };
   }
   async opportunities(): Promise<OpportunityV1[]> {
     const state = await this.snapshot();

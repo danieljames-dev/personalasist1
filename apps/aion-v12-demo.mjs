@@ -157,6 +157,38 @@ try {
   assert.equal(promoted.claims.find((c) => c.id === carried.id).promotions.length, 1);
   proved("the owner promoting a checked claim is what moves the score, and the previous class stays in its history");
 
+  // --- Product Studio linkage ------------------------------------------------------------------
+  const studioTask = await call("task.create", { task: { title: "Draft the handover note format" } });
+  const studioPlan = await call("plan.create", { goal: "Validate the handover note", steps: [{ title: "Ask five clinics" }] });
+  const withTask = await call("opportunity.task.link", { id: opportunity.id, taskId: studioTask.id });
+  const withBoth = await call("opportunity.plan.link", { id: opportunity.id, planId: studioPlan.id });
+  assert.deepEqual(withTask.taskIds, [studioTask.id]);
+  assert.deepEqual(withBoth.planIds, [studioPlan.id]);
+  const twice = await call("opportunity.task.link", { id: opportunity.id, taskId: studioTask.id });
+  assert.deepEqual(twice.taskIds, [studioTask.id], "linking twice does not accumulate a duplicate");
+  proved("an opportunity links to a Task and a Plan, and linking twice adds nothing");
+
+  await refuse("opportunity.update", { id: opportunity.id, change: { taskIds: [studioTask.id] } }, /unexpected field/iu);
+  await refuse("opportunity.task.link", { id: opportunity.id, taskId: "no-such-task" }, /was not found/iu);
+  proved("the generic editor still refuses to write taskIds, and a reference that does not resolve is refused");
+
+  // A task that genuinely exists, in a workspace this opportunity cannot reach.
+  await call("settings.update", { settings: { activeWorkspace: "work" } });
+  const workTask = await call("task.create", { task: { title: "A task that belongs to Work" } });
+  await call("settings.update", { settings: { activeWorkspace: workspace.id } });
+  const crossed = await refuse("opportunity.task.link", { id: opportunity.id, taskId: workTask.id }, /different workspace/iu);
+  const unchanged = await call("opportunity.assess", { id: opportunity.id });
+  assert.deepEqual(unchanged.opportunity.taskIds, [studioTask.id], "the refused link changed nothing");
+  proved("a cross-workspace link is refused and leaves the opportunity exactly as it was");
+  because(crossed);
+
+  await call("task.transition", { id: studioTask.id, state: "completed", reason: "Format agreed." });
+  const afterCompletion = await call("opportunity.assess", { id: opportunity.id });
+  assert.deepEqual(afterCompletion.opportunity.taskIds, [studioTask.id], "completing work does not erase the link");
+  assert.equal(afterCompletion.linkedWork.tasks.completed, 1);
+  proved("a linked Task stays linked once completed: a link is a durable historical reference");
+  because(afterCompletion.linkedWork.summary);
+
   // --- The model-independent brain -----------------------------------------------------------
   const before = await view();
   assert.equal(before.state.brain.mode, "local-preferred");
@@ -299,6 +331,9 @@ try {
   assert.deepEqual(reloaded.state.lessons, atClose.state.lessons);
   assert.deepEqual(reloaded.state.brain, atClose.state.brain);
   assert.equal(reloaded.state.revision, atClose.state.revision, "reopening writes no revision at all");
+  const persisted = reloaded.state.opportunities.find((o) => o.id === opportunity.id);
+  assert.deepEqual(persisted.taskIds, [studioTask.id], "the Task link survived the restart");
+  assert.deepEqual(persisted.planIds, [studioPlan.id], "so did the Plan link");
   await reopened.app.close();
   proved("closing and reopening AION reloads byte-identical state, with the offline floor intact and no migration churn");
 

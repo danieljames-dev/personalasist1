@@ -189,6 +189,80 @@ export function applyOpportunityEdit(opportunity: OpportunityV1, change: Record<
   return next;
 }
 
+/**
+ * The kinds of AION record an opportunity can be linked to by the owner.
+ *
+ * A closed set, and deliberately not a generic "attach anything" mechanism. Research findings and
+ * development projects already reach an opportunity through their own operations; these two are
+ * the ones the owner drives directly, so they get their own verbs rather than being written
+ * through a field editor. That is the difference between a link and an arbitrary mutation: a link
+ * names what it is joining, and the operation can check that the join makes sense.
+ */
+export type OpportunityLinkKindV1 = "task" | "plan";
+export const OPPORTUNITY_LINK_KINDS: readonly OpportunityLinkKindV1[] = ["task", "plan"];
+
+/** Which field on the opportunity holds each kind of link. */
+const LINK_FIELD: Record<OpportunityLinkKindV1, "taskIds" | "planIds"> = { task: "taskIds", plan: "planIds" };
+
+export interface OpportunityLinkResultV1 {
+  opportunity: OpportunityV1;
+  /** False when the link was already present, or the unlink had nothing to remove. */
+  changed: boolean;
+  summary: string;
+}
+
+/**
+ * Links a Task or Plan to an opportunity.
+ *
+ * Idempotent by construction: linking something already linked returns the opportunity unchanged
+ * and says so, rather than appending a duplicate or throwing. The caller is responsible for having
+ * already established that the referenced record exists and is in the same workspace — the service
+ * does that, because only it can see the other collections — and this function refuses anything
+ * malformed so a bad identifier cannot reach the stored array.
+ */
+export function linkOpportunityRecord(
+  opportunity: OpportunityV1,
+  kind: OpportunityLinkKindV1,
+  recordId: unknown,
+  now: IsoTimestamp,
+): OpportunityLinkResultV1 {
+  if (!OPPORTUNITY_LINK_KINDS.includes(kind)) fail(`An opportunity link must be one of: ${OPPORTUNITY_LINK_KINDS.join(", ")}.`);
+  const id = text(recordId, `${kind} reference`, 200);
+  const field = LINK_FIELD[kind];
+  const existing = opportunity[field];
+  if (existing.includes(id)) {
+    return { opportunity: structuredClone(opportunity), changed: false, summary: `That ${kind} is already linked to "${opportunity.title}". Nothing changed.` };
+  }
+  if (existing.length >= 200) fail(`An opportunity may link at most 200 ${kind}s.`);
+  const next = structuredClone(opportunity);
+  next[field] = [...existing, id];
+  next.updatedAt = now;
+  return { opportunity: next, changed: true, summary: `Linked a ${kind} to "${opportunity.title}".` };
+}
+
+/**
+ * Unlinks a Task or Plan. Removing a link that is not there is not an error: the caller asked for
+ * a state, and that state already holds. Nothing about the linked record itself is touched — an
+ * unlink removes a reference, never a Task, a Plan, or any of their history.
+ */
+export function unlinkOpportunityRecord(
+  opportunity: OpportunityV1,
+  kind: OpportunityLinkKindV1,
+  recordId: unknown,
+  now: IsoTimestamp,
+): OpportunityLinkResultV1 {
+  if (!OPPORTUNITY_LINK_KINDS.includes(kind)) fail(`An opportunity link must be one of: ${OPPORTUNITY_LINK_KINDS.join(", ")}.`);
+  const id = text(recordId, `${kind} reference`, 200);
+  const field = LINK_FIELD[kind];
+  if (!opportunity[field].includes(id)) {
+    return { opportunity: structuredClone(opportunity), changed: false, summary: `That ${kind} was not linked to "${opportunity.title}". Nothing changed.` };
+  }
+  const next = structuredClone(opportunity);
+  next[field] = opportunity[field].filter((entry) => entry !== id);
+  next.updatedAt = now;
+  return { opportunity: next, changed: true, summary: `Unlinked a ${kind} from "${opportunity.title}". The ${kind} itself is untouched.` };
+}
+
 export function buildCompetitorNote(input: Record<string, unknown>, context: { id: OpaqueId; now: IsoTimestamp }): CompetitorNoteV1 {
   return {
     id: context.id,
@@ -263,6 +337,40 @@ export function scoreOpportunity(opportunity: OpportunityV1): OpportunityScoreV1
     ? `0 of a possible 100. Severity ${problemSeverity} + reach ${reachability} + advantage ${ownerAdvantage}, less half of effort ${effort}, gives ${raw} of 25 — but nothing has been recorded about this opportunity yet, so evidence strength is 0 and the score is 0. This is an idea, not a finding.`
     : `${total} of a possible 100. Severity ${problemSeverity} + reach ${reachability} + advantage ${ownerAdvantage}, less half of effort ${effort}, gives ${raw} of 25, scaled by evidence strength ${evidenceStrength}% (${settled} settled of ${live.length} live claims). Raising the score means confirming claims, not rewording them.`;
   return { problemSeverity, reachability, ownerAdvantage, effort, evidenceStrength, total, explanation };
+}
+
+/**
+ * What the linked work is actually doing.
+ *
+ * A link is a durable historical reference, so a Task that was completed or cancelled stays
+ * linked — the opportunity's record of what was attempted should not quietly shrink as work
+ * finishes or is abandoned. What changes is how it reads: this reports the current state of each
+ * linked record so "three tasks" cannot hide "all three cancelled". A reference whose record has
+ * genuinely been deleted is reported as missing rather than dropped.
+ */
+export function linkedWorkSummary(
+  opportunity: OpportunityV1,
+  tasks: ReadonlyArray<{ id: string; state: string }>,
+  plans: ReadonlyArray<{ id: string; status: string }>,
+): { tasks: { total: number; open: number; completed: number; cancelled: number; missing: number }; plans: { total: number; missing: number }; summary: string } {
+  const byTask = new Map(tasks.map((task) => [task.id, task.state]));
+  const states = opportunity.taskIds.map((id) => byTask.get(id) ?? null);
+  const taskCounts = {
+    total: states.length,
+    open: states.filter((state) => state !== null && state !== "completed" && state !== "cancelled").length,
+    completed: states.filter((state) => state === "completed").length,
+    cancelled: states.filter((state) => state === "cancelled").length,
+    missing: states.filter((state) => state === null).length,
+  };
+  const knownPlans = new Set(plans.map((plan) => plan.id));
+  const planCounts = { total: opportunity.planIds.length, missing: opportunity.planIds.filter((id) => !knownPlans.has(id)).length };
+  const parts = [
+    taskCounts.total ? `${taskCounts.total} linked task(s): ${taskCounts.open} open, ${taskCounts.completed} completed, ${taskCounts.cancelled} cancelled.` : "No task is linked to this opportunity.",
+    planCounts.total ? `${planCounts.total} linked plan(s).` : "",
+    taskCounts.missing || planCounts.missing ? `${taskCounts.missing + planCounts.missing} link(s) point at a record that no longer exists.` : "",
+    taskCounts.total && taskCounts.open === 0 && taskCounts.completed === 0 ? "Every linked task was cancelled, so nothing here is actually being worked on." : "",
+  ].filter(Boolean);
+  return { tasks: taskCounts, plans: planCounts, summary: parts.join(" ") };
 }
 
 /**

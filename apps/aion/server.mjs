@@ -195,6 +195,12 @@ export async function createAionServer(options = {}) {
       case "opportunity.experiment": return service.addExperiment(input.id, input.experiment ?? {});
       case "opportunity.experiment.result": return service.completeExperiment(input.id, input.experimentId, input.status, input.result ?? "");
       case "opportunity.specify": return service.setOpportunitySpecification(input.id, input.specification ?? {});
+      // Typed linkage. Deliberately four verbs rather than a writable field: each one resolves
+      // the reference and checks the workspace before anything is stored.
+      case "opportunity.task.link": return service.linkOpportunityTask(input.id, input.taskId);
+      case "opportunity.task.unlink": return service.unlinkOpportunityTask(input.id, input.taskId);
+      case "opportunity.plan.link": return service.linkOpportunityPlan(input.id, input.planId);
+      case "opportunity.plan.unlink": return service.unlinkOpportunityPlan(input.id, input.planId);
       case "opportunity.assess": return service.assessOpportunity(input.id);
       case "opportunity.list": return { opportunities: await service.opportunities() };
       // Learning. A lesson carries its class, so a suggestion is never quoted as settled practice.
