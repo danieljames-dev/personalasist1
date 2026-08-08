@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 474,
+    [int]      $ExpectedTests = 538,
     [switch]   $DryRun
 )
 
@@ -152,6 +152,7 @@ $result = [ordered]@{
     aionDemoCommand  = 'npm run aion:demo'
     salesDemoCommand = 'npm run aion:sales:demo'
     v12DemoCommand   = 'npm run aion:v12:demo'
+    v13DemoCommand   = 'npm run aion:v13:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
@@ -163,6 +164,7 @@ $result = [ordered]@{
     aionDemoResult = $null
     salesDemoResult = $null
     v12DemoResult = $null
+    v13DemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -529,6 +531,30 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.2 demo left permanent private runtime state in the restored repository' }
     $result.v12DemoResult = 'PASS'
     Add-Step 'aion-v12-demo-regression' 'PASS' 'complete synthetic V1.2 proof: workspaces, Relationship Core, Product Studio, governed research, model independence, learning, projects, and the command router'
+
+    Write-Step "running npm run aion:v13:demo"
+    $v13Out = Join-Path $logDir "restore-$Timestamp.v13-demo.out.log"
+    $v13Err = Join-Path $logDir "restore-$Timestamp.v13-demo.err.log"
+    $v13Exit = Invoke-Logged -CommandLine 'npm run aion:v13:demo' -WorkingDirectory $restoreDir -OutFile $v13Out -ErrFile $v13Err
+    if ($v13Exit -ne 0) { throw "npm run aion:v13:demo failed with exit code $v13Exit" }
+    $v13Text = Get-Content -LiteralPath $v13Out -Raw
+    foreach ($required in @(
+        'AION V1.3 demo PASS',
+        'benchmarked in-process, with no endpoint address invented',
+        'AION can rent nothing',
+        'refused before the owner ever sees it',
+        'stop deadline is stored rather than held in a timer',
+        'confirms teardown with the provider rather than assuming it',
+        'refuses your own network and the cloud metadata address',
+        'AION does not pick a side',
+        'refuses to recommend buying hardware without enough measured evidence',
+        'no credential value appears anywhere in state',
+        'with no model configured and no credential anywhere')) {
+        if ($v13Text -notmatch [regex]::Escape($required)) { throw "V1.3 demo evidence missing: $required" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.3 demo left permanent private runtime state in the restored repository' }
+    $result.v13DemoResult = 'PASS'
+    Add-Step 'aion-v13-demo-regression' 'PASS' 'complete synthetic V1.3 proof: deterministic floor benchmark, GPU spending boundary, stored stop deadlines, governed live research, contradiction handling, cost evidence, and independence'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

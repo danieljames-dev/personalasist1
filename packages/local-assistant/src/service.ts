@@ -41,6 +41,8 @@ import {
   PIPELINE_STEPS, advanceProject, approveProjectStage, buildAgentProposal, buildDeploymentProposal,
   buildProject, buildProjectSpecification, projectStanding,
 } from "./projects.js";
+import type { CostIntelligenceV1, InferenceUsageV1 } from "./usage.js";
+import { buildUsage, costIntelligence, usageSummary } from "./usage.js";
 import type { RoutingResultV1 } from "./command-router.js";
 import { assertNoExecutableText, routeCommand } from "./command-router.js";
 import type {
@@ -1497,6 +1499,28 @@ export class AionAssistantV1 {
   async gpuProposals(): Promise<Array<GpuProvisioningProposalV1 & { disclosure: string }>> {
     const state = await this.snapshot();
     return state.gpuProposals.map((entry) => ({ ...structuredClone(entry), disclosure: describeProposal(entry) }));
+  }
+  /**
+   * Records one measured inference. Nothing is estimated into existence: a token count is stored
+   * only when the runtime reported one, and a cost only where a rate was actually known.
+   */
+  async recordUsage(input: Record<string, unknown> = {}): Promise<InferenceUsageV1> {
+    return this.mutate((state) => {
+      const record = buildUsage(input, { id: this.ports.ids.next("usage"), now: this.ports.clock.now() });
+      state.usage.unshift(record);
+      if (state.usage.length > 5000) state.usage.length = 5000;
+      return structuredClone(record);
+    });
+  }
+  /**
+   * The rent-versus-buy evidence, and an honest refusal to have an opinion without enough of it.
+   * Buying hardware is a decision worth hundreds of pounds; AION does not make it on three
+   * requests, and says so plainly rather than producing a number that looks like analysis.
+   */
+  async costIntelligence(): Promise<CostIntelligenceV1 & { summary: string }> {
+    const state = await this.snapshot();
+    const intelligence = costIntelligence(state.usage, state.gpuSessions, V13_BUDGET_CEILING_CENTS);
+    return { ...intelligence, summary: usageSummary(intelligence) };
   }
   /** Model profiles as owner-editable planning estimates, labelled as such wherever shown. */
   modelProfiles(): { local: readonly ModelProfileV1[]; rented: readonly ModelProfileV1[]; ceilingCents: number; note: string } {

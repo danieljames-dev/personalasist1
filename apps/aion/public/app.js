@@ -332,8 +332,33 @@ ${brain.endpoints.map((e) => `<p class="meta"><b>${esc(e.label)}</b> — ${badge
 <label>Context tokens<input name="contextTokens" type="number" min="512" max="10000000" value="8192"></label>
 <label>${["reasoning", "code", "structuredJson", "toolProposal", "vision", "embeddings"].map((f) => `<label class="inline"><input type="checkbox" name="${f}"> ${f}</label>`).join(" ")}</label>
 <button>Add endpoint</button></form>
+${gpuCard()}
 ${runs.length ? `<div class="card"><h2>Evaluation evidence</h2><p class="meta">Deterministic synthetic fixtures. This measures the cases in this repository on the day it ran, not the model in general.</p>
-${runs.slice(0, 10).map((r) => `<p class="meta"><b>${esc(r.endpointLabel)}</b> — ${r.passed}/${r.total} · median ${r.medianLatencyMs} ms<br>${esc(r.summary)}</p>`).join("")}</div>` : ""}`;
+${runs.slice(0, 10).map((r) => `<p class="meta"><b>${esc(r.endpointLabel)}</b> — ${r.passed}/${r.total} · median ${r.medianLatencyMs} ms${r.isFloor ? " · the floor" : ""}<br>${esc(r.summary)}</p>`).join("")}</div>` : ""}`;
+}
+
+/**
+ * Rented GPU capacity: what it costs, what is running, and how to stop it.
+ *
+ * Shown on the phone as well as the console, because a session left running is a problem wherever
+ * the owner happens to be. Credentials are never displayed — only the name of the variable.
+ */
+function gpuCard() {
+  const gpu = model.gpu;
+  if (!gpu) return "";
+  const live = (gpu.sessions ?? []).filter((x) => x.state === "running");
+  const pending = (gpu.proposals ?? []).filter((x) => x.state === "pending");
+  const cost = gpu.cost ?? null;
+  return `<div class="card ${live.length ? "warnbox" : ""}"><h2>Rented GPU</h2>
+<p class="meta">${esc(gpu.credential.detail)}</p>
+${live.length ? live.map((x) => `<p class="warn"><b>RUNNING</b> — ${esc(x.standing)}
+<button data-do="gpu-stop" data-id="${esc(x.id)}" class="danger">Stop now</button></p>`).join("") : `<p class="meta">Nothing is rented right now.</p>`}
+${pending.map((x) => `<p class="meta"><b>Awaiting your decision</b> — ${esc(x.disclosure)}
+<button data-do="gpu-decide" data-id="${esc(x.id)}" data-value="true">Approve exactly this</button>
+<button data-do="gpu-decide" data-id="${esc(x.id)}" data-value="false" class="danger">Deny</button></p>`).join("")}
+${cost ? `<p class="meta">${esc(cost.summary)}</p><p class="meta"><b>Rent or buy:</b> ${esc(cost.verdict.detail)}</p>` : ""}
+<div class="actions">${gpu.credential.configured ? `<button data-do="gpu-discover">Look at capacity and prices</button>` : ""}</div>
+<p class="meta">AION never rents anything without a bounded proposal you approve, and every session carries a stored deadline so a forgotten instance stops on its own.</p></div>`;
 }
 
 function studioArea(s) {
@@ -596,6 +621,9 @@ document.addEventListener("click", async (event) => {
     if (verb === "brain-detect") { const found = await api("brain.detect"); toast(found.runtimes.length ? found.runtimes.map((r) => r.detail).join(" ") : "Nothing is listening on any documented local runtime address. AION installed nothing and searched nothing."); return; }
     if (verb === "brain-remove") { await api("brain.endpoint.remove", { id }); toast("Endpoint removed. Nothing AION knows was affected."); }
     if (verb === "brain-evaluate") { const run = await api("brain.evaluate", { id }); toast(run.summary); }
+    if (verb === "gpu-stop") { const stopped = await api("gpu.stop", { id, reason: "owner stop from the Command Center" }); toast(stopped.teardownConfirmed ? "Stopped and teardown confirmed." : "AION could not confirm teardown. Check the provider console yourself."); }
+    if (verb === "gpu-decide") { await api("gpu.decide", { id, approve: value === "true" }); toast(value === "true" ? "Approved exactly that proposal. AION cannot raise it." : "Denied. Nothing was rented."); }
+    if (verb === "gpu-discover") { const found = await api("gpu.discover", { filter: {} }); toast(found.recommendations.length ? found.recommendations.map((r) => r.tier + ": " + r.why).join(" | ") : "Nothing eligible was found, so AION recommends nothing."); return; }
     if (verb === "research-approve") await api("research.approve", { id });
     if (verb === "research-run") { const job = await api("research.run", { id }); toast(`${job.findings.length} finding(s) from ${job.sources.length} source(s). None of them is a fact yet.`); }
     if (verb === "project-step") { await api("project.step", { id, step }); }

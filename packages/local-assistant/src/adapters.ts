@@ -96,7 +96,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
     workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
-    brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [],
+    brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
 }
@@ -245,6 +245,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.projects)) clone.projects = [];
   if (!Array.isArray(clone.gpuProposals)) clone.gpuProposals = [];
   if (!Array.isArray(clone.gpuSessions)) clone.gpuSessions = [];
+  if (!Array.isArray(clone.usage)) clone.usage = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };

@@ -7,6 +7,7 @@ export * from "./workspaces.js";
 export * from "./brain.js";
 export * from "./evaluation.js";
 export * from "./gpu.js";
+export * from "./usage.js";
 export * from "./command-router.js";
 export * from "./knowledge.js";
 export * from "./learning.js";

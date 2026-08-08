@@ -275,6 +275,9 @@ export async function createAionServer(options = {}) {
       case "gpu.enforce": return { stopped: await service.enforceGpuLimits() };
       case "gpu.sessions": return { sessions: await service.gpuSessions(), proposals: await service.gpuProposals() };
       case "gpu.models": return service.modelProfiles();
+      case "gpu.cost": return service.costIntelligence();
+      case "research.analyse": return service.analyseResearchJob(input.id);
+      case "research.learn": return service.adoptResearchLearning(input.id, Number(input.index ?? 0));
       // The brain. Endpoints are owner-configured; AION never adds one it merely detected.
       case "brain.endpoint.add": return service.addBrainEndpoint(input.endpoint ?? {});
       case "brain.endpoint.remove": return service.removeBrainEndpoint(input.id);
@@ -417,7 +420,7 @@ export async function createAionServer(options = {}) {
           projects: await service.projects(),
           brainBoundary: service.brainBoundary(),
           adaptationBoundary: service.adaptationBoundary(),
-          gpu: { credential: await service.gpuCredentialStatus(), sessions: await service.gpuSessions(), proposals: await service.gpuProposals(), models: service.modelProfiles() },
+          gpu: { credential: await service.gpuCredentialStatus(), sessions: await service.gpuSessions(), proposals: await service.gpuProposals(), models: service.modelProfiles(), cost: await service.costIntelligence() },
           search: searchProvider
             ? { configured: true, ...(await searchProvider.health()) }
             : { configured: false, available: false, detail: `No search provider is configured. Set ${SEARCH_VARIABLE} to a SearXNG-compatible base URL if you want discovery; research works without it when you supply the URLs.` },
