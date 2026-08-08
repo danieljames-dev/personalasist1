@@ -84,7 +84,7 @@ export async function resolveDeveloperAgentBridges(repositoryRoot, env = process
 
   return new SelectableDeveloperAgentRegistryV1([
     new UnavailableDeveloperAgentBridgeV1(
-      "No supported local developer-agent executable was found. AION checked only the documented Codex CLI and Claude Code install locations; it does not search your computer. Windows npm shell shims are deliberately ignored because AION never routes instructions through a shell.",
+      "No supported local developer-agent executable is configured (unavailable). AION checked only the documented Codex CLI and Claude Code install locations; it does not search your computer. Windows npm shell shims are deliberately ignored because AION never routes instructions through a shell.",
     ),
   ]);
 }

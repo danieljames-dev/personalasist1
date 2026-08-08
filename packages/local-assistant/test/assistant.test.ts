@@ -285,7 +285,8 @@ test("a real CLI bridge reports a name rather than a local path and refuses unsu
     const status = await bridge.status({ includeAccount: true });
     assert.equal(status.available, false, "a missing executable is reported unavailable, never fabricated");
     assert.equal(status.executable, null);
-    assert.equal(status.account, "unknown");
+    // No executable means account was never inspected — not "unknown after a probe".
+    assert.equal(status.account, "not-checked");
     assert.doesNotMatch(JSON.stringify(status), /[A-Za-z]:\\|\/tmp\//u, "no local path is ever reported");
     await assert.rejects(bridge.run({ repositoryRoot: join(root, "elsewhere"), instruction: "x", mode: "read-only" }, new AbortController().signal), /approved repository root/iu);
     await assert.rejects(bridge.run({ repositoryRoot: root, instruction: "   ", mode: "read-only" }, new AbortController().signal), /instruction is invalid/iu);

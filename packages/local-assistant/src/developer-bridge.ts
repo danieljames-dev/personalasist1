@@ -86,7 +86,12 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
         status = { ...status, account, accountDetail: ACCOUNT_DETAIL[account] };
       } catch { status = { ...status, account: "unknown", accountDetail: ACCOUNT_DETAIL.unknown }; }
     } else if (includeAccount) {
-      status = { ...status, account: "unknown", accountDetail: "Account health cannot be checked because the executable is unavailable." };
+      // Executable never answered — account was not inspected, so do not imply a probe result.
+      status = {
+        ...status,
+        account: "not-checked",
+        accountDetail: "Account health was not checked because the developer-agent executable is unavailable.",
+      };
     }
     this.cached = { at: Date.now(), withAccount: includeAccount, status };
     return status;

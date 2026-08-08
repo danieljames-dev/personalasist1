@@ -935,16 +935,25 @@ export class SyntheticDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 {
   }
 }
 
+/**
+ * Truthful stand-in when no supported developer-agent executable exists on this host.
+ *
+ * Account health is "not-checked": AION never inspected a vendor account, so "unknown" would
+ * imply a probe that did not run. Tasks always fail closed; nothing is executed.
+ */
 export class UnavailableDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 {
   constructor(
-    private readonly detail = "No supported local developer-agent executable is configured.",
+    private readonly detail = "No supported local developer-agent executable is configured (unavailable). AION does not search the computer for one.",
     readonly id = "none",
     readonly displayName = "No developer agent",
   ) {}
-  async status(): Promise<DeveloperAgentStatusV1> {
+  async status(_options: { includeAccount?: boolean } = {}): Promise<DeveloperAgentStatusV1> {
     return {
       bridgeId: this.id, displayName: this.displayName, available: false, executable: null, version: null,
-      account: "unknown", accountDetail: "There is no executable to check.", detail: this.detail, modes: [],
+      // No executable means no account inspection occurred — not "unknown after a failed probe".
+      account: "not-checked",
+      accountDetail: "Account health was not checked because no developer-agent executable is available or configured.",
+      detail: this.detail, modes: [],
     };
   }
   describe(): { executable: string; args: readonly string[] } { return { executable: "", args: [] }; }

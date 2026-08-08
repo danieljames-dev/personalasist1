@@ -57,8 +57,15 @@ test("with no candidate installed, discovery reports unavailable truthfully and 
     assert.equal(status.executable, null, `${label}: no executable is reported`);
     assert.equal(status.version, null);
     assert.deepEqual(status.modes, [], `${label}: an unavailable bridge offers no task boundary`);
+    // No executable means account was never inspected — "unknown" would imply a failed probe.
+    assert.equal(status.account, "not-checked", `${label}: account is not-checked when no executable exists`);
+    assert.match(status.accountDetail, /not checked|not been checked/iu, `${label}: account detail is truthful`);
+    assert.match(status.detail, /unavailable|configured/iu, `${label}: detail identifies unavailable/not configured`);
     assert.match(status.detail, /does not search your computer/u);
-    await assert.rejects(bridge.run({ repositoryRoot, instruction: "anything", mode: "read-only" }, new AbortController().signal), /No supported local developer-agent executable/u);
+    await assert.rejects(
+      bridge.run({ repositoryRoot, instruction: "anything", mode: "read-only" }, new AbortController().signal),
+      /unavailable|configured|No supported local developer-agent executable/iu,
+    );
   }
 });
 
@@ -91,8 +98,27 @@ test("real discovery on this machine is reported truthfully, whatever is install
 test("a resolved bridge refuses tasks aimed outside the one approved repository root", async () => {
   const bridge = await resolveDeveloperAgentBridge(repositoryRoot);
   const foreign = process.platform === "win32" ? "C:\\synthetic\\elsewhere" : "/synthetic/elsewhere";
-  await assert.rejects(bridge.run({ repositoryRoot: foreign, instruction: "Do something", mode: "read-only" }, new AbortController().signal), /approved repository root|available|configured/iu);
-  await assert.rejects(bridge.run({ repositoryRoot, instruction: "   ", mode: "read-only" }, new AbortController().signal), /instruction is invalid|available|configured/iu);
+  await assert.rejects(bridge.run({ repositoryRoot: foreign, instruction: "Do something", mode: "read-only" }, new AbortController().signal), /approved repository root|available|configured|unavailable/iu);
+  await assert.rejects(bridge.run({ repositoryRoot, instruction: "   ", mode: "read-only" }, new AbortController().signal), /instruction is invalid|available|configured|unavailable/iu);
+});
+
+test("forced no-agent host: zero task execution and truthful account semantics", async () => {
+  const { UnavailableDeveloperAgentBridgeV1 } = await import("../../packages/local-assistant/dist/index.js");
+  const bridge = new UnavailableDeveloperAgentBridgeV1();
+  const ordinary = await bridge.status();
+  const asked = await bridge.status({ includeAccount: true });
+  assert.equal(ordinary.available, false);
+  assert.equal(ordinary.account, "not-checked");
+  assert.equal(asked.account, "not-checked", "includeAccount does not invent a probe result when unavailable");
+  assert.deepEqual(ordinary.modes, []);
+  let executed = false;
+  await assert.rejects(async () => {
+    executed = true;
+    await bridge.run({ repositoryRoot, instruction: "must not run", mode: "read-only" }, new AbortController().signal);
+  }, /unavailable|configured/iu);
+  // run throws before any work; the flag only proves we entered the call and it failed closed.
+  assert.equal(executed, true);
+  assert.equal(bridge.describe("read-only").args.length, 0);
 });
 
 test("no part of a task instruction can ever become an argument or shell text", async () => {
