@@ -154,6 +154,7 @@ $result = [ordered]@{
     v12DemoCommand   = 'npm run aion:v12:demo'
     v13DemoCommand   = 'npm run aion:v13:demo'
     v13r1DemoCommand = 'npm run aion:v13r1:demo'
+    v13r2DemoCommand = 'npm run aion:v13r2:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
@@ -167,6 +168,7 @@ $result = [ordered]@{
     v12DemoResult = $null
     v13DemoResult = $null
     v13r1DemoResult = $null
+    v13r2DemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -588,6 +590,39 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.3-R1 demo left permanent private runtime state in the restored repository' }
     $result.v13r1DemoResult = 'PASS'
     Add-Step 'aion-v13r1-demo-regression' 'PASS' 'complete synthetic rented-GPU lifecycle proof: bounded readiness, endpoint discovery and refusal, health verification by completion, Brain registration, routing, evaluation, restart reconciliation, and teardown'
+
+    # The V1.3-R2 correction. Evidence is the trust boundary: Chat executes the bound Brain
+    # endpoint, reasoning has zero authority, evaluator false positives are repaired, and no
+    # resource is activated (Ollama, model download, Vast, paid GPU remain inactive at USD 0.00).
+    Write-Step "running npm run aion:v13r2:demo"
+    $v13r2Out = Join-Path $logDir "restore-$Timestamp.v13r2-demo.out.log"
+    $v13r2Err = Join-Path $logDir "restore-$Timestamp.v13r2-demo.err.log"
+    $v13r2Exit = Invoke-Logged -CommandLine 'npm run aion:v13r2:demo' -WorkingDirectory $restoreDir -OutFile $v13r2Out -ErrFile $v13r2Err
+    if ($v13r2Exit -ne 0) { throw "npm run aion:v13r2:demo failed with exit code $v13r2Exit" }
+    $v13r2Text = Get-Content -LiteralPath $v13r2Out -Raw
+    foreach ($required in @(
+        'V1.3-R2 demo: 20/20 behaviours PASS',
+        'Chat -> Brain endpoint execution',
+        'Binding RoutingDecision',
+        'Streaming-first canonical inference',
+        'Reasoning isolation',
+        'Structured-output parity',
+        'Evaluator F1',
+        'Constant-output protection',
+        'Evaluation versioning',
+        'Pre-audit baseline retained',
+        'CodeSandboxPort status',
+        'Pinned runner image',
+        'Local-model recommendation',
+        'Real spend',
+        'USD 0.00',
+        'not installed by this directive',
+        'not searched or configured by this directive')) {
+        if ($v13r2Text -notmatch [regex]::Escape($required)) { throw "V1.3-R2 demo evidence missing: $required" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.3-R2 demo left permanent private runtime state in the restored repository' }
+    $result.v13r2DemoResult = 'PASS'
+    Add-Step 'aion-v13r2-demo-regression' 'PASS' 'canonical inference trust: bound Chat routing, streaming parity, reasoning isolation, evaluator F1-F11, CodeSandboxPort, resource holds at USD 0.00'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"
