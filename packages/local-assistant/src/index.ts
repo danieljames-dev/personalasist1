@@ -14,6 +14,7 @@ export * from "./projects.js";
 export * from "./relationships.js";
 export * from "./product-studio.js";
 export * from "./research.js";
+export * from "./research-agent.js";
 export * from "./sales.js";
 export * from "./sales-coach.js";
 export * from "./access.js";

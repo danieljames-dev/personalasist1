@@ -29,6 +29,8 @@ import {
 } from "./product-studio.js";
 import type { ResearchJobV1, ResearchProviderV1, UrlVerdictV1 } from "./research.js";
 import { applyResearchResult, buildResearchJob, evaluateResearchUrl, researchSummary } from "./research.js";
+import type { ResearchPlanV1, ResearchSynthesisV1 } from "./research-agent.js";
+import { describeRun, planResearch, proposeLearning, synthesise } from "./research-agent.js";
 import type { LessonScopeV1, LessonStandingV1, LessonV1 } from "./learning.js";
 import {
   ADAPTATION_BOUNDARY, applicableLessons, assertLessonClaimClass, buildLesson, learningSummary,
@@ -1607,6 +1609,41 @@ export class AionAssistantV1 {
       this.activity(state, "plan", "opportunity.research", `A research ${claim.class} was carried into "${opportunity.title}" with its sources. It is not a fact until you say so.`, opportunityId);
       return this.#replaceOpportunity(state, updated);
     });
+  }
+  /**
+   * The research agent's reading of a completed job.
+   *
+   * Nothing here is stored as knowledge: it plans, compares, and reports, and the learning it
+   * proposes is limited to the three classes a non-owner actor may produce. Agreement between
+   * pages is not verification, so even a well-supported statement arrives as an observation.
+   */
+  async analyseResearchJob(id: string): Promise<{
+    plan: ResearchPlanV1;
+    synthesis: ResearchSynthesisV1;
+    proposedLearning: ReturnType<typeof proposeLearning>;
+    trace: ReturnType<typeof describeRun>;
+  }> {
+    const state = await this.snapshot();
+    const job = find(state.researchJobs, id, "Research job");
+    assertSameWorkspace(job, state.settings.activeWorkspace, "research job");
+    const plan = planResearch(job.question, job.scope);
+    const synthesis = synthesise(job);
+    return { plan, synthesis, proposedLearning: proposeLearning(synthesis), trace: describeRun(plan, job, synthesis, this.ports.clock.now()) };
+  }
+  /**
+   * Carries an agent proposal into the learning loop as a lesson.
+   *
+   * It arrives at whatever class the agent produced, with its sources cited, and the owner
+   * promotes it if they check it. There is deliberately no path from research straight to a fact.
+   */
+  async adoptResearchLearning(jobId: string, index: number): Promise<LessonV1> {
+    const analysis = await this.analyseResearchJob(jobId);
+    const proposal = analysis.proposedLearning[index];
+    if (!proposal) throw new Error("That proposed lesson does not exist.");
+    return this.recordLesson(
+      { class: proposal.class, statement: proposal.statement, supportedBy: [`research:${jobId}`, ...proposal.supportedBy], confidence: proposal.confidence, guidance: "" },
+      "provider-proposal",
+    );
   }
   async researchJobs(): Promise<ResearchJobV1[]> {
     const state = await this.snapshot();

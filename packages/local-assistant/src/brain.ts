@@ -305,9 +305,32 @@ export interface RoutingRequestV1 {
   contextClasses: readonly string[];
 }
 
+/**
+ * Which tier an endpoint belongs to, in the owner's terms rather than the implementation's.
+ *
+ * Local Preferred means "the floor and the local model first, a machine you rent when the work
+ * genuinely needs it, and a vendor only if you say so" — and that sentence needs a word for each
+ * of the four things it distinguishes.
+ */
+export type BrainTierV1 = "deterministic-floor" | "local-model" | "owner-gpu" | "third-party";
+
+export function endpointTier(endpoint: BrainEndpointV1): BrainTierV1 {
+  if (endpoint.runtime === "deterministic-offline") return "deterministic-floor";
+  if (endpoint.location === "local-machine") return "local-model";
+  if (endpoint.location === "owner-controlled-host") return "owner-gpu";
+  return "third-party";
+}
+
+/** Cheapest and most private first. Routing walks this order unless a mode says otherwise. */
+export const TIER_ORDER: readonly BrainTierV1[] = ["deterministic-floor", "local-model", "owner-gpu", "third-party"];
+
 export interface RoutingDecisionV1 {
   allowed: boolean;
   endpoint: BrainEndpointV1 | null;
+  /** Which tier the chosen endpoint sits in. Null when nothing was chosen. */
+  tier: BrainTierV1 | null;
+  /** What AION will actually transmit, once a destination is known. */
+  context: ContextSelectionV1 | null;
   /** True whenever the chosen endpoint is not owner-controlled. Never suppressed by any mode. */
   requiresDisclosure: boolean;
   /** True when the owner must approve before this runs, in addition to seeing the disclosure. */
@@ -396,7 +419,7 @@ export function routeRequest(settings: BrainSettingsV1, request: RoutingRequestV
     candidates.push(endpoint);
   }
 
-  const refuse = (reason: string): RoutingDecisionV1 => ({ allowed: false, endpoint: null, requiresDisclosure: false, requiresApproval: false, disclosure: null, reason, considered });
+  const refuse = (reason: string): RoutingDecisionV1 => ({ allowed: false, endpoint: null, tier: null, context: null, requiresDisclosure: false, requiresApproval: false, disclosure: null, reason, considered });
   if (!candidates.length) {
     return refuse(settings.offlineMode
       ? "Offline mode is on and no endpoint on this computer can do this. AION will not reach out to complete it."
@@ -410,6 +433,9 @@ export function routeRequest(settings: BrainSettingsV1, request: RoutingRequestV
     const ownerControlled = isOwnerControlled(endpoint);
     return {
       allowed: true, endpoint,
+      tier: endpointTier(endpoint),
+      // What will actually be transmitted, decided per destination rather than per mode.
+      context: selectContext(endpoint, { workspace: request.workspace, requested: request.contextClasses, includesWorkOrCustomerInformation: request.includesWorkOrCustomerInformation }),
       // A disclosure is produced whenever the prompt travels anywhere at all, including to the
       // owner's own host. Approval is required only for a third party.
       requiresDisclosure: endpoint.location !== "local-machine",
@@ -453,9 +479,19 @@ export function routeRequest(settings: BrainSettingsV1, request: RoutingRequestV
         return choose(primary, `Local Preferred: running on your primary endpoint ${primary.label}.`);
       }
       if (owned.length) {
-        const pick = strongest(owned);
-        const why = primary ? `Your primary endpoint ${primary.label} could not be used, so` : "";
-        return choose(pick, `${why} Local Preferred: running on ${pick.label}, which you control.`.trim());
+        /*
+         * The cheapest and most private tier that can do the work, not the strongest thing
+         * available. Local Preferred means exactly that: the floor and a local model come before a
+         * machine being rented by the minute, and reaching for the rented one is a decision the
+         * reason string has to justify out loud.
+         */
+        const byTier = TIER_ORDER.map((tier) => owned.filter((entry) => endpointTier(entry) === tier)).find((group) => group.length);
+        const pick = strongest(byTier ?? owned);
+        const why = primary && !candidates.includes(primary) ? `Your primary endpoint ${primary.label} could not be used, so ` : "";
+        const because = endpointTier(pick) === "owner-gpu"
+          ? `nothing cheaper could do this, so AION reached for ${pick.label}, a machine you rent. It costs money while it runs.`
+          : `running on ${pick.label}, which you control.`;
+        return choose(pick, `${why}Local Preferred: ${because}`.trim());
       }
       const remote = strongest(candidates);
       if (!settings.remoteFallbackEnabled) {
@@ -490,7 +526,7 @@ export function routeSelectedProvider(settings: BrainSettingsV1, endpoint: Brain
   const scoped: BrainSettingsV1 = { ...settings, mode: vetoed ? "local-only" : "manual", manualEndpointId: endpoint.id, endpoints };
   const decision = routeRequest(scoped, request);
   if (vetoed) {
-    return { ...decision, allowed: false, endpoint: null, disclosure: null, requiresDisclosure: false, requiresApproval: false,
+    return { ...decision, allowed: false, endpoint: null, tier: null, context: null, disclosure: null, requiresDisclosure: false, requiresApproval: false,
       reason: `Local Only is set and ${endpoint.label} is a third-party service, so AION will not use it. Choose a local or owner-controlled endpoint, or change the mode.` };
   }
   return decision;
@@ -521,6 +557,64 @@ export function endpointForProvider(provider: { id: string; location: "local" | 
     addedAt: now,
     lastHealth: null,
   };
+}
+
+/**
+ * Context minimisation.
+ *
+ * An owner-controlled rented GPU is better than a vendor's API and is not the same as nothing
+ * leaving the machine. The prompt still travels, it still sits in somebody else's RAM, and the
+ * host still could be watching. So AION sends the minimum the work needs rather than everything
+ * it happens to have — which is also the honest reason the disclosure exists.
+ *
+ * The rule is a whitelist, not a redaction pass: classes are opted *in* per destination, so a new
+ * kind of context added later is excluded until somebody deliberately includes it.
+ */
+export interface ContextSelectionV1 {
+  /** What the caller asked to include. */
+  requested: readonly string[];
+  /** What AION will actually send. */
+  included: string[];
+  /** What was dropped, and why, so the owner can see the difference. */
+  withheld: Array<{ class: string; reason: string }>;
+  /** How many Memory records may travel, after the cap for this destination. */
+  memoryLimit: number;
+  statement: string;
+}
+
+/** Context classes that never leave this computer, whatever the destination or the mode. */
+export const NEVER_TRANSMITTED = [
+  "credential values",
+  "pairing codes and session tokens",
+  "other workspaces",
+  "complete Memory database",
+  "complete relationship records",
+] as const;
+
+export function selectContext(
+  endpoint: BrainEndpointV1,
+  request: { workspace: string; requested: readonly string[]; includesWorkOrCustomerInformation: boolean },
+): ContextSelectionV1 {
+  const local = endpoint.location === "local-machine";
+  // A local endpoint is this computer, so nothing is leaving and there is nothing to minimise.
+  // Everywhere else gets a cap, and a third party gets the tightest one.
+  const memoryLimit = local ? 20 : endpoint.location === "owner-controlled-host" ? 8 : 3;
+  const withheld: ContextSelectionV1["withheld"] = [];
+  const included: string[] = [];
+  for (const entry of request.requested) {
+    const lower = entry.toLocaleLowerCase();
+    const banned = NEVER_TRANSMITTED.find((never) => lower.includes(never.toLocaleLowerCase()));
+    if (banned) { withheld.push({ class: entry, reason: `"${banned}" never leaves this computer, under any mode or destination.` }); continue; }
+    if (!local && lower.includes("workspace") && !lower.includes(request.workspace.toLocaleLowerCase())) {
+      withheld.push({ class: entry, reason: "It belongs to a workspace other than the one this work is in." });
+      continue;
+    }
+    included.push(entry);
+  }
+  const statement = local
+    ? `Everything stays on this computer, so nothing was withheld. ${included.length} context class(es) included.`
+    : `${included.length} context class(es) will be sent to ${endpoint.label}; at most ${memoryLimit} Memory record(s) travel with them.${withheld.length ? ` ${withheld.length} class(es) withheld.` : ""}${request.includesWorkOrCustomerInformation ? " Work or customer information is included, which is governed by your workspace policy rather than by this endpoint being one you control." : ""} An endpoint you control is better than a vendor's API; it is not the same as nothing leaving the machine.`;
+  return { requested: [...request.requested], included, withheld, memoryLimit, statement };
 }
 
 /**
