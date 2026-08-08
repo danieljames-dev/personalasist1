@@ -243,9 +243,12 @@ export class CompositeCanonicalInferenceV1 implements CanonicalStreamPortV1 {
     const { endpoint } = envelope;
 
     // Prefer brain runtime stream when the adapter can serve this endpoint.
-    if (this.brainRuntime?.supports(endpoint)) {
-      if (typeof this.brainRuntime.stream === "function") {
-        for await (const chunk of this.brainRuntime.stream(endpoint, {
+    // Optional supports() must be checked before call — demo/test stubs may omit it.
+    const runtime = this.brainRuntime;
+    const supported = runtime && typeof runtime.supports === "function" ? runtime.supports(endpoint) : false;
+    if (runtime && supported) {
+      if (typeof runtime.stream === "function") {
+        for await (const chunk of runtime.stream(endpoint, {
           prompt: latestOwnerPrompt(envelope.messages),
           context: envelope.memoryContext.map((item) => item.content),
           messages: envelope.messages,
@@ -257,7 +260,7 @@ export class CompositeCanonicalInferenceV1 implements CanonicalStreamPortV1 {
         return;
       }
       // Runtime has complete only: wrap as a single answer chunk (still the same adapter path).
-      const result = await this.brainRuntime.complete(endpoint, {
+      const result = await runtime.complete(endpoint, {
         prompt: latestOwnerPrompt(envelope.messages),
         context: envelope.memoryContext.map((item) => item.content),
         signal,

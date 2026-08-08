@@ -54,7 +54,12 @@ async function open(dataRoot, exportRoot) {
     pipeline: new SyntheticBuildPipelineV1(),
     // The brain runtime is never reached in this demo: no endpoint is probed and no completion is
     // requested, so nothing here can open a socket even by accident.
-    brainRuntime: { probe: async () => { throw new Error("the demo never probes an endpoint"); }, detect: async () => [], complete: async () => { throw new Error("the demo never runs a completion"); } },
+    brainRuntime: {
+      supports: () => false,
+      probe: async () => { throw new Error("the demo never probes an endpoint"); },
+      detect: async () => [],
+      complete: async () => { throw new Error("the demo never runs a completion"); },
+    },
   });
   const address = await app.listen(0);
   assert.equal(address.address, "127.0.0.1", "the Command Center must bind loopback only");
