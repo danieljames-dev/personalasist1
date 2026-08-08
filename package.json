@@ -93,7 +93,8 @@
     "aion:sales:demo": "npm run aion:build --silent && node apps/aion-sales-demo.mjs",
     "aion:v12:demo": "npm run aion:build --silent && node apps/aion-v12-demo.mjs",
     "aion:v13:demo": "npm run aion:build --silent && node apps/aion-v13-demo.mjs",
-    "aion:v13r1:demo": "npm run aion:build --silent && node apps/aion-v13-r1-demo.mjs"
+    "aion:v13r1:demo": "npm run aion:build --silent && node apps/aion-v13-r1-demo.mjs",
+    "aion:v13r2:demo": "npm run aion:build --silent && node apps/aion-v13-r2-demo.mjs"
   },
   "engines": {
     "node": ">=22"

@@ -59,3 +59,33 @@ test("no owner-identifying value, credential, or machine path is embedded in the
   assert.doesNotMatch(source, /[A-Za-z]:\\Users\\/u, "no machine-specific path may appear in source");
   assert.doesNotMatch(source, /(?:api[_-]?key|secret|password|token)\s*[:=]\s*["'][^"']{8,}/i, "no literal credential may appear in source");
 });
+
+test("domain package has no node:vm, eval, or new Function execution for model code", () => {
+  for (const [name, text] of sources) {
+    assert.doesNotMatch(text, /from\s+["']node:vm["']|require\s*\(\s*["']node:vm["']\s*\)/u, `${name} must not import node:vm`);
+    assert.doesNotMatch(text, /(?<![.\w])eval\s*\(/u, `${name} must not call eval(`);
+    assert.doesNotMatch(text, /\bnew\s+Function\s*\(/u, `${name} must not use new Function(`);
+  }
+});
+
+test("CodeSandboxPortV1 is a domain port only; no Docker client in domain sources", () => {
+  assert.match(source, /interface CodeSandboxPortV1/u);
+  for (const [name, text] of sources) {
+    if (name === "developer-bridge.ts") continue;
+    assert.doesNotMatch(text, /\bchild_process\b/u, `${name} must not use child_process`);
+    assert.doesNotMatch(text, /(?:^|[^.\w])docker\s+run\b/imu, `${name} must not invoke docker run`);
+  }
+  const sandbox = sources.find(([name]) => name === "code-sandbox.ts")?.[1] ?? "";
+  assert.doesNotMatch(sandbox, /\bchild_process\b/u);
+  assert.doesNotMatch(sandbox, /(?<![.\w])eval\s*\(/u);
+  assert.doesNotMatch(sandbox, /\bnew\s+Function\s*\(/u);
+  assert.doesNotMatch(sandbox, /from\s+["']node:vm["']|require\s*\(\s*["']node:vm["']\s*\)/u);
+});
+
+test("canonical inference is the post-routing execution path", () => {
+  const service = sources.find(([name]) => name === "service.ts")?.[1] ?? "";
+  assert.match(service, /CompositeCanonicalInferenceV1|bindInferenceEnvelope/u);
+  assert.match(service, /#routeChat/u);
+  // After routing, Chat must not independently re-select an unlimited memory slice.
+  assert.doesNotMatch(service, /\.slice\(0,\s*20\)\.map\(\(\{\s*id,\s*content/u);
+});

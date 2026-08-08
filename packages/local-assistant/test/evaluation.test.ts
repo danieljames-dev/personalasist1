@@ -109,7 +109,7 @@ test("a high score with a fabrication failure is called out rather than averaged
   const careful = comparison.find((entry) => entry.endpointId === "weak")!;
   assert.match(flashy.note, /Fabricated an answer it had no way to know/u);
   assert.equal(flashy.hallucinationResistance, "0/1");
-  assert.match(careful.note, /No fabrication observed/u);
+  assert.match(careful.note, /No fabrication observed/iu);
   assert.equal(careful.hallucinationResistance, "1/1");
 });
 

@@ -259,11 +259,11 @@ test("Local Only vetoes a third-party provider without breaking an ordinary loca
   await service.updateBrainSettings({ mode: "local-only" });
   assert.equal((await service.brainSettings()).primaryEndpointId, OFFLINE_ENDPOINT_ID);
 
-  // The selected provider is "deterministic"; the primary endpoint is "deterministic-offline".
-  // Two different local identifiers, and the chat must still run.
+  // Legacy provider id is "deterministic"; the bound Brain endpoint is the offline floor.
+  // Local Only must not refuse an ordinary local chat merely because those identifiers differ.
   const local = await service.chatDisclosure(conversation.id);
   assert.equal(local.allowed, true, "an ordinary local chat is unaffected by Local Only");
-  assert.equal(local.endpoint?.id, "deterministic");
+  assert.equal(local.endpoint?.id, OFFLINE_ENDPOINT_ID);
   assert.equal(local.requiresDisclosure, false);
   const turn = await service.sendMessage(conversation.id, "Hello");
   assert.ok(turn.message.content.length > 0);
