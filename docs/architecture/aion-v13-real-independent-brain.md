@@ -2,6 +2,9 @@
 
 Directive: `AION-V1.3-REAL-INDEPENDENT-BRAIN`.
 Builds on [AION V1.2](./aion-v12-independent-business-os.md).
+Corrected by [AION V1.3-R1](./aion-v13-r1-gpu-endpoint-bridge.md), which closes the gap between a
+provisioned GPU session and a routable Brain endpoint. The verification counts below are this
+milestone's; the current ones are in that record.
 
 ## What V1.3 is for
 

@@ -18,7 +18,7 @@ param(
     [string]   $RepositoryPath,
     [string]   $ExpectedRemote   = 'https://github.com/danieljames-dev/personalasist1.git',
     [string[]] $IncludeUntracked = @(),
-    [int]      $ExpectedTests     = 538,
+    [int]      $ExpectedTests     = 564,
     [switch]   $DryRun
 )
 
@@ -218,8 +218,15 @@ try {
         $manifest.restoreResult.careerDemoResult -ne 'PASS' -or
         $manifest.restoreResult.aionResult -ne 'PASS' -or
         $manifest.restoreResult.aionDemoResult -ne 'PASS' -or
+        # Every milestone proof is named here rather than left to the restore test's exit code.
+        # A gate that only checks the exit code cannot tell "the demo passed" from "the demo was
+        # quietly dropped from the script", and those are the same exit code.
+        $manifest.restoreResult.salesDemoResult -ne 'PASS' -or
+        $manifest.restoreResult.v12DemoResult -ne 'PASS' -or
+        $manifest.restoreResult.v13DemoResult -ne 'PASS' -or
+        $manifest.restoreResult.v13r1DemoResult -ne 'PASS' -or
         $manifest.restoreResult.exclusionResult -ne 'PASS') {
-        throw 'Mandatory integration, Career vertical-slice, AION V1, demo, or private-state exclusion restore evidence missing'
+        throw 'Mandatory integration, Career vertical-slice, AION V1/V1.1/V1.2/V1.3/V1.3-R1, demo, or private-state exclusion restore evidence missing'
     }
     $manifest.outcome='SUCCESS'
     Write-Step 'BACKUP SUCCESS - durable refs restored and verified'

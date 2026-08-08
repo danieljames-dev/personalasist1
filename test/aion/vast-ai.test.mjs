@@ -127,14 +127,20 @@ test("nothing reaches Vast.ai when the variable is unset, including a stop", asy
   await assert.rejects(() => adapter.discover({ minimumVramGb: 8, maxHourlyCents: 50, minimumReliability: null, limit: 5 }, signal), new RegExp(`${variableName} is not set`, "u"));
   await assert.rejects(() => adapter.start({ offerRef: "1", modelId: "m", runtime: "vllm" }, signal), new RegExp(`${variableName} is not set`, "u"));
 
-  // stop and status swallow the failure into a reported outcome rather than throwing, because a
-  // teardown attempt that cannot even be made must still be recorded as unconfirmed.
+  // stop swallows the failure into a reported outcome rather than throwing, because a teardown
+  // attempt that cannot even be made must still be recorded as unconfirmed.
   const stopped = await adapter.stop("1", signal);
   assert.equal(stopped.stopped, false);
   assert.match(stopped.detail, new RegExp(`${variableName} is not set`, "u"));
-  const status = await adapter.status("1", signal);
-  assert.equal(status.state, "failed");
-  assert.equal(status.endpointUrl, null);
+
+  /*
+   * status throws instead, and the difference matters. "AION could not ask" and "the machine has
+   * failed" are not the same fact, and the readiness bridge tears a machine down when the provider
+   * reports failure. Returning `failed` here would mean an environment variable missing from a
+   * restarted shell destroyed a paid instance mid-boot. Throwing says AION does not know, which is
+   * recorded, redacted, and retried inside the allowance the owner approved.
+   */
+  await assert.rejects(() => adapter.status("1", signal), new RegExp(`${variableName} is not set`, "u"));
 });
 
 test("an invalid variable name is treated as no credential at all", async () => {

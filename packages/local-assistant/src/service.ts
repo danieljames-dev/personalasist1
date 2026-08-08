@@ -14,13 +14,13 @@ import { buildRelationship, queryRelationships } from "./relationships.js";
 import type { WorkspaceV1 } from "./workspaces.js";
 import { applyWorkspaceEdit, assertSameWorkspace, buildBrandProduct, buildWorkspace, requireWorkspace } from "./workspaces.js";
 import { buildClaim, promoteClaim, supersedeClaim } from "./knowledge.js";
-import type { BrainEndpointV1, BrainHealthV1, BrainSettingsV1, RouterModeV1, RoutingDecisionV1, RoutingRequestV1 } from "./brain.js";
+import type { BrainEndpointV1, BrainHealthV1, BrainRuntimePortV1, BrainRuntimeV1, BrainSettingsV1, RouterModeV1, RoutingDecisionV1, RoutingRequestV1 } from "./brain.js";
 import {
-  BRAIN_BOUNDARY, OFFLINE_ENDPOINT_ID, ROUTER_MODES, buildEndpoint, endpointForProvider,
-  independenceReport, routeRequest, routeSelectedProvider,
+  BRAIN_BOUNDARY, BRAIN_RUNTIMES, OFFLINE_ENDPOINT_ID, ROUTER_MODES, buildEndpoint,
+  endpointForProvider, independenceReport, rentedGpuEndpoint, routeRequest, routeSelectedProvider,
 } from "./brain.js";
 import type { EvaluationCaseResultV1, EvaluationCaseV1, EvaluationRunV1 } from "./evaluation.js";
-import { EVALUATION_SUITE, compareEvaluations, summariseEvaluation } from "./evaluation.js";
+import { EVALUATION_SUITE, compareEvaluations, runEvaluationSuite, summariseEvaluation } from "./evaluation.js";
 import type { OpportunityLinkKindV1, OpportunityV1 } from "./product-studio.js";
 import {
   applyOpportunityEdit, buildCompetitorNote, buildExperiment, buildOpportunity, buildSpecification,
@@ -46,13 +46,17 @@ import { buildUsage, costIntelligence, usageSummary } from "./usage.js";
 import type { RoutingResultV1 } from "./command-router.js";
 import { assertNoExecutableText, routeCommand } from "./command-router.js";
 import type {
-  ExperimentRecommendationV1, GpuInfrastructurePortV1, GpuOfferV1, GpuProvisioningProposalV1,
-  GpuRequirementV1, GpuSessionV1, ModelProfileV1, OfferAssessmentV1,
+  ExperimentRecommendationV1, GpuCostBreakdownV1, GpuInfrastructurePortV1, GpuOfferV1,
+  GpuProvisioningProposalV1, GpuRequirementV1, GpuSessionStateV1, GpuSessionV1, ModelProfileV1,
+  OfferAssessmentV1, ReadinessVerdictV1,
 } from "./gpu.js";
 import {
-  LOCAL_MODEL_PROFILES, OPEN_MODEL_PROFILES, V13_BUDGET_CEILING_CENTS, assessOffer,
-  buildProvisioningProposal, describeProposal, estimatedCents, recommendExperiments,
-  redactCredentials, revalidateProposal, runtimeMinutes, sessionStanding, shutdownDecision,
+  DEFAULT_READINESS_INTERVAL_MS, LOCAL_MODEL_PROFILES, MAX_HEALTH_FAILURES, OPEN_MODEL_PROFILES,
+  V13_BUDGET_CEILING_CENTS, assessOffer, buildProvisioningProposal, describeProposal,
+  emptyActivation, estimatedCents, isActivatingSession, isFinishedSession, isLiveSession,
+  normaliseServingEndpoint, readinessDeadline, readinessVerdict, recommendExperiments,
+  redactCredentials, revalidateProposal, runtimeMinutes, sessionCostBreakdown, sessionStanding,
+  sessionStatusLabel, shutdownDecision,
 } from "./gpu.js";
 import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
@@ -73,7 +77,44 @@ type AssistantPorts = {
   pipeline?: BuildPipelinePortV1;
   /** Optional. Absent means AION can rent nothing and spend nothing, which is also the default. */
   gpu?: GpuInfrastructurePortV1;
+  /**
+   * Optional. Absent means AION cannot verify that an endpoint answers, so it will not register a
+   * rented one — a machine it cannot health-check is a machine it cannot honestly call ready.
+   */
+  brainRuntime?: BrainRuntimePortV1;
 };
+
+/**
+ * The prompt AION sends a rented runtime to decide whether it is actually serving.
+ *
+ * Deliberately a real completion rather than a socket check. A container can accept connections
+ * for several minutes before the weights are loaded, and "the port is open" registered as "the
+ * brain is ready" is exactly how an owner ends up paying for a machine that answers nothing.
+ * Trivial, synthetic, and free of anything personal, because it is sent to rented hardware.
+ */
+const RENTED_HEALTH_PROMPT = "Reply with the single word READY.";
+
+/**
+ * Where a rented session is in becoming usable.
+ *
+ * `ready` and `finished` are separate booleans on purpose. "Not ready" and "finished" are very
+ * different situations for someone watching a meter run, and a single tri-state would invite a
+ * caller to treat one as the other.
+ */
+export interface GpuActivationStatusV1 {
+  sessionId: string;
+  state: GpuSessionStateV1;
+  /** The owner-facing word for that state. Never "Ready" unless the endpoint answered. */
+  label: string;
+  endpointId: string | null;
+  endpointHost: string | null;
+  ready: boolean;
+  finished: boolean;
+  detail: string;
+  readiness: ReadinessVerdictV1;
+  cost: GpuCostBreakdownV1;
+  standing: string;
+}
 const TASK_TRANSITIONS: Record<TaskStateV1, readonly TaskStateV1[]> = {
   proposed: ["ready", "cancelled"], ready: ["in-progress", "blocked", "completed", "cancelled"],
   "in-progress": ["blocked", "completed", "cancelled"], blocked: ["ready", "in-progress", "cancelled"],
@@ -152,6 +193,17 @@ export class AionAssistantV1 {
   private ready: Promise<void>;
   private writeQueue: Promise<void> = Promise.resolve();
   private controllers = new Map<string, AbortController>();
+  /** Sessions with a readiness check in flight. One at a time, so no session registers twice. */
+  #activating = new Set<string>();
+  private reconciliation: Promise<void> = Promise.resolve();
+  /**
+   * Resolves when the startup reconciliation of rented GPUs has finished.
+   *
+   * Exposed because "a session that outlived a crash is stopped by whatever starts next" is a
+   * claim that has to be testable. Ordinary callers never need it: reconciliation deliberately
+   * does not block startup, since AION must open even when a provider is unreachable.
+   */
+  get startupReconciliation(): Promise<void> { return this.ready.then(() => this.reconciliation); }
   constructor(private readonly ports: AssistantPorts) {
     if (!ports.providers.length) throw new Error("At least one model provider is required.");
     this.ready = this.initialize();
@@ -175,13 +227,15 @@ export class AionAssistantV1 {
     // startup: AION keeps its default and reports the real availability in Settings.
     try { this.ports.developerAgents.select(this.state.settings.developerBridgeId); } catch { this.ports.developerAgents.select(""); }
     /*
-     * Enforce rented-GPU stop conditions on startup, before anything else runs.
+     * Reconcile rented GPUs on startup, before anything else runs.
      *
-     * If AION was closed or crashed while a session was live, its deadline is still in the state
-     * file and this is where it gets honoured. That is the whole reason the deadline is stored
-     * rather than held in a timer: whatever starts next reaches the same conclusion.
+     * If AION was closed or crashed while a session was live, its deadlines are still in the state
+     * file and this is where they get honoured. That is the whole reason they are stored rather
+     * than held in timers: whatever starts next reaches the same conclusion. Reconciliation
+     * enforces the limits first and only then asks the provider what still exists, so a session
+     * that outlived its deadline is torn down rather than reconnected to.
      */
-    if (this.ports.gpu) void this.enforceGpuLimits().catch(() => {});
+    if (this.ports.gpu) this.reconciliation = this.reconcileGpuSessions().then(() => {}, () => {});
   }
   #recordMigration(state: AssistantStateV1, record: MigrationRecordV1 | null): void {
     if (!record) return;
@@ -429,9 +483,19 @@ export class AionAssistantV1 {
   /**
    * The ordinary tick. Routine scheduling is gated on the owner's setting; GPU stop conditions are
    * not, because a rented instance costs money whether or not the scheduler is switched on.
+   *
+   * Readiness is advanced here too, and for the same reason. A session left in `booting-runtime`
+   * with nobody watching would otherwise sit paying until its allowance ran out, then be stopped
+   * having achieved nothing — bounded, but expensively so. Each check re-reads the stop conditions
+   * first, so this can only ever end a session earlier than the deadline, never later.
    */
   async tick(): Promise<number> {
     await this.enforceGpuLimits();
+    if (this.ports.gpu) {
+      for (const session of (await this.snapshot()).gpuSessions.filter((entry) => isActivatingSession(entry.state))) {
+        await this.pollGpuReadiness(session.id).catch(() => {});
+      }
+    }
     const state = await this.snapshot(); if (!state.settings.schedulerEnabled) return 0; const now = Date.parse(this.ports.clock.now()); const due = state.routines.filter((item) => item.enabled && item.nextRunAt && Date.parse(item.nextRunAt) <= now); for (const routine of due) await this.runRoutine(routine.id, "scheduled"); return due.length;
   }
 
@@ -1046,6 +1110,38 @@ export class AionAssistantV1 {
       return structuredClone(run);
     });
   }
+  /**
+   * Runs the suite against one configured endpoint and records the result.
+   *
+   * The same function, the same fixtures, and the same order for the deterministic floor, a local
+   * runtime, and a machine rented by the minute. A rented endpoint is an ordinary registered
+   * endpoint by the time it gets here, which is exactly why it needs no special path: if it needed
+   * one, "measured against the same suite" would not be true.
+   *
+   * Evaluating a rented endpoint counts as using it, so the idle timeout is reset — otherwise a
+   * long benchmark would be stopped halfway through for inactivity.
+   */
+  async evaluateEndpoint(endpointId: string, signal?: AbortSignal): Promise<EvaluationRunV1> {
+    const runtime = this.ports.brainRuntime;
+    if (!runtime) throw new Error("No runtime adapter is configured, so AION cannot reach any endpoint to measure it.");
+    const state = await this.snapshot();
+    const endpoint = find(state.brain.endpoints, endpointId, "Endpoint");
+    if (!runtime.supports(endpoint)) throw new Error(`No configured runtime adapter can reach "${endpoint.label}" (${endpoint.runtime}). AION will not invent a transport for it, and a silently skipped measurement looks exactly like a passing one.`);
+    const startedAt = this.ports.clock.now();
+    const session = endpoint.rental ? state.gpuSessions.find((entry) => entry.id === endpoint.rental?.gpuSessionId) : undefined;
+    if (session) await this.touchGpuSession(session.id);
+    const results = await runEvaluationSuite(endpoint, EVALUATION_SUITE, runtime, { ...(signal ? { signal } : {}), redact: redactCredentials });
+    const run = await this.recordEvaluation(endpointId, results, startedAt);
+    if (session) {
+      await this.touchGpuSession(session.id);
+      await this.mutate((draft) => {
+        const stored = draft.gpuSessions.find((entry) => entry.id === session.id);
+        if (!stored) return;
+        stored.events.push({ at: this.ports.clock.now(), event: "evaluated", detail: `${run.passed}/${run.total} synthetic cases passed, median ${run.medianLatencyMs} ms. Measured on the same suite as the deterministic floor.` });
+      });
+    }
+    return run;
+  }
   async evaluations(): Promise<EvaluationRunV1[]> { return (await this.snapshot()).evaluations.map((entry) => structuredClone(entry)); }
   /** The most recent run per endpoint, ranked on the evidence rather than on vendor claims. */
   async modelComparison(): Promise<ReturnType<typeof compareEvaluations>> {
@@ -1341,6 +1437,7 @@ export class AionAssistantV1 {
           maxRuntimeMinutes: Number(input.maxRuntimeMinutes ?? 30),
           maxSpendCents: Number(input.maxSpendCents ?? 0),
           idleTimeoutMinutes: Number(input.idleTimeoutMinutes ?? 10),
+          ...(input.readinessMinutes === undefined ? {} : { readinessMinutes: Number(input.readinessMinutes) }),
         },
         { id: this.ports.ids.next("gpu-proposal"), now: this.ports.clock.now(), digest: digestValue },
       );
@@ -1400,53 +1497,348 @@ export class AionAssistantV1 {
         const stored = find(state.gpuProposals, proposalId, "GPU proposal");
         stored.state = "consumed";
         const at = this.ports.clock.now();
+        const hardStopAt = new Date(Date.parse(at) + proposal.maxRuntimeMinutes * 60_000).toISOString();
+        const activation = emptyActivation();
+        /*
+         * Cost accounting begins here, not when the endpoint becomes usable.
+         *
+         * The machine starts billing the moment the provider creates it, so `startedAt` is set now
+         * and the readiness deadline is derived from it. Starting the clock at READY would make
+         * every failed activation look free, which is the one case where the owner most needs to
+         * see what it cost.
+         */
+        activation.provisioningStartedAt = at;
+        activation.deadlineAt = readinessDeadline(at, hardStopAt, proposal.readinessMinutes);
+        activation.lastDetail = redactCredentials(started.detail);
         const session: GpuSessionV1 = {
           id: this.ports.ids.next("gpu-session"), provider: port.provider, proposalId,
-          instanceRef: started.instanceRef, state: "running",
+          instanceRef: started.instanceRef, state: "provisioning",
           gpuName: proposal.gpuName, vramGb: proposal.vramGb, modelId: proposal.modelId, runtime: proposal.runtime,
-          endpointId: null,
+          endpointId: null, endpointHost: null, activation, failureReason: null,
           hourlyCents: proposal.quotedHourlyCents + proposal.quotedStorageCentsPerHour,
           maxRuntimeMinutes: proposal.maxRuntimeMinutes, maxSpendCents: proposal.maxSpendCents,
           idleTimeoutMinutes: proposal.idleTimeoutMinutes,
-          hardStopAt: new Date(Date.parse(at) + proposal.maxRuntimeMinutes * 60_000).toISOString(),
+          hardStopAt,
           startedAt: at, stoppedAt: null, lastActivityAt: at,
           measuredMinutes: 0, estimatedCents: 0, teardownConfirmed: false,
           events: [
             { at: proposal.proposedAt, event: "proposed", detail: describeProposal(proposal) },
-            { at: proposal.decidedAt ?? at, event: "approved", detail: `Owner approved at most ${proposal.maxRuntimeMinutes} minutes and ${proposal.maxSpendCents} cents.` },
+            { at: proposal.decidedAt ?? at, event: "approved", detail: `Owner approved at most ${proposal.maxRuntimeMinutes} minutes and ${proposal.maxSpendCents} cents, including up to ${proposal.readinessMinutes} minutes of paid waiting.` },
             { at, event: "started", detail: redactCredentials(started.detail) },
+            { at, event: "provisioning", detail: `The provider is creating the machine. It is billing from now, including while the model loads. AION will give up on it at ${activation.deadlineAt}.` },
           ],
         };
         state.gpuSessions.unshift(session);
-        this.activity(state, "provider", "gpu.start", `Rented GPU session started on ${session.gpuName}. It must be gone by ${session.hardStopAt}; that deadline is stored, not held in a timer.`, session.id);
+        this.activity(state, "provider", "gpu.start", `Rented GPU session started on ${session.gpuName}. It is not usable yet — the model still has to load, and AION will stop the machine at ${activation.deadlineAt} if it has not. It must be gone by ${session.hardStopAt}; both deadlines are stored, not held in timers.`, session.id);
         return structuredClone(session);
       });
     } finally { clearTimeout(timer); }
+  }
+
+  // --- The bridge: a rented machine becomes a routable endpoint, or it stops -----------------------
+  /**
+   * One readiness check.
+   *
+   * The order of the steps is the design. Stop conditions are evaluated before anything else, from
+   * stored state, so a session past its spend limit stops even if it is one poll from ready — the
+   * owner authorised an amount, not an outcome. Then the readiness allowance. Only then does AION
+   * ask the provider anything, and only after a real completion comes back does an endpoint exist.
+   *
+   * Every exit from this function leaves the session in a state that describes what is true. There
+   * is no path that reports READY without a completion having been answered.
+   */
+  async pollGpuReadiness(id: string): Promise<GpuActivationStatusV1> {
+    const port = this.ports.gpu;
+    if (!port) throw new Error("No GPU infrastructure provider is configured.");
+    /*
+     * One check at a time per session. Two concurrent polls that both saw "no endpoint yet" would
+     * both go on to register one, and the owner would be billed for one machine while the router
+     * held two endpoints pointing at it.
+     */
+    if (this.#activating.has(id)) return this.#activationStatus(await this.snapshot(), id, "Another readiness check for this session is already running.");
+    this.#activating.add(id);
+    try { return await this.#pollOnce(port, id); }
+    finally { this.#activating.delete(id); }
+  }
+  async #pollOnce(port: GpuInfrastructurePortV1, id: string): Promise<GpuActivationStatusV1> {
+    const before = await this.snapshot();
+    const session = find(before.gpuSessions, id, "GPU session");
+    const now = this.ports.clock.now();
+    // A session that is not activating is reported as it is. Both ready and finished are stable
+    // answers, so a duplicate or late poll changes nothing.
+    if (!isActivatingSession(session.state)) return this.#activationStatus(before, id, sessionStanding(session, now));
+
+    // 1. The stop conditions, from stored state, before anything else and before any network call.
+    const decision = shutdownDecision(session, now);
+    if (decision.stop) {
+      await this.#abandonActivation(id, `${decision.trigger}: ${decision.reason}`, "stop-requested");
+      return this.#activationStatus(await this.snapshot(), id, decision.reason);
+    }
+    // 2. The readiness allowance, also from stored state. No silent extension of either.
+    const readiness = readinessVerdict(session, now);
+    if (readiness.expired) {
+      await this.#abandonActivation(id, readiness.reason, "readiness-expired");
+      return this.#activationStatus(await this.snapshot(), id, readiness.reason);
+    }
+
+    // 3. Ask the provider what it sees. A provider error is ordinary, so it is recorded, redacted,
+    //    and retried inside the allowance rather than treated as fatal on its own.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    let observed: { state: string; detail: string; endpointUrl: string | null };
+    try { observed = await port.status(session.instanceRef ?? "", controller.signal); }
+    catch (error) {
+      const detail = redactCredentials(error instanceof Error ? error.message : "the provider did not answer");
+      await this.#notePoll(id, "booting-runtime", detail, `The provider did not answer this check: ${detail}`);
+      return this.#activationStatus(await this.snapshot(), id, `The provider did not answer: ${detail}`);
+    }
+    finally { clearTimeout(timer); }
+
+    const detail = redactCredentials(observed.detail);
+    if (observed.state === "stopped" || observed.state === "failed") {
+      const reason = `The provider reports the machine is ${observed.state}: ${detail} AION will not wait for something that is not there.`;
+      await this.#abandonActivation(id, reason, "readiness-expired");
+      return this.#activationStatus(await this.snapshot(), id, reason);
+    }
+    if (!observed.endpointUrl) {
+      await this.#notePoll(id, "waiting-for-endpoint", detail, detail || "The machine is up; the runtime has not opened a serving port yet.");
+      return this.#activationStatus(await this.snapshot(), id, "The machine is up; the model is still loading.");
+    }
+
+    // 4. Validate and normalise the address before anything is stored or connected to. A malformed
+    //    or secret-bearing address is refused outright rather than corrected into something usable.
+    let serving: { baseUrl: string; host: string; encrypted: boolean };
+    try { serving = normaliseServingEndpoint(observed.endpointUrl); }
+    catch (error) {
+      const reason = redactCredentials(error instanceof Error ? error.message : "the provider reported an unusable serving address");
+      await this.#abandonActivation(id, reason, "endpoint-refused");
+      return this.#activationStatus(await this.snapshot(), id, reason);
+    }
+
+    // 5. Health verification, through the same runtime adapter ordinary work would use. AION will
+    //    not register an endpoint it has no way to check: an unverifiable endpoint reported as
+    //    ready is the exact claim this correction exists to make impossible.
+    const runtime = this.ports.brainRuntime;
+    if (!runtime) {
+      const reason = "No runtime adapter is configured, so AION cannot verify that this machine answers. It will not register an endpoint it cannot check, and is stopping the machine rather than billing for one it cannot use.";
+      await this.#abandonActivation(id, reason, "endpoint-refused");
+      return this.#activationStatus(await this.snapshot(), id, reason);
+    }
+    await this.#recordDiscovery(id, serving.host, detail);
+    const health = await this.#verifyRentedEndpoint(runtime, session, serving.baseUrl);
+    if (!health.available) {
+      await this.#noteHealthFailure(id, health.detail);
+      const after = await this.snapshot();
+      const stillActivating = find(after.gpuSessions, id, "GPU session");
+      const verdict = readinessVerdict(stillActivating, this.ports.clock.now());
+      if (verdict.expired) {
+        await this.#abandonActivation(id, verdict.reason, "readiness-expired");
+        return this.#activationStatus(await this.snapshot(), id, verdict.reason);
+      }
+      return this.#activationStatus(after, id, `The endpoint answered but did not pass its health check: ${health.detail}`);
+    }
+
+    // 6. Register. Everything below happens in one write, and re-reads the session inside it, so a
+    //    poll that raced another one finds the endpoint already there and adopts it.
+    return this.#registerRentedEndpoint(id, serving, health);
+  }
+  /**
+   * Whether the runtime on the far end can actually do the job.
+   *
+   * Two checks, deliberately. The probe says something is listening and reports what it holds; the
+   * completion says the model is loaded and answering. Only the second is evidence, which is why a
+   * probe that succeeds and a completion that returns nothing is recorded as a failure.
+   *
+   * The model identity check matters more than it looks: registering an endpoint labelled with a
+   * model the host is not running would make every evaluation, comparison, and cost figure derived
+   * from it quietly wrong.
+   */
+  async #verifyRentedEndpoint(runtime: BrainRuntimePortV1, session: GpuSessionV1, baseUrl: string): Promise<BrainHealthV1> {
+    const checkedAt = this.ports.clock.now();
+    const candidate = this.#rentedEndpointDraft(session, baseUrl, "health-check");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      if (!runtime.supports(candidate)) {
+        return { available: false, detail: `No configured runtime adapter can reach a ${session.runtime} endpoint, so AION cannot verify this machine.`, checkedAt, latencyMs: null, installedModels: [] };
+      }
+      const probe = await runtime.probe(candidate, controller.signal);
+      if (!probe.available) return { ...probe, checkedAt, detail: redactCredentials(probe.detail) };
+      if (probe.installedModels.length && !probe.installedModels.some((name) => name === session.modelId || name.startsWith(`${session.modelId}:`))) {
+        return {
+          available: false, checkedAt, latencyMs: probe.latencyMs, installedModels: probe.installedModels,
+          detail: `The machine is serving ${probe.installedModels.slice(0, 5).join(", ")}, not ${session.modelId}. AION will not register an endpoint under a model name it is not running.`,
+        };
+      }
+      const answer = await runtime.complete(candidate, { prompt: RENTED_HEALTH_PROMPT, context: [], signal: controller.signal });
+      if (!answer.text.trim()) {
+        return { available: false, checkedAt, latencyMs: answer.latencyMs, installedModels: probe.installedModels, detail: "The endpoint accepted the request and returned nothing. An open port is not a loaded model." };
+      }
+      return {
+        available: true, checkedAt, latencyMs: answer.latencyMs, installedModels: probe.installedModels,
+        detail: `Answered a real completion in ${answer.latencyMs} ms${probe.installedModels.length ? `, serving ${probe.installedModels.slice(0, 3).join(", ")}` : ""}. Verified by a completion, not by a socket.`,
+      };
+    } catch (error) {
+      return { available: false, checkedAt, latencyMs: null, installedModels: [], detail: redactCredentials(error instanceof Error ? error.message : "the endpoint did not answer") };
+    } finally { clearTimeout(timer); }
+  }
+  /** The endpoint a session *would* become, used for health checks before one is registered. */
+  #rentedEndpointDraft(session: GpuSessionV1, baseUrl: string, id: string): BrainEndpointV1 {
+    return rentedGpuEndpoint({
+      baseUrl,
+      model: session.modelId,
+      runtime: BRAIN_RUNTIMES.includes(session.runtime as BrainRuntimeV1) ? session.runtime as BrainRuntimeV1 : "openai-compatible",
+      rental: {
+        gpuSessionId: session.id, infrastructureProvider: session.provider, instanceRef: session.instanceRef ?? "",
+        gpuName: session.gpuName, hourlyCents: session.hourlyCents, hardStopAt: session.hardStopAt,
+      },
+    }, { id, now: session.startedAt ?? this.ports.clock.now() });
+  }
+  async #registerRentedEndpoint(id: string, serving: { baseUrl: string; host: string }, health: BrainHealthV1): Promise<GpuActivationStatusV1> {
+    const registered = await this.mutate((state) => {
+      const session = find(state.gpuSessions, id, "GPU session");
+      const at = this.ports.clock.now();
+      // A concurrent poll may already have registered one. Adopting it is the only safe answer:
+      // creating a second would leave the router holding two names for one rented machine.
+      if (session.endpointId && state.brain.endpoints.some((entry) => entry.id === session.endpointId)) {
+        return structuredClone(session);
+      }
+      if (!isActivatingSession(session.state)) return structuredClone(session);
+      let endpoint: BrainEndpointV1;
+      try {
+        endpoint = this.#rentedEndpointDraft(session, serving.baseUrl, this.ports.ids.next("endpoint"));
+      } catch (error) {
+        // Registration is the last thing that can fail, and failing here means the owner is paying
+        // for a machine nothing will ever use. Recording it and letting the caller tear down is the
+        // only honest outcome; silently keeping the session would be billing for nothing.
+        session.failureReason = redactCredentials(error instanceof Error ? error.message : "the endpoint could not be registered");
+        session.events.push({ at, event: "endpoint-refused", detail: session.failureReason });
+        return structuredClone(session);
+      }
+      endpoint.lastHealth = { ...structuredClone(health), checkedAt: at };
+      state.brain.endpoints = [...state.brain.endpoints, endpoint];
+      session.endpointId = endpoint.id;
+      session.endpointHost = serving.host;
+      session.state = "ready";
+      session.lastActivityAt = at;
+      session.activation.healthyAt = at;
+      session.activation.readyAt = at;
+      session.activation.healthFailures = 0;
+      session.activation.lastDetail = health.detail;
+      session.events.push({ at, event: "health", detail: health.detail });
+      session.events.push({ at, event: "endpoint-registered", detail: `Registered as "${endpoint.label}" at ${serving.host}, an owner-controlled endpoint backed by a rented machine. It is removed when the session stops.` });
+      this.activity(state, "provider", "gpu.endpoint.register", `The rented ${session.gpuName} is now usable: "${endpoint.label}" at ${serving.host} answered a real completion and joined the Brain as an endpoint you control. It disappears when the session stops at ${session.hardStopAt}. No credential value was stored.`, session.id);
+      return structuredClone(session);
+    });
+    if (!registered.endpointId && registered.failureReason) {
+      await this.#abandonActivation(id, registered.failureReason, "endpoint-refused");
+    }
+    return this.#activationStatus(await this.snapshot(), id, registered.endpointId ? "The rented endpoint is ready." : registered.failureReason ?? "Registration did not complete.");
+  }
+  /** Records that a check happened without changing what AION claims to know. */
+  async #notePoll(id: string, state: GpuSessionStateV1, detail: string, event: string): Promise<void> {
+    await this.mutate((draft) => {
+      const session = draft.gpuSessions.find((entry) => entry.id === id);
+      if (!session || !isActivatingSession(session.state)) return;
+      session.activation.polls += 1;
+      session.activation.lastDetail = detail;
+      // Never move backwards through the lifecycle: a session that reached health-checking and hit
+      // a provider hiccup is still further along than one that has only just been created.
+      if (session.state === "provisioning") session.state = state;
+      else if (session.state === "booting-runtime" && state === "waiting-for-endpoint") session.state = state;
+      if (state === "waiting-for-endpoint" && session.activation.instanceUpAt === null) session.activation.instanceUpAt = this.ports.clock.now();
+      session.events.push({ at: this.ports.clock.now(), event: "runtime-boot", detail: event });
+    });
+  }
+  async #recordDiscovery(id: string, host: string, detail: string): Promise<void> {
+    await this.mutate((draft) => {
+      const session = draft.gpuSessions.find((entry) => entry.id === id);
+      if (!session || !isActivatingSession(session.state)) return;
+      const at = this.ports.clock.now();
+      session.activation.polls += 1;
+      session.activation.lastDetail = detail;
+      session.state = "health-checking";
+      if (session.activation.instanceUpAt === null) session.activation.instanceUpAt = at;
+      if (session.activation.endpointDiscoveredAt === null) {
+        session.activation.endpointDiscoveredAt = at;
+        session.endpointHost = host;
+        session.events.push({ at, event: "endpoint-discovered", detail: `The runtime is serving on ${host}. Checking whether it can actually answer before AION routes anything to it.` });
+      }
+    });
+  }
+  async #noteHealthFailure(id: string, detail: string): Promise<void> {
+    await this.mutate((draft) => {
+      const session = draft.gpuSessions.find((entry) => entry.id === id);
+      if (!session || !isActivatingSession(session.state)) return;
+      const at = this.ports.clock.now();
+      session.activation.polls += 1;
+      session.activation.healthFailures += 1;
+      session.activation.lastDetail = detail;
+      session.events.push({ at, event: "health", detail: `Health check ${session.activation.healthFailures} of ${MAX_HEALTH_FAILURES} failed: ${detail}` });
+    });
+  }
+  /**
+   * Activation has failed. Say so, tear the machine down, and report what it cost.
+   *
+   * The state is set to `activation-failed` *before* the provider is asked to stop, so a teardown
+   * that never confirms still leaves a session nothing will route to.
+   */
+  async #abandonActivation(id: string, reason: string, event: "readiness-expired" | "endpoint-refused" | "stop-requested"): Promise<void> {
+    await this.mutate((draft) => {
+      const session = draft.gpuSessions.find((entry) => entry.id === id);
+      if (!session || isFinishedSession(session.state)) return;
+      session.failureReason = reason;
+      session.events.push({ at: this.ports.clock.now(), event, detail: reason });
+    });
+    try { await this.stopGpuSession(id, reason, { activationFailed: true }); }
+    catch { /* stopGpuSession records its own failure; there is nothing further to try here */ }
   }
   /** Records that a session did some work, which is what the idle timeout measures against. */
   async touchGpuSession(id: string): Promise<void> {
     await this.mutate((state) => {
       const session = state.gpuSessions.find((entry) => entry.id === id);
-      if (session && session.state === "running") session.lastActivityAt = this.ports.clock.now();
+      if (!session || (session.state !== "ready" && session.state !== "in-use")) return;
+      const at = this.ports.clock.now();
+      session.lastActivityAt = at;
+      if (session.activation.firstInferenceAt === null) session.activation.firstInferenceAt = at;
+      session.state = "in-use";
     });
   }
   /**
-   * Stops a session and confirms teardown.
+   * Stops a session, removes its endpoint, and confirms teardown.
+   *
+   * The endpoint is removed *first*, in its own write, before the provider is asked anything. A
+   * stop that cannot be confirmed must still leave the router unable to reach a machine that may
+   * already be gone — the alternative is chat requests failing against a dead address while AION
+   * insists the endpoint is fine.
    *
    * `teardownConfirmed` is only ever set from the provider actually saying it stopped. If it says
    * otherwise, the session records that plainly and tells the owner to look themselves, because a
    * machine AION believes is off while it is still billing is the worst possible outcome.
    */
-  async stopGpuSession(id: string, reason = "owner stop"): Promise<GpuSessionV1> {
+  async stopGpuSession(id: string, reason = "owner stop", options: { activationFailed?: boolean } = {}): Promise<GpuSessionV1> {
     const port = this.ports.gpu;
     if (!port) throw new Error("No GPU infrastructure provider is configured.");
     const snapshot = await this.snapshot();
-    const session = find(snapshot.gpuSessions, id, "GPU session");
-    if (!session.instanceRef) throw new Error("That session never started, so there is nothing to stop.");
+    const existing = find(snapshot.gpuSessions, id, "GPU session");
+    // Stopping something already stopped is not an error and must not produce a second teardown
+    // call, a second Activity entry, or a second cost figure.
+    if (isFinishedSession(existing.state)) return structuredClone(existing);
+    if (!existing.instanceRef) throw new Error("That session never started, so there is nothing to stop.");
+
+    const activationFailed = options.activationFailed ?? isActivatingSession(existing.state);
+    await this.mutate((state) => {
+      const session = find(state.gpuSessions, id, "GPU session");
+      if (isFinishedSession(session.state)) return;
+      session.state = "stopping";
+      session.events.push({ at: this.ports.clock.now(), event: "stop-requested", detail: reason });
+      this.#detachRentedEndpoint(state, session, "the rented session is stopping");
+    });
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60_000);
     let outcome: { stopped: boolean; detail: string };
-    try { outcome = await port.stop(session.instanceRef, controller.signal); }
+    try { outcome = await port.stop(existing.instanceRef, controller.signal); }
     catch (error) { outcome = { stopped: false, detail: redactCredentials(error instanceof Error ? error.message : "the provider did not answer") }; }
     finally { clearTimeout(timer); }
 
@@ -1456,17 +1848,45 @@ export class AionAssistantV1 {
       stored.stoppedAt = at;
       stored.measuredMinutes = runtimeMinutes({ ...stored, stoppedAt: at }, at);
       stored.estimatedCents = estimatedCents({ ...stored, stoppedAt: at }, at);
-      stored.state = outcome.stopped ? "stopped" : "failed";
+      stored.state = outcome.stopped ? (activationFailed ? "activation-failed" : "stopped") : "failed";
       stored.teardownConfirmed = outcome.stopped;
-      stored.events.push({ at, event: "stop-requested", detail: reason });
+      if (!outcome.stopped) stored.failureReason = `AION could not confirm teardown: ${redactCredentials(outcome.detail)}`;
       stored.events.push({ at, event: outcome.stopped ? "teardown-confirmed" : "failed", detail: redactCredentials(outcome.detail) });
+      const cost = sessionCostBreakdown(stored, at);
       this.activity(state, outcome.stopped ? "provider" : "failure", "gpu.stop",
         outcome.stopped
-          ? `Rented session stopped after ${stored.measuredMinutes} minute(s), about ${stored.estimatedCents} cents. Teardown confirmed by the provider.`
-          : `AION asked the provider to stop the session and did NOT get confirmation: ${redactCredentials(outcome.detail)} Check the provider console yourself — it may still be billing.`,
+          ? `Rented session stopped after ${stored.measuredMinutes} minute(s), about ${stored.estimatedCents} cents (${cost.provisioningMinutes} provisioning, ${cost.readinessMinutes} loading, ${cost.servingMinutes} serving). ${activationFailed ? "It never became usable, so that was paid for boot time that produced nothing. " : ""}Teardown confirmed by the provider.`
+          : `AION asked the provider to stop the session and did NOT get confirmation: ${redactCredentials(outcome.detail)} Check the provider console yourself — it may still be billing. The endpoint has been removed from routing either way.`,
         id, outcome.stopped ? "success" : "failed");
       return structuredClone(stored);
     });
+  }
+  /**
+   * Takes a rented endpoint out of the Brain registry.
+   *
+   * Idempotent by construction: it works from whatever is actually in the registry rather than
+   * from what the session believes, so calling it twice, or on a session whose endpoint was
+   * already removed by hand, changes nothing the second time.
+   */
+  #detachRentedEndpoint(state: AssistantStateV1, session: GpuSessionV1, why: string): string | null {
+    const endpointId = session.endpointId;
+    if (!endpointId) return null;
+    const endpoint = state.brain.endpoints.find((entry) => entry.id === endpointId);
+    state.brain.endpoints = state.brain.endpoints.filter((entry) => entry.id !== endpointId);
+    if (state.brain.primaryEndpointId === endpointId) state.brain.primaryEndpointId = OFFLINE_ENDPOINT_ID;
+    if (state.brain.manualEndpointId === endpointId) {
+      state.brain.manualEndpointId = "";
+      // Manual mode with nothing chosen is not a valid configuration, and picking a replacement
+      // would be AION deciding where the owner's context goes. It falls back to the policy that
+      // never makes that decision on its own.
+      if (state.brain.mode === "manual") state.brain.mode = "local-preferred";
+    }
+    session.endpointId = null;
+    if (!endpoint) return null;
+    const at = this.ports.clock.now();
+    session.events.push({ at, event: "endpoint-removed", detail: `"${endpoint.label}" was removed from the Brain because ${why}. Nothing AION knows was affected.` });
+    this.activity(state, "provider", "gpu.endpoint.remove", `Rented endpoint "${endpoint.label}" removed from the Brain because ${why}. Every workspace, Memory record, and piece of evidence is untouched: a model is a reasoning provider, not where your information lives.`, session.id);
+    return endpointId;
   }
   /**
    * Enforces every stop condition from stored state.
@@ -1474,27 +1894,172 @@ export class AionAssistantV1 {
    * Called on the ordinary scheduler tick and on startup, so a session outlives neither its
    * deadline nor the process that created it. Reading the deadline from state rather than from a
    * timer is the whole design: whatever runs next reaches the same conclusion.
+   *
+   * The readiness allowance is enforced here too. A session that was still booting when AION was
+   * closed would otherwise wait forever, which is the most expensive way to fail.
    */
   async enforceGpuLimits(healthy = true): Promise<Array<{ sessionId: string; trigger: string; stopped: boolean }>> {
     const state = await this.snapshot();
     const now = this.ports.clock.now();
     const results: Array<{ sessionId: string; trigger: string; stopped: boolean }> = [];
-    for (const session of state.gpuSessions.filter((entry) => entry.state === "running")) {
+    for (const session of state.gpuSessions.filter((entry) => isLiveSession(entry.state))) {
       const decision = shutdownDecision(session, now, healthy);
-      if (!decision.stop) continue;
+      const readiness = readinessVerdict(session, now);
+      const trigger = decision.stop ? decision.trigger : readiness.expired ? "readiness" : "none";
+      if (trigger === "none") continue;
+      const reason = decision.stop ? decision.reason : readiness.reason;
       try {
-        await this.stopGpuSession(session.id, `${decision.trigger}: ${decision.reason}`);
-        results.push({ sessionId: session.id, trigger: decision.trigger, stopped: true });
+        await this.stopGpuSession(session.id, `${trigger}: ${reason}`, { activationFailed: isActivatingSession(session.state) });
+        results.push({ sessionId: session.id, trigger, stopped: true });
       } catch {
-        results.push({ sessionId: session.id, trigger: decision.trigger, stopped: false });
+        results.push({ sessionId: session.id, trigger, stopped: false });
       }
     }
     return results;
   }
-  async gpuSessions(): Promise<Array<GpuSessionV1 & { standing: string; decision: ReturnType<typeof shutdownDecision> }>> {
+  /**
+   * Reconciles rented sessions against the provider after a restart.
+   *
+   * Three rules, in order. Stop conditions are enforced *first*, before anything is reconnected,
+   * so a session that outlived its deadline is torn down rather than resumed. Then the provider is
+   * asked what actually exists, and local belief yields to it — a session AION thinks is ready but
+   * the provider says is gone is recorded as gone. And nothing here ever calls `start`: uncertainty
+   * about local state is never a reason to create a second machine somebody has to pay for.
+   */
+  async reconcileGpuSessions(): Promise<Array<{ sessionId: string; state: GpuSessionStateV1; action: string }>> {
+    const port = this.ports.gpu;
+    if (!port) return [];
+    await this.enforceGpuLimits();
+    const state = await this.snapshot();
+    const results: Array<{ sessionId: string; state: GpuSessionStateV1; action: string }> = [];
+    for (const session of state.gpuSessions.filter((entry) => isLiveSession(entry.state))) {
+      if (!session.instanceRef) continue;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30_000);
+      let observed: { state: string; detail: string; endpointUrl: string | null } | null = null;
+      let failure = "";
+      try { observed = await port.status(session.instanceRef, controller.signal); }
+      catch (error) { failure = redactCredentials(error instanceof Error ? error.message : "the provider did not answer"); }
+      finally { clearTimeout(timer); }
+
+      if (!observed) {
+        // The provider is unreachable. AION does not guess in either direction: it does not resume
+        // routing to a machine it cannot confirm, and it does not create anything.
+        await this.mutate((draft) => {
+          const stored = draft.gpuSessions.find((entry) => entry.id === session.id);
+          if (!stored) return;
+          this.#detachRentedEndpoint(draft, stored, `AION could not reach ${port.provider} to confirm the machine still exists`);
+          stored.activation.lastDetail = failure;
+          stored.events.push({ at: this.ports.clock.now(), event: "reconciled", detail: `The provider did not answer on startup: ${failure} The endpoint is withdrawn from routing until it does. AION has not created anything to replace it.` });
+        });
+        results.push({ sessionId: session.id, state: session.state, action: "provider-unreachable" });
+        continue;
+      }
+      if (observed.state === "stopped" || observed.state === "failed") {
+        await this.#markSessionGone(session.id, `The provider reports the machine is ${observed.state}: ${redactCredentials(observed.detail)}`);
+        results.push({ sessionId: session.id, state: "stopped", action: "already-gone" });
+        continue;
+      }
+      // The machine is genuinely still there. An activating session resumes where it was; a ready
+      // one keeps its endpoint if the endpoint is still in the registry, and is re-verified from
+      // scratch if it is not. Neither path provisions anything.
+      if (isActivatingSession(session.state)) {
+        const status = await this.pollGpuReadiness(session.id);
+        results.push({ sessionId: session.id, state: status.state, action: "resumed-activation" });
+        continue;
+      }
+      const endpointPresent = session.endpointId !== null && state.brain.endpoints.some((entry) => entry.id === session.endpointId);
+      if (endpointPresent) {
+        results.push({ sessionId: session.id, state: session.state, action: "endpoint-intact" });
+        continue;
+      }
+      await this.mutate((draft) => {
+        const stored = draft.gpuSessions.find((entry) => entry.id === session.id);
+        if (!stored) return;
+        stored.endpointId = null;
+        stored.state = "waiting-for-endpoint";
+        stored.events.push({ at: this.ports.clock.now(), event: "reconciled", detail: "The machine is still running but its endpoint is no longer registered, so AION is re-verifying it from scratch rather than assuming it still answers." });
+      });
+      const status = await this.pollGpuReadiness(session.id);
+      results.push({ sessionId: session.id, state: status.state, action: "re-verified" });
+    }
+    return results;
+  }
+  /** The provider says the machine is gone. Record that; never resurrect it. */
+  async #markSessionGone(id: string, reason: string): Promise<void> {
+    await this.mutate((state) => {
+      const session = state.gpuSessions.find((entry) => entry.id === id);
+      if (!session || isFinishedSession(session.state)) return;
+      const at = this.ports.clock.now();
+      const activating = isActivatingSession(session.state);
+      this.#detachRentedEndpoint(state, session, "the provider says the machine no longer exists");
+      session.stoppedAt = at;
+      session.measuredMinutes = runtimeMinutes({ ...session, stoppedAt: at }, at);
+      session.estimatedCents = estimatedCents({ ...session, stoppedAt: at }, at);
+      session.state = activating ? "activation-failed" : "stopped";
+      session.teardownConfirmed = true;
+      session.failureReason = reason;
+      session.events.push({ at, event: "reconciled", detail: reason });
+      this.activity(state, "provider", "gpu.reconcile", `${reason} AION recorded it as finished after about ${session.estimatedCents} cents and created nothing to replace it.`, id);
+    });
+  }
+  /** The activation picture for one session, for the UI and for whoever is polling. */
+  #activationStatus(state: AssistantStateV1, id: string, detail: string): GpuActivationStatusV1 {
+    const session = find(state.gpuSessions, id, "GPU session");
+    const now = this.ports.clock.now();
+    return {
+      sessionId: session.id,
+      state: session.state,
+      label: sessionStatusLabel(session.state),
+      endpointId: session.endpointId,
+      endpointHost: session.endpointHost,
+      ready: session.state === "ready" || session.state === "in-use",
+      finished: isFinishedSession(session.state),
+      detail: redactCredentials(detail),
+      readiness: readinessVerdict(session, now),
+      cost: sessionCostBreakdown(session, now),
+      standing: sessionStanding(session, now),
+    };
+  }
+  async gpuActivation(id: string): Promise<GpuActivationStatusV1> {
+    return this.#activationStatus(await this.snapshot(), id, "Current activation state, read from stored state.");
+  }
+  /**
+   * Waits for a session to become usable, or stops it.
+   *
+   * A bounded loop over `pollGpuReadiness`, which is where all the judgement lives. This adds only
+   * the waiting, and every iteration re-reads stored state rather than trusting anything it
+   * computed before it slept — the process may have been asleep for minutes, and the deadline it
+   * checked at the start may have passed while it was.
+   */
+  async activateGpuSession(id: string, options: { intervalMs?: number; maxPolls?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<GpuActivationStatusV1> {
+    const intervalMs = Number.isSafeInteger(options.intervalMs) && options.intervalMs! > 0 ? options.intervalMs! : DEFAULT_READINESS_INTERVAL_MS;
+    const maxPolls = Number.isSafeInteger(options.maxPolls) && options.maxPolls! > 0 ? options.maxPolls! : 240;
+    const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+    let status = await this.pollGpuReadiness(id);
+    for (let poll = 1; poll < maxPolls && !status.ready && !status.finished; poll += 1) {
+      await sleep(intervalMs);
+      status = await this.pollGpuReadiness(id);
+    }
+    if (!status.ready && !status.finished) {
+      // The loop ran out before the stored deadline did. That is a bug in whoever called it, not a
+      // reason to keep a machine running: AION stops it and says which limit it actually hit.
+      await this.#abandonActivation(id, `AION stopped checking after ${maxPolls} attempts without the endpoint becoming usable. The machine is being stopped rather than left running unattended.`, "readiness-expired");
+      return this.#activationStatus(await this.snapshot(), id, "Activation gave up after the maximum number of checks.");
+    }
+    return status;
+  }
+  async gpuSessions(): Promise<Array<GpuSessionV1 & { standing: string; label: string; decision: ReturnType<typeof shutdownDecision>; readiness: ReadinessVerdictV1; cost: GpuCostBreakdownV1 }>> {
     const state = await this.snapshot();
     const now = this.ports.clock.now();
-    return state.gpuSessions.map((entry) => ({ ...structuredClone(entry), standing: sessionStanding(entry, now), decision: shutdownDecision(entry, now) }));
+    return state.gpuSessions.map((entry) => ({
+      ...structuredClone(entry),
+      standing: sessionStanding(entry, now),
+      label: sessionStatusLabel(entry.state),
+      decision: shutdownDecision(entry, now),
+      readiness: readinessVerdict(entry, now),
+      cost: sessionCostBreakdown(entry, now),
+    }));
   }
   async gpuProposals(): Promise<Array<GpuProvisioningProposalV1 & { disclosure: string }>> {
     const state = await this.snapshot();

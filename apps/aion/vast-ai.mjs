@@ -200,22 +200,34 @@ export class VastAiInfrastructureV1 {
     }
   }
 
+  /**
+   * What Vast.ai says about one machine, in infrastructure terms only.
+   *
+   * A failure to reach the API **throws** rather than reporting the instance as failed. The two are
+   * not the same thing and conflating them is expensive: the readiness bridge tears a machine down
+   * when the provider says it has failed, so one flaky request would destroy a paid instance
+   * mid-boot. Throwing says "AION does not know", which the bridge records, redacts, and retries
+   * inside the allowance the owner approved.
+   *
+   * The address reported here is a claim, not an endpoint. Validating it and proving something
+   * answers on it happens in AION, not in this adapter.
+   */
   async status(instanceRef, signal) {
-    try {
-      const payload = await this.#request("/instances/", { signal });
-      const instances = Array.isArray(payload?.instances) ? payload.instances : [];
-      const found = instances.find((entry) => String(entry?.id ?? "") === String(instanceRef));
-      if (!found) return { state: "stopped", detail: "Vast.ai does not list that instance, so it is not running.", endpointUrl: null };
-      const running = found.actual_status === "running";
-      const host = typeof found.public_ipaddr === "string" ? found.public_ipaddr : null;
-      const port = found.ports?.["8000/tcp"]?.[0]?.HostPort ?? null;
-      return {
-        state: running ? "running" : "starting",
-        detail: redactCredentials(`Vast.ai reports ${String(found.actual_status ?? "an unknown state")}.`),
-        endpointUrl: running && host && port ? `http://${host}:${port}/v1` : null,
-      };
-    } catch (error) {
-      return { state: "failed", detail: redactCredentials(error?.message ?? "the provider did not answer"), endpointUrl: null };
-    }
+    const payload = await this.#request("/instances/", { signal });
+    const instances = Array.isArray(payload?.instances) ? payload.instances : [];
+    const found = instances.find((entry) => String(entry?.id ?? "") === String(instanceRef));
+    if (!found) return { state: "stopped", detail: "Vast.ai does not list that instance, so it is not running.", endpointUrl: null };
+    const actual = String(found.actual_status ?? "").toLowerCase();
+    const running = actual === "running";
+    // Anything that is neither running nor plainly finished is treated as still coming up. That is
+    // the honest reading during a boot, and the readiness deadline bounds how long it can last.
+    const state = running ? "running" : ["exited", "stopped", "offline"].includes(actual) ? "stopped" : "provisioning";
+    const host = typeof found.public_ipaddr === "string" ? found.public_ipaddr : null;
+    const port = found.ports?.["8000/tcp"]?.[0]?.HostPort ?? null;
+    return {
+      state,
+      detail: redactCredentials(`Vast.ai reports ${actual || "an unknown state"}.`),
+      endpointUrl: running && host && port ? `http://${host}:${port}/v1` : null,
+    };
   }
 }

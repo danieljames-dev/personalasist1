@@ -1,4 +1,4 @@
-import { scoreCase, validateEndpointUrl } from "../../packages/local-assistant/dist/index.js";
+import { runEvaluationSuite, validateEndpointUrl } from "../../packages/local-assistant/dist/index.js";
 
 /**
  * The only place AION talks to an inference runtime.
@@ -200,22 +200,13 @@ export async function completeOnce(endpoint, { prompt, context = [], signal }) {
 /**
  * Runs the synthetic evaluation suite against one endpoint.
  *
- * Cases run in order rather than concurrently, because latency is one of the things being measured
- * and a local runtime queues requests anyway. A case that errors is recorded as a failure with the
- * reason rather than aborting the run: how an endpoint fails is itself part of the evidence.
+ * The loop itself lives in the domain package, so the deterministic floor, a local runtime, and a
+ * machine rented by the minute are all measured by literally the same function rather than by two
+ * implementations that could drift apart. This wrapper adds only the transport-layer redaction:
+ * an error from an HTTP adapter can carry a local path or a key, and neither belongs in evidence.
  */
 export async function runEvaluation(endpoint, suite, runtime, signal) {
-  const results = [];
-  for (const evaluationCase of suite) {
-    const startedAt = Date.now();
-    try {
-      const { text, latencyMs } = await runtime.complete(endpoint, { prompt: evaluationCase.prompt, context: evaluationCase.context, signal });
-      results.push(scoreCase(evaluationCase, text, latencyMs));
-    } catch (error) {
-      results.push(scoreCase(evaluationCase, "", Date.now() - startedAt, safeDetail(error?.message) || "the endpoint failed"));
-    }
-  }
-  return results;
+  return runEvaluationSuite(endpoint, suite, runtime, { ...(signal ? { signal } : {}), redact: safeDetail });
 }
 
 /** The adapter, as the port the policy module declares. */

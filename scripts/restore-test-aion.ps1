@@ -65,7 +65,7 @@ param(
     [string]   $RestoreTestsRoot,
     [string]   $ActiveRepositoryPath,
     [string]   $Timestamp,
-    [int]      $ExpectedTests = 538,
+    [int]      $ExpectedTests = 564,
     [switch]   $DryRun
 )
 
@@ -153,6 +153,7 @@ $result = [ordered]@{
     salesDemoCommand = 'npm run aion:sales:demo'
     v12DemoCommand   = 'npm run aion:v12:demo'
     v13DemoCommand   = 'npm run aion:v13:demo'
+    v13r1DemoCommand = 'npm run aion:v13r1:demo'
     careerInputResult  = $null
     careerEvidenceResult = $null
     jobPostingResult = $null
@@ -165,6 +166,7 @@ $result = [ordered]@{
     salesDemoResult = $null
     v12DemoResult = $null
     v13DemoResult = $null
+    v13r1DemoResult = $null
     exclusionResult    = $null
     testsPassed        = $null
     testsFailed        = $null
@@ -555,6 +557,35 @@ try {
     if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.3 demo left permanent private runtime state in the restored repository' }
     $result.v13DemoResult = 'PASS'
     Add-Step 'aion-v13-demo-regression' 'PASS' 'complete synthetic V1.3 proof: deterministic floor benchmark, GPU spending boundary, stored stop deadlines, governed live research, contradiction handling, cost evidence, and independence'
+
+    # The V1.3-R1 correction. The evidence demanded here is deliberately the *refusals*: a rented
+    # machine that never comes up, one whose port opens but cannot answer, and one whose address
+    # carries a token. A gate that only checked the success case would pass a build that quietly
+    # went back to reporting an unready endpoint as ready.
+    Write-Step "running npm run aion:v13r1:demo"
+    $v13r1Out = Join-Path $logDir "restore-$Timestamp.v13r1-demo.out.log"
+    $v13r1Err = Join-Path $logDir "restore-$Timestamp.v13r1-demo.err.log"
+    $v13r1Exit = Invoke-Logged -CommandLine 'npm run aion:v13r1:demo' -WorkingDirectory $restoreDir -OutFile $v13r1Out -ErrFile $v13r1Err
+    if ($v13r1Exit -ne 0) { throw "npm run aion:v13r1:demo failed with exit code $v13r1Exit" }
+    $v13r1Text = Get-Content -LiteralPath $v13r1Out -Raw
+    foreach ($required in @(
+        'AION V1.3-R1 demo PASS',
+        "is 'Provisioning', not 'Ready'",
+        'health-verified by an actual completion',
+        'joins the router as the owner-gpu tier',
+        'measured by exactly the same harness as the deterministic floor',
+        'removes the endpoint from the Brain first',
+        'given up on at its stored deadline',
+        'an open port is not a loaded model',
+        'refused rather than stored and routed to',
+        'stopped by whatever starts next, before anything can route to it',
+        'no credential value appears anywhere in state',
+        'No GPU was rented, no money spent')) {
+        if ($v13r1Text -notmatch [regex]::Escape($required)) { throw "V1.3-R1 demo evidence missing: $required" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $restoreDir 'private')) { throw 'V1.3-R1 demo left permanent private runtime state in the restored repository' }
+    $result.v13r1DemoResult = 'PASS'
+    Add-Step 'aion-v13r1-demo-regression' 'PASS' 'complete synthetic rented-GPU lifecycle proof: bounded readiness, endpoint discovery and refusal, health verification by completion, Brain registration, routing, evaluation, restart reconciliation, and teardown'
 
     $result.outcome = 'SUCCESS'
     Write-Step "RESTORE TEST PASSED"

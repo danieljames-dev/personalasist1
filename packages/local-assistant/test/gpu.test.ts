@@ -8,8 +8,8 @@ import {
   InMemoryStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   OPEN_MODEL_PROFILES, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1,
   SyntheticDeveloperAgentBridgeV1, SyntheticGpuInfrastructureV1, UnavailableGpuInfrastructureV1,
-  V13_BUDGET_CEILING_CENTS, assessOffer, buildProvisioningProposal, digestValue, normaliseOffer,
-  recommendExperiments, redactCredentials, revalidateProposal, shutdownDecision,
+  V13_BUDGET_CEILING_CENTS, assessOffer, buildProvisioningProposal, digestValue, emptyActivation,
+  normaliseOffer, recommendExperiments, redactCredentials, revalidateProposal, shutdownDecision,
 } from "../src/index.js";
 import type { GpuInfrastructurePortV1, GpuOfferV1, GpuRequirementV1, GpuSessionV1 } from "../src/index.js";
 
@@ -166,7 +166,10 @@ test("provisioning needs an approved proposal, and consumes it", async () => {
   await service.decideGpuProposal(proposal.id, true);
   const session = await service.startGpuSession(proposal.id);
 
-  assert.equal(session.state, "running");
+  // Provisioning, not running: the provider has created a machine and nothing has yet checked
+  // whether a model answers on it. Calling that "running" was the defect this milestone corrects.
+  assert.equal(session.state, "provisioning");
+  assert.equal(session.endpointId, null);
   assert.ok(session.instanceRef);
   assert.equal(session.maxSpendCents, 30);
   assert.equal((await service.gpuProposals()).find((entry) => entry.id === proposal.id)?.state, "consumed", "an approval is one-shot");
@@ -188,8 +191,9 @@ test("the hard-stop deadline is stored, not held in a timer", async () => {
 
 test("every stop condition fires from stored state alone", () => {
   const base: GpuSessionV1 = {
-    id: "s1", provider: "synthetic", proposalId: "p1", instanceRef: "i1", state: "running",
-    gpuName: "RTX 4090", vramGb: 24, modelId: "m", runtime: "vllm", endpointId: null,
+    id: "s1", provider: "synthetic", proposalId: "p1", instanceRef: "i1", state: "ready",
+    gpuName: "RTX 4090", vramGb: 24, modelId: "m", runtime: "vllm",
+    endpointId: "e1", endpointHost: "gpu.invalid", activation: emptyActivation(), failureReason: null,
     hourlyCents: 60, maxRuntimeMinutes: 60, maxSpendCents: 40, idleTimeoutMinutes: 10,
     hardStopAt: at(60), startedAt: NOW, stoppedAt: null, lastActivityAt: NOW,
     measuredMinutes: 0, estimatedCents: 0, teardownConfirmed: false, events: [],
@@ -220,10 +224,14 @@ test("enforcement stops a session that outran its limits, and records the trigge
   assert.deepEqual(enforced, [{ sessionId: session.id, trigger: "health", stopped: true }]);
 
   const after = (await service.gpuSessions()).find((entry) => entry.id === session.id)!;
-  assert.equal(after.state, "stopped");
+  // It was stopped while still booting, so it is recorded as an activation failure rather than a
+  // normal stop: the owner paid for boot time and got nothing usable, and those are different
+  // outcomes even though both end with the machine gone.
+  assert.equal(after.state, "activation-failed");
   assert.equal(after.teardownConfirmed, true);
   assert.ok(after.events.some((event) => event.event === "teardown-confirmed"));
   assert.match(after.standing, /Teardown confirmed/u);
+  assert.match(after.standing, /never became usable/u);
 });
 
 test("a teardown the provider did not confirm is reported as unconfirmed, not assumed", async () => {

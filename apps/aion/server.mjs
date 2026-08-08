@@ -10,7 +10,7 @@ import {
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
-import { HttpBrainRuntimeV1, runEvaluation } from "./brain-runtime.mjs";
+import { HttpBrainRuntimeV1 } from "./brain-runtime.mjs";
 import { DEFAULT_VAST_CREDENTIAL_VARIABLE, VastAiInfrastructureV1 } from "./vast-ai.mjs";
 import { PublicUrlResearchProviderV1, SearxngSearchProviderV1 } from "./research-fetch.mjs";
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
@@ -180,6 +180,13 @@ export async function createAionServer(options = {}) {
     gpu: options.gpu ?? (process.env[DEFAULT_VAST_CREDENTIAL_VARIABLE]?.trim()
       ? new VastAiInfrastructureV1({ allowProvisioning: false })
       : new UnavailableGpuInfrastructureV1(`No GPU infrastructure provider is configured. Set ${DEFAULT_VAST_CREDENTIAL_VARIABLE} in the shell that starts AION to enable Vast.ai discovery. AION stores only the variable name, never the value, and will still not rent anything without an approved bounded proposal.`)),
+    /*
+     * The same adapter that runs evaluations verifies a rented endpoint before AION will route to
+     * it. Giving the service the runtime port rather than doing the check up here is deliberate:
+     * "this machine answered a real completion" is the fact the whole bridge turns on, and it must
+     * be established by the code that decides, not by the transport that happens to be in front.
+     */
+    brainRuntime,
   });
 
   async function dispatch(input) {
@@ -273,6 +280,16 @@ export async function createAionServer(options = {}) {
       case "gpu.start": return service.startGpuSession(input.id);
       case "gpu.stop": return service.stopGpuSession(input.id, input.reason ?? "owner stop");
       case "gpu.enforce": return { stopped: await service.enforceGpuLimits() };
+      /*
+       * The readiness bridge. `gpu.poll` is one bounded check, safe to call from a browser on a
+       * timer; `gpu.activate` runs the loop server-side for a caller that wants to wait. Both stop
+       * the machine rather than extending anything if a limit is reached, and neither can create a
+       * second paid resource. `gpu.reconcile` is the same reconciliation that runs at startup.
+       */
+      case "gpu.poll": return service.pollGpuReadiness(input.id);
+      case "gpu.activate": return service.activateGpuSession(input.id, input.options ?? {});
+      case "gpu.activation": return service.gpuActivation(input.id);
+      case "gpu.reconcile": return { reconciled: await service.reconcileGpuSessions() };
       case "gpu.sessions": return { sessions: await service.gpuSessions(), proposals: await service.gpuProposals() };
       case "gpu.models": return service.modelProfiles();
       case "gpu.cost": return service.costIntelligence();
@@ -292,12 +309,10 @@ export async function createAionServer(options = {}) {
         return service.recordEndpointHealth(endpoint.id, await brainRuntime.probe(endpoint, AbortSignal.timeout(15_000)));
       }
       case "brain.detect": return { runtimes: await brainRuntime.detect(AbortSignal.timeout(20_000)) };
-      case "brain.evaluate": {
-        const settings = await service.brainSettings();
-        const endpoint = settings.endpoints.find((entry) => entry.id === input.id);
-        if (!endpoint) throw new Error("Endpoint is not registered.");
-        return service.recordEvaluation(endpoint.id, await runEvaluation(endpoint, service.evaluationSuite(), brainRuntime), new Date().toISOString());
-      }
+      // One harness for every endpoint, including a machine rented by the minute. A rented
+      // endpoint is an ordinary registered endpoint by the time it reaches here, which is why it
+      // needs no branch: if it needed one, "measured against the same suite" would not be true.
+      case "brain.evaluate": return service.evaluateEndpoint(input.id, AbortSignal.timeout(20 * 60_000));
       case "brain.comparison": return { comparison: await service.modelComparison(), runs: await service.evaluations() };
       case "chat.disclosure": return service.chatDisclosure(input.id);
       // Governed research. Proposing runs nothing; a job runs only after the owner approves it.

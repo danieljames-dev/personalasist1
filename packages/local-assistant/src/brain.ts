@@ -81,6 +81,30 @@ export interface BrainHealthV1 {
   installedModels: string[];
 }
 
+/**
+ * What makes an endpoint temporary.
+ *
+ * A rented GPU is not a configured endpoint that happens to cost money; it is a machine with a
+ * deadline that AION borrowed an address from. Recording that here — rather than inferring it from
+ * a label or a URL — is what lets the router, the disclosure, and the UI all say "this one is
+ * rented and stops at a stated time" from the same fact.
+ *
+ * There is no credential in this record. The rented runtime's credential, if it has one, lives in
+ * the endpoint's `credentialEnvironmentVariable` by *name*, exactly like every other endpoint.
+ */
+export interface RentedGpuRentalV1 {
+  /** The GPU session this endpoint belongs to. Removing the session removes the endpoint. */
+  gpuSessionId: string;
+  /** Which infrastructure supplied the machine. Replaceable; nothing depends on which. */
+  infrastructureProvider: string;
+  /** The provider's own handle for the machine, for the owner to check against their console. */
+  instanceRef: string;
+  gpuName: string;
+  hourlyCents: number;
+  /** The stored moment this endpoint must be gone by. The same deadline the session enforces. */
+  hardStopAt: IsoTimestamp;
+}
+
 export interface BrainEndpointV1 {
   id: OpaqueId;
   label: string;
@@ -100,9 +124,14 @@ export interface BrainEndpointV1 {
   enabled: boolean;
   addedAt: IsoTimestamp;
   lastHealth: BrainHealthV1 | null;
+  /** Set only for a temporary endpoint backed by a rented GPU session. Null for everything else. */
+  rental: RentedGpuRentalV1 | null;
 }
 
-export type RouterModeV1 = "local-only" | "local-preferred" | "manual" | "maximum-capability";
+/** True when this endpoint exists only for as long as a rented machine does. */
+export function isRentedGpuEndpoint(endpoint: BrainEndpointV1): boolean { return endpoint.rental !== null; }
+
+export type RouterModeV1 ="local-only" | "local-preferred" | "manual" | "maximum-capability";
 export const ROUTER_MODES: readonly RouterModeV1[] = ["local-only", "local-preferred", "manual", "maximum-capability"];
 
 export interface BrainSettingsV1 {
@@ -164,6 +193,7 @@ export function offlineEndpoint(now: IsoTimestamp): BrainEndpointV1 {
     enabled: true,
     addedAt: now,
     lastHealth: { available: true, detail: "Always available. It performs no network request and needs no model file.", checkedAt: now, latencyMs: 0, installedModels: [] },
+    rental: null,
   };
 }
 
@@ -252,6 +282,61 @@ export function buildEndpoint(input: Record<string, unknown>, context: { id: Opa
     enabled: input.enabled !== false,
     addedAt: context.now,
     lastHealth: null,
+    // Only the rented-GPU bridge creates a temporary endpoint, and it uses its own builder. An
+    // owner-configured endpoint is never a rental, so this cannot be set from input.
+    rental: null,
+  };
+}
+
+/**
+ * The temporary endpoint a ready rented session becomes.
+ *
+ * Built here rather than in the GPU module on purpose: this is a Brain endpoint that happens to be
+ * backed by rented hardware, not a GPU concept that happens to be routable. Nothing Vast-specific
+ * reaches this function — it takes a validated address, a model, a runtime, and the rental facts,
+ * and would build the same endpoint for any infrastructure.
+ *
+ * The location is `owner-controlled-host`, which is the honest classification: the owner is paying
+ * for the machine and chose it, and it is still not this computer. The disclosure says both.
+ */
+export function rentedGpuEndpoint(
+  input: {
+    baseUrl: string;
+    model: string;
+    runtime: BrainRuntimeV1;
+    rental: RentedGpuRentalV1;
+    contextTokens?: number;
+    credentialEnvironmentVariable?: string;
+    health?: BrainHealthV1;
+  },
+  context: { id: OpaqueId; now: IsoTimestamp },
+): BrainEndpointV1 {
+  if (input.runtime === "deterministic-offline") fail("The offline provider is built in and is not something you can rent.");
+  const credential = text(input.credentialEnvironmentVariable, "Credential environment-variable name", 128, false);
+  if (credential && !/^[A-Z][A-Z0-9_]{0,127}$/u.test(credential)) fail("A credential environment-variable name must be upper-case letters, digits, and underscores.");
+  const model = text(input.model, "Model identifier", 200);
+  return {
+    id: context.id,
+    // Named for what it is and when it dies, so a stale one in a list is obvious at a glance.
+    label: `Rented ${input.rental.gpuName} (${model})`,
+    runtime: input.runtime,
+    location: "owner-controlled-host",
+    baseUrl: validateEndpointUrl(input.baseUrl, "owner-controlled-host"),
+    model,
+    hostLabel: `a ${input.rental.gpuName} you are renting from ${input.rental.infrastructureProvider}, until ${input.rental.hardStopAt}`,
+    credentialEnvironmentVariable: credential,
+    capabilities: buildCapabilityProfile({
+      conversation: true, reasoning: true, code: true, structuredJson: true, toolProposal: true,
+      vision: false, embeddings: false,
+      contextTokens: input.contextTokens ?? 32_768,
+      // The owner pays by the hour for the machine, not per token to a vendor. That is a different
+      // kind of cost and the router's cost intelligence treats it as one.
+      costClass: "owner-metered",
+    }),
+    enabled: true,
+    addedAt: context.now,
+    lastHealth: input.health ? structuredClone(input.health) : null,
+    rental: structuredClone(input.rental),
   };
 }
 
@@ -372,6 +457,11 @@ export function describeDisclosure(endpoint: BrainEndpointV1, request: RoutingRe
     request.includesWorkOrCustomerInformation ? "Work or customer information is included." : "No work or customer information is included.",
     local ? "" : encrypted ? "The connection is encrypted." : "The connection is plain HTTP, so anything between here and there can read it.",
     ownerControlled ? "" : "A third-party service may retain, log, or train on what it receives; AION cannot control that and does not claim to.",
+    // A rented machine is somebody else's hardware that the owner is paying for by the minute.
+    // Both halves of that matter and both are said, every time, rather than once at approval.
+    endpoint.rental
+      ? `This machine is rented from ${endpoint.rental.infrastructureProvider} at ${endpoint.rental.hourlyCents} cents/hour and stops at ${endpoint.rental.hardStopAt}. You control it and you are paying for it; it is still not this computer, and the host could in principle see what is in its memory.`
+      : "",
   ].filter(Boolean);
   return {
     endpointId: endpoint.id, endpointLabel: endpoint.label, runtime: endpoint.runtime, location: endpoint.location,
@@ -447,8 +537,19 @@ export function routeRequest(settings: BrainSettingsV1, request: RoutingRequestV
 
   switch (settings.mode) {
     case "local-only": {
-      const pick = settings.endpoints.find((entry) => entry.id === settings.primaryEndpointId && candidates.includes(entry)) ?? strongest(candidates);
-      return choose(pick, `Local Only: running on ${pick.label}, which is ${pick.location === "local-machine" ? "this computer" : "a host you control"}. No third-party endpoint was considered.`);
+      /*
+       * Local Only excludes third parties, and among what is left it takes the cheapest and most
+       * private tier that can do the work rather than the most capable thing present. A rented
+       * machine billing by the minute must not be reached implicitly just because it happens to
+       * outscore the floor — and when it *is* the only thing that can do the work, the reason says
+       * so and names the cost.
+       */
+      const pick = settings.endpoints.find((entry) => entry.id === settings.primaryEndpointId && candidates.includes(entry))
+        ?? strongest(TIER_ORDER.map((tier) => candidates.filter((entry) => endpointTier(entry) === tier)).find((group) => group.length) ?? candidates);
+      const where = pick.rental
+        ? `${pick.label}, a machine you are renting at ${pick.rental.hourlyCents} cents/hour. Nothing cheaper on this computer could do this, and it costs money while it runs`
+        : `${pick.label}, which is ${pick.location === "local-machine" ? "this computer" : "a host you control"}`;
+      return choose(pick, `Local Only: running on ${where}. No third-party endpoint was considered.`);
     }
     case "manual": {
       const named = settings.endpoints.find((entry) => entry.id === settings.manualEndpointId);
@@ -556,6 +657,7 @@ export function endpointForProvider(provider: { id: string; location: "local" | 
     enabled: true,
     addedAt: now,
     lastHealth: null,
+    rental: null,
   };
 }
 

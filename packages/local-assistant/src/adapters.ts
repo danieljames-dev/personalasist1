@@ -16,8 +16,8 @@ import type { BrainEndpointV1, BrainHealthV1, BrainRuntimePortV1, BrainRuntimeV1
 import { defaultBrainSettings, offlineEndpoint } from "./brain.js";
 import type { ResearchLimitsV1, ResearchProviderV1, ResearchScopeV1, ResearchSourceV1 } from "./research.js";
 import type { BuildPipelinePortV1, PipelineRunV1, PipelineStepV1 } from "./projects.js";
-import type { GpuInfrastructurePortV1, GpuOfferV1, GpuSessionStateV1 } from "./gpu.js";
-import { normaliseOffer } from "./gpu.js";
+import type { GpuInfrastructurePortV1, GpuInstanceStateV1, GpuOfferV1 } from "./gpu.js";
+import { emptyActivation, normaliseOffer } from "./gpu.js";
 
 const scrypt = promisify(scryptCallback);
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -125,7 +125,7 @@ export function migrateStateV1(
 ): { state: AssistantStateV1; applied: boolean; record: MigrationRecordV1 | null; records: MigrationRecordV1[] } {
   let draft = structuredClone(state);
   const records: MigrationRecordV1[] = [];
-  for (const step of [migrateWorkspaceSeparation, migrateWorkspaceRegistry, migrateRelationshipCore]) {
+  for (const step of [migrateWorkspaceSeparation, migrateWorkspaceRegistry, migrateRelationshipCore, migrateGpuSessionLifecycle]) {
     const result = step(draft, now, nextId);
     draft = result.state;
     if (result.record) { draft.migrations.push(result.record); records.push(result.record); }
@@ -210,6 +210,40 @@ const migrateRelationshipCore: MigrationStep = (draft, now, nextId) => {
   };
 };
 
+/**
+ * V1.3-R1: a rented session recorded before the endpoint bridge existed said "running" when what
+ * it actually meant was "the provider says the box is powered on, and nothing has ever checked
+ * whether a model answers on it".
+ *
+ * The remap refuses to improve on that. A legacy session with no endpoint becomes
+ * `waiting-for-endpoint`, not `ready` — promoting it would invent precisely the fact this
+ * correction exists to stop AION asserting, and the session has no stored readiness deadline, so
+ * the next reconciliation will stop the machine rather than wait on it indefinitely.
+ */
+const migrateGpuSessionLifecycle: MigrationStep = (draft, now, nextId) => {
+  const sessions = Array.isArray(draft.gpuSessions) ? draft.gpuSessions : [];
+  let remapped = 0;
+  for (const session of sessions) {
+    const legacy = (session as unknown as { state?: unknown }).state;
+    if (legacy === "starting") { session.state = "provisioning"; remapped += 1; continue; }
+    if (legacy !== "running") continue;
+    session.state = session.endpointId ? "ready" : "waiting-for-endpoint";
+    session.events.push({
+      at: now,
+      event: "reconciled",
+      detail: session.endpointId
+        ? "Recorded as running before AION distinguished a live machine from a usable endpoint. It has an endpoint, so it is now recorded as ready."
+        : "Recorded as running before AION distinguished a live machine from a usable endpoint. It never had an endpoint, so it is now recorded as still waiting for one — which is what it always was.",
+    });
+    remapped += 1;
+  }
+  if (!remapped) return { state: draft, record: null };
+  return {
+    state: draft,
+    record: { id: nextId("migration"), migration: GPU_LIFECYCLE_MIGRATION, at: now, assigned: { gpuSessions: remapped }, defaultWorkspace: DEFAULT_WORKSPACE },
+  };
+};
+
 /** Every workspace identifier this state can legitimately reference. */
 function knownWorkspaceIds(state: AssistantStateV1): Set<string> {
   const ids = new Set<string>(WORKSPACE_IDS);
@@ -220,6 +254,7 @@ function knownWorkspaceIds(state: AssistantStateV1): Set<string> {
 export const WORKSPACE_MIGRATION = "aion.workspace-separation.v1";
 export const WORKSPACE_REGISTRY_MIGRATION = "aion.workspace-registry.v1";
 export const RELATIONSHIP_CORE_MIGRATION = "aion.relationship-core.v1";
+export const GPU_LIFECYCLE_MIGRATION = "aion.gpu-endpoint-bridge.v1";
 export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!value || typeof value !== "object") fail("Assistant state is malformed.");
   const state = value as Partial<AssistantStateV1>;
@@ -245,6 +280,23 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.projects)) clone.projects = [];
   if (!Array.isArray(clone.gpuProposals)) clone.gpuProposals = [];
   if (!Array.isArray(clone.gpuSessions)) clone.gpuSessions = [];
+  /*
+   * V1.3-R1 additive fields, defaulted forward rather than migrated.
+   *
+   * An endpoint written before rented capacity existed is not a rental, and a session written
+   * before the bridge existed has no activation timeline. Neither is a fact about the owner's
+   * data, so neither is worth a migration record; what *is* worth one — a session whose recorded
+   * state overstated what AION knew — is handled by `migrateGpuSessionLifecycle`.
+   */
+  for (const endpoint of clone.brain.endpoints) {
+    if ((endpoint as unknown as Record<string, unknown>).rental === undefined) endpoint.rental = null;
+  }
+  for (const session of clone.gpuSessions) {
+    const legacy = session as unknown as Record<string, unknown>;
+    if (legacy.activation === undefined) session.activation = emptyActivation();
+    if (legacy.endpointHost === undefined) session.endpointHost = null;
+    if (legacy.failureReason === undefined) session.failureReason = null;
+  }
   if (!Array.isArray(clone.usage)) clone.usage = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
@@ -666,13 +718,37 @@ export class UnavailableGpuInfrastructureV1 implements GpuInfrastructurePortV1 {
  * conditions, teardown — can be proved end to end without a card being charged. Every test of the
  * spending boundary runs against this.
  */
+export interface SyntheticGpuOptionsV1 {
+  credentialConfigured?: boolean;
+  variableName?: string;
+  /**
+   * How many status checks happen before a serving address appears. Zero means it is serving
+   * immediately; a large number is a machine that boots and never comes up, which is the failure
+   * the readiness deadline exists for.
+   */
+  endpointAfterPolls?: number;
+  /** The address the machine claims to serve on. Null means it never reports one at all. */
+  endpointUrl?: string | null;
+  /** How many status calls throw before the provider starts answering. */
+  statusFailures?: number;
+  /** What a failing status call throws. Used to prove provider text is redacted before storage. */
+  statusError?: string;
+  /** Refuse teardown, so an unconfirmed stop can be tested rather than assumed impossible. */
+  refuseStop?: boolean;
+  /** What the machine reports about itself once it is up. */
+  instanceState?: GpuInstanceStateV1;
+}
+
 export class SyntheticGpuInfrastructureV1 implements GpuInfrastructurePortV1 {
   readonly provider = "synthetic" as const;
-  private started = new Map<string, { offerRef: string; stopped: boolean }>();
+  private started = new Map<string, { offerRef: string; stopped: boolean; polls: number }>();
+  private statusCalls = 0;
   constructor(
     private readonly offers: ReadonlyArray<Record<string, unknown>> = [],
-    private readonly options: { credentialConfigured?: boolean; variableName?: string } = {},
+    private readonly options: SyntheticGpuOptionsV1 = {},
   ) {}
+  /** How many times the provider was asked to create a machine. Tests assert this never grows. */
+  get startCount(): number { return this.started.size; }
   async credentialStatus(): Promise<{ configured: boolean; variableName: string; detail: string }> {
     const variableName = this.options.variableName ?? "AION_SYNTHETIC_GPU_TOKEN";
     const configured = this.options.credentialConfigured !== false;
@@ -696,21 +772,88 @@ export class SyntheticGpuInfrastructureV1 implements GpuInfrastructurePortV1 {
   async start(request: { offerRef: string; modelId: string; runtime: string }, signal: AbortSignal): Promise<{ instanceRef: string; detail: string }> {
     if (signal.aborted) fail("Provisioning cancelled.");
     const instanceRef = `synthetic-instance-${this.started.size + 1}`;
-    this.started.set(instanceRef, { offerRef: request.offerRef, stopped: false });
+    this.started.set(instanceRef, { offerRef: request.offerRef, stopped: false, polls: 0 });
     return { instanceRef, detail: `Synthetic instance for ${request.modelId} on ${request.runtime}. Nothing was rented and nothing was charged.` };
   }
   async stop(instanceRef: string): Promise<{ stopped: boolean; detail: string }> {
     const entry = this.started.get(instanceRef);
     if (!entry) return { stopped: false, detail: "That synthetic instance does not exist." };
+    if (this.options.refuseStop) return { stopped: false, detail: "The synthetic provider was scripted to refuse teardown confirmation." };
     entry.stopped = true;
     return { stopped: true, detail: "Synthetic instance stopped and torn down." };
   }
-  async status(instanceRef: string): Promise<{ state: GpuSessionStateV1; detail: string; endpointUrl: string | null }> {
+  async status(instanceRef: string): Promise<{ state: GpuInstanceStateV1; detail: string; endpointUrl: string | null }> {
+    this.statusCalls += 1;
+    if (this.statusCalls <= (this.options.statusFailures ?? 0)) {
+      fail(this.options.statusError ?? "The synthetic provider was scripted to fail this status call.");
+    }
     const entry = this.started.get(instanceRef);
     if (!entry) return { state: "failed", detail: "That synthetic instance does not exist.", endpointUrl: null };
-    return entry.stopped
-      ? { state: "stopped", detail: "Synthetic instance is stopped.", endpointUrl: null }
-      : { state: "running", detail: "Synthetic instance is running.", endpointUrl: "https://synthetic-gpu.invalid/v1" };
+    if (entry.stopped) return { state: "stopped", detail: "Synthetic instance is stopped.", endpointUrl: null };
+    entry.polls += 1;
+    // A real machine reports itself up well before the model inside it can answer, which is the
+    // whole reason a separate readiness wait exists. The default scripting reproduces that gap.
+    const serving = entry.polls > (this.options.endpointAfterPolls ?? 0);
+    const url = this.options.endpointUrl === undefined ? "https://synthetic-gpu.invalid/v1" : this.options.endpointUrl;
+    return {
+      state: this.options.instanceState ?? "running",
+      detail: serving
+        ? "Synthetic instance is running and reports a serving address."
+        : `Synthetic instance is running; the runtime has not opened its port yet (check ${entry.polls}).`,
+      endpointUrl: serving ? url : null,
+    };
+  }
+}
+
+/**
+ * Scripted answers for an endpoint, for tests and the demo.
+ *
+ * The rented-GPU bridge cannot be proved against a real machine without spending money, and it
+ * must not be proved against a stub so permissive that it would pass whatever the code did. So
+ * this adapter is deliberately literal: it serves the endpoints a predicate names, it answers
+ * exactly what it was told to, and it fails exactly when it was told to. Everything it does is
+ * visible in the script the caller wrote.
+ */
+export interface ScriptedRuntimeScriptV1 {
+  /** Which endpoints this adapter claims. Defaults to anything with an address. */
+  serves?: (endpoint: BrainEndpointV1) => boolean;
+  available?: boolean;
+  detail?: string;
+  /** Models the endpoint reports. An empty list means it reported none, which is not an error. */
+  models?: readonly string[];
+  latencyMs?: number;
+  /** The answer. A function receives the prompt, so a script can refuse one prompt and not others. */
+  answer?: string | ((prompt: string, endpoint: BrainEndpointV1) => string);
+  /** How many completions fail before any succeed. Used to exercise the health-failure ceiling. */
+  failFirstCompletions?: number;
+  completionError?: string;
+}
+
+export class ScriptedBrainRuntimeV1 implements BrainRuntimePortV1 {
+  private completions = 0;
+  constructor(private readonly script: ScriptedRuntimeScriptV1 = {}) {}
+  get completionCount(): number { return this.completions; }
+  supports(endpoint: BrainEndpointV1): boolean {
+    return this.script.serves ? this.script.serves(endpoint) : Boolean(endpoint.baseUrl);
+  }
+  async probe(endpoint: BrainEndpointV1): Promise<BrainHealthV1> {
+    const available = this.script.available !== false;
+    return {
+      available,
+      detail: this.script.detail ?? (available ? "Scripted endpoint answered." : "Scripted endpoint refused."),
+      checkedAt: "2030-01-01T00:00:00.000Z",
+      latencyMs: available ? this.script.latencyMs ?? 5 : null,
+      installedModels: this.script.models ? [...this.script.models] : [endpoint.model],
+    };
+  }
+  async detect(): Promise<Array<{ runtime: BrainRuntimeV1; baseUrl: string; models: string[]; detail: string }>> { return []; }
+  async complete(endpoint: BrainEndpointV1, request: { prompt: string; context: readonly string[]; signal: AbortSignal }): Promise<{ text: string; latencyMs: number }> {
+    if (!this.supports(endpoint)) fail(`The scripted runtime does not serve "${endpoint.label}".`);
+    if (request.signal.aborted) fail("Completion cancelled.");
+    this.completions += 1;
+    if (this.completions <= (this.script.failFirstCompletions ?? 0)) fail(this.script.completionError ?? "The scripted runtime was told to fail this completion.");
+    const answer = typeof this.script.answer === "function" ? this.script.answer(request.prompt, endpoint) : this.script.answer;
+    return { text: answer ?? `Scripted answer from ${endpoint.model}.`, latencyMs: this.script.latencyMs ?? 5 };
   }
 }
 

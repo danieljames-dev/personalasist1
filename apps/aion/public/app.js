@@ -343,22 +343,32 @@ ${runs.slice(0, 10).map((r) => `<p class="meta"><b>${esc(r.endpointLabel)}</b> �
  * Shown on the phone as well as the console, because a session left running is a problem wherever
  * the owner happens to be. Credentials are never displayed — only the name of the variable.
  */
+/** Every state in which the meter may be running. All of them show a stop button. */
+const LIVE_GPU_STATES = ["provisioning", "booting-runtime", "waiting-for-endpoint", "health-checking", "ready", "in-use", "stopping"];
+const ACTIVATING_GPU_STATES = ["provisioning", "booting-runtime", "waiting-for-endpoint", "health-checking"];
+
 function gpuCard() {
   const gpu = model.gpu;
   if (!gpu) return "";
-  const live = (gpu.sessions ?? []).filter((x) => x.state === "running");
+  const live = (gpu.sessions ?? []).filter((x) => LIVE_GPU_STATES.includes(x.state));
+  const recentFailure = (gpu.sessions ?? []).find((x) => x.state === "activation-failed" || (x.state === "failed" && !x.teardownConfirmed));
   const pending = (gpu.proposals ?? []).filter((x) => x.state === "pending");
   const cost = gpu.cost ?? null;
   return `<div class="card ${live.length ? "warnbox" : ""}"><h2>Rented GPU</h2>
 <p class="meta">${esc(gpu.credential.detail)}</p>
-${live.length ? live.map((x) => `<p class="warn"><b>RUNNING</b> — ${esc(x.standing)}
-<button data-do="gpu-stop" data-id="${esc(x.id)}" class="danger">Stop now</button></p>`).join("") : `<p class="meta">Nothing is rented right now.</p>`}
+${live.length ? live.map((x) => `<p class="warn"><b>${esc((x.label ?? x.state).toUpperCase())}</b> — ${esc(x.standing)}
+${ACTIVATING_GPU_STATES.includes(x.state) ? `<br><span class="meta">It is billing while it loads and is not usable yet. ${esc(x.readiness?.reason ?? "")}</span>` : ""}
+${x.endpointId ? `<br><span class="meta">Routable as an endpoint you control${x.endpointHost ? ` at ${esc(x.endpointHost)}` : ""}. <button data-do="brain-evaluate" data-id="${esc(x.endpointId)}">Evaluate this model</button></span>` : ""}
+${x.cost ? `<br><span class="meta">About ${x.cost.totalCents} cent(s) so far: ${x.cost.provisioningMinutes} provisioning, ${x.cost.readinessMinutes} loading, ${x.cost.servingMinutes} serving.</span>` : ""}
+<br><button data-do="gpu-stop" data-id="${esc(x.id)}" class="danger">Stop now</button>
+${ACTIVATING_GPU_STATES.includes(x.state) ? `<button data-do="gpu-poll" data-id="${esc(x.id)}">Check readiness</button>` : ""}</p>`).join("") : `<p class="meta">Nothing is rented right now.</p>`}
+${recentFailure ? `<p class="warn"><b>FAILED</b> — ${esc(recentFailure.standing)}</p>` : ""}
 ${pending.map((x) => `<p class="meta"><b>Awaiting your decision</b> — ${esc(x.disclosure)}
 <button data-do="gpu-decide" data-id="${esc(x.id)}" data-value="true">Approve exactly this</button>
 <button data-do="gpu-decide" data-id="${esc(x.id)}" data-value="false" class="danger">Deny</button></p>`).join("")}
 ${cost ? `<p class="meta">${esc(cost.summary)}</p><p class="meta"><b>Rent or buy:</b> ${esc(cost.verdict.detail)}</p>` : ""}
 <div class="actions">${gpu.credential.configured ? `<button data-do="gpu-discover">Look at capacity and prices</button>` : ""}</div>
-<p class="meta">AION never rents anything without a bounded proposal you approve, and every session carries a stored deadline so a forgotten instance stops on its own.</p></div>`;
+<p class="meta">AION never rents anything without a bounded proposal you approve, and every session carries a stored deadline so a forgotten instance stops on its own. A machine only becomes an endpoint after it answers a real request — an open port is not a loaded model. No endpoint credential is ever shown here.</p></div>`;
 }
 
 function studioArea(s) {
@@ -623,6 +633,9 @@ document.addEventListener("click", async (event) => {
     if (verb === "brain-evaluate") { const run = await api("brain.evaluate", { id }); toast(run.summary); }
     if (verb === "gpu-stop") { const stopped = await api("gpu.stop", { id, reason: "owner stop from the Command Center" }); toast(stopped.teardownConfirmed ? "Stopped and teardown confirmed." : "AION could not confirm teardown. Check the provider console yourself."); }
     if (verb === "gpu-decide") { await api("gpu.decide", { id, approve: value === "true" }); toast(value === "true" ? "Approved exactly that proposal. AION cannot raise it." : "Denied. Nothing was rented."); }
+    // One bounded check per press. Every one of them re-reads the stored stop conditions first, so
+    // pressing this on a session that has run out of money stops the machine rather than waiting.
+    if (verb === "gpu-poll") { const status = await api("gpu.poll", { id }); toast(`${status.label}: ${status.detail}`); }
     if (verb === "gpu-discover") { const found = await api("gpu.discover", { filter: {} }); toast(found.recommendations.length ? found.recommendations.map((r) => r.tier + ": " + r.why).join(" | ") : "Nothing eligible was found, so AION recommends nothing."); return; }
     if (verb === "research-approve") await api("research.approve", { id });
     if (verb === "research-run") { const job = await api("research.run", { id }); toast(`${job.findings.length} finding(s) from ${job.sources.length} source(s). None of them is a fact yet.`); }

@@ -1,4 +1,5 @@
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
+import type { BrainEndpointV1, BrainRuntimePortV1 } from "./brain.js";
 
 /**
  * The model evaluation harness.
@@ -292,6 +293,40 @@ function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[middle]! : Math.round((sorted[middle - 1]! + sorted[middle]!) / 2);
+}
+
+/**
+ * Runs the suite against one endpoint through whichever adapter can reach it.
+ *
+ * This is the *only* harness. The deterministic floor, a local runtime, and a machine rented by
+ * the minute all come through here with the same fixtures in the same order, because a comparison
+ * where one side ran a different suite is not a comparison. Cases run sequentially rather than
+ * concurrently: latency is one of the things being measured, and a queued runtime would report
+ * everyone else's wait as its own.
+ *
+ * A case that throws is recorded as a failure carrying the reason rather than aborting the run.
+ * How an endpoint fails is part of the evidence, and a run that stops at the first error would
+ * report a broken endpoint as an unfinished measurement instead of a bad one.
+ */
+export async function runEvaluationSuite(
+  endpoint: BrainEndpointV1,
+  suite: readonly EvaluationCaseV1[],
+  runtime: Pick<BrainRuntimePortV1, "complete">,
+  options: { signal?: AbortSignal; redact?: (value: unknown) => string } = {},
+): Promise<EvaluationCaseResultV1[]> {
+  const redact = options.redact ?? ((value: unknown) => String(value ?? "").slice(0, 500));
+  const signal = options.signal ?? new AbortController().signal;
+  const results: EvaluationCaseResultV1[] = [];
+  for (const evaluationCase of suite) {
+    const startedAt = Date.now();
+    try {
+      const answer = await runtime.complete(endpoint, { prompt: evaluationCase.prompt, context: evaluationCase.context, signal });
+      results.push(scoreCase(evaluationCase, answer.text, answer.latencyMs));
+    } catch (error) {
+      results.push(scoreCase(evaluationCase, "", Date.now() - startedAt, redact(error instanceof Error ? error.message : error) || "the endpoint failed"));
+    }
+  }
+  return results;
 }
 
 export function summariseEvaluation(

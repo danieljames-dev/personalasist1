@@ -164,10 +164,15 @@ try {
 
   await session.call("gpu.decide", { id: proposal.id, approve: true });
   const started = await session.call("gpu.start", { id: proposal.id });
-  assert.equal(started.state, "running");
+  // Provisioning, not running, and no endpoint: the provider has made a machine and nothing has
+  // checked whether a model answers on it. Turning that into a usable endpoint is the V1.3-R1
+  // demo's subject; what matters here is that AION does not claim it already is one.
+  assert.equal(started.state, "provisioning");
+  assert.equal(started.endpointId, null);
   assert.ok(Date.parse(started.hardStopAt) > Date.parse(started.startedAt));
+  assert.ok(Date.parse(started.activation.deadlineAt) <= Date.parse(started.hardStopAt), "the readiness allowance is stored and never outlives the hard stop");
   await session.refuse("gpu.start", { id: proposal.id }, /is consumed/u);
-  proved("an approval is one-shot, and the session's stop deadline is stored rather than held in a timer");
+  proved("an approval is one-shot, and both the readiness allowance and the hard stop are stored rather than held in timers");
 
   const stopped = await session.call("gpu.stop", { id: started.id, reason: "demo teardown" });
   assert.equal(stopped.teardownConfirmed, true);

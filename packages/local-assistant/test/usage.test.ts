@@ -7,7 +7,7 @@ import {
   AionAssistantV1, DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
   InMemoryStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
-  V13_BUDGET_CEILING_CENTS, buildUsage, costIntelligence, usageSummary,
+  V13_BUDGET_CEILING_CENTS, buildUsage, costIntelligence, emptyActivation, usageSummary,
 } from "../src/index.js";
 import type { GpuSessionV1, InferenceUsageV1 } from "../src/index.js";
 
@@ -23,7 +23,8 @@ function usage(overrides: Partial<InferenceUsageV1> = {}): InferenceUsageV1 {
 function session(minutes: number, cents: number, index: number): GpuSessionV1 {
   return {
     id: `s${index}`, provider: "synthetic", proposalId: `p${index}`, instanceRef: `i${index}`, state: "stopped",
-    gpuName: "RTX 4090", vramGb: 24, modelId: "m", runtime: "vllm", endpointId: null,
+    gpuName: "RTX 4090", vramGb: 24, modelId: "m", runtime: "vllm",
+    endpointId: null, endpointHost: null, activation: emptyActivation(), failureReason: null,
     hourlyCents: 40, maxRuntimeMinutes: 600, maxSpendCents: 1000, idleTimeoutMinutes: 10,
     hardStopAt: NOW, startedAt: NOW, stoppedAt: NOW, lastActivityAt: NOW,
     measuredMinutes: minutes, estimatedCents: cents, teardownConfirmed: true, events: [],
