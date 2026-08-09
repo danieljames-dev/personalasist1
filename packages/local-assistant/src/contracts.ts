@@ -688,3 +688,5 @@ export interface PrivateBackupV1 {
   create(state: AssistantStateV1, destination: string, passphrase: string): Promise<{ digest: string; bytes: number }>;
   restore(destination: string, passphrase: string): Promise<AssistantStateV1>;
 }
+
+/** Re-export marker: writer authority is defined in writer-authority.ts and enforced at mutation boundaries. */

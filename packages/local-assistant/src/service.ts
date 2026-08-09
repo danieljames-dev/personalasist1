@@ -9,6 +9,7 @@ import type {
 } from "./contracts.js";
 import { DEFAULT_WORKSPACE, SALES_COUNT_KEYS } from "./contracts.js";
 import { createEmptyStateV1, digestValue, migrateStateV1 } from "./adapters.js";
+import type { AuthorityGrantV1, WriterAuthorityPortV1 } from "./writer-authority.js";
 import { applyCustomerEdit, buildAppointment, buildCustomer, buildFollowUp, buildInteraction, lastInteraction, queryCustomers } from "./sales.js";
 import { buildRelationship, queryRelationships } from "./relationships.js";
 import type { WorkspaceV1 } from "./workspaces.js";
@@ -75,6 +76,12 @@ type AssistantPorts = {
   importer: ImportSourceV1;
   backup: PrivateBackupV1;
   developerAgents: DeveloperAgentRegistryV1;
+  /**
+   * Machine writer authority. When provided, every durable mutation through `mutate` requires a
+   * valid WRITER grant. Production always injects a host-local store. Unit tests that omit the
+   * port remain unbound only for synthetic fixtures; they must not be used for multi-host safety.
+   */
+  authority?: WriterAuthorityPortV1;
   /** Optional. Absent means AION has no way to research anything, which is the default. */
   research?: ResearchProviderV1;
   /** Optional. Absent means AION cannot build or preview anything, which is also the default. */
@@ -243,6 +250,19 @@ export class AionAssistantV1 {
   /** The workspace new records join and the one the UI is showing. */
   private get workspace(): WorkspaceIdV1 { return this.state.settings.activeWorkspace ?? DEFAULT_WORKSPACE; }
   async snapshot(): Promise<AssistantStateV1> { await this.ready; return structuredClone(this.state); }
+  /** Inspect host writer authority without granting or mutating owner state. */
+  async inspectWriterAuthority(): Promise<AuthorityGrantV1 | null> {
+    await this.ready;
+    if (!this.ports.authority) return null;
+    return this.ports.authority.load();
+  }
+  /**
+   * Runtime self-promotion is forbidden. Grant/revoke only via WriterAuthorityPort.applyOwnerCommand
+   * from an external Owner/control-plane path — never exposed as an assistant capability.
+   */
+  async promoteWriterAuthority(): Promise<never> {
+    throw new Error("Runtime cannot self-promote writer authority; use an external Owner/control-plane grant.");
+  }
   private activity(state: AssistantStateV1, category: ActivityV1["category"], action: string, summary: string, subjectRef: string | null, outcome: ActivityV1["outcome"] = "success"): void {
     state.activity.unshift({ id: this.ports.ids.next("activity"), workspace: state.settings.activeWorkspace ?? DEFAULT_WORKSPACE, at: this.ports.clock.now(), category, action, summary, subjectRef, outcome });
     if (state.activity.length > 10_000) state.activity.length = 10_000;
@@ -280,7 +300,11 @@ export class AionAssistantV1 {
     await this.ready; let result!: T; let failure: unknown;
     this.writeQueue = this.writeQueue.then(async () => {
       const expected = this.state.revision; const draft = structuredClone(this.state);
-      try { result = await operation(draft); this.prune(draft); draft.revision = expected + 1; await this.ports.repository.save(expected, draft); this.state = draft; }
+      try {
+        // Fail closed at the durable mutation boundary when authority is bound.
+        if (this.ports.authority) await this.ports.authority.assertWritable("persistent owner-state mutation");
+        result = await operation(draft); this.prune(draft); draft.revision = expected + 1; await this.ports.repository.save(expected, draft); this.state = draft;
+      }
       catch (error) { failure = error; }
     });
     await this.writeQueue; if (failure) throw failure; return result;

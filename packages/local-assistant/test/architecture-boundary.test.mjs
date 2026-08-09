@@ -36,7 +36,7 @@ test("only the owner or the Agent Controller can approve; provider text cannot",
 });
 
 test("all required replaceable ports remain explicit", () => {
-  for (const name of ["StateRepositoryV1", "ClockV1", "IdGeneratorV1", "ModelProviderV1", "CapabilityRegistryV1", "ImportSourceV1", "PrivateBackupV1", "DeveloperAgentBridgeV1"]) {
+  for (const name of ["StateRepositoryV1", "ClockV1", "IdGeneratorV1", "ModelProviderV1", "CapabilityRegistryV1", "ImportSourceV1", "PrivateBackupV1", "DeveloperAgentBridgeV1", "WriterAuthorityPortV1"]) {
     assert.match(source, new RegExp(`interface ${name}`, "u"));
   }
 });

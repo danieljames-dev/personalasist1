@@ -1,11 +1,12 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
-  AionAssistantV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
-  FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
+  AionAssistantV1, AuthorityGatedStateRepositoryV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
+  FileStateRepositoryV1, FileWriterAuthorityV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
   CompositeBrainRuntimeV1, InProcessBrainRuntimeV1,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
@@ -154,12 +155,41 @@ export async function createAionServer(options = {}) {
   const brainRuntime = options.brainRuntime
     ?? new CompositeBrainRuntimeV1(new InProcessBrainRuntimeV1(offlineProvider), new HttpBrainRuntimeV1());
   const codeSandbox = options.codeSandbox ?? createDockerCodeSandboxV1();
+  /*
+   * Writer authority is host-local and machine-verifiable. Production always binds it so UI,
+   * phone, scheduler, and capability paths share one durable mutation gate. Missing authority is
+   * bootstrapped once for the existing laptop primary (legacy upgrade path) and never self-promotes
+   * after READ_ONLY or REVOKED.
+   */
+  const authority = options.authority ?? new FileWriterAuthorityV1(dataRoot);
+  if (!options.authority) {
+    let systemInstanceId = null;
+    try {
+      const identity = JSON.parse(await readFile(join(repositoryRoot, "private", "identity", "identity-state-v1.json"), "utf8"));
+      const record = Array.isArray(identity.records)
+        ? identity.records.find((entry) => entry && entry.kind === "system-instance" && typeof entry.id === "string")
+        : null;
+      if (record?.id) systemInstanceId = record.id;
+    } catch {
+      /* Identity may be absent in synthetic servers; bootstrap still needs a UUID. */
+    }
+    if (!systemInstanceId) systemInstanceId = randomUUID();
+    await authority.bootstrapLegacyWriterIfAbsent({
+      systemInstanceId,
+      grantedAt: new Date().toISOString(),
+    });
+  }
+  const rawRepository = options.repository ?? new FileStateRepositoryV1(dataRoot);
+  const repository = options.repository
+    ? rawRepository
+    : new AuthorityGatedStateRepositoryV1(rawRepository, authority);
   const service = new AionAssistantV1({
-    repository: options.repository ?? new FileStateRepositoryV1(dataRoot), clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
+    repository, clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
     providers,
     capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
+    authority,
     codeSandbox,
     /*
      * V1.3 activates real public-URL research, and the guards around it are unchanged.
