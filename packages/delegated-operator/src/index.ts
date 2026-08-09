@@ -1,0 +1,34 @@
+/**
+ * @aion/delegated-operator — R6.5 administrative control plane.
+ *
+ * INACTIVE by default for real approval roots. Founder authorization remains
+ * authoritative until a later explicit activation milestone.
+ *
+ * This package must not be invoked from normal AION chat or provider-runtime
+ * paths as shell authority.
+ */
+
+export * from "./contracts.js";
+export * from "./canonical.js";
+export * from "./roles.js";
+export * from "./lifecycle.js";
+export * from "./envelope.js";
+export * from "./authorization.js";
+export * from "./owner-presence.js";
+export * from "./store.js";
+export * from "./audit-log.js";
+export * from "./session.js";
+export * from "./reboot.js";
+export * from "./nested-gates.js";
+export * from "./host.js";
+export * from "./owner-ui.js";
+export * from "./factory.js";
+
+export const R65_PRODUCTION_DEFAULTS = {
+  realApprovalRootActivated: false,
+  founderAuthoritative: true,
+  activationMode: "inactive" as const,
+  readyForRealAuthority: false,
+  readyForRealMigration: false,
+  desktopRemainsNonPrimary: true,
+} as const;
