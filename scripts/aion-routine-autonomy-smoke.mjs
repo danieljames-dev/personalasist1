@@ -36,7 +36,7 @@ run("node", () =>
   execFileSync("node", ["-e", "console.log('aion-node-ok')"], { encoding: "utf8" }).trim(),
 );
 run("npm_version", () =>
-  execFileSync("npm.cmd", ["-v"], { encoding: "utf8", cwd: REPO }).trim(),
+  execFileSync("cmd.exe", ["/c", "npm -v"], { encoding: "utf8", cwd: REPO }).trim(),
 );
 run("dotnet", () => {
   const env = {
