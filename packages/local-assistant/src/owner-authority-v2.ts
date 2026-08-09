@@ -55,11 +55,45 @@ export type AuthorityReasonCodeV2 =
   | "INVALID_SIGNATURE"
   | "FOREIGN_SYSTEM_INSTANCE"
   | "STALE_OR_BROKEN_CHAIN"
+  | "UNEXPECTED_LEDGER_CONTENTS"
   | "QUIESCENT"
   | "REVOKED"
   | "V1_NOT_AUTHORITATIVE"
   | "MALFORMED_RECORD"
   | "ANCHOR_UNAVAILABLE";
+
+/**
+ * Stable fail-closed ledger integrity error.
+ * Distinguishes unexpected ledger population from generic chain/anchor failures (LOW-1).
+ */
+export class AuthorityLedgerIntegrityError extends Error {
+  readonly reasonCode: Extract<
+    AuthorityReasonCodeV2,
+    "UNEXPECTED_LEDGER_CONTENTS" | "STALE_OR_BROKEN_CHAIN" | "MALFORMED_RECORD"
+  >;
+
+  constructor(
+    reasonCode: Extract<
+      AuthorityReasonCodeV2,
+      "UNEXPECTED_LEDGER_CONTENTS" | "STALE_OR_BROKEN_CHAIN" | "MALFORMED_RECORD"
+    >,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AuthorityLedgerIntegrityError";
+    this.reasonCode = reasonCode;
+  }
+}
+
+function failLedger(
+  reasonCode: Extract<
+    AuthorityReasonCodeV2,
+    "UNEXPECTED_LEDGER_CONTENTS" | "STALE_OR_BROKEN_CHAIN" | "MALFORMED_RECORD"
+  >,
+  message: string,
+): never {
+  throw new AuthorityLedgerIntegrityError(reasonCode, message);
+}
 
 export interface TrustedOwnerVerificationMaterialV2 {
   /** SHA-256 fingerprint of canonical DER SPKI Ed25519 public key bytes. */
@@ -318,13 +352,29 @@ export const EPOCH_LEDGER_FILE_PATTERN = /^(\d{10})\.json$/u;
 /**
  * Parse a ledger directory entry name into an epoch.
  * Fail closed on non-canonical names (no alternate spellings, no case variants).
+ * Unexpected names raise UNEXPECTED_LEDGER_CONTENTS (not generic chain/anchor codes).
  */
 export function parseEpochLedgerFileName(name: string): number {
   const match = EPOCH_LEDGER_FILE_PATTERN.exec(name);
-  if (!match) fail(`Authority ledger contains unexpected entry: ${name}`);
+  if (!match) {
+    failLedger(
+      "UNEXPECTED_LEDGER_CONTENTS",
+      `Authority ledger contains unexpected entry (non-canonical name): ${name}`,
+    );
+  }
   const epoch = Number(match[1]);
-  if (!Number.isSafeInteger(epoch) || epoch < 1) fail(`Authority ledger filename encodes an invalid epoch: ${name}`);
-  if (epochLedgerFileName(epoch) !== name) fail(`Authority ledger filename is non-canonical: ${name}`);
+  if (!Number.isSafeInteger(epoch) || epoch < 1) {
+    failLedger(
+      "UNEXPECTED_LEDGER_CONTENTS",
+      `Authority ledger filename encodes an invalid epoch: ${name}`,
+    );
+  }
+  if (epochLedgerFileName(epoch) !== name) {
+    failLedger(
+      "UNEXPECTED_LEDGER_CONTENTS",
+      `Authority ledger filename is non-canonical: ${name}`,
+    );
+  }
   return epoch;
 }
 
@@ -446,26 +496,39 @@ export class FileOwnerAuthorityAnchorV2 {
   /**
    * Enumerate surviving ledger evidence by directory listing (not tip+1 probing).
    * Fail closed on unexpected entries, non-canonical names, or ambiguous duplicates.
+   * Returns sorted epochs and an O(1) membership Set (LOW-2).
    */
-  async listPresentLedgerEpochs(): Promise<number[]> {
+  async listPresentLedgerEpochs(): Promise<{ epochs: number[]; epochSet: Set<number> }> {
     let entries;
     try {
       entries = await readdir(this.ledgerDir, { withFileTypes: true });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { epochs: [], epochSet: new Set() };
+      }
       throw error;
     }
     const epochs: number[] = [];
-    const seen = new Set<number>();
+    const epochSet = new Set<number>();
     for (const entry of entries) {
-      if (!entry.isFile()) fail(`Authority ledger contains unexpected non-file entry: ${entry.name}`);
+      if (!entry.isFile()) {
+        failLedger(
+          "UNEXPECTED_LEDGER_CONTENTS",
+          `Authority ledger contains unexpected non-file entry: ${entry.name}`,
+        );
+      }
       const epoch = parseEpochLedgerFileName(entry.name);
-      if (seen.has(epoch)) fail(`Authority ledger contains duplicate epoch entry: ${entry.name}`);
-      seen.add(epoch);
+      if (epochSet.has(epoch)) {
+        failLedger(
+          "UNEXPECTED_LEDGER_CONTENTS",
+          `Authority ledger contains duplicate/ambiguous epoch entry: ${entry.name}`,
+        );
+      }
+      epochSet.add(epoch);
       epochs.push(epoch);
     }
     epochs.sort((a, b) => a - b);
-    return epochs;
+    return { epochs, epochSet };
   }
 
   /**
@@ -474,6 +537,11 @@ export class FileOwnerAuthorityAnchorV2 {
    * Fail closed when ANY surviving ledger evidence is inconsistent with current:
    * gaps, unexpected higher epochs, stale/future current, filename/epoch mismatch,
    * digest/signature/anchor/ownerKey failures, or malformed relevant records.
+   *
+   * Unexpected ledger population (Thumbs.db, desktop.ini, non-canonical names, dirs)
+   * raises UNEXPECTED_LEDGER_CONTENTS — distinct from STALE_OR_BROKEN_CHAIN (LOW-1).
+   *
+   * Contiguity uses Set membership O(n), not Array.includes O(n^2) (LOW-2).
    *
    * Re-reads files every call (no cache).
    *
@@ -488,62 +556,121 @@ export class FileOwnerAuthorityAnchorV2 {
     const current = await this.readCurrent();
     if (!current) {
       // If ledger has any entry without current, fail closed (do not invent tip)
-      const orphanEpochs = await this.listPresentLedgerEpochs();
-      if (orphanEpochs.length > 0) {
-        fail("Authority current pointer is missing while ledger records survive.");
+      const orphan = await this.listPresentLedgerEpochs();
+      if (orphan.epochs.length > 0) {
+        failLedger(
+          "STALE_OR_BROKEN_CHAIN",
+          "Authority current pointer is missing while ledger records survive.",
+        );
       }
       fail("Authority current pointer is missing.");
     }
 
     // Enumerate actual surviving ledger evidence — do not probe only current+1.
-    const presentEpochs = await this.listPresentLedgerEpochs();
+    const { epochs: presentEpochs, epochSet } = await this.listPresentLedgerEpochs();
     if (presentEpochs.length === 0) {
-      fail("Authority ledger is empty while current pointer exists.");
+      failLedger(
+        "STALE_OR_BROKEN_CHAIN",
+        "Authority ledger is empty while current pointer exists.",
+      );
     }
     const highestPresent = presentEpochs[presentEpochs.length - 1]!;
 
-    // Require contiguous epochs 1..highestPresent (no gaps, no missing middle).
+    // Require contiguous epochs 1..highestPresent via Set membership (O(n)).
     for (let epoch = 1; epoch <= highestPresent; epoch++) {
-      if (!presentEpochs.includes(epoch)) {
-        fail(`Authority ledger gap: missing epoch ${epoch} while higher epoch ${highestPresent} survives.`);
+      if (!epochSet.has(epoch)) {
+        failLedger(
+          "STALE_OR_BROKEN_CHAIN",
+          `Authority ledger gap: missing epoch ${epoch} while higher epoch ${highestPresent} survives.`,
+        );
       }
     }
-    if (presentEpochs.length !== highestPresent) {
-      fail("Authority ledger epoch set is inconsistent with contiguous chain requirements.");
+    if (presentEpochs.length !== highestPresent || epochSet.size !== highestPresent) {
+      failLedger(
+        "STALE_OR_BROKEN_CHAIN",
+        "Authority ledger epoch set is inconsistent with contiguous chain requirements.",
+      );
     }
 
     // current must identify the actual highest surviving ledger epoch.
     if (current.epoch !== highestPresent) {
       if (current.epoch < highestPresent) {
-        fail(
+        failLedger(
+          "STALE_OR_BROKEN_CHAIN",
           `Authority current is stale: current.epoch=${current.epoch} but higher surviving ledger epoch ${highestPresent} exists.`,
         );
       }
-      fail(
+      failLedger(
+        "STALE_OR_BROKEN_CHAIN",
         `Authority current points to future/missing epoch ${current.epoch}; highest surviving ledger epoch is ${highestPresent}.`,
       );
     }
 
     const tip = await this.readRecord(current.epoch, trustedOwner);
-    if (!tip) fail(`Authority ledger record for current epoch ${current.epoch} is missing.`);
-    if (tip.anchorId !== current.anchorId) fail("Authority current anchorId does not match tip record.");
-    if (tip.recordDigest !== current.recordDigest) fail("Authority current recordDigest does not match tip record.");
-    if (tip.epoch !== current.epoch) fail("Authority current epoch does not match tip record.");
-    if (tip.epoch !== highestPresent) fail("Authority tip epoch is not the highest surviving ledger epoch.");
+    if (!tip) {
+      failLedger(
+        "STALE_OR_BROKEN_CHAIN",
+        `Authority ledger record for current epoch ${current.epoch} is missing.`,
+      );
+    }
+    if (tip.anchorId !== current.anchorId) {
+      failLedger("STALE_OR_BROKEN_CHAIN", "Authority current anchorId does not match tip record.");
+    }
+    if (tip.recordDigest !== current.recordDigest) {
+      failLedger("STALE_OR_BROKEN_CHAIN", "Authority current recordDigest does not match tip record.");
+    }
+    if (tip.epoch !== current.epoch) {
+      failLedger(
+        "UNEXPECTED_LEDGER_CONTENTS",
+        `Authority ledger filename/epoch body disagreement at tip epoch ${current.epoch} (body epoch ${tip.epoch}).`,
+      );
+    }
+    if (tip.epoch !== highestPresent) {
+      failLedger(
+        "STALE_OR_BROKEN_CHAIN",
+        "Authority tip epoch is not the highest surviving ledger epoch.",
+      );
+    }
 
     // Walk chain exactly: every epoch 1..tip must exist, continuous, previousDigest links
     let previous: AuthorityRecordV2 | null = null;
     for (let epoch = 1; epoch <= tip.epoch; epoch++) {
-      const record = await this.readRecord(epoch, trustedOwner);
-      if (!record) fail(`Authority ledger gap: missing epoch ${epoch}.`);
-      if (record.epoch !== epoch) fail(`Authority ledger filename/epoch mismatch at ${epoch}.`);
-      if (record.anchorId !== tip.anchorId) fail(`Authority ledger anchorId mismatch at epoch ${epoch}.`);
-      if (record.ownerKeyId !== trustedOwner.ownerKeyId) fail(`Authority ledger ownerKeyId mismatch at epoch ${epoch}.`);
+      let record: AuthorityRecordV2 | null;
+      try {
+        record = await this.readRecord(epoch, trustedOwner);
+      } catch (error) {
+        // Canonical filename present but body unusable → still refuse authority (fail closed).
+        const message = error instanceof Error ? error.message : "malformed ledger record";
+        failLedger(
+          "MALFORMED_RECORD",
+          `Authority ledger record at epoch ${epoch} is malformed or unreadable: ${message}`,
+        );
+      }
+      if (!record) {
+        failLedger("STALE_OR_BROKEN_CHAIN", `Authority ledger gap: missing epoch ${epoch}.`);
+      }
+      if (record.epoch !== epoch) {
+        failLedger(
+          "UNEXPECTED_LEDGER_CONTENTS",
+          `Authority ledger filename/epoch body disagreement at epoch ${epoch}.`,
+        );
+      }
+      if (record.anchorId !== tip.anchorId) {
+        failLedger("STALE_OR_BROKEN_CHAIN", `Authority ledger anchorId mismatch at epoch ${epoch}.`);
+      }
+      if (record.ownerKeyId !== trustedOwner.ownerKeyId) {
+        failLedger("STALE_OR_BROKEN_CHAIN", `Authority ledger ownerKeyId mismatch at epoch ${epoch}.`);
+      }
       if (epoch === 1) {
-        if (record.previousRecordDigest !== null) fail("Genesis previousRecordDigest must be null.");
+        if (record.previousRecordDigest !== null) {
+          failLedger("STALE_OR_BROKEN_CHAIN", "Genesis previousRecordDigest must be null.");
+        }
       } else {
         if (!previous || record.previousRecordDigest !== previous.recordDigest) {
-          fail(`Authority previousRecordDigest chain break at epoch ${epoch}.`);
+          failLedger(
+            "STALE_OR_BROKEN_CHAIN",
+            `Authority previousRecordDigest chain break at epoch ${epoch}.`,
+          );
         }
       }
       previous = record;
@@ -551,9 +678,12 @@ export class FileOwnerAuthorityAnchorV2 {
 
     // Defense in depth: re-confirm no higher surviving evidence after chain validation.
     const rechecked = await this.listPresentLedgerEpochs();
-    const recheckedHighest = rechecked.length === 0 ? 0 : rechecked[rechecked.length - 1]!;
-    if (recheckedHighest !== tip.epoch || rechecked.length !== tip.epoch) {
-      fail("Authority ledger population changed or remains inconsistent after chain validation.");
+    const recheckedHighest = rechecked.epochs.length === 0 ? 0 : rechecked.epochs[rechecked.epochs.length - 1]!;
+    if (recheckedHighest !== tip.epoch || rechecked.epochs.length !== tip.epoch || rechecked.epochSet.size !== tip.epoch) {
+      failLedger(
+        "STALE_OR_BROKEN_CHAIN",
+        "Authority ledger population changed or remains inconsistent after chain validation.",
+      );
     }
 
     return { current, tip };
@@ -744,6 +874,9 @@ export class OwnerAuthorityRuntimeV2 implements WriterAuthorityPortV1 {
         chainValid: true,
       });
     } catch (error) {
+      if (error instanceof AuthorityLedgerIntegrityError) {
+        return readOnlyDecision(error.reasonCode, error.message);
+      }
       const message = error instanceof Error ? error.message : "Authority anchor unavailable.";
       if (/signature|ownerKeyId does not match|Ed25519/i.test(message)) {
         return readOnlyDecision("INVALID_SIGNATURE", message);
@@ -751,7 +884,7 @@ export class OwnerAuthorityRuntimeV2 implements WriterAuthorityPortV1 {
       if (/ownerKeyId|trusted Owner key/i.test(message)) {
         return readOnlyDecision("INVALID_OWNER_KEY", message);
       }
-      if (/chain|gap|stale|previousRecordDigest|current|missing|mismatch|Genesis|higher surviving|unexpected entry|non-canonical|duplicate epoch|empty while current|future/i.test(message)) {
+      if (/chain|gap|stale|previousRecordDigest|current|missing|mismatch|Genesis|higher surviving|empty while current|future/i.test(message)) {
         return readOnlyDecision("STALE_OR_BROKEN_CHAIN", message);
       }
       return readOnlyDecision("ANCHOR_UNAVAILABLE", message);

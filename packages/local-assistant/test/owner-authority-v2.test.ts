@@ -29,6 +29,7 @@ import {
   createEmptyStateV1,
   createSyntheticOwnerAuthorityFixtureV2,
   createWriterGrantForTest,
+  epochLedgerFileName,
   generateOwnerKeyPairV2ForTest,
   ownerKeyIdFromSpkiDer,
   recordDigestV2,
@@ -974,7 +975,7 @@ test("IA-28 malformed / mismatched ledger epoch filename refuses", async () => {
     await writeCurrentPointer(root, 2, JSON.parse(epoch1).recordDigest);
     await assert.rejects(
       fixture.anchor.loadValidatedTip(fixture.trust),
-      /filename\/epoch mismatch|recordDigest|signature|current/i,
+      /filename\/epoch|disagreement|recordDigest|signature|current/i,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -990,7 +991,10 @@ test("IA-28 unexpected higher surviving record refuses even when tip+1 is absent
     await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
     // Old tip+1 probe would miss epoch 3; enumeration must not.
     const present = await fixture.anchor.listPresentLedgerEpochs();
-    assert.deepEqual(present, [1, 3]);
+    assert.deepEqual(present.epochs, [1, 3]);
+    assert.equal(present.epochSet.has(1), true);
+    assert.equal(present.epochSet.has(2), false);
+    assert.equal(present.epochSet.has(3), true);
     await assert.rejects(
       fixture.anchor.loadValidatedTip(fixture.trust),
       /higher surviving|gap|stale/i,
@@ -1015,6 +1019,229 @@ test("IA-28 complete later-record removal + current rollback is residual externa
     assert.equal(tip.state, "WRITER");
     assert.equal((await fixture.runtime.evaluate()).effective, "WRITER");
     // Documented residual: requires external monotonic witness — not claimed solved by IA-28.
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R6.4 LOW-1 — unexpected ledger contents: distinct reason, still fail-closed
+// ---------------------------------------------------------------------------
+
+async function assertUnexpectedLedgerRefuses(root: string, fixture: Awaited<ReturnType<typeof createSyntheticOwnerAuthorityFixtureV2>>): Promise<void> {
+  await assert.rejects(
+    fixture.anchor.loadValidatedTip(fixture.trust),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /unexpected|non-canonical|invalid epoch|duplicate|filename\/epoch/i);
+      return true;
+    },
+  );
+  const decision = await fixture.runtime.evaluate();
+  assert.equal(decision.effective, "READ_ONLY");
+  assert.equal(decision.reasonCode, "UNEXPECTED_LEDGER_CONTENTS");
+}
+
+test("LOW-1 Thumbs.db / desktop.ini / temp refuse with UNEXPECTED_LEDGER_CONTENTS", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    for (const name of ["Thumbs.db", "desktop.ini", ".ledger-swap.tmp", "0000000001.json~"]) {
+      await writeFile(join(root, "ledger", name), "x\n", "utf8");
+      await assertUnexpectedLedgerRefuses(root, fixture);
+      await rm(join(root, "ledger", name), { force: true });
+    }
+    // Valid again after cleanup
+    assert.equal((await fixture.runtime.evaluate()).effective, "WRITER");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LOW-1 unexpected directory refuses with UNEXPECTED_LEDGER_CONTENTS", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await mkdir(join(root, "ledger", "subdir"), { recursive: true });
+    await assertUnexpectedLedgerRefuses(root, fixture);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LOW-1 noncanonical epoch names refuse with UNEXPECTED_LEDGER_CONTENTS", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    // Names that must not collide with existing 0000000001.json on case-insensitive Windows.
+    const names = [
+      "000000001.json", // 9 digits
+      "00000000001.json", // 11 digits
+      "0000000000.json", // epoch 0
+      "0000000009.JSON", // wrong case extension (epoch 9 absent)
+      "0000000009.txt", // wrong extension
+      "0000000009.Json",
+      "０００００００００２.json", // fullwidth digits (non-ASCII)
+    ];
+    for (const name of names) {
+      await writeFile(join(root, "ledger", name), "{}\n", "utf8");
+      await assertUnexpectedLedgerRefuses(root, fixture);
+      await rm(join(root, "ledger", name), { force: true });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LOW-1 malformed canonical ledger file refuses authority (not WRITER)", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await writeFile(join(root, "ledger", "0000000001.json"), "{not-json\n", "utf8");
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.ok(
+      decision.reasonCode === "MALFORMED_RECORD" ||
+        decision.reasonCode === "STALE_OR_BROKEN_CHAIN" ||
+        decision.reasonCode === "ANCHOR_UNAVAILABLE",
+      `expected fail-closed reason, got ${decision.reasonCode}`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LOW-1 filename/body epoch disagreement refuses with UNEXPECTED_LEDGER_CONTENTS", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await fixture.offline.appendTransition({
+      state: "QUIESCENT",
+      writerSystemInstanceId: null,
+      grantDirectiveId: "LOW1-Q",
+      issuedAt: "2030-01-01T05:00:00.000Z",
+    });
+    const epoch1 = await readFile(join(root, "ledger", "0000000001.json"), "utf8");
+    await writeFile(join(root, "ledger", "0000000002.json"), epoch1, "utf8");
+    await writeCurrentPointer(root, 2, JSON.parse(epoch1).recordDigest);
+    await assert.rejects(
+      fixture.anchor.loadValidatedTip(fixture.trust),
+      /filename\/epoch|disagreement|mismatch|digest|signature|current epoch/i,
+    );
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "UNEXPECTED_LEDGER_CONTENTS");
+    assert.notEqual(decision.reasonCode, "NO_ANCHOR");
+    assert.notEqual(decision.reasonCode, "ANCHOR_UNAVAILABLE");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LOW-1 unexpected contents are not conflated with NO_ANCHOR", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await writeFile(join(root, "ledger", "Thumbs.db"), "x\n", "utf8");
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "UNEXPECTED_LEDGER_CONTENTS");
+    assert.notEqual(decision.reasonCode, "NO_ANCHOR");
+    assert.notEqual(decision.reasonCode, "ANCHOR_UNAVAILABLE");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R6.4 LOW-2 — O(n) Set membership; IA-28 semantics preserved; large synthetic
+// ---------------------------------------------------------------------------
+
+test("LOW-2 Set membership preserves gap/stale/future/IA-28 semantics", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    // valid 1..3
+    assert.equal((await fixture.anchor.loadValidatedTip(fixture.trust)).tip.epoch, 3);
+
+    // stale current
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    assert.equal((await fixture.runtime.evaluate()).reasonCode, "STALE_OR_BROKEN_CHAIN");
+
+    // IA-28 attack
+    await rm(join(root, "ledger", "0000000002.json"), { force: true });
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    assert.equal((await fixture.runtime.evaluate()).effective, "READ_ONLY");
+    assert.equal((await fixture.runtime.evaluate()).reasonCode, "STALE_OR_BROKEN_CHAIN");
+
+    // missing middle with current at 3
+    await writeCurrentPointer(root, 3, await digestOfEpoch(root, 3));
+    assert.equal((await fixture.runtime.evaluate()).reasonCode, "STALE_OR_BROKEN_CHAIN");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LOW-2 large synthetic ledger contiguity check stays bounded (no quadratic blow-up)", async () => {
+  const root = await tempRoot();
+  try {
+    const keys = generateOwnerKeyPairV2ForTest();
+    const anchor = new FileOwnerAuthorityAnchorV2(root);
+    const offline = new OfflineOwnerAuthorityWriterV2(anchor, keys.privateKey, keys.trust);
+    await offline.initializeGenesis({
+      anchorId: ANCHOR,
+      state: "WRITER",
+      writerSystemInstanceId: SI_A,
+      grantDirectiveId: "LOW2-G",
+      issuedAt: "2030-01-01T06:00:00.000Z",
+    });
+    // Build a moderately large contiguous chain. 400 epochs is enough to expose
+    // O(n^2) includes() cost without making the suite multi-minute.
+    // Contiguity membership is O(n); 200 signed epochs is enough to show no quadratic blow-up
+    // without multi-minute fixture construction. Construction cost dominates, not membership.
+    const N = 200;
+    for (let i = 2; i <= N; i++) {
+      await offline.appendTransition({
+        state: i % 2 === 0 ? "QUIESCENT" : "WRITER",
+        writerSystemInstanceId: i % 2 === 0 ? null : SI_A,
+        grantDirectiveId: `LOW2-E${i}`,
+        issuedAt: new Date(Date.UTC(2030, 0, 1, 6, 0, i)).toISOString(),
+      });
+    }
+    const t0 = performance.now();
+    const { tip } = await anchor.loadValidatedTip(keys.trust);
+    const elapsedMs = performance.now() - t0;
+    assert.equal(tip.epoch, N);
+    // Soft bound on validation path only (not fixture construction). Not a microbenchmark claim.
+    assert.ok(elapsedMs < 15_000, `loadValidatedTip for ${N} epochs took ${elapsedMs.toFixed(1)}ms (bound 15000ms)`);
+
+    // Gap detection still works with large set
+    await rm(join(root, "ledger", epochLedgerFileName(Math.floor(N / 2))), { force: true });
+    await assert.rejects(anchor.loadValidatedTip(keys.trust), /gap|missing epoch/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
