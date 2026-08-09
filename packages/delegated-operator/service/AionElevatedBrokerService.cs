@@ -33,7 +33,9 @@ namespace Aion.ElevatedOperatorBroker
             _nodeExe = Environment.GetEnvironmentVariable("AION_NODE_EXE");
             if (string.IsNullOrEmpty(_nodeExe))
             {
+                // Prefer pinned runtime under install root (service SID can execute RX install root)
                 var candidates = new string[] {
+                    Path.Combine(_installRoot, "runtime", "node.exe"),
                     @"C:\Program Files\nodejs\node.exe",
                     @"C:\Users\User\dev\tools\nodejs\node.exe"
                 };
@@ -45,7 +47,7 @@ namespace Aion.ElevatedOperatorBroker
             _entry = Path.Combine(_installRoot, "lib", "service-main.mjs");
             _logPath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "AION", "ElevatedOperatorBroker", "audit", "service-host.log");
+                "AION", "ElevatedOperatorBroker", "public", "audit", "service-host.log");
         }
 
         protected override void OnStart(string[] args)

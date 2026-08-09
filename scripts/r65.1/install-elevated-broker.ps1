@@ -60,6 +60,20 @@ New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 Copy-Item -Path (Join-Path $StagingRoot '*') -Destination $InstallRoot -Recurse -Force
 Remove-Item -LiteralPath (Join-Path $InstallRoot 'STAGING-MANIFEST.v1.json') -Force -ErrorAction SilentlyContinue
 
+# Pin a Node runtime under install root so NT SERVICE can execute it (no user-profile path)
+$runtimeDir = Join-Path $InstallRoot 'runtime'
+New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+$nodeCandidates = @(
+    $env:AION_NODE_EXE,
+    'C:\Program Files\nodejs\node.exe',
+    'C:\Users\User\dev\tools\nodejs\node.exe'
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+if (-not $nodeCandidates -or $nodeCandidates.Count -eq 0) {
+    throw 'No node.exe found to pin under install root runtime\'
+}
+Copy-Item -LiteralPath $nodeCandidates[0] -Destination (Join-Path $runtimeDir 'node.exe') -Force
+Write-AionLog "Pinned node runtime from $($nodeCandidates[0])"
+
 # Private / public state layout
 $privateRoot = Join-Path $StateRoot 'private'
 $publicRoot = Join-Path $StateRoot 'public'
@@ -170,7 +184,7 @@ $privateRules = @(
 Clear-And-SetAcl -Path $privateRoot -Rules $privateRules
 Write-AionLog 'Applied private-root ACLs (pre-service SID)'
 
-# Public root: SYSTEM/Admins full; Users RX only
+# Public root: SYSTEM/Admins full; Users RX only (service SID granted after create for audit write)
 $publicRules = @(
     (New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl',$inherit,$prop,'Allow')),
     (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl',$inherit,$prop,'Allow')),
@@ -226,7 +240,12 @@ try {
     $iacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl',$inherit,$prop,'Allow')))
     $iacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($svcSidAccount,'Modify',$inherit,$prop,'Allow')))
     Set-Acl -LiteralPath $inbox -AclObject $iacl
-    Write-AionLog "Granted $svcSidAccount access to private root"
+    # Public audit write for service logs (not secrets)
+    $pacl = Get-Acl -LiteralPath $publicRoot
+    $pacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $svcSidAccount, 'Modify', $inherit, $prop, 'Allow')))
+    Set-Acl -LiteralPath $publicRoot -AclObject $pacl
+    Write-AionLog "Granted $svcSidAccount access to private root and public audit"
 } catch {
     throw "Failed to grant service SID private ACLs: $($_.Exception.Message)"
 }

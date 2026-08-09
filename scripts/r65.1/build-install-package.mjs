@@ -207,6 +207,7 @@ const subjects = [
   "profiles/GROK_BUILD.v1.json",
   "profiles/CLAUDE_AUDITOR.v1.json",
 ];
+// runtime/node.exe is pinned at install time (not in repo staging)
 walkJs(join(OUT, "lib", "package", "dist"), "lib/package/dist", subjects);
 
 const digests = {};
