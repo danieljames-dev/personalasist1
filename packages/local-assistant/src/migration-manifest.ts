@@ -378,13 +378,24 @@ export function validateMigrationManifestV1(value: unknown): MigrationManifestV1
   };
 }
 
-/** Bind a verified artifact + code identity to a validated manifest. Fail closed on mismatch. */
+/**
+ * Bind a verified artifact + code identity + intended target System Instance to a validated
+ * migration manifest. Fail closed on mismatch.
+ *
+ * Target SystemInstanceId binding is identity proof only. It does NOT grant writer authority.
+ * Manifest fields remain non-authoritative for WRITER decisions.
+ */
 export function assertManifestMatchesInstallContext(input: {
   manifest: MigrationManifestV1;
   artifactSha256: string;
   actualSourceHead: string;
   actualTargetHead: string;
   actualOrigin: string;
+  /**
+   * Explicit intended install-target SystemInstanceId (host-resolved identity proof).
+   * Must equal manifest.target.systemInstanceId. Does not confer WRITER.
+   */
+  actualTargetSystemInstanceId: string;
 }): void {
   const manifest = validateMigrationManifestV1(input.manifest);
   assertCanonicalRepositoryIdentity({
@@ -401,6 +412,14 @@ export function assertManifestMatchesInstallContext(input: {
     expectedHead: manifest.target.head,
     label: "install target",
   });
+  if (!isUuid(input.actualTargetSystemInstanceId)) {
+    fail("Cold restore refused: actual target SystemInstanceId is invalid.");
+  }
+  if (input.actualTargetSystemInstanceId !== manifest.target.systemInstanceId) {
+    fail(
+      "Cold restore refused: actual target SystemInstanceId does not match migration manifest target.systemInstanceId.",
+    );
+  }
   if (!isSha256Hex(input.artifactSha256)) fail("Artifact SHA-256 is invalid.");
   if (input.artifactSha256 !== manifest.privateBackup.artifactSha256) {
     fail("Private backup artifact hash does not match the migration manifest.");

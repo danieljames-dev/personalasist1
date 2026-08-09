@@ -30,6 +30,12 @@ export interface ColdPrivateRestoreRequestV1 {
   actualOrigin: string;
   actualSourceHead: string;
   actualTargetHead: string;
+  /**
+   * Explicit intended target SystemInstanceId for this install.
+   * Must match manifest.target.systemInstanceId. Identity proof only — never grants WRITER.
+   * Manifest/private state/Markdown remain non-authoritative for authority decisions.
+   */
+  actualTargetSystemInstanceId: string;
   /** Optional capture of diagnostic strings for tests (must never include passphrase). */
   logSink?: (line: string) => void;
 }
@@ -133,8 +139,9 @@ export async function installColdPrivateBackup(
     actualOrigin: request.actualOrigin,
     actualSourceHead: request.actualSourceHead,
     actualTargetHead: request.actualTargetHead,
+    actualTargetSystemInstanceId: request.actualTargetSystemInstanceId,
   });
-  logSafe(request.logSink, "cold-restore: manifest and repository identity verified", passphrase);
+  logSafe(request.logSink, "cold-restore: manifest, repository identity, and target SystemInstanceId verified", passphrase);
 
   let state: AssistantStateV1;
   try {

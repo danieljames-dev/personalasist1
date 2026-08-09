@@ -773,3 +773,249 @@ test("R1-TRANSFER shared current never authorizes both distinct SI identities", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// IA-28 — surviving ledger evidence enumeration (not tip+1 probe)
+// ---------------------------------------------------------------------------
+
+async function writeCurrentPointer(root: string, epoch: number, recordDigest: string): Promise<void> {
+  await writeFile(
+    join(root, "current.json"),
+    `${JSON.stringify({
+      schema: "aion.authority-current.v2",
+      anchorId: ANCHOR,
+      epoch,
+      recordDigest,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function digestOfEpoch(root: string, epoch: number): Promise<string> {
+  const name = String(epoch).padStart(10, "0") + ".json";
+  return JSON.parse(await readFile(join(root, "ledger", name), "utf8")).recordDigest as string;
+}
+
+/** Build epochs 1=WRITER(A), 2=QUIESCENT, 3=REVOKED under a shared anchor. */
+async function buildThreeEpochAnchor(root: string) {
+  const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+    anchorRoot: root,
+    systemInstanceId: SI_A,
+    anchorId: ANCHOR,
+  });
+  await fixture.offline.appendTransition({
+    state: "QUIESCENT",
+    writerSystemInstanceId: null,
+    grantDirectiveId: "IA28-Q",
+    issuedAt: "2030-01-01T03:00:00.000Z",
+  });
+  await fixture.offline.appendTransition({
+    state: "REVOKED",
+    writerSystemInstanceId: null,
+    grantDirectiveId: "IA28-R",
+    issuedAt: "2030-01-01T03:01:00.000Z",
+  });
+  return fixture;
+}
+
+test("IA-28 ledger 1,2,3 + current 1 refuses (stale current)", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "STALE_OR_BROKEN_CHAIN");
+    await assert.rejects(fixture.runtime.assertWritable(), /READ_ONLY|stale|higher surviving/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 ledger 1,2,3 + current 2 refuses (stale current)", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    await writeCurrentPointer(root, 2, await digestOfEpoch(root, 2));
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "STALE_OR_BROKEN_CHAIN");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 Claude attack: delete successor epoch 2, keep epoch 3, roll current to 1 — refuses", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    // Exact IA-28 attack shape: remove immediate successor, leave higher record, roll current back.
+    await rm(join(root, "ledger", "0000000002.json"), { force: true });
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "STALE_OR_BROKEN_CHAIN");
+    // Must not resurrect epoch-1 WRITER while epoch 3 survives.
+    await assert.rejects(fixture.runtime.assertWritable(), /READ_ONLY|gap|stale|higher surviving/i);
+    // Direct tip load must fail closed (not only evaluate path).
+    await assert.rejects(
+      fixture.anchor.loadValidatedTip(fixture.trust),
+      /gap|stale|higher surviving|missing epoch/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 ledger 1,3 + current 1 refuses (gap + higher surviving)", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    await rm(join(root, "ledger", "0000000002.json"), { force: true });
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    await assert.rejects(fixture.anchor.loadValidatedTip(fixture.trust), /gap|stale|higher surviving/i);
+    assert.equal((await fixture.runtime.evaluate()).effective, "READ_ONLY");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 ledger 1,3 + current 3 refuses because chain gap", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    await rm(join(root, "ledger", "0000000002.json"), { force: true });
+    await writeCurrentPointer(root, 3, await digestOfEpoch(root, 3));
+    await assert.rejects(fixture.anchor.loadValidatedTip(fixture.trust), /gap|missing epoch 2/i);
+    assert.equal((await fixture.runtime.evaluate()).effective, "READ_ONLY");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 ledger 1 only + current 1 remains valid when cryptographically correct", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    const { current, tip } = await fixture.anchor.loadValidatedTip(fixture.trust);
+    assert.equal(current.epoch, 1);
+    assert.equal(tip.epoch, 1);
+    assert.equal(tip.state, "WRITER");
+    assert.equal((await fixture.runtime.evaluate()).effective, "WRITER");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 valid complete internally consistent chain (1,2,3 + current 3) accepts", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    const { current, tip } = await fixture.anchor.loadValidatedTip(fixture.trust);
+    assert.equal(current.epoch, 3);
+    assert.equal(tip.epoch, 3);
+    assert.equal(tip.state, "REVOKED");
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "REVOKED");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 future current / missing tip refuses", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await writeCurrentPointer(root, 9, "a".repeat(64));
+    await assert.rejects(
+      fixture.anchor.loadValidatedTip(fixture.trust),
+      /future|missing|highest surviving/i,
+    );
+    assert.equal((await fixture.runtime.evaluate()).effective, "READ_ONLY");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 malformed / mismatched ledger epoch filename refuses", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    // Non-canonical filename must fail closed during enumeration.
+    await writeFile(join(root, "ledger", "2.json"), "{}\n", "utf8");
+    await assert.rejects(
+      fixture.anchor.loadValidatedTip(fixture.trust),
+      /unexpected entry|non-canonical|gap|stale/i,
+    );
+    await rm(join(root, "ledger", "2.json"), { force: true });
+
+    // Filename/epoch body mismatch: copy epoch-1 body into epoch-2 filename after a real transition.
+    await fixture.offline.appendTransition({
+      state: "QUIESCENT",
+      writerSystemInstanceId: null,
+      grantDirectiveId: "IA28-Q2",
+      issuedAt: "2030-01-01T04:00:00.000Z",
+    });
+    const epoch1 = await readFile(join(root, "ledger", "0000000001.json"), "utf8");
+    await writeFile(join(root, "ledger", "0000000002.json"), epoch1, "utf8");
+    await writeCurrentPointer(root, 2, JSON.parse(epoch1).recordDigest);
+    await assert.rejects(
+      fixture.anchor.loadValidatedTip(fixture.trust),
+      /filename\/epoch mismatch|recordDigest|signature|current/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 unexpected higher surviving record refuses even when tip+1 is absent", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    // Leave gap at tip+1 relative to rolled-back current: delete only epoch 2.
+    await rm(join(root, "ledger", "0000000002.json"), { force: true });
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    // Old tip+1 probe would miss epoch 3; enumeration must not.
+    const present = await fixture.anchor.listPresentLedgerEpochs();
+    assert.deepEqual(present, [1, 3]);
+    await assert.rejects(
+      fixture.anchor.loadValidatedTip(fixture.trust),
+      /higher surviving|gap|stale/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("IA-28 complete later-record removal + current rollback is residual external-witness limitation", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await buildThreeEpochAnchor(root);
+    // Complete historical rollback: remove ALL later records, then roll current to epoch 1.
+    // Local verifier cannot distinguish this from a never-advanced legitimate tip.
+    await rm(join(root, "ledger", "0000000002.json"), { force: true });
+    await rm(join(root, "ledger", "0000000003.json"), { force: true });
+    await writeCurrentPointer(root, 1, await digestOfEpoch(root, 1));
+    const { current, tip } = await fixture.anchor.loadValidatedTip(fixture.trust);
+    assert.equal(current.epoch, 1);
+    assert.equal(tip.epoch, 1);
+    assert.equal(tip.state, "WRITER");
+    assert.equal((await fixture.runtime.evaluate()).effective, "WRITER");
+    // Documented residual: requires external monotonic witness — not claimed solved by IA-28.
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

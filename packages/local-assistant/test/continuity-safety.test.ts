@@ -391,6 +391,7 @@ test("B1 valid synthetic encrypted backup restores to empty synthetic target", a
     actualOrigin: CANONICAL_ORIGIN,
     actualSourceHead: HEAD_A,
     actualTargetHead: HEAD_A,
+    actualTargetSystemInstanceId: SYSTEM_B,
   });
   assert.equal(result.stateSha256, fx.stateSha256);
   const installed = JSON.parse(await readFile(join(fx.dest, "state-v1.json"), "utf8"));
@@ -410,6 +411,7 @@ test("B2 existing state refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /already exists|refused/i,
   );
@@ -426,6 +428,7 @@ test("B3 wrong passphrase refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /failed closed|auth|decrypt|Unsupported|bad decrypt|unable/i,
   );
@@ -448,6 +451,7 @@ test("B4 tampered ciphertext refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /hash|failed closed|auth|integrity|mismatch/i,
   );
@@ -474,6 +478,7 @@ test("B5 wrong auth tag refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /failed closed|auth|integrity|tag|Unsupported|unable/i,
   );
@@ -496,6 +501,7 @@ test("B6 malformed envelope refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /failed closed|JSON|Unsupported|malformed|Unexpected/i,
   );
@@ -519,6 +525,7 @@ test("B7 wrong state digest refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /digest/i,
   );
@@ -548,6 +555,7 @@ test("B9 wrong manifest artifact hash refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /artifact hash|manifest/i,
   );
@@ -564,6 +572,7 @@ test("B10 wrong source HEAD refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_B,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /HEAD mismatch|source/i,
   );
@@ -580,6 +589,7 @@ test("B11 wrong target HEAD refuses", async () => {
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_B,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /HEAD mismatch|target/i,
   );
@@ -596,6 +606,7 @@ test("B12 wrong repo origin refuses", async () => {
       actualOrigin: WRONG_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /origin|identity|refused/i,
   );
@@ -612,6 +623,7 @@ test("B13 plaintext/passphrase absent from logs", async () => {
     actualOrigin: CANONICAL_ORIGIN,
     actualSourceHead: HEAD_A,
     actualTargetHead: HEAD_A,
+    actualTargetSystemInstanceId: SYSTEM_B,
     logSink: (line) => lines.push(line),
   });
   assert.ok(lines.length > 0);
@@ -638,10 +650,104 @@ test("B14 installation atomicity / partial failure leaves no accepted live state
       actualOrigin: CANONICAL_ORIGIN,
       actualSourceHead: HEAD_A,
       actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_B,
     }),
     /digest/i,
   );
   await assert.rejects(readFile(join(fx.dest, "state-v1.json")), /ENOENT/i);
+});
+
+test("B15 FI-07 matching target SystemInstanceId accepts cold restore", async () => {
+  const fx = await makeEncryptedFixture();
+  assert.equal(fx.manifest.target.systemInstanceId, SYSTEM_B);
+  const result = await installColdPrivateBackup(fx.backup, {
+    backupPath: fx.backupPath,
+    passphrase: fx.passphrase,
+    destinationRoot: fx.dest,
+    manifest: fx.manifest,
+    actualOrigin: CANONICAL_ORIGIN,
+    actualSourceHead: HEAD_A,
+    actualTargetHead: HEAD_A,
+    actualTargetSystemInstanceId: SYSTEM_B,
+  });
+  assert.equal(result.stateSha256, fx.stateSha256);
+  assert.equal(result.manifest.target.systemInstanceId, SYSTEM_B);
+});
+
+test("B16 FI-07 mismatched target SystemInstanceId refuses cold restore", async () => {
+  const fx = await makeEncryptedFixture();
+  // Manifest names target B; install claimed for C must fail closed.
+  const SYSTEM_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await assert.rejects(
+    installColdPrivateBackup(fx.backup, {
+      backupPath: fx.backupPath,
+      passphrase: fx.passphrase,
+      destinationRoot: fx.dest,
+      manifest: fx.manifest,
+      actualOrigin: CANONICAL_ORIGIN,
+      actualSourceHead: HEAD_A,
+      actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: SYSTEM_C,
+    }),
+    /target SystemInstanceId|does not match|refused/i,
+  );
+  await assert.rejects(readFile(join(fx.dest, "state-v1.json")), /ENOENT/i);
+});
+
+test("B17 FI-07 missing/invalid target SystemInstanceId refuses cold restore", async () => {
+  const fx = await makeEncryptedFixture();
+  await assert.rejects(
+    installColdPrivateBackup(fx.backup, {
+      backupPath: fx.backupPath,
+      passphrase: fx.passphrase,
+      destinationRoot: fx.dest,
+      manifest: fx.manifest,
+      actualOrigin: CANONICAL_ORIGIN,
+      actualSourceHead: HEAD_A,
+      actualTargetHead: HEAD_A,
+      actualTargetSystemInstanceId: "not-a-uuid",
+    }),
+    /invalid|refused|SystemInstanceId/i,
+  );
+  await assert.rejects(
+    installColdPrivateBackup(fx.backup, {
+      backupPath: fx.backupPath,
+      passphrase: fx.passphrase,
+      destinationRoot: fx.dest,
+      manifest: fx.manifest,
+      actualOrigin: CANONICAL_ORIGIN,
+      actualSourceHead: HEAD_A,
+      actualTargetHead: HEAD_A,
+      // @ts-expect-error intentional missing binding for negative test
+      actualTargetSystemInstanceId: undefined,
+    }),
+    /invalid|refused|SystemInstanceId|required/i,
+  );
+});
+
+test("B18 FI-07 target identity match does not grant writer authority", async () => {
+  const fx = await makeEncryptedFixture();
+  const result = await installColdPrivateBackup(fx.backup, {
+    backupPath: fx.backupPath,
+    passphrase: fx.passphrase,
+    destinationRoot: fx.dest,
+    manifest: fx.manifest,
+    actualOrigin: CANONICAL_ORIGIN,
+    actualSourceHead: HEAD_A,
+    actualTargetHead: HEAD_A,
+    actualTargetSystemInstanceId: SYSTEM_B,
+  });
+  // Manifest authority snapshot remains descriptive only.
+  assert.equal(result.manifest.authority.targetState, "absent");
+  // Restored private state is not an authority grant.
+  const installed = JSON.parse(await readFile(result.installedPath, "utf8"));
+  assert.equal(installed.schema, "aion.local-assistant-state.v1");
+  assert.equal("writerAuthority" in installed, false);
+  // File-backed state repository accepts cold-restored state without inventing WRITER.
+  const repo = new FileStateRepositoryV1(fx.dest);
+  const loaded = await repo.load();
+  assert.ok(loaded);
+  assert.equal(loaded.revision, 3);
 });
 
 // ---------------------------------------------------------------------------

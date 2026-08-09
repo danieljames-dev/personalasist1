@@ -35,7 +35,7 @@ import {
   verify as cryptoVerify,
   type KeyObject,
 } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { AuthorityGrantV1, WriterAuthorityPortV1 } from "./writer-authority.js";
 
@@ -312,6 +312,22 @@ export function epochLedgerFileName(epoch: number): string {
   return `${String(epoch).padStart(10, "0")}.json`;
 }
 
+/** Canonical ledger filename pattern: zero-padded 10-digit epoch + ".json". */
+export const EPOCH_LEDGER_FILE_PATTERN = /^(\d{10})\.json$/u;
+
+/**
+ * Parse a ledger directory entry name into an epoch.
+ * Fail closed on non-canonical names (no alternate spellings, no case variants).
+ */
+export function parseEpochLedgerFileName(name: string): number {
+  const match = EPOCH_LEDGER_FILE_PATTERN.exec(name);
+  if (!match) fail(`Authority ledger contains unexpected entry: ${name}`);
+  const epoch = Number(match[1]);
+  if (!Number.isSafeInteger(epoch) || epoch < 1) fail(`Authority ledger filename encodes an invalid epoch: ${name}`);
+  if (epochLedgerFileName(epoch) !== name) fail(`Authority ledger filename is non-canonical: ${name}`);
+  return epoch;
+}
+
 function readOnlyDecision(
   reasonCode: AuthorityReasonCodeV2,
   detail: string,
@@ -428,8 +444,42 @@ export class FileOwnerAuthorityAnchorV2 {
   }
 
   /**
-   * Load tip and walk full chain to genesis. Fail closed on any gap, mismatch, or stale/future current.
+   * Enumerate surviving ledger evidence by directory listing (not tip+1 probing).
+   * Fail closed on unexpected entries, non-canonical names, or ambiguous duplicates.
+   */
+  async listPresentLedgerEpochs(): Promise<number[]> {
+    let entries;
+    try {
+      entries = await readdir(this.ledgerDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const epochs: number[] = [];
+    const seen = new Set<number>();
+    for (const entry of entries) {
+      if (!entry.isFile()) fail(`Authority ledger contains unexpected non-file entry: ${entry.name}`);
+      const epoch = parseEpochLedgerFileName(entry.name);
+      if (seen.has(epoch)) fail(`Authority ledger contains duplicate epoch entry: ${entry.name}`);
+      seen.add(epoch);
+      epochs.push(epoch);
+    }
+    epochs.sort((a, b) => a - b);
+    return epochs;
+  }
+
+  /**
+   * Load tip and walk full chain to genesis.
+   *
+   * Fail closed when ANY surviving ledger evidence is inconsistent with current:
+   * gaps, unexpected higher epochs, stale/future current, filename/epoch mismatch,
+   * digest/signature/anchor/ownerKey failures, or malformed relevant records.
+   *
    * Re-reads files every call (no cache).
+   *
+   * Residual limitation (NOT solved here): a COMPLETE rollback that removes all later
+   * ledger records together with current rollback cannot be detected without an external
+   * monotonic witness. Local verification only inspects surviving on-disk evidence.
    */
   async loadValidatedTip(trustedOwner: TrustedOwnerVerificationMaterialV2): Promise<{
     current: AuthorityCurrentV2;
@@ -438,19 +488,48 @@ export class FileOwnerAuthorityAnchorV2 {
     const current = await this.readCurrent();
     if (!current) {
       // If ledger has any entry without current, fail closed (do not invent tip)
-      try {
-        await stat(this.ledgerDir);
-        // Presence of ledger dir alone is ambiguous; require current.
-      } catch {
-        /* no ledger dir */
+      const orphanEpochs = await this.listPresentLedgerEpochs();
+      if (orphanEpochs.length > 0) {
+        fail("Authority current pointer is missing while ledger records survive.");
       }
       fail("Authority current pointer is missing.");
     }
+
+    // Enumerate actual surviving ledger evidence — do not probe only current+1.
+    const presentEpochs = await this.listPresentLedgerEpochs();
+    if (presentEpochs.length === 0) {
+      fail("Authority ledger is empty while current pointer exists.");
+    }
+    const highestPresent = presentEpochs[presentEpochs.length - 1]!;
+
+    // Require contiguous epochs 1..highestPresent (no gaps, no missing middle).
+    for (let epoch = 1; epoch <= highestPresent; epoch++) {
+      if (!presentEpochs.includes(epoch)) {
+        fail(`Authority ledger gap: missing epoch ${epoch} while higher epoch ${highestPresent} survives.`);
+      }
+    }
+    if (presentEpochs.length !== highestPresent) {
+      fail("Authority ledger epoch set is inconsistent with contiguous chain requirements.");
+    }
+
+    // current must identify the actual highest surviving ledger epoch.
+    if (current.epoch !== highestPresent) {
+      if (current.epoch < highestPresent) {
+        fail(
+          `Authority current is stale: current.epoch=${current.epoch} but higher surviving ledger epoch ${highestPresent} exists.`,
+        );
+      }
+      fail(
+        `Authority current points to future/missing epoch ${current.epoch}; highest surviving ledger epoch is ${highestPresent}.`,
+      );
+    }
+
     const tip = await this.readRecord(current.epoch, trustedOwner);
     if (!tip) fail(`Authority ledger record for current epoch ${current.epoch} is missing.`);
     if (tip.anchorId !== current.anchorId) fail("Authority current anchorId does not match tip record.");
     if (tip.recordDigest !== current.recordDigest) fail("Authority current recordDigest does not match tip record.");
     if (tip.epoch !== current.epoch) fail("Authority current epoch does not match tip record.");
+    if (tip.epoch !== highestPresent) fail("Authority tip epoch is not the highest surviving ledger epoch.");
 
     // Walk chain exactly: every epoch 1..tip must exist, continuous, previousDigest links
     let previous: AuthorityRecordV2 | null = null;
@@ -469,9 +548,13 @@ export class FileOwnerAuthorityAnchorV2 {
       }
       previous = record;
     }
-    // Refuse if a higher contiguous epoch exists beyond current (stale current while newer ledger remains)
-    const next = await this.readRecord(tip.epoch + 1, trustedOwner);
-    if (next) fail("Authority current is stale: a newer ledger epoch exists.");
+
+    // Defense in depth: re-confirm no higher surviving evidence after chain validation.
+    const rechecked = await this.listPresentLedgerEpochs();
+    const recheckedHighest = rechecked.length === 0 ? 0 : rechecked[rechecked.length - 1]!;
+    if (recheckedHighest !== tip.epoch || rechecked.length !== tip.epoch) {
+      fail("Authority ledger population changed or remains inconsistent after chain validation.");
+    }
 
     return { current, tip };
   }
@@ -668,7 +751,7 @@ export class OwnerAuthorityRuntimeV2 implements WriterAuthorityPortV1 {
       if (/ownerKeyId|trusted Owner key/i.test(message)) {
         return readOnlyDecision("INVALID_OWNER_KEY", message);
       }
-      if (/chain|gap|stale|previousRecordDigest|current|missing|mismatch|Genesis/i.test(message)) {
+      if (/chain|gap|stale|previousRecordDigest|current|missing|mismatch|Genesis|higher surviving|unexpected entry|non-canonical|duplicate epoch|empty while current|future/i.test(message)) {
         return readOnlyDecision("STALE_OR_BROKEN_CHAIN", message);
       }
       return readOnlyDecision("ANCHOR_UNAVAILABLE", message);
