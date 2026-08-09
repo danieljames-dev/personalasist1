@@ -38,6 +38,13 @@
       "type": "shell",
       "command": "git status --short --branch",
       "problemMatcher": []
+    },
+    {
+      "label": "AION: Routine Autonomy Smoke",
+      "type": "shell",
+      "command": "npm run autonomy:smoke",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
     }
   ]
 }

@@ -23,8 +23,11 @@ While `CURRENT` is `AUTHORIZED` or `RUNNING` for this repository (`C:\AION-HQ`):
   **without per-command Owner prompts**. Structural role still denies tracked
   production edit/commit/push unless a future Owner envelope grants them.
 
-Project Grok mode: `always-approve` in `.grok/config.toml`.  
-Project Claude mode: `bypassPermissions` in `.claude/settings.json`.
+Project Grok mode: `always-approve` in `.grok/config.toml` (AION repo only).  
+Project Claude mode: `bypassPermissions` in `.claude/settings.json`.  
+VS Code workspace: `chat.tools.terminal.autoApprove` for routine prefixes.  
+Global Grok home config stays **non**-always-approve so Remote Job Kit and other
+trees are not AION trust scope. See `docs/operations/routine-agent-autonomy.md`.
 
 ## Still require new Owner authority
 

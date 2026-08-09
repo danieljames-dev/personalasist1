@@ -6,5 +6,40 @@
   "files.exclude": {
     "**/packages/delegated-operator/service/bin": true,
     "**/packages/delegated-operator/service/obj": true
-  }
+  },
+  "security.workspace.trust.enabled": true,
+  "chat.tools.terminal.autoApprove": {
+    "powershell": true,
+    "pwsh": true,
+    "cmd": true,
+    "npm": true,
+    "npx": true,
+    "node": true,
+    "dotnet": true,
+    "docker": true,
+    "git": true,
+    "sc": true,
+    "icacls": true,
+    "where": true,
+    "Get-": true,
+    "Test-": true,
+    "Select-": true,
+    "Write-": true,
+    "Set-Location": true,
+    "Start-": true,
+    "Stop-": true,
+    "Restart-": true,
+    "Copy-": true,
+    "New-": true,
+    "Join-": true,
+    "Out-": true,
+    "Invoke-": true,
+    "cd": true,
+    "ls": true,
+    "dir": true,
+    "type": true,
+    "echo": true
+  },
+  "claudeCode.preferredLocation": "panel",
+  "claudeCode.useTerminal": false
 }

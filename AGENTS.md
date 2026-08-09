@@ -16,10 +16,13 @@
 - **Command approval** is IDE/agent UI prompting for each PowerShell/npm/Git
   tool call. For work under an already-authorized AION milestone in
   `C:\AION-HQ`, routine commands must **not** re-prompt the Owner.
-- Project defaults: Grok `.grok/config.toml` uses `permission_mode =
-  "always-approve"`; Claude `.claude/settings.json` uses
+- Project defaults (workspace `C:\AION-HQ` only): Grok `.grok/config.toml` uses
+  `permission_mode = "always-approve"`; Claude `.claude/settings.json` uses
   `defaultMode: "bypassPermissions"`, with deny rules for high-consequence
-  patterns. This is workspace-scoped to AION, not other machines/projects.
+  patterns. Global `~/.grok` must not be always-approve for unrelated projects.
+  Open the agent session with project root `C:\AION-HQ` (not Remote Job Kit).
+- Full policy: `docs/operations/routine-agent-autonomy.md`. Smoke:
+  `npm run autonomy:smoke`.
 - Agents never complete Windows UAC secure-desktop prompts themselves.
 
 ## Current Directive

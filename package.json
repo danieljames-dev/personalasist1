@@ -93,6 +93,7 @@
     "aion:demo": "npm run career:build --silent && npm run aion:build --silent && node apps/aion-demo.mjs",
     "verify": "npm run typecheck && npm test",
     "verify:recovery": "npm run verify",
+    "autonomy:smoke": "node scripts/aion-routine-autonomy-smoke.mjs",
     "aion:sales:demo": "npm run aion:build --silent && node apps/aion-sales-demo.mjs",
     "aion:v12:demo": "npm run aion:build --silent && node apps/aion-v12-demo.mjs",
     "aion:v13:demo": "npm run aion:build --silent && node apps/aion-v13-demo.mjs",
