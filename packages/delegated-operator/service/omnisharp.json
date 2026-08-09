@@ -1,0 +1,11 @@
+{
+  "msbuild": {
+    "enabled": true
+  },
+  "fileOptions": {
+    "excludeSearchPatterns": [
+      "**/bin/**",
+      "**/obj/**"
+    ]
+  }
+}

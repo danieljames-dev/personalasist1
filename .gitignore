@@ -11,3 +11,7 @@ private/
 
 dist-install/
 
+
+packages/delegated-operator/service/bin/
+packages/delegated-operator/service/obj/
+

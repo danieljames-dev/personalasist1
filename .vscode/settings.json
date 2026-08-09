@@ -1,0 +1,10 @@
+{
+  "dotnet.dotnetPath": "${env:LOCALAPPDATA}\\Microsoft\\dotnet",
+  "dotnet.defaultSolution": "packages/delegated-operator/service/AionElevatedBroker.sln",
+  "omnisharp.dotnetPath": "${env:LOCALAPPDATA}\\Microsoft\\dotnet",
+  "omnisharp.projectLoadTimeout": 120,
+  "files.exclude": {
+    "**/packages/delegated-operator/service/bin": true,
+    "**/packages/delegated-operator/service/obj": true
+  }
+}

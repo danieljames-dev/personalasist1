@@ -20,6 +20,17 @@ namespace Aion.ElevatedOperatorBroker
         {
             try
             {
+                // Smoke / tooling: --help does not require elevation
+                foreach (var early in args)
+                {
+                    if (early == "--help" || early == "-h")
+                    {
+                        Console.WriteLine("AionOwnerApprovalHelper - bounded Owner UAC approval only.");
+                        Console.WriteLine("Requires elevation. Accepts only authorizationId, envelopeDigest, approvalNonce, directiveId, repositoryRoot.");
+                        return 0;
+                    }
+                }
+
                 if (!IsElevated())
                 {
                     Console.Error.WriteLine("Owner Approval Helper must run elevated (UAC).");
@@ -40,11 +51,6 @@ namespace Aion.ElevatedOperatorBroker
                         directiveId = a.Substring("--directiveId=".Length);
                     else if (a.StartsWith("--repositoryRoot=", StringComparison.Ordinal))
                         repositoryRoot = a.Substring("--repositoryRoot=".Length);
-                    else if (a == "--help" || a == "-h")
-                    {
-                        Console.WriteLine("AionOwnerApprovalHelper — bounded Owner UAC approval only.");
-                        return 0;
-                    }
                 }
 
                 if (string.IsNullOrEmpty(authorizationId) || string.IsNullOrEmpty(envelopeDigest)

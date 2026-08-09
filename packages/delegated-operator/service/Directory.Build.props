@@ -1,0 +1,7 @@
+<Project>
+  <!-- Keep service tooling independent of any accidental parent workspace MSBuild settings. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)bin\</BaseOutputPath>
+  </PropertyGroup>
+</Project>

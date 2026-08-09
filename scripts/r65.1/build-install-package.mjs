@@ -41,34 +41,120 @@ function walkJs(dir, base, acc) {
   }
 }
 
+function resolveDotnet() {
+  const localDotnet = join(
+    process.env.LOCALAPPDATA || "",
+    "Microsoft",
+    "dotnet",
+    "dotnet.exe",
+  );
+  return process.env.AION_DOTNET || (existsSync(localDotnet) ? localDotnet : "dotnet");
+}
+
+function publishSdkProject(dotnet, projectPath, outDir, label) {
+  // Self-contained: Windows service SID cannot rely on user-local shared frameworks.
+  execFileSync(
+    dotnet,
+    [
+      "publish",
+      projectPath,
+      "-c",
+      "Release",
+      "-r",
+      "win-x64",
+      "--self-contained",
+      "true",
+      "-p:PublishSingleFile=true",
+      "-p:IncludeNativeLibrariesForSelfExtract=true",
+      "-o",
+      outDir,
+    ],
+    { stdio: "inherit", cwd: REPO },
+  );
+  console.log(`${label}: built with self-contained dotnet publish (net8.0-windows win-x64)`);
+}
+
 function compileServiceExe(destBin) {
   const csc =
     process.env.AION_CSC ||
     "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
-  if (!existsSync(csc)) throw new Error(`csc not found: ${csc}`);
   const src = join(PKG, "service", "AionElevatedBrokerService.cs");
+  const serviceProj = join(PKG, "service", "AionElevatedBrokerService.csproj");
   const exe = join(destBin, "aion-elevated-broker.exe");
   mkdirSync(destBin, { recursive: true });
-  execFileSync(
-    csc,
-    ["/nologo", "/target:exe", `/out:${exe}`, "/reference:System.ServiceProcess.dll", src],
-    { stdio: "inherit" },
-  );
-  // Owner Approval Helper with requireAdministrator manifest
+  const dotnet = resolveDotnet();
+
+  // Service host: prefer SDK project
+  let serviceBuilt = false;
+  if (existsSync(serviceProj)) {
+    try {
+      const pub = join(destBin, "_service_publish");
+      publishSdkProject(dotnet, serviceProj, pub, "Elevated Broker Service");
+      const published = join(pub, "aion-elevated-broker.exe");
+      if (!existsSync(published)) throw new Error("dotnet publish missing aion-elevated-broker.exe");
+      copyFileSync(published, exe);
+      // Framework-dependent net8 needs hostfxr beside app OR system runtime — copy deps
+      for (const name of readdirSync(pub)) {
+        if (name === "aion-elevated-broker.exe") continue;
+        const from = join(pub, name);
+        const to = join(destBin, name);
+        if (statSync(from).isFile()) copyFileSync(from, to);
+      }
+      serviceBuilt = true;
+    } catch (e) {
+      console.warn("service dotnet publish failed; falling back to csc:", e instanceof Error ? e.message : e);
+    }
+  }
+  if (!serviceBuilt) {
+    if (!existsSync(csc)) throw new Error(`csc not found: ${csc}`);
+    execFileSync(
+      csc,
+      ["/nologo", "/target:exe", `/out:${exe}`, "/reference:System.ServiceProcess.dll", src],
+      { stdio: "inherit" },
+    );
+    console.log("Elevated Broker Service: built with Framework csc.exe");
+  }
+
+  // Owner Approval Helper: prefer SDK `dotnet publish` (net8.0-windows), else Framework csc
+  const helperExe = join(destBin, "AionOwnerApprovalHelper.exe");
+  const helperProj = join(PKG, "service", "AionOwnerApprovalHelper.csproj");
   const helperSrc = join(PKG, "service", "AionOwnerApprovalHelper.cs");
   const helperMan = join(PKG, "service", "AionOwnerApprovalHelper.manifest");
-  const helperExe = join(destBin, "AionOwnerApprovalHelper.exe");
-  execFileSync(
-    csc,
-    [
-      "/nologo",
-      "/target:exe",
-      `/out:${helperExe}`,
-      `/win32manifest:${helperMan}`,
-      helperSrc,
-    ],
-    { stdio: "inherit" },
-  );
+  let helperBuilt = false;
+  if (existsSync(helperProj)) {
+    try {
+      const pub = join(destBin, "_helper_publish");
+      publishSdkProject(dotnet, helperProj, pub, "Owner Approval Helper");
+      const published = join(pub, "AionOwnerApprovalHelper.exe");
+      if (!existsSync(published)) throw new Error("dotnet publish missing helper exe");
+      copyFileSync(published, helperExe);
+      for (const name of readdirSync(pub)) {
+        if (name === "AionOwnerApprovalHelper.exe") continue;
+        const from = join(pub, name);
+        const to = join(destBin, name);
+        // Avoid clobbering service-host deps with same names — helper deps can share runtimes
+        if (statSync(from).isFile() && !existsSync(to)) copyFileSync(from, to);
+      }
+      helperBuilt = true;
+    } catch (e) {
+      console.warn("helper dotnet publish failed; falling back to csc:", e instanceof Error ? e.message : e);
+    }
+  }
+  if (!helperBuilt) {
+    if (!existsSync(csc)) throw new Error(`csc not found: ${csc}`);
+    execFileSync(
+      csc,
+      [
+        "/nologo",
+        "/target:exe",
+        `/out:${helperExe}`,
+        `/win32manifest:${helperMan}`,
+        helperSrc,
+      ],
+      { stdio: "inherit" },
+    );
+    console.log("Owner Approval Helper: built with Framework csc.exe");
+  }
   return exe;
 }
 
