@@ -25,15 +25,29 @@ try {
     Write-Host "Baseline     : $($directive.Fields.'Repository-Baseline')"
     Write-Host "`nAuthorized Scope:`n$(Get-AionDirectiveSection $directive.Text 'Authorized Scope')"
     Write-Host "`nProhibited Scope:`n$(Get-AionDirectiveSection $directive.Text 'Prohibited Scope')"
-    Write-Host "`nRequired phrase: $($directive.Fields.'Required-Authorization-Phrase')"
+
+    $requiredPhrase = [string]$directive.Fields.'Required-Authorization-Phrase'
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host ' THIS IS NOT A PASSWORD YOU CREATE.' -ForegroundColor Yellow
+    Write-Host ' Type the EXACT authorization phrase below (copy/paste OK).' -ForegroundColor Yellow
+    Write-Host ' Matching is case-sensitive. Extra spaces are trimmed.' -ForegroundColor Yellow
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host $requiredPhrase -ForegroundColor Green
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host ''
 
     if($ValidationOnly){throw 'Validation-only refusal: no authorization phrase accepted'}
     if(-not $PSBoundParameters.ContainsKey('AuthorizationInput')){
         if($TestMode){throw 'TestMode requires explicit AuthorizationInput'}
-        $AuthorizationInput=Read-Host 'Type the exact authorization phrase (visible input)'
+        $AuthorizationInput=Read-Host 'Paste/type the EXACT phrase shown above (not a personal password)'
     }
-    if(-not(Test-AionAuthorizationPhrase -Expected $directive.Fields.'Required-Authorization-Phrase' -Actual $AuthorizationInput)){
-        throw 'Authorization phrase did not match exactly'
+    # Trim only; do not change case. Empty after trim still fails closed.
+    if($null -ne $AuthorizationInput){
+        $AuthorizationInput = $AuthorizationInput.Trim()
+    }
+    if(-not(Test-AionAuthorizationPhrase -Expected $requiredPhrase -Actual $AuthorizationInput)){
+        throw 'Authorization phrase did not match exactly. This is not a Windows/login password and not a password you invent. Copy the Required-Authorization-Phrase from CURRENT.md exactly.'
     }
     if($SkipRepositoryChecks -and -not $TestMode){throw 'SkipRepositoryChecks is permitted only in TestMode'}
     if(-not $SkipRepositoryChecks){
