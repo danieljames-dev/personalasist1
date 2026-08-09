@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -163,16 +164,48 @@ export async function createAionServer(options = {}) {
    * - Absence of trust / anchor / identity / valid grant => READ_ONLY (fail closed)
    * - No production bootstrap, no randomUUID identity fallback, no runtime signing
    * - Does not read real private identity files unless the caller injects an SI id
+   *
+   * R6.6 production load: when dataRoot/authority-v2/{trust.json,system-instance-id.txt,anchor/}
+   * exist (placed by offline Owner cutover tools), wire them as the external trust boundary.
+   * Runtime still only verifies — it never generates keys or appends the ledger.
    */
+  const loadAuthorityV2FromDataRoot = () => {
+    const authRoot = join(dataRoot, "authority-v2");
+    const trustPath = join(authRoot, "trust.json");
+    const siPath = join(authRoot, "system-instance-id.txt");
+    const anchorRoot = join(authRoot, "anchor");
+    try {
+      if (!existsSync(trustPath) || !existsSync(siPath) || !existsSync(join(anchorRoot, "current.json"))) {
+        return null;
+      }
+      const trustRaw = JSON.parse(readFileSync(trustPath, "utf8"));
+      const ownerKeyId = String(trustRaw.ownerKeyId || "").trim();
+      const spkiB64 = String(trustRaw.publicKeySpkiDerBase64 || "").trim();
+      const systemInstanceId = readFileSync(siPath, "utf8").trim();
+      if (!ownerKeyId || !spkiB64 || !systemInstanceId) return null;
+      const publicKeySpkiDer = new Uint8Array(Buffer.from(spkiB64, "base64"));
+      return {
+        trustedOwnerVerification: { ownerKeyId, publicKeySpkiDer },
+        authorityAnchorRoot: resolve(anchorRoot),
+        localSystemInstanceId: systemInstanceId,
+      };
+    } catch {
+      return null;
+    }
+  };
+  const fileAuthority = options.authority ? null : loadAuthorityV2FromDataRoot();
   const authority = options.authority ?? new OwnerAuthorityRuntimeV2({
-    getTrustedOwner: () => options.trustedOwnerVerification ?? null,
+    getTrustedOwner: () =>
+      options.trustedOwnerVerification
+      ?? fileAuthority?.trustedOwnerVerification
+      ?? null,
     getAnchorRoot: () => {
-      const root = options.authorityAnchorRoot;
+      const root = options.authorityAnchorRoot ?? fileAuthority?.authorityAnchorRoot;
       if (typeof root !== "string" || !root.trim()) return null;
       return resolve(root);
     },
     getLocalSystemInstanceId: () => {
-      const id = options.localSystemInstanceId;
+      const id = options.localSystemInstanceId ?? fileAuthority?.localSystemInstanceId;
       return typeof id === "string" && id.trim() ? id.trim() : null;
     },
   });
