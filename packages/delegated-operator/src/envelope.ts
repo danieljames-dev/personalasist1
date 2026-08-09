@@ -131,7 +131,11 @@ function parseProof(value: unknown): ApprovalProofV1 | null {
     }
   }
   const kind = rec.kind;
-  if (kind !== "synthetic_hmac_v1" && kind !== "unprovisioned_real_v1") {
+  if (
+    kind !== "synthetic_hmac_v1" &&
+    kind !== "unprovisioned_real_v1" &&
+    kind !== "provisioned_owner_hmac_v1"
+  ) {
     throw new DelegatedOperatorError("envelope-invalid", "Unknown approval proof kind");
   }
   if (rec.algorithm !== "hmac-sha256") {

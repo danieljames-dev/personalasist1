@@ -97,6 +97,18 @@ export class OperatorHost {
         );
       }
     }
+    if (this.activationMode === "activated" && this.presence.mode !== "provisioned_owner") {
+      throw new DelegatedOperatorError(
+        "activation-mode",
+        "activated host requires ProvisionedOwnerPresence",
+      );
+    }
+    if (this.activationMode === "activated" && this.presence.mode === "synthetic_test") {
+      throw new DelegatedOperatorError(
+        "activation-mode",
+        "Synthetic Owner presence cannot be used when activationMode is activated",
+      );
+    }
   }
 
   getStore(): AuthorizationStore {

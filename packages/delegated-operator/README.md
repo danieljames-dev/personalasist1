@@ -6,7 +6,7 @@ R6.5 / R6.5-R1 **Delegated Operator Control Plane** (administrative).
 
 - **Implementation:** present (R6.5-R1 activation-blocker corrections applied)
 - **Real approval root activated:** **NO**
-- **Elevated broker installed/activated:** **NO**
+- **Elevated broker installed/activated:** YES after R6.5.1 Owner-authorized install (default library still inactive until install)
 - **Founder remains authoritative:** **YES**
 - **Normal AION chat/model path:** must not use this package as shell authority
 

@@ -26,7 +26,10 @@ export * from "./factory.js";
 export * from "./elevated-broker.js";
 export * from "./facts-ports.js";
 export * from "./replay-store.js";
+export * from "./pipe-server.js";
+export * from "./installed-runtime.js";
 
+/** Package-level library defaults (pre-install). Installed runtime overrides via protected roots. */
 export const R65_PRODUCTION_DEFAULTS = {
   realApprovalRootActivated: false,
   founderAuthoritative: true,
@@ -40,4 +43,5 @@ export const R65_PRODUCTION_DEFAULTS = {
   uacDisabled: false,
   ownerPasswordStored: false,
   arbitraryElevatedPowerShellExposed: false,
+  founderFallbackAvailable: true,
 } as const;

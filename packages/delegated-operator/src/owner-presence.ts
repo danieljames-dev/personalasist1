@@ -1,25 +1,21 @@
 import { createHmac, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { type ApprovalProofV1, DelegatedOperatorError } from "./contracts.js";
 import { safeEqualHex } from "./canonical.js";
 
 /**
- * OwnerPresencePort: future real activation binds approval to Owner presence
- * and exact envelope digest. R6.5 ships:
+ * OwnerPresencePort: binds approval to Owner presence and exact envelope digest.
+ *
  * - SyntheticOwnerPresence (tests only)
- * - UnprovisionedRealOwnerPresence (real path code; always fails until activation milestone)
+ * - UnprovisionedRealOwnerPresence (fail-closed until activation)
+ * - ProvisionedOwnerPresence (R6.5.1+): local HMAC material under protected
+ *   approval root; Founder remains available as recovery/breakglass.
  *
- * Selected real-path direction (documented, NOT activated):
- * A fixed elevated consent helper that can only HMAC a Host-supplied
- * challenge of form `aion-owner-approve-v1|<envelopeDigest>|<nonce>|<exp>`
- * under secure-desktop UAC, with the HMAC key held in DPAPI for the Owner
- * interactive user and never readable by agent processes.
- *
- * Why not faked as active: R6.5 forbids provisioning a real approval root.
- * Founder remains authoritative.
+ * Challenge form: `aion-owner-approve-v1|<envelopeDigest>|<utc>|<presenceId>`
  */
 
 export interface OwnerPresencePort {
-  readonly mode: "synthetic_test" | "unprovisioned_real";
+  readonly mode: "synthetic_test" | "unprovisioned_real" | "provisioned_owner";
   approveEnvelopeDigest(envelopeDigest: string, nowUtc: string): ApprovalProofV1;
   verify(envelopeDigest: string, proof: ApprovalProofV1): boolean;
 }
@@ -63,20 +59,73 @@ export class SyntheticOwnerPresence implements OwnerPresencePort {
   }
 }
 
-/** Real adapter code path — always refuses until a later activation milestone provisions trust. */
+/** Real adapter code path — always refuses until activation provisions trust. */
 export class UnprovisionedRealOwnerPresence implements OwnerPresencePort {
   readonly mode = "unprovisioned_real" as const;
 
   approveEnvelopeDigest(_envelopeDigest: string, _nowUtc: string): ApprovalProofV1 {
     throw new DelegatedOperatorError(
       "approval-root-unprovisioned",
-      "Real Owner-presence approval root is not provisioned or activated in R6.5. Founder remains authoritative.",
+      "Real Owner-presence approval root is not provisioned or activated. Founder remains authoritative.",
     );
   }
 
   verify(_envelopeDigest: string, proof: ApprovalProofV1): boolean {
     if (proof.kind === "unprovisioned_real_v1") return false;
     return false;
+  }
+}
+
+/**
+ * Provisioned Owner presence (R6.5.1).
+ * HMAC key is loaded from a protected path (ACL-restricted); never logged.
+ * Agent processes without ACL access cannot mint approvals.
+ */
+export class ProvisionedOwnerPresence implements OwnerPresencePort {
+  readonly mode = "provisioned_owner" as const;
+  private readonly secret: Buffer;
+
+  constructor(secret: Buffer) {
+    if (!Buffer.isBuffer(secret) || secret.length < 32) {
+      throw new DelegatedOperatorError(
+        "approval-root-invalid",
+        "Provisioned Owner presence requires a >=32-byte secret buffer",
+      );
+    }
+    this.secret = Buffer.from(secret);
+  }
+
+  /** Load hex-encoded secret from ACL-protected file (not from caller string in production). */
+  static fromKeyFile(keyPath: string): ProvisionedOwnerPresence {
+    const raw = readFileSync(keyPath, "utf8").trim();
+    if (!/^[0-9a-f]{64,}$/i.test(raw)) {
+      throw new DelegatedOperatorError("approval-root-invalid", "Owner key file shape invalid");
+    }
+    return new ProvisionedOwnerPresence(Buffer.from(raw.slice(0, 64), "hex"));
+  }
+
+  approveEnvelopeDigest(envelopeDigest: string, nowUtc: string): ApprovalProofV1 {
+    if (!/^[0-9a-f]{64}$/.test(envelopeDigest)) {
+      throw new DelegatedOperatorError("presence-invalid", "Envelope digest must be sha256 hex");
+    }
+    const presenceId = randomBytes(16).toString("hex");
+    const payload = `aion-owner-approve-v1|${envelopeDigest}|${nowUtc}|${presenceId}`;
+    const signatureHex = createHmac("sha256", this.secret).update(payload, "utf8").digest("hex");
+    return {
+      kind: "provisioned_owner_hmac_v1",
+      algorithm: "hmac-sha256",
+      signatureHex,
+      approvedAtUtc: nowUtc,
+      presenceId,
+    };
+  }
+
+  verify(envelopeDigest: string, proof: ApprovalProofV1): boolean {
+    if (proof.kind !== "provisioned_owner_hmac_v1" || proof.algorithm !== "hmac-sha256") return false;
+    if (!/^[0-9a-f]{64}$/.test(envelopeDigest)) return false;
+    const payload = `aion-owner-approve-v1|${envelopeDigest}|${proof.approvedAtUtc}|${proof.presenceId}`;
+    const expected = createHmac("sha256", this.secret).update(payload, "utf8").digest("hex");
+    return safeEqualHex(expected, proof.signatureHex);
   }
 }
 

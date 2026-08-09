@@ -146,7 +146,7 @@ export const AUTHORIZATION_LIFECYCLES_V1: readonly AuthorizationLifecycleV1[] = 
   "EXPIRED",
 ];
 
-export type ActivationModeV1 = "inactive" | "synthetic_test";
+export type ActivationModeV1 = "inactive" | "synthetic_test" | "activated";
 
 export interface RebootPolicyV1 {
   readonly allowed: boolean;
@@ -155,7 +155,7 @@ export interface RebootPolicyV1 {
 }
 
 export interface ApprovalProofV1 {
-  readonly kind: "synthetic_hmac_v1" | "unprovisioned_real_v1";
+  readonly kind: "synthetic_hmac_v1" | "unprovisioned_real_v1" | "provisioned_owner_hmac_v1";
   readonly algorithm: "hmac-sha256";
   /** Hex signature over envelope digest + approval metadata. */
   readonly signatureHex: string;

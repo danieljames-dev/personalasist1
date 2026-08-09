@@ -2,17 +2,18 @@
 
 ## Status
 
-- Implemented: YES (source + synthetic tests)
-- Installed as Windows service: **NO**
-- Activated: **NO**
+- Implemented: YES (source + synthetic tests + R6.5.1 install path)
+- Installed as Windows service: **YES** (R6.5.1 on Owner-authorized machines)
+- Activated: **YES** after R6.5.1 install (local Owner UI + provisioned presence)
 - UAC disabled: **NO**
 - Owner password stored: **NO**
 - Arbitrary elevated PowerShell exposed: **NO**
 - High-consequence ops independently gated: YES
-- Unattended routine elevation after future activation: YES (designed)
-- Protected install architecture (inactive): YES (R6.5-R1)
-- Durable anti-replay: YES (R6.5-R1)
-- Independent integrity port: YES (R6.5-R1)
+- Unattended routine elevation after activation: YES (authorized envelope ops)
+- Protected install architecture: YES (Program Files + ProgramData)
+- Durable anti-replay: YES
+- Independent integrity port: YES
+- Founder recovery/breakglass: AVAILABLE
 
 ## IPC
 
@@ -81,7 +82,8 @@ refuses reuse. Corrupt/missing state fails closed.
 `measureActualDigests()` measures files independently. Callers cannot supply both
 sides of the comparison.
 
-## Activation
+## Activation (R6.5.1)
 
-Deferred to R6.5.1 after independent Claude acceptance of R6.5-R1 corrections.
-**Do not install or activate the real broker from this milestone.**
+Owner-authorized install via `scripts/r65.1/install-elevated-broker.ps1` (UAC once).
+Pins digests under ProgramData `manifest.v1.json`. Service: `AionElevatedBroker`.
+Owner UI loopback; Founder phrase script remains available as recovery.

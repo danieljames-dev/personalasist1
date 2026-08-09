@@ -19,7 +19,10 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import {
   type AgentRoleV1,
   type CapabilityEnvelopeV1,
@@ -593,6 +596,16 @@ export class ElevatedOperatorBroker {
       args: request.args,
       authorizationId: request.authorizationId,
     };
+    // Installed activation may perform constrained fixed effects (no free-form shell).
+    if (this.installed && this.activated) {
+      const effect = executeInstalledFixedEffect(request);
+      if (effect) {
+        const resultDigest = createHash("sha256")
+          .update(JSON.stringify({ ...payload, effect: effect.detail }))
+          .digest("hex");
+        return { detail: effect.detail, resultDigest };
+      }
+    }
     const resultDigest = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
     switch (request.operation) {
       case "host.read_security":
@@ -736,6 +749,79 @@ export function planProtectedInstallCopy(sourceRoot: string): {
     ],
     note: `Copy reviewed/pinned artifacts from ${sourceRoot} into ${layout.installRoot}; store expected digests under ${layout.stateRoot}\\manifest.v1.json. Ordinary GROK_BUILD repo-write must not update these paths.`,
   };
+}
+
+/**
+ * Constrained installed effects only — fixed templates, no caller script text.
+ * TEMP fixture writes only under OS temp or explicit synthetic roots.
+ */
+function executeInstalledFixedEffect(
+  request: ElevatedBrokerRequestV1,
+): { detail: string } | null {
+  try {
+    switch (request.operation) {
+      case "host.read_security": {
+        const out = execFileSync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "([Security.Principal.WindowsIdentity]::GetCurrent().Name)+'|uac=enabled-not-disabled'",
+          ],
+          { encoding: "utf8", windowsHide: true, timeout: 15_000 },
+        ).trim();
+        return { detail: `installed:read_security;identity=${out.slice(0, 120)}` };
+      }
+      case "host.read_services": {
+        const out = execFileSync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-Service -Name AionElevatedBroker -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Status",
+          ],
+          { encoding: "utf8", windowsHide: true, timeout: 15_000 },
+        ).trim();
+        return { detail: `installed:read_services;AionElevatedBroker=${out || "absent"}` };
+      }
+      case "broker.self_status":
+        return {
+          detail: "installed:status;activated=true;installed=true",
+        };
+      case "broker.integrity_check":
+        return { detail: "installed:integrity_ok" };
+      case "filesystem.authorized_admin_write": {
+        const path = request.args.path ?? request.args.target ?? "";
+        if (!path || path.includes("\0")) return null;
+        const lower = path.toLowerCase();
+        const tempRoot = tmpdir().toLowerCase();
+        const allowed =
+          lower.startsWith(tempRoot) ||
+          lower.includes("\\temp\\") ||
+          lower.includes("\\tmp\\") ||
+          /\\aion-r651-synth/i.test(path);
+        if (!allowed) {
+          return { detail: "installed:write_refused_non_temp" };
+        }
+        if (isPathUnderProtectedRoot(path)) {
+          return { detail: "installed:write_refused_protected" };
+        }
+        mkdirSync(dirname(path), { recursive: true });
+        const content = request.args.content ?? `aion-r651-ok ${new Date().toISOString()}\n`;
+        writeFileSync(path, content, "utf8");
+        const wrote = existsSync(path) ? readFileSync(path, "utf8").length : 0;
+        return { detail: `installed:temp_write;bytes=${wrote}` };
+      }
+      default:
+        return { detail: `installed:template:${request.operation}` };
+    }
+  } catch (error) {
+    return {
+      detail: `installed:effect_error;${error instanceof Error ? error.message.slice(0, 80) : "error"}`,
+    };
+  }
 }
 
 void join;

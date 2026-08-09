@@ -76,11 +76,13 @@ export class OwnerAuthorizationUi {
 
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname === "/health") {
+        const activated = this.host.activationMode === "activated";
         json(res, 200, {
           ok: true,
           activationMode: this.host.activationMode,
           founderAuthoritative: true,
-          realApprovalRootActivated: false,
+          founderFallbackAvailable: true,
+          realApprovalRootActivated: activated,
         });
         return;
       }
