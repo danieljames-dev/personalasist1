@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash",
+      "Bash(*)",
+      "Read",
+      "Edit",
+      "Write",
+      "NotebookRead",
+      "NotebookEdit",
+      "Grep",
+      "Glob",
+      "WebSearch",
+      "WebFetch",
+      "TodoWrite",
+      "Task",
+      "Agent"
+    ],
+    "deny": [
+      "Bash(*manage-bde*)",
+      "Bash(*BitLocker*)",
+      "Bash(*Enable-BitLocker*)",
+      "Bash(*Disable-BitLocker*)",
+      "Bash(*bcdedit*)",
+      "Bash(*Clear-Tpm*)",
+      "Bash(*Initialize-Tpm*)",
+      "Bash(*Set-TpmOwnerAuth*)",
+      "Bash(*diskpart*)",
+      "Bash(*Format-Volume*)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Read(**/.env)",
+      "Edit(**/.env)",
+      "Read(**/.env.*)",
+      "Edit(**/.env.*)"
+    ]
+  },
+  "effortLevel": "high"
+}

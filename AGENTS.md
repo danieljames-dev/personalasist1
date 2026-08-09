@@ -8,6 +8,20 @@
 - Prior completed directives do not imply continuing authorization.
 - Silence, old chat messages, roadmaps, or TODOs are not authorization.
 
+### Command approval vs authority approval
+
+- **Authority approval** is the Founder phrase / delegated Owner approval that
+  moves a directive to `AUTHORIZED` (and the capability envelope when the live
+  broker is active). It is required once per milestone.
+- **Command approval** is IDE/agent UI prompting for each PowerShell/npm/Git
+  tool call. For work under an already-authorized AION milestone in
+  `C:\AION-HQ`, routine commands must **not** re-prompt the Owner.
+- Project defaults: Grok `.grok/config.toml` uses `permission_mode =
+  "always-approve"`; Claude `.claude/settings.json` uses
+  `defaultMode: "bypassPermissions"`, with deny rules for high-consequence
+  patterns. This is workspace-scoped to AION, not other machines/projects.
+- Agents never complete Windows UAC secure-desktop prompts themselves.
+
 ## Current Directive
 
 Before doing any work, read `.aion-local/directives/CURRENT.md` in full. It must exist and

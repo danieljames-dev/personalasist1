@@ -1,0 +1,80 @@
+# AION project permission policy — C:\AION-HQ only
+# COMMAND APPROVAL (IDE/agent tool prompts) vs AUTHORITY APPROVAL (Founder/Owner envelope)
+#
+# Once a milestone is Owner-authorized (Founder phrase or delegated Owner UI),
+# routine tool/terminal work inside that envelope must not re-prompt the Owner
+# per command. High-consequence authority expansion remains denied here and
+# still requires a new Owner authorization at the control-plane layer.
+
+[ui]
+permission_mode = "always-approve"
+remember_tool_approvals = true
+default_selected_permission = "always_allow_all_sessions"
+
+[permission]
+# Deny always wins over always-approve pass-through.
+deny = [
+  # Destructive / recovery
+  "Bash(rm -rf *)",
+  "Bash(*Remove-Item* -Recurse* -Force* C:\\Users*)",
+  "Bash(*Format-Volume*)",
+  "Bash(*diskpart*)",
+  # BitLocker / Secure Boot / firmware / TPM
+  "Bash(*manage-bde*)",
+  "Bash(*BitLocker*)",
+  "Bash(*Enable-BitLocker*)",
+  "Bash(*Disable-BitLocker*)",
+  "Bash(*bcdedit*)",
+  "Bash(*Confirm-SecureBootUEFI*)",
+  "Bash(*Set-SecureBootUEFI*)",
+  "Bash(*Clear-Tpm*)",
+  "Bash(*Initialize-Tpm*)",
+  "Bash(*Set-TpmOwnerAuth*)",
+  # Credential / secrets scooping
+  "Bash(*cmdkey*)",
+  "Bash(*mimikatz*)",
+  "Read(**/.env)",
+  "Read(**/.env.*)",
+  "Read(**/*credential*)",
+  "Read(**/*secrets*)",
+  "Edit(**/.env)",
+  "Edit(**/.env.*)",
+]
+
+allow = [
+  # Shell — routine development (full command string match / prefix)
+  "Bash(powershell*)",
+  "Bash(pwsh*)",
+  "Bash(cmd*)",
+  "Bash(npm*)",
+  "Bash(npx*)",
+  "Bash(node*)",
+  "Bash(dotnet*)",
+  "Bash(docker*)",
+  "Bash(git*)",
+  "Bash(sc*)",
+  "Bash(icacls*)",
+  "Bash(where*)",
+  "Bash(Get-*)",
+  "Bash(Test-*)",
+  "Bash(Set-Location*)",
+  "Bash(Select-*)",
+  "Bash(Write-*)",
+  "Bash(Start-*)",
+  "Bash(Stop-*)",
+  "Bash(Restart-*)",
+  "Bash(Copy-*)",
+  "Bash(New-*)",
+  "Bash(Join-*)",
+  "Bash(Out-*)",
+  "Bash(Invoke-*)",
+  "Bash(*)",
+  # File tools inside the trusted workspace
+  "Read",
+  "Edit",
+  "Write",
+  "Grep",
+  "Glob",
+  "WebSearch",
+  "WebFetch",
+]
