@@ -1,8 +1,6 @@
 /**
- * Installed elevated broker service entry (Node).
- * Loaded from protected install root — never from live C:\AION-HQ after install.
- *
- * Started by aion-elevated-broker.exe (Windows service host).
+ * Installed elevated broker service entry (Node) — R6.5.2.
+ * Private trust material only; Owner approval via elevated helper inbox.
  */
 
 import { writeFileSync, mkdirSync, appendFileSync } from "node:fs";
@@ -12,7 +10,9 @@ import { createActivatedRuntime, BROKER_SERVICE_NAME } from "./installed-runtime
 const MACHINE_ROLE = process.env.AION_MACHINE_ROLE ?? "DESKTOP TARGET CANDIDATE / NON-PRIMARY";
 const REPO_ROOT = process.env.AION_REPOSITORY_ROOT ?? "C:\\AION-HQ";
 const UI_PORT = Number(process.env.AION_OWNER_UI_PORT ?? "17865");
-const STATE_LOG = process.env.AION_BROKER_LOG ?? "C:\\ProgramData\\AION\\ElevatedOperatorBroker\\audit\\service.log";
+const STATE_LOG =
+  process.env.AION_BROKER_LOG ??
+  "C:\\ProgramData\\AION\\ElevatedOperatorBroker\\public\\audit\\service.log";
 
 function log(line: string): void {
   try {
@@ -31,7 +31,6 @@ async function main(): Promise<void> {
     uiPort: UI_PORT,
   });
 
-  // Integrity gate at startup
   runtime.broker.verifyIntegrity();
   log("integrity ok");
 
@@ -41,10 +40,19 @@ async function main(): Promise<void> {
   const uiInfo = await runtime.ui.listenLoopbackOnly();
   log(`owner-ui ${uiInfo.baseUrl}`);
 
-  // Ready marker for install/tests (no secrets)
+  // Poll elevated Owner approval inbox
+  const inboxTimer = setInterval(() => {
+    try {
+      const n = runtime.processApprovalInbox();
+      if (n > 0) log(`owner-approval-inbox processed=${n}`);
+    } catch (e) {
+      log(`inbox error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 400);
+
   try {
     writeFileSync(
-      join(runtime.paths.stateRoot, "runtime-ready.v1.json"),
+      join(runtime.paths.publicRoot, "runtime-ready.v1.json"),
       `${JSON.stringify(
         {
           ok: true,
@@ -54,7 +62,9 @@ async function main(): Promise<void> {
           activationMode: runtime.host.activationMode,
           installed: true,
           activated: true,
+          trustBoundary: "r652-private-owner-helper",
           founderFallbackAvailable: true,
+          serviceAccountExpected: "NT SERVICE\\AionElevatedBroker",
           pid: process.pid,
           utc: new Date().toISOString(),
         },
@@ -69,6 +79,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string) => {
     log(`shutdown ${signal}`);
+    clearInterval(inboxTimer);
     try {
       await runtime.ui.close();
     } catch {
@@ -84,7 +95,6 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  // Keep alive
   await new Promise(() => {
     /* run until signal */
   });

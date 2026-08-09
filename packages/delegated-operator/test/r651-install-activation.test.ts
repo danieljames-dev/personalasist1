@@ -19,6 +19,8 @@ import {
   StaticHostFactsPort,
   StaticRepositoryFactsPort,
   StaticGitFactsPort,
+  writeOwnerApprovalRequest,
+  drainOwnerApprovalInbox,
 } from "../src/index.js";
 import {
   BASELINE,
@@ -57,7 +59,7 @@ test("R6.5.1 activated host requires provisioned presence", () => {
   }
 });
 
-test("R6.5.1 activated host ownerAuthorize binds digest+nonce", () => {
+test("R6.5.1/R6.5.2 activated host ownerAuthorize binds digest+nonce", () => {
   const { dir, cleanup } = tempStore();
   try {
     const presence = new ProvisionedOwnerPresence(randomBytes(32));
@@ -89,6 +91,30 @@ test("R6.5.1 activated host ownerAuthorize binds digest+nonce", () => {
     );
     assert.equal(authorized.approvalProof?.kind, "provisioned_owner_hmac_v1");
     assert.equal(envelopeDigest(authorized), challenge.digest);
+  } finally {
+    cleanup();
+  }
+});
+
+test("R6.5.2 owner-approval-inbox parse + drain", () => {
+  const { dir, cleanup } = tempStore();
+  try {
+    const inbox = join(dir, "inbox");
+    writeOwnerApprovalRequest(inbox, {
+      schemaVersion: "aion.owner-approval-inbox.v1",
+      authorizationId: "auth_test",
+      envelopeDigest: "ab".repeat(32),
+      approvalNonce: "nonce1",
+      directiveId: "DIR",
+      repositoryRoot: REPO,
+      requestedAtUtc: new Date().toISOString(),
+      helperPid: 1,
+      elevated: true,
+    });
+    const drained = drainOwnerApprovalInbox(inbox);
+    assert.equal(drained.length, 1);
+    assert.equal(drained[0]!.authorizationId, "auth_test");
+    assert.equal(drainOwnerApprovalInbox(inbox).length, 0);
   } finally {
     cleanup();
   }

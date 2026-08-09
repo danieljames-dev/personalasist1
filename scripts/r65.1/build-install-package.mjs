@@ -54,6 +54,21 @@ function compileServiceExe(destBin) {
     ["/nologo", "/target:exe", `/out:${exe}`, "/reference:System.ServiceProcess.dll", src],
     { stdio: "inherit" },
   );
+  // Owner Approval Helper with requireAdministrator manifest
+  const helperSrc = join(PKG, "service", "AionOwnerApprovalHelper.cs");
+  const helperMan = join(PKG, "service", "AionOwnerApprovalHelper.manifest");
+  const helperExe = join(destBin, "AionOwnerApprovalHelper.exe");
+  execFileSync(
+    csc,
+    [
+      "/nologo",
+      "/target:exe",
+      `/out:${helperExe}`,
+      `/win32manifest:${helperMan}`,
+      helperSrc,
+    ],
+    { stdio: "inherit" },
+  );
   return exe;
 }
 
@@ -86,9 +101,11 @@ writeFileSync(join(OUT, "lib", "service-main.mjs"), entry, "utf8");
 
 const policy = {
   schemaVersion: "aion.elevated-broker.policy.v1",
-  version: "0.1.0-r651",
+  version: "0.1.0-r652",
   pipeName: "\\\\.\\pipe\\AION-ElevatedOperatorBroker-v1",
   serviceName: "AionElevatedBroker",
+  serviceAccount: "NT SERVICE\\AionElevatedBroker",
+  trustBoundary: "r652-private-owner-helper",
   uacDisabled: false,
   ownerPasswordStored: false,
   arbitraryElevatedPowerShellExposed: false,
@@ -182,6 +199,7 @@ compileServiceExe(join(OUT, "bin"));
 
 const subjects = [
   "bin/aion-elevated-broker.exe",
+  "bin/AionOwnerApprovalHelper.exe",
   "config/policy.v1.json",
   "service/aion-elevated-broker.xml",
   "lib/service-main.mjs",
@@ -200,7 +218,7 @@ for (const rel of subjects) {
 
 const stagingManifest = {
   schemaVersion: "aion.elevated-broker.install.v1",
-  artifactVersion: "0.1.0-r651",
+  artifactVersion: "0.1.0-r652",
   sourceHead: HEAD,
   operationCatalogVersion: "elevated-broker-ops-v1",
   policyDigest: sha256Text(policyText),

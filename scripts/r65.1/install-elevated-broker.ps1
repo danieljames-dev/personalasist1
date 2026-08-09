@@ -1,8 +1,11 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  R6.5.1 elevated install of AION Elevated Operator Broker.
-  Owner may approve UAC once. Does not disable UAC. Does not store Owner password.
+  R6.5.2 elevated install/redeploy of AION Elevated Operator Broker.
+  - Dedicated NT SERVICE\AionElevatedBroker (never LocalSystem)
+  - Private/public state split; ordinary User cannot read secrets or write trust state
+  - Retires compromised R6.5.1 keys; provisions fresh private material
+  - Does not disable UAC; does not store Owner password
 #>
 [CmdletBinding()]
 param(
@@ -17,7 +20,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Write-AionLog([string]$Message) {
-    $logDir = Join-Path $StateRoot 'audit'
+    $logDir = Join-Path $StateRoot 'public\audit'
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
     $line = '{0} {1}' -f (Get-Date).ToUniversalTime().ToString('o'), $Message
     Add-Content -LiteralPath (Join-Path $logDir 'install.log') -Value $line -Encoding UTF8
@@ -32,16 +35,14 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not (Test-Path -LiteralPath $StagingRoot)) {
     throw "Staging package missing: $StagingRoot - run build-install-package.mjs first"
 }
-
 $stagingManifestPath = Join-Path $StagingRoot 'STAGING-MANIFEST.v1.json'
 if (-not (Test-Path -LiteralPath $stagingManifestPath)) {
     throw "Staging manifest missing: $stagingManifestPath"
 }
 $staging = Get-Content -LiteralPath $stagingManifestPath -Raw | ConvertFrom-Json
+Write-AionLog "Install start sourceHead=$($staging.sourceHead) artifact=$($staging.artifactVersion)"
 
-Write-AionLog "Install start sourceHead=$($staging.sourceHead)"
-
-# Stop existing service if present
+# Stop/remove old service
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
     Write-AionLog "Stopping existing service $ServiceName"
@@ -50,46 +51,59 @@ if ($existing) {
     Start-Sleep -Seconds 2
 }
 
-# Deploy install root (code) from staged package only
+# Deploy install root from staged package only
 if (Test-Path -LiteralPath $InstallRoot) {
-    Write-AionLog "Removing previous install root"
+    Write-AionLog 'Replacing install root'
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 Copy-Item -Path (Join-Path $StagingRoot '*') -Destination $InstallRoot -Recurse -Force
-# Do not leave staging secrets in install root
 Remove-Item -LiteralPath (Join-Path $InstallRoot 'STAGING-MANIFEST.v1.json') -Force -ErrorAction SilentlyContinue
 
-# State root
-New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $StateRoot 'approval') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $StateRoot 'ipc') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $StateRoot 'host-store') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $StateRoot 'replay') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $StateRoot 'audit') | Out-Null
+# Private / public state layout
+$privateRoot = Join-Path $StateRoot 'private'
+$publicRoot = Join-Path $StateRoot 'public'
+foreach ($d in @(
+    $StateRoot, $privateRoot, $publicRoot,
+    (Join-Path $privateRoot 'approval'),
+    (Join-Path $privateRoot 'ipc'),
+    (Join-Path $privateRoot 'host-store'),
+    (Join-Path $privateRoot 'replay'),
+    (Join-Path $privateRoot 'owner-approval-inbox'),
+    (Join-Path $publicRoot 'audit')
+)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 
-# Provision approval HMAC key (64 hex chars) if absent — ACL restricted later
-$keyPath = Join-Path $StateRoot 'approval\owner-hmac.key'
-if (-not (Test-Path -LiteralPath $keyPath)) {
-    $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    $hex = -join ($bytes | ForEach-Object { $_.ToString('x2') })
-    [IO.File]::WriteAllText($keyPath, $hex, [Text.UTF8Encoding]::new($false))
-    Write-AionLog 'Provisioned owner-hmac.key (contents not logged)'
-} else {
-    Write-AionLog 'Reusing existing owner-hmac.key'
+# Retire compromised R6.5.1 flat keys (existence only logged)
+$legacyKey = Join-Path $StateRoot 'approval\owner-hmac.key'
+$legacySession = Join-Path $StateRoot 'ipc\session.key'
+foreach ($legacy in @($legacyKey, $legacySession)) {
+    if (Test-Path -LiteralPath $legacy) {
+        Write-AionLog "Retiring compromised legacy path (contents not logged): $legacy"
+        Remove-Item -LiteralPath $legacy -Force -ErrorAction SilentlyContinue
+    }
+}
+# Also wipe any previous private keys to force rotation on repair
+$privateKey = Join-Path $privateRoot 'approval\owner-hmac.key'
+$privateSession = Join-Path $privateRoot 'ipc\session.key'
+foreach ($pk in @($privateKey, $privateSession)) {
+    if (Test-Path -LiteralPath $pk) {
+        Write-AionLog 'Rotating prior private material (contents not logged)'
+        Remove-Item -LiteralPath $pk -Force
+    }
 }
 
-$sessionKeyPath = Join-Path $StateRoot 'ipc\session.key'
-if (-not (Test-Path -LiteralPath $sessionKeyPath)) {
+function New-HexKey32 {
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    $hex = -join ($bytes | ForEach-Object { $_.ToString('x2') })
-    [IO.File]::WriteAllText($sessionKeyPath, $hex, [Text.UTF8Encoding]::new($false))
-    Write-AionLog 'Provisioned ipc session.key (contents not logged)'
+    return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
 }
 
-# Write install manifest with digests measured on installed files
+# Provision FRESH keys only after private dirs exist (ACLs applied next)
+[IO.File]::WriteAllText($privateKey, (New-HexKey32), [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($privateSession, (New-HexKey32), [Text.UTF8Encoding]::new($false))
+Write-AionLog 'Provisioned fresh private approval and session material (not logged)'
+
+# Manifest digests measured on installed files
 $digests = @{}
 foreach ($prop in $staging.digests.PSObject.Properties) {
     $rel = $prop.Name
@@ -97,15 +111,18 @@ foreach ($prop in $staging.digests.PSObject.Properties) {
     if (-not (Test-Path -LiteralPath $full)) { throw "Installed artifact missing: $rel" }
     $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($hash -cne $prop.Value.ToLowerInvariant()) {
-        throw "Digest mismatch for $rel expected=$($prop.Value) actual=$hash"
+        throw "Digest mismatch for $rel"
     }
     $digests[$rel] = $hash
 }
-
+$repoHead = (& git -C $RepositoryRoot rev-parse HEAD).Trim()
+if ($repoHead -cne $staging.sourceHead) {
+    throw "Staging sourceHead $($staging.sourceHead) != repository HEAD $repoHead"
+}
 $manifest = [ordered]@{
     schemaVersion           = 'aion.elevated-broker.install.v1'
     artifactVersion         = $staging.artifactVersion
-    sourceHead              = $staging.sourceHead
+    sourceHead              = $repoHead
     operationCatalogVersion = $staging.operationCatalogVersion
     policyDigest            = $staging.policyDigest
     digests                 = $digests
@@ -113,112 +130,155 @@ $manifest = [ordered]@{
     installedAtUtc          = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     pipeName                = '\\.\pipe\AION-ElevatedOperatorBroker-v1'
     serviceName             = $ServiceName
+    serviceAccount          = "NT SERVICE\$ServiceName"
+    trustBoundary           = 'r652-private-owner-helper'
     installRoot             = $InstallRoot
     stateRoot               = $StateRoot
     repositoryRoot          = $RepositoryRoot
     loadFromRepoAfterInstall= $false
 }
-$manifestPath = Join-Path $StateRoot 'manifest.v1.json'
-$manifestJson = $manifest | ConvertTo-Json -Depth 8
-# UTF-8 without BOM — Node JSON.parse rejects BOM
-[IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
-Write-AionLog "Wrote manifest $manifestPath"
+$manifestPath = Join-Path $publicRoot 'manifest.v1.json'
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+Write-AionLog "Wrote manifest sourceHead=$repoHead"
 
-# ACLs: install root — Administrators + SYSTEM full; Users read/execute only (no write)
-function Set-ProtectedAcls([string]$Path, [switch]$State) {
+# ACLs
+function Clear-And-SetAcl([string]$Path, [System.Security.AccessControl.FileSystemAccessRule[]]$Rules) {
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $false)
-    $rules = @()
-    $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
-        'NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
-        'BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    if ($State) {
-        # Service account needs write on state
-        $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
-            'NT AUTHORITY\LOCAL SERVICE', 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
-            'NT AUTHORITY\NETWORK SERVICE', 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    } else {
-        $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
-            'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    }
-    # Owner interactive user read on approval root (for Owner UI process)
-    $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if ($State) {
-        $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $owner, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    }
-    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-    foreach ($r in $rules) { $acl.AddAccessRule($r) }
+    foreach ($a in @($acl.Access)) { [void]$acl.RemoveAccessRule($a) }
+    foreach ($r in $Rules) { $acl.AddAccessRule($r) }
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
-Write-AionLog 'Applying install root ACLs'
-Set-ProtectedAcls -Path $InstallRoot
-Write-AionLog 'Applying state root ACLs'
-Set-ProtectedAcls -Path $StateRoot -State
+$inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+$prop = [System.Security.AccessControl.PropagationFlags]::None
 
-# Tighten key files: remove Users if any
-foreach ($sensitive in @($keyPath, $sessionKeyPath, $manifestPath)) {
+# Install root: SYSTEM/Admins full; Users RX; no User write
+$installRules = @(
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl',$inherit,$prop,'Allow')),
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl',$inherit,$prop,'Allow')),
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Users','ReadAndExecute',$inherit,$prop,'Allow'))
+)
+Clear-And-SetAcl -Path $InstallRoot -Rules $installRules
+Write-AionLog 'Applied install-root ACLs'
+
+# Private root: SYSTEM + Admins full; NO ordinary User; service SID added after service create
+$privateRules = @(
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl',$inherit,$prop,'Allow')),
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl',$inherit,$prop,'Allow'))
+)
+Clear-And-SetAcl -Path $privateRoot -Rules $privateRules
+Write-AionLog 'Applied private-root ACLs (pre-service SID)'
+
+# Public root: SYSTEM/Admins full; Users RX only
+$publicRules = @(
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl',$inherit,$prop,'Allow')),
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl',$inherit,$prop,'Allow')),
+    (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Users','ReadAndExecute',$inherit,$prop,'Allow'))
+)
+Clear-And-SetAcl -Path $publicRoot -Rules $publicRules
+
+# Sensitive private files: SYSTEM + Admins only until service SID granted on directory
+foreach ($sensitive in @($privateKey, $privateSession)) {
     $acl = Get-Acl -LiteralPath $sensitive
     $acl.SetAccessRuleProtection($true, $false)
-    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-    foreach ($id in @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $id, 'FullControl', 'Allow')))
-    }
-    $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $owner, 'Read', 'Allow')))
-    # LocalSystem service host needs key read
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-        'NT AUTHORITY\SYSTEM', 'FullControl', 'Allow')))
+    foreach ($a in @($acl.Access)) { [void]$acl.RemoveAccessRule($a) }
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl','Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl','Allow')))
     Set-Acl -LiteralPath $sensitive -AclObject $acl
 }
 
-# Register service (LocalSystem for constrained elevated templates; no password stored)
+# Create service under virtual service account (no password)
 $binPath = '"{0}"' -f (Join-Path $InstallRoot 'bin\aion-elevated-broker.exe')
-Write-AionLog "Creating service $ServiceName binPath=$binPath"
-$create = sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= 'AION Elevated Operator Broker'
+Write-AionLog "Creating service $ServiceName as NT SERVICE\$ServiceName"
+$create = & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= 'AION Elevated Operator Broker' obj= "NT SERVICE\$ServiceName"
 Write-AionLog "sc create: $create"
-sc.exe description $ServiceName 'AION constrained elevated operator broker — local named pipe only; no public listener' | Out-Null
-# Prefer virtual service account when supported; fall back stays LocalSystem
-$cfg = sc.exe config $ServiceName obj= 'LocalSystem'
-Write-AionLog "sc config account: $cfg"
+if ("$create" -notmatch 'SUCCESS') {
+    # Some Windows builds need create then config
+    & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= 'AION Elevated Operator Broker' | Out-Null
+    $cfg = & sc.exe config $ServiceName obj= "NT SERVICE\$ServiceName" password= ""
+    Write-AionLog "sc config: $cfg"
+    if ("$cfg" -notmatch 'SUCCESS') {
+        throw "Failed to set service account to NT SERVICE\$ServiceName - refusing LocalSystem fallback"
+    }
+}
+& sc.exe description $ServiceName 'AION constrained elevated operator broker R6.5.2 - private trust state; no public listener' | Out-Null
+
+# Grant service SID modify on private root
+$svcSidAccount = "NT SERVICE\$ServiceName"
+try {
+    $acl = Get-Acl -LiteralPath $privateRoot
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $svcSidAccount, 'Modify', $inherit, $prop, 'Allow')))
+    Set-Acl -LiteralPath $privateRoot -AclObject $acl
+    foreach ($sensitive in @($privateKey, $privateSession)) {
+        $acl = Get-Acl -LiteralPath $sensitive
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $svcSidAccount, 'Read', 'Allow')))
+        Set-Acl -LiteralPath $sensitive -AclObject $acl
+    }
+    # Inbox: Admins write (elevated helper), service modify
+    $inbox = Join-Path $privateRoot 'owner-approval-inbox'
+    $iacl = Get-Acl -LiteralPath $inbox
+    $iacl.SetAccessRuleProtection($true, $false)
+    foreach ($a in @($iacl.Access)) { [void]$iacl.RemoveAccessRule($a) }
+    $iacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM','FullControl',$inherit,$prop,'Allow')))
+    $iacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators','FullControl',$inherit,$prop,'Allow')))
+    $iacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($svcSidAccount,'Modify',$inherit,$prop,'Allow')))
+    Set-Acl -LiteralPath $inbox -AclObject $iacl
+    Write-AionLog "Granted $svcSidAccount access to private root"
+} catch {
+    throw "Failed to grant service SID private ACLs: $($_.Exception.Message)"
+}
+
+# Verify not LocalSystem
+$acct = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").StartName
+Write-AionLog "Service StartName=$acct"
+if ($acct -match 'LocalSystem|LocalSystem') {
+    if ($acct -eq 'LocalSystem') { throw 'Service is LocalSystem - refusing to start' }
+}
+if ($acct -eq 'LocalSystem') { throw 'Service is LocalSystem - refusing to start' }
 
 Write-AionLog 'Starting service'
 Start-Service -Name $ServiceName
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 4
 $svc = Get-Service -Name $ServiceName
 Write-AionLog "Service status=$($svc.Status)"
+if ($svc.Status -ne 'Running') {
+    # capture log tail non-secret
+    $slog = Join-Path $publicRoot 'audit\service.log'
+    if (Test-Path $slog) { Get-Content $slog -Tail 20 | ForEach-Object { Write-AionLog "svc: $_" } }
+    throw "Service failed to run: $($svc.Status)"
+}
 
-# Controlled restart proof
-Write-AionLog 'Controlled service restart'
+# Controlled restart
 Restart-Service -Name $ServiceName -Force
 Start-Sleep -Seconds 4
 $svc2 = Get-Service -Name $ServiceName
 Write-AionLog "Service status after restart=$($svc2.Status)"
+if ($svc2.Status -ne 'Running') { throw "Service failed after restart" }
 
-if ($svc2.Status -ne 'Running') {
-    throw "Service failed to run after install/restart: $($svc2.Status)"
-}
+$finalAcct = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").StartName
+if ($finalAcct -eq 'LocalSystem') { throw 'Post-start LocalSystem detected' }
 
-# Result marker
 $result = [ordered]@{
-    ok              = $true
-    serviceName     = $ServiceName
-    serviceStatus   = "$($svc2.Status)"
-    installRoot     = $InstallRoot
-    stateRoot       = $StateRoot
-    sourceHead      = $staging.sourceHead
+    ok = $true
+    serviceName = $ServiceName
+    serviceStatus = "$($svc2.Status)"
+    serviceAccount = $finalAcct
+    installRoot = $InstallRoot
+    stateRoot = $StateRoot
+    privateRoot = $privateRoot
+    publicRoot = $publicRoot
+    sourceHead = $repoHead
     artifactVersion = $staging.artifactVersion
-    installedAtUtc  = $manifest.installedAtUtc
-    uacDisabled     = $false
+    installedAtUtc = $manifest.installedAtUtc
+    uacDisabled = $false
     ownerPasswordStored = $false
+    trustBoundary = 'r652-private-owner-helper'
+    compromisedKeysReused = $false
 }
-$resultPath = Join-Path $StateRoot 'install-result.v1.json'
-[IO.File]::WriteAllText($resultPath, ($result | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $publicRoot 'install-result.v1.json'), ($result | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 Write-AionLog 'INSTALL_OK'
 Write-Output ($result | ConvertTo-Json)
 exit 0

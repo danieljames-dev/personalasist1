@@ -1,20 +1,26 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { type CapabilityEnvelopeV1, DelegatedOperatorError } from "./contracts.js";
 import { envelopeDigest } from "./envelope.js";
 import type { OperatorHost } from "./host.js";
 
 /**
- * Loopback-only Owner authorization UI (INACTIVE for real authority in R6.5).
+ * Loopback-only Owner authorization UI.
  * Never binds 0.0.0.0 / :: / public interfaces.
  *
- * R6.5-R1 M-6: approval POST binds exact displayed envelope digest + one-time nonce.
+ * R6.5-R2 M-6: approval POST binds exact displayed envelope digest + one-time nonce.
+ * R6.5.2: when requireElevatedOwnerHelper, AUTHORIZE launches UAC helper and does not
+ * mint proofs in-process under the ordinary user (private key is broker-only).
  */
 
 export interface OwnerUiOptions {
   readonly host: OperatorHost;
   readonly getPendingEnvelope: (authorizationId: string) => CapabilityEnvelopeV1 | null;
   readonly port?: number;
+  /** When true, AUTHORIZE spawns elevated helper instead of host.ownerAuthorize. */
+  readonly requireElevatedOwnerHelper?: boolean;
+  readonly ownerApprovalHelperPath?: string;
 }
 
 export class OwnerAuthorizationUi {
@@ -22,12 +28,16 @@ export class OwnerAuthorizationUi {
   private readonly host: OperatorHost;
   private readonly getPending: OwnerUiOptions["getPendingEnvelope"];
   private readonly port: number;
+  private readonly requireElevatedOwnerHelper: boolean;
+  private readonly ownerApprovalHelperPath: string;
   private csrfToken = randomBytes(24).toString("hex");
 
   constructor(options: OwnerUiOptions) {
     this.host = options.host;
     this.getPending = options.getPendingEnvelope;
     this.port = options.port ?? 0;
+    this.requireElevatedOwnerHelper = options.requireElevatedOwnerHelper === true;
+    this.ownerApprovalHelperPath = options.ownerApprovalHelperPath ?? "";
   }
 
   async listenLoopbackOnly(): Promise<{ port: number; baseUrl: string }> {
@@ -132,14 +142,68 @@ export class OwnerAuthorizationUi {
           return;
         }
         if (decision === "AUTHORIZE") {
+          if (!submittedDigest || !approvalNonce) {
+            json(res, 409, {
+              ok: false,
+              error: "Owner approval requires exact envelopeDigest and approvalNonce",
+              founderAuthoritative: true,
+            });
+            return;
+          }
+          if (this.requireElevatedOwnerHelper) {
+            if (!this.ownerApprovalHelperPath) {
+              json(res, 500, { ok: false, error: "Owner approval helper path not configured" });
+              return;
+            }
+            const pending = this.getPending(id);
+            if (!pending) {
+              json(res, 404, { ok: false, error: "Unknown pending authorization" });
+              return;
+            }
+            // Launch elevated helper — Owner must click UAC YES. No in-process mint.
+            try {
+              spawn(
+                this.ownerApprovalHelperPath,
+                [
+                  `--authorizationId=${id}`,
+                  `--envelopeDigest=${submittedDigest}`,
+                  `--approvalNonce=${approvalNonce}`,
+                  `--directiveId=${pending.directiveId}`,
+                  `--repositoryRoot=${pending.repositoryRoot}`,
+                ],
+                {
+                  detached: true,
+                  stdio: "ignore",
+                  windowsHide: false,
+                },
+              ).unref();
+            } catch (error) {
+              json(res, 500, {
+                ok: false,
+                error: error instanceof Error ? error.message : "helper launch failed",
+              });
+              return;
+            }
+            json(res, 202, {
+              ok: true,
+              decision: "AUTHORIZE_PENDING_UAC",
+              needsElevatedOwnerHelper: true,
+              activationMode: this.host.activationMode,
+              realApprovalRootActivated: true,
+              authorizationId: id,
+              founderAuthoritative: true,
+              founderFallbackAvailable: true,
+            });
+            return;
+          }
           try {
-            // M-6: Owner must approve the exact digest that was displayed
+            // Synthetic/test path: in-process Owner presence (never for live private key)
             const env = this.host.ownerAuthorize(id, submittedDigest, approvalNonce);
             json(res, 200, {
               ok: true,
               decision: "AUTHORIZE",
               activationMode: this.host.activationMode,
-              realApprovalRootActivated: false,
+              realApprovalRootActivated: this.host.activationMode === "activated",
               authorizationId: env.authorizationId,
               envelopeDigest: envelopeDigest(env),
               founderAuthoritative: true,
@@ -191,7 +255,8 @@ body{font-family:system-ui,sans-serif;max-width:720px;margin:2rem auto;padding:0
 code{font-size:.8rem;word-break:break-all}.banner{background:#402010;padding:.75rem;border-radius:8px;margin-bottom:1rem}
 </style></head><body>
 <div class="banner"><strong>R6.5 INACTIVE MODE</strong> — UI is not a Founder-replacing root.
-Founder remains authoritative. activationMode=${esc(activationMode)}. realApprovalRootActivated=NO.</div>
+Founder remains authoritative (breakglass). activationMode=${esc(activationMode)}.
+Live approval requires elevated Owner Approval Helper (UAC), not a user-readable key.</div>
 <h1>AION MILESTONE AUTHORIZATION</h1>
 <div class="card">
 <p><strong>Milestone</strong><br/>${esc(envelope.directiveId)}</p>
