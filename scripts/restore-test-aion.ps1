@@ -25,7 +25,10 @@
     Full 40-character commit SHA the restored clone must check out. Required.
 
 .PARAMETER BackupRoot
-    Approved external backup root. Default: D:\AION-backups
+    Approved external backup root. Default: D:\AION-backups (accepted laptop layout).
+    May be any absolute path on a mounted drive. DryRun does not require the default
+    drive to exist. A real restore never creates or substitutes BackupRoot; missing
+    required backup material fails closed.
 
 .PARAMETER RestoreTestsRoot
     Where isolated restores are created. Default: <BackupRoot>\restore-tests
@@ -43,10 +46,15 @@
 
 .PARAMETER DryRun
     Report the planned actions and exit without cloning, installing, or verifying.
+    Safe when the default BackupRoot drive is absent; does not create paths.
 
 .EXAMPLE
-    # Standalone dry run
+    # Standalone dry run (portable even when D: is missing)
     .\scripts\restore-test-aion.ps1 -ExpectedCommit 527ba4b5490b5c60233f77dd3ac5499312eb00fd -DryRun
+
+.EXAMPLE
+    # Explicit alternate backup root
+    .\scripts\restore-test-aion.ps1 -ExpectedCommit 527ba4b5490b5c60233f77dd3ac5499312eb00fd -BackupRoot E:\AION-backups -DryRun
 
 .EXAMPLE
     # Standalone real restore test
@@ -54,6 +62,8 @@
 
 .NOTES
     Windows PowerShell 5.1 compatible. No external modules. No scheduling.
+    PowerShell Join-Path throws DriveNotFoundException when a drive letter is not
+    mounted; BackupRoot-derived paths therefore use .NET Path.Combine.
 #>
 
 [CmdletBinding()]
@@ -79,6 +89,30 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Step { param([string]$Message) Write-Host "  [restore] $Message" }
 function Write-Fail { param([string]$Message) Write-Host "  [restore] FAIL: $Message" -ForegroundColor Red }
+
+# Join path segments without requiring the base drive to be mounted.
+# Windows PowerShell 5.1 Join-Path throws DriveNotFoundException for missing drives.
+function Join-AionPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Base,
+        [Parameter(Mandatory = $true)][string]$Child
+    )
+    return [System.IO.Path]::Combine($Base, $Child)
+}
+
+# Existence check that does not throw when a path's drive letter is absent.
+function Test-AionPathExists {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $root = [System.IO.Path]::GetPathRoot($Path)
+        if (-not [string]::IsNullOrEmpty($root) -and -not [System.IO.Directory]::Exists($root)) {
+            return $false
+        }
+        return [System.IO.Directory]::Exists($Path) -or [System.IO.File]::Exists($Path)
+    } catch {
+        return $false
+    }
+}
 
 # Runs git and throws on a non-zero exit code.
 # stderr is deliberately NOT redirected: git writes progress there, and merging it in
@@ -106,24 +140,25 @@ function Invoke-Logged {
 }
 
 # ---------------------------------------------------------------------------
-# Resolve defaults
+# Resolve defaults (string assembly only — no drive access required)
 # ---------------------------------------------------------------------------
 
 if (-not $Timestamp)        { $Timestamp        = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'") }
-if (-not $MirrorPath)       { $MirrorPath       = Join-Path $BackupRoot 'repository-mirror\AION.git' }
-if (-not $RestoreTestsRoot) { $RestoreTestsRoot = Join-Path $BackupRoot 'restore-tests' }
+if (-not $MirrorPath)       { $MirrorPath       = Join-AionPath $BackupRoot 'repository-mirror\AION.git' }
+if (-not $RestoreTestsRoot) { $RestoreTestsRoot = Join-AionPath $BackupRoot 'restore-tests' }
 if (-not $ActiveRepositoryPath) {
     # Used only to resolve the authoritative expected-count file when ExpectedTests is defaulted.
+    # The active repository lives on a mounted volume; Resolve-Path is appropriate here.
     $ActiveRepositoryPath = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 }
 if ($ExpectedTests -lt 0) {
     $ExpectedTests = Get-AionExpectedVerifyPassCount -RepositoryPath $ActiveRepositoryPath
 }
 
-$restoreDir = Join-Path $RestoreTestsRoot "restore-$Timestamp"
-$logDir     = Join-Path $BackupRoot 'logs'
-$logFile    = Join-Path $logDir "restore-$Timestamp.log"
-$resultFile = Join-Path $logDir "restore-$Timestamp.result.json"
+$restoreDir = Join-AionPath $RestoreTestsRoot "restore-$Timestamp"
+$logDir     = Join-AionPath $BackupRoot 'logs'
+$logFile    = Join-AionPath $logDir "restore-$Timestamp.log"
+$resultFile = Join-AionPath $logDir "restore-$Timestamp.result.json"
 
 $result = [ordered]@{
     schema             = 'aion.restore-test.v1'
@@ -196,8 +231,11 @@ try {
     Write-Host ''
     Write-Host "AION restore test  ($Timestamp)"
     Write-Host "--------------------------------------------------------------"
+    Write-Step "backup root: $BackupRoot"
+    Write-Step "dry run    : $([bool]$DryRun)"
 
     # Gate: never restore into or beneath the active working repository.
+    # GetFullPath is string-only for absolute paths and does not require the drive mounted.
     if ($ActiveRepositoryPath) {
         $activeFull  = [System.IO.Path]::GetFullPath($ActiveRepositoryPath).TrimEnd('\')
         $restoreFull = [System.IO.Path]::GetFullPath($restoreDir).TrimEnd('\')
@@ -208,11 +246,11 @@ try {
     }
 
     # Gate: the restore directory must be new. Never reuse or overwrite.
-    if (Test-Path $restoreDir) { throw "Restore directory already exists: $restoreDir" }
+    # Use drive-safe existence (PowerShell Test-Path throws DriveNotFound for missing drives).
+    if (Test-AionPathExists $restoreDir) { throw "Restore directory already exists: $restoreDir" }
 
-    # Gate: the mirror must exist.
-    if (-not $DryRun -and -not (Test-Path $MirrorPath)) { throw "Mirror not found: $MirrorPath" }
-
+    # DryRun reports the plan without requiring BackupRoot or its drive to exist.
+    # Recovery is not weakened: real restores still fail closed below when material is missing.
     if ($DryRun) {
         Write-Step "DRY RUN - no clone, no install, no verification"
         Write-Step "would clone : $MirrorPath"
@@ -237,11 +275,20 @@ try {
         Write-Step "would run   : npm run aion:test (local assistant, architecture, and Command Center suites)"
         Write-Step "would run   : npm run aion:demo (complete synthetic V1 product proof, reload, and rerun)"
         $result.outcome = 'DRY-RUN'
-        Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed'
+        Add-Step 'dry-run' 'PASS' 'planned actions reported; nothing executed; BackupRoot drive not required'
         Write-Host ''
         return
     }
 
+    # Real restore: fail closed. Never create or substitute BackupRoot.
+    if (-not (Test-AionPathExists $BackupRoot)) {
+        throw "Backup root not found (refusing to create or substitute): $BackupRoot"
+    }
+    if (-not (Test-AionPathExists $MirrorPath)) {
+        throw "Mirror not found: $MirrorPath"
+    }
+
+    # logs/ and restore-tests/ may be created under an existing BackupRoot only.
     New-Item -ItemType Directory -Path $logDir          -Force | Out-Null
     New-Item -ItemType Directory -Path $RestoreTestsRoot -Force | Out-Null
 
@@ -640,26 +687,31 @@ catch {
     Write-Fail $result.failureReason
 }
 finally {
-    # Evidence is always written for real runs, for failures as well as successes.
-    # A dry run writes nothing at all, including no evidence file.
+    # Evidence is always written for real runs, for failures as well as successes,
+    # when BackupRoot exists. A dry run writes nothing. A missing BackupRoot fails
+    # closed without creating a substitute root for evidence files.
     if ($DryRun) {
         Write-Host "  [restore] dry run complete - no files written"
         Write-Host ''
     }
+    elseif (Test-AionPathExists $BackupRoot) {
+        if (-not (Test-AionPathExists $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        $json = $result | ConvertTo-Json -Depth 8
+        Set-Content -Path $resultFile -Value $json -Encoding utf8
+        Set-Content -Path $logFile -Value @(
+            "AION restore test $Timestamp",
+            "mirror   : $MirrorPath",
+            "expected : $ExpectedCommit",
+            "restored : $restoreDir",
+            "outcome  : $($result.outcome)",
+            "reason   : $($result.failureReason)"
+        ) -Encoding utf8
+        Write-Host "  [restore] result : $resultFile"
+        Write-Host ''
+    }
     else {
-    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-    $json = $result | ConvertTo-Json -Depth 8
-    Set-Content -Path $resultFile -Value $json -Encoding utf8
-    Set-Content -Path $logFile -Value @(
-        "AION restore test $Timestamp",
-        "mirror   : $MirrorPath",
-        "expected : $ExpectedCommit",
-        "restored : $restoreDir",
-        "outcome  : $($result.outcome)",
-        "reason   : $($result.failureReason)"
-    ) -Encoding utf8
-    Write-Host "  [restore] result : $resultFile"
-    Write-Host ''
+        Write-Host "  [restore] no evidence files written (BackupRoot unavailable): $BackupRoot"
+        Write-Host ''
     }
 }
 
