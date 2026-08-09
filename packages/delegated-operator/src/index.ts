@@ -23,6 +23,7 @@ export * from "./nested-gates.js";
 export * from "./host.js";
 export * from "./owner-ui.js";
 export * from "./factory.js";
+export * from "./elevated-broker.js";
 
 export const R65_PRODUCTION_DEFAULTS = {
   realApprovalRootActivated: false,
@@ -31,4 +32,10 @@ export const R65_PRODUCTION_DEFAULTS = {
   readyForRealAuthority: false,
   readyForRealMigration: false,
   desktopRemainsNonPrimary: true,
+  elevatedBrokerInstalled: false,
+  elevatedBrokerActivated: false,
+  unattendedRoutineElevationAfterFutureActivation: true,
+  uacDisabled: false,
+  ownerPasswordStored: false,
+  arbitraryElevatedPowerShellExposed: false,
 } as const;

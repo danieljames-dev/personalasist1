@@ -639,8 +639,18 @@ export class FileOwnerAuthorityAnchorV2 {
       try {
         record = await this.readRecord(epoch, trustedOwner);
       } catch (error) {
-        // Canonical filename present but body unusable → still refuse authority (fail closed).
+        // R6.4 LOW / R6.5: preserve typed cryptographic failures for historical records.
+        // Do not collapse INVALID_SIGNATURE / INVALID_OWNER_KEY into MALFORMED_RECORD.
+        // evaluate() maps signature/ownerKey messages to specific reason codes.
+        if (error instanceof AuthorityLedgerIntegrityError) throw error;
         const message = error instanceof Error ? error.message : "malformed ledger record";
+        if (/signature|Ed25519|recordDigest validation failed/i.test(message)) {
+          throw error instanceof Error ? error : new Error(message);
+        }
+        if (/ownerKeyId does not match|trusted Owner key/i.test(message)) {
+          throw error instanceof Error ? error : new Error(message);
+        }
+        // Structural/syntax unreadable → MALFORMED_RECORD (still fail-closed).
         failLedger(
           "MALFORMED_RECORD",
           `Authority ledger record at epoch ${epoch} is malformed or unreadable: ${message}`,

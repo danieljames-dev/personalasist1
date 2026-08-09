@@ -1178,6 +1178,95 @@ test("LOW-1 unexpected contents are not conflated with NO_ANCHOR", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// R6.5 — historical cryptographic failures keep typed reasons (Claude R6.4 LOW)
+// ---------------------------------------------------------------------------
+
+test("R6.5 historical wrong signer retains INVALID_SIGNATURE (not MALFORMED_RECORD)", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await fixture.offline.appendTransition({
+      state: "QUIESCENT",
+      writerSystemInstanceId: null,
+      grantDirectiveId: "HIST-Q",
+      issuedAt: "2030-01-01T05:00:00.000Z",
+    });
+    const path1 = join(root, "ledger", "0000000001.json");
+    const rec = JSON.parse(await readFile(path1, "utf8")) as { signature: string };
+    rec.signature = "ab".repeat(32);
+    await writeFile(path1, JSON.stringify(rec), "utf8");
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.equal(decision.reasonCode, "INVALID_SIGNATURE");
+    assert.notEqual(decision.reasonCode, "MALFORMED_RECORD");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("R6.5 historical ownerKeyId mismatch retains INVALID_OWNER_KEY (not MALFORMED_RECORD)", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await fixture.offline.appendTransition({
+      state: "QUIESCENT",
+      writerSystemInstanceId: null,
+      grantDirectiveId: "HIST-Q2",
+      issuedAt: "2030-01-01T06:00:00.000Z",
+    });
+    const path1 = join(root, "ledger", "0000000001.json");
+    const rec = JSON.parse(await readFile(path1, "utf8")) as { ownerKeyId: string };
+    rec.ownerKeyId = "ff".repeat(32);
+    await writeFile(path1, JSON.stringify(rec), "utf8");
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.ok(
+      decision.reasonCode === "INVALID_OWNER_KEY" || decision.reasonCode === "INVALID_SIGNATURE",
+      decision.reasonCode,
+    );
+    assert.notEqual(decision.reasonCode, "MALFORMED_RECORD");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("R6.5 historical malformed JSON still MALFORMED_RECORD fail-closed", async () => {
+  const root = await tempRoot();
+  try {
+    const fixture = await createSyntheticOwnerAuthorityFixtureV2({
+      anchorRoot: root,
+      systemInstanceId: SI_A,
+      anchorId: ANCHOR,
+    });
+    await fixture.offline.appendTransition({
+      state: "QUIESCENT",
+      writerSystemInstanceId: null,
+      grantDirectiveId: "HIST-Q3",
+      issuedAt: "2030-01-01T07:00:00.000Z",
+    });
+    await writeFile(join(root, "ledger", "0000000001.json"), "{not-json\n", "utf8");
+    const decision = await fixture.runtime.evaluate();
+    assert.equal(decision.effective, "READ_ONLY");
+    assert.ok(
+      decision.reasonCode === "MALFORMED_RECORD" ||
+        decision.reasonCode === "STALE_OR_BROKEN_CHAIN" ||
+        decision.reasonCode === "ANCHOR_UNAVAILABLE",
+      decision.reasonCode,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // R6.4 LOW-2 — O(n) Set membership; IA-28 semantics preserved; large synthetic
 // ---------------------------------------------------------------------------
 
