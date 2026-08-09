@@ -24,9 +24,19 @@ namespace Aion.ElevatedOperatorBroker
             CanStop = true;
             CanShutdown = true;
             AutoLog = true;
-            _installRoot = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            // Single-file publish: Assembly.Location is empty — use process path / BaseDirectory.
+            string baseDir = AppContext.BaseDirectory;
+            try
+            {
+                var main = Process.GetCurrentProcess().MainModule;
+                if (main != null && !string.IsNullOrEmpty(main.FileName))
+                    baseDir = Path.GetDirectoryName(main.FileName);
+            }
+            catch { /* keep AppContext.BaseDirectory */ }
+            _installRoot = baseDir;
             // bin\ -> install root
-            if (Path.GetFileName(_installRoot).Equals("bin", StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(_installRoot) &&
+                Path.GetFileName(_installRoot).Equals("bin", StringComparison.OrdinalIgnoreCase))
             {
                 _installRoot = Directory.GetParent(_installRoot).FullName;
             }
