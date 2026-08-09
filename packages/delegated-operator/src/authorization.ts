@@ -11,6 +11,7 @@ import { roleAllowsOperation, BUILDER_WRITE_OPERATIONS } from "./roles.js";
 import type { OwnerPresencePort } from "./owner-presence.js";
 import { agentMayTransition } from "./lifecycle.js";
 import type { AuthorizationLifecycleV1 } from "./contracts.js";
+import type { GitFactsV1, HostFactsV1, RepositoryFactsV1 } from "./facts-ports.js";
 
 export interface AuthorizationRecordV1 {
   readonly envelope: CapabilityEnvelopeV1;
@@ -20,15 +21,16 @@ export interface AuthorizationRecordV1 {
   readonly superseded: boolean;
 }
 
+/**
+ * Validation context carries TRUSTED OBSERVATIONS only.
+ * Callers of Host must not populate these from request body.
+ */
 export interface ValidationContextV1 {
   readonly nowUtc: string;
-  readonly machineName: string;
-  readonly machineRole: string;
-  readonly repositoryRoot: string;
-  readonly canonicalOrigin: string;
-  readonly headCommit: string;
+  readonly hostFacts: HostFactsV1;
+  readonly repoFacts: RepositoryFactsV1;
+  readonly gitFacts: GitFactsV1;
   readonly presence: OwnerPresencePort;
-  /** When set, this authorization id is known superseded in the store. */
   readonly isSupersededId?: (authorizationId: string) => boolean;
 }
 
@@ -49,7 +51,6 @@ export function validateAuthorizedEnvelope(
   envelope: CapabilityEnvelopeV1,
   ctx: ValidationContextV1,
 ): { readonly digest: string } {
-  // Re-parse to reject unknown fields if rehydrated loosely
   const reparsed = parseCapabilityEnvelope(envelope);
   const digest = envelopeDigest(reparsed);
 
@@ -65,57 +66,40 @@ export function validateAuthorizedEnvelope(
   if (ctx.isSupersededId?.(reparsed.authorizationId)) {
     throw new DelegatedOperatorError("superseded", "Authorization superseded");
   }
-  if (reparsed.machineName !== ctx.machineName) {
+
+  // EXPECTATION (envelope) vs OBSERVATION (trusted ports)
+  if (reparsed.machineName !== ctx.hostFacts.machineName) {
     throw new DelegatedOperatorError("wrong-machine", "Machine name binding mismatch");
   }
-  if (reparsed.machineRole !== ctx.machineRole) {
+  if (reparsed.machineRole !== ctx.hostFacts.machineRole) {
     throw new DelegatedOperatorError("wrong-machine-role", "Machine role binding mismatch");
   }
-  if (normalizePath(reparsed.repositoryRoot) !== normalizePath(ctx.repositoryRoot)) {
+  if (normalizePath(reparsed.repositoryRoot) !== normalizePath(ctx.repoFacts.repositoryRoot)) {
     throw new DelegatedOperatorError("wrong-repo", "Repository root binding mismatch");
   }
-  if (reparsed.canonicalOrigin !== ctx.canonicalOrigin) {
+  if (normalizePath(reparsed.repositoryRoot) !== normalizePath(ctx.gitFacts.repositoryRoot)) {
+    throw new DelegatedOperatorError("wrong-repo", "Git repository root observation mismatch");
+  }
+  if (reparsed.canonicalOrigin !== ctx.repoFacts.canonicalOrigin || reparsed.canonicalOrigin !== ctx.gitFacts.canonicalOrigin) {
     throw new DelegatedOperatorError("wrong-origin", "Canonical origin binding mismatch");
   }
-  if (!commitAllowed(reparsed, ctx.headCommit)) {
-    throw new DelegatedOperatorError("wrong-baseline", "Git HEAD not permitted by envelope baseline/range rules");
+  if (ctx.gitFacts.branch !== "main" && (reparsed.authorizedOperations.includes("git.push_canonical") || reparsed.authorizedOperations.includes("git.commit_forward"))) {
+    // Builder write/push on non-main refuses when policy assumes main
+    throw new DelegatedOperatorError("wrong-branch", `Observed branch '${ctx.gitFacts.branch}' is not main`);
   }
-  return { digest };
+
+  const head = ctx.gitFacts.headCommit;
+  if (head === reparsed.baselineCommit) {
+    return { digest };
+  }
+  if (reparsed.allowOrdinaryForwardCommits && ctx.gitFacts.isOrdinaryForwardFromBaseline) {
+    return { digest };
+  }
+  throw new DelegatedOperatorError("wrong-baseline", "Git HEAD not permitted by envelope baseline/range rules");
 }
 
 function normalizePath(p: string): string {
   return p.replace(/\//g, "\\").replace(/\\+$/u, "").toLowerCase();
-}
-
-function commitAllowed(envelope: CapabilityEnvelopeV1, head: string): boolean {
-  if (head === envelope.baselineCommit) return true;
-  // R6.5 library does not shell to git for ancestry; Host layer may refine.
-  // For pure validation: only exact baseline unless allowOrdinaryForwardCommits and
-  // caller supplies explicit allow list via head===baseline OR Host sets forwardOk.
-  // Default fail closed for non-equal when we cannot prove ancestry here.
-  if (envelope.allowOrdinaryForwardCommits) {
-    // Accept only if Host marked forward via special context is not available —
-    // keep strict equality for pure unit path; Host wraps with forward check.
-    return head === envelope.baselineCommit;
-  }
-  return false;
-}
-
-/** Host may call after verifying git merge-base ancestry. */
-export function validateAuthorizedEnvelopeAllowingForwardHead(
-  envelope: CapabilityEnvelopeV1,
-  ctx: ValidationContextV1,
-  headIsOrdinaryForwardFromBaseline: boolean,
-): { readonly digest: string } {
-  if (ctx.headCommit === envelope.baselineCommit) {
-    return validateAuthorizedEnvelope(envelope, ctx);
-  }
-  if (!envelope.allowOrdinaryForwardCommits || !headIsOrdinaryForwardFromBaseline) {
-    throw new DelegatedOperatorError("wrong-baseline", "HEAD not an allowed ordinary forward commit");
-  }
-  const loosened: ValidationContextV1 = { ...ctx, headCommit: envelope.baselineCommit };
-  // Verify binding against baseline equality path, while recording actual head separately by Host.
-  return validateAuthorizedEnvelope(envelope, loosened);
 }
 
 export function decideOperation(
@@ -144,6 +128,14 @@ export function decideOperation(
     if (!hostAllows(envelope, operation)) {
       return refuse(operation, agentRole, digest, "host-permission", "Host permission missing for operation");
     }
+    // For commit/push require observed ancestry when head != baseline
+    if (
+      (operation === "git.commit_forward" || operation === "git.push_canonical") &&
+      ctx.gitFacts.headCommit !== envelope.baselineCommit &&
+      !ctx.gitFacts.isOrdinaryForwardFromBaseline
+    ) {
+      return refuse(operation, agentRole, digest, "wrong-baseline", "Git ancestry observation is not ordinary-forward");
+    }
     return {
       outcome: "ALLOW",
       reasonCode: "allow",
@@ -161,7 +153,9 @@ export function decideOperation(
 
 function gitAllows(envelope: CapabilityEnvelopeV1, operation: OperationClassV1): boolean {
   const g = new Set(envelope.gitPermissions);
-  if (operation === "git.status" || operation === "git.diff" || operation === "repo.read") return g.has("read") || g.has("stage") || g.has("commit_forward") || g.has("push_canonical");
+  if (operation === "git.status" || operation === "git.diff" || operation === "repo.read") {
+    return g.has("read") || g.has("stage") || g.has("commit_forward") || g.has("push_canonical");
+  }
   if (operation === "git.stage") return g.has("stage") || g.has("commit_forward") || g.has("push_canonical");
   if (operation === "git.commit_forward") return g.has("commit_forward") || g.has("push_canonical");
   if (operation === "git.push_canonical") return g.has("push_canonical");
@@ -210,7 +204,6 @@ export function isBuilderWriteOp(operation: OperationClassV1): boolean {
   return BUILDER_WRITE_OPERATIONS.has(operation);
 }
 
-/** Detect tampering: any body change changes digest and invalidates prior proof. */
 export function proofBindsOnlyToDigest(envelope: CapabilityEnvelopeV1, presence: OwnerPresencePort): boolean {
   if (!envelope.approvalProof) return false;
   const digest = envelopeDigest(envelope);

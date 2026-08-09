@@ -60,6 +60,29 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+/** Strict closed UTC instant: YYYY-MM-DDTHH:mm:ss.sssZ only (no whitespace, no offsets). */
+export function requireCanonicalUtcTimestamp(value: unknown, field: string): string {
+  const s = requireString(value, field);
+  if (s !== s.trim() || /\s/.test(s)) {
+    throw new DelegatedOperatorError("invalid-timestamp", `${field} contains whitespace`);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(s)) {
+    throw new DelegatedOperatorError(
+      "invalid-timestamp",
+      `${field} must be canonical UTC form YYYY-MM-DDTHH:mm:ss.sssZ`,
+    );
+  }
+  const ms = Date.parse(s);
+  if (!Number.isFinite(ms)) {
+    throw new DelegatedOperatorError("invalid-timestamp", `${field} is not a valid instant`);
+  }
+  // Round-trip: Date.toISOString must match exactly (rejects invalid calendar components).
+  if (new Date(ms).toISOString() !== s) {
+    throw new DelegatedOperatorError("invalid-timestamp", `${field} is not a normalizable UTC instant`);
+  }
+  return s;
+}
+
 function requireBoolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") {
     throw new DelegatedOperatorError("envelope-invalid", `Invalid boolean field: ${field}`);
@@ -254,8 +277,8 @@ export function parseCapabilityEnvelope(input: unknown): CapabilityEnvelopeV1 {
     authorizedOperations,
     prohibitedOperations,
     riskClass: riskClass as RiskClassV1,
-    issuedAtUtc: requireString(rec.issuedAtUtc, "issuedAtUtc"),
-    expiresAtUtc: requireString(rec.expiresAtUtc, "expiresAtUtc"),
+    issuedAtUtc: requireCanonicalUtcTimestamp(rec.issuedAtUtc, "issuedAtUtc"),
+    expiresAtUtc: requireCanonicalUtcTimestamp(rec.expiresAtUtc, "expiresAtUtc"),
     completionLifecycle: "AWAITING_REVIEW",
     allowedLifecycleTransitions: parseEnumArray(rec.allowedLifecycleTransitions, "allowedLifecycleTransitions", AUTHORIZATION_LIFECYCLES_V1),
     gitPermissions: parseEnumArray(rec.gitPermissions, "gitPermissions", GIT_PERMISSIONS_V1) as GitPermissionV1[],
@@ -275,11 +298,26 @@ export function parseCapabilityEnvelope(input: unknown): CapabilityEnvelopeV1 {
     approvalProof: parseProof(rec.approvalProof),
   };
 
+  const issuedMs = Date.parse(envelope.issuedAtUtc);
+  const expiresMs = Date.parse(envelope.expiresAtUtc);
+  if (!Number.isFinite(issuedMs) || !Number.isFinite(expiresMs)) {
+    throw new DelegatedOperatorError("invalid-timestamp", "issuedAt/expiresAt not finite");
+  }
+  if (expiresMs <= issuedMs) {
+    throw new DelegatedOperatorError("invalid-timestamp", "expiresAtUtc must be strictly after issuedAtUtc");
+  }
+
   // Ensure closed catalogs are complete references (lint against drift)
   void OPERATION_CLASSES_V1;
   return envelope;
 }
 
 export function isExpired(envelope: CapabilityEnvelopeV1, nowUtcIso: string): boolean {
-  return Date.parse(nowUtcIso) >= Date.parse(envelope.expiresAtUtc);
+  const now = Date.parse(nowUtcIso);
+  const exp = Date.parse(envelope.expiresAtUtc);
+  if (!Number.isFinite(now) || !Number.isFinite(exp)) {
+    // Fail closed: treat as expired if clocks cannot be interpreted.
+    return true;
+  }
+  return now >= exp;
 }

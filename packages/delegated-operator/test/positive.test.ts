@@ -11,7 +11,6 @@ import {
   syntheticHost,
   sampleEnvelope,
   approveAndRun,
-  BASELINE,
 } from "./helpers.js";
 
 test("GROK_BUILD positive mediated path", () => {
@@ -47,7 +46,6 @@ test("GROK_BUILD positive mediated path", () => {
         "GROK_BUILD",
         authorizationId,
         env.repositoryRoot,
-        BASELINE,
       );
       assert.equal(decision.outcome, "ALLOW", op);
       assert.notEqual(effect, "none", op);
@@ -81,7 +79,6 @@ test("CLAUDE_AUDITOR positive read/test/temp/handoff", () => {
         "CLAUDE_AUDITOR",
         authorizationId,
         env.repositoryRoot,
-        BASELINE,
       );
       assert.equal(decision.outcome, "ALLOW", op);
     }
@@ -96,9 +93,9 @@ test("reboot resume exact authority", () => {
     const { host } = syntheticHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["repo.read", "host.reboot"], { allowReboot: true });
     const { authorizationId, sessionId } = approveAndRun(host, env);
-    const token = host.beginReboot(authorizationId, BASELINE);
+    const token = host.beginReboot(authorizationId);
     assert.equal(host.getStore().get(authorizationId)?.lifecycle, "REBOOT_PENDING");
-    host.resumeAfterReboot(token, authorizationId, BASELINE);
+    host.resumeAfterReboot(token, authorizationId);
     assert.equal(host.getStore().get(authorizationId)?.lifecycle, "RUNNING");
     const d = host.request(sessionId, {
       authorizationId,
@@ -106,7 +103,7 @@ test("reboot resume exact authority", () => {
       operation: "repo.read",
       repositoryRoot: env.repositoryRoot,
       args: {},
-    }, BASELINE);
+    });
     // session still bound in process memory after reboot simulation
     assert.equal(d.outcome, "ALLOW");
   } finally {
@@ -136,14 +133,18 @@ test("Owner UI synthetic authorize via loopback", async () => {
       assert.match(html, new RegExp(envelopeDigest(env)));
       assert.match(html, /INACTIVE MODE/);
       const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1];
+      const digestField = /name="envelopeDigest" value="([^"]+)"/.exec(html)?.[1];
+      const nonceField = /name="approvalNonce" value="([^"]+)"/.exec(html)?.[1];
       assert.ok(csrf);
+      assert.ok(digestField);
+      assert.ok(nonceField);
       const res = await fetch(`${baseUrl}/decision`, {
         method: "POST",
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           origin: "http://127.0.0.1",
         },
-        body: `csrf=${csrf}&authorizationId=${env.authorizationId}&decision=AUTHORIZE`,
+        body: `csrf=${csrf}&authorizationId=${env.authorizationId}&envelopeDigest=${digestField}&approvalNonce=${nonceField}&decision=AUTHORIZE`,
       });
       const body = await res.json() as { ok: boolean; realApprovalRootActivated: boolean };
       assert.equal(res.status, 200);

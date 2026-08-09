@@ -7,6 +7,8 @@ import type { OperatorHost } from "./host.js";
 /**
  * Loopback-only Owner authorization UI (INACTIVE for real authority in R6.5).
  * Never binds 0.0.0.0 / :: / public interfaces.
+ *
+ * R6.5-R1 M-6: approval POST binds exact displayed envelope digest + one-time nonce.
  */
 
 export interface OwnerUiOptions {
@@ -85,20 +87,26 @@ export class OwnerAuthorizationUi {
 
       if (req.method === "GET" && url.pathname === "/authorize") {
         const id = url.searchParams.get("authorizationId") ?? "";
-        // No secrets in URL beyond non-secret authorization id
         const envelope = this.getPending(id);
         if (!envelope) {
           res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
           res.end("<html><body>Unknown pending authorization</body></html>");
           return;
         }
-        const digest = envelopeDigest(envelope);
+        // M-6: challenge binds exact displayed digest + one-time nonce
+        const challenge = this.host.beginOwnerApprovalChallenge(id);
+        const digest = challenge.digest;
+        if (digest !== envelopeDigest(envelope)) {
+          res.writeHead(409, { "content-type": "text/plain" });
+          res.end("Digest inconsistency");
+          return;
+        }
         res.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
           "x-content-type-options": "nosniff",
         });
-        res.end(renderPage(envelope, digest, this.csrfToken, this.host.activationMode));
+        res.end(renderPage(envelope, digest, challenge.nonce, this.csrfToken, this.host.activationMode));
         return;
       }
 
@@ -113,6 +121,8 @@ export class OwnerAuthorizationUi {
         }
         const id = params.get("authorizationId") ?? "";
         const decision = params.get("decision") ?? "";
+        const submittedDigest = params.get("envelopeDigest") ?? "";
+        const approvalNonce = params.get("approvalNonce") ?? "";
         this.csrfToken = randomBytes(24).toString("hex");
         if (decision === "DENY") {
           this.host.ownerDeny(id);
@@ -121,13 +131,15 @@ export class OwnerAuthorizationUi {
         }
         if (decision === "AUTHORIZE") {
           try {
-            const env = this.host.ownerAuthorize(id);
+            // M-6: Owner must approve the exact digest that was displayed
+            const env = this.host.ownerAuthorize(id, submittedDigest, approvalNonce);
             json(res, 200, {
               ok: true,
               decision: "AUTHORIZE",
               activationMode: this.host.activationMode,
               realApprovalRootActivated: false,
               authorizationId: env.authorizationId,
+              envelopeDigest: envelopeDigest(env),
               founderAuthoritative: true,
             });
           } catch (error) {
@@ -158,6 +170,7 @@ export class OwnerAuthorizationUi {
 function renderPage(
   envelope: CapabilityEnvelopeV1,
   digest: string,
+  approvalNonce: string,
   csrf: string,
   activationMode: string,
 ): string {
@@ -195,10 +208,12 @@ Founder remains authoritative. activationMode=${esc(activationMode)}. realApprov
 <p><strong>Expires</strong>: ${esc(envelope.expiresAtUtc)}</p>
 <p><strong>Reboot</strong>: allowed=${envelope.rebootPolicy.allowed}, max=${envelope.rebootPolicy.maxReboots}</p>
 <p><strong>Nested Owner gates listed</strong>: ${esc(envelope.nestedOwnerGates.join(", ") || "(Host still enforces full catalog)")}</p>
-<p><strong>Canonical envelope digest</strong><br/><code>${esc(digest)}</code></p>
+<p><strong>Canonical envelope digest</strong><br/><code id="displayed-digest">${esc(digest)}</code></p>
 <form method="POST" action="/decision">
 <input type="hidden" name="csrf" value="${esc(csrf)}"/>
 <input type="hidden" name="authorizationId" value="${esc(envelope.authorizationId)}"/>
+<input type="hidden" name="envelopeDigest" value="${esc(digest)}"/>
+<input type="hidden" name="approvalNonce" value="${esc(approvalNonce)}"/>
 <button class="auth" type="submit" name="decision" value="AUTHORIZE">AUTHORIZE</button>
 <button class="deny" type="submit" name="decision" value="DENY">DENY</button>
 </form>

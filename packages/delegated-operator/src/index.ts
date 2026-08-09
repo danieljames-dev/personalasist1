@@ -24,6 +24,8 @@ export * from "./host.js";
 export * from "./owner-ui.js";
 export * from "./factory.js";
 export * from "./elevated-broker.js";
+export * from "./facts-ports.js";
+export * from "./replay-store.js";
 
 export const R65_PRODUCTION_DEFAULTS = {
   realApprovalRootActivated: false,

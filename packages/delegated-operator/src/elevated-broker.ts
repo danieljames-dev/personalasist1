@@ -1,8 +1,14 @@
 /**
- * AION Elevated Operator Broker (R6.5).
+ * AION Elevated Operator Broker (R6.5 / R6.5-R1).
  *
  * Implements constrained elevated-operation policy + local IPC contract.
  * REAL install/activation is OFF until R6.5.1 after independent audit.
+ *
+ * R6.5-R1:
+ * - BrokerIntegrityPort: expected digests from protected install state (M-3)
+ * - Protected install roots refuse ordinary write-capable ops (M-4)
+ * - DurableReplayStore survives broker restart (M-5)
+ * - ValidationContext observations from host/repo/git ports — never caller (M-1/M-7)
  *
  * Security:
  * - No arbitrary PowerShell/cmd/executable launch
@@ -13,6 +19,7 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { join } from "node:path";
 import {
   type AgentRoleV1,
   type CapabilityEnvelopeV1,
@@ -23,8 +30,22 @@ import { envelopeDigest } from "./envelope.js";
 import { decideOperation, type ValidationContextV1 } from "./authorization.js";
 import type { OwnerPresencePort } from "./owner-presence.js";
 import { roleAllowsOperation } from "./roles.js";
-import { digestCanonical, safeEqualHex } from "./canonical.js";
+import { digestCanonical } from "./canonical.js";
 import type { OperationClassV1 } from "./contracts.js";
+import {
+  type BrokerIntegrityPort,
+  type GitFactsPort,
+  type HostFactsPort,
+  type RepositoryFactsPort,
+  DEFAULT_PROTECTED_INSTALL_LAYOUT,
+  digestsMatch,
+  isPathUnderProtectedRoot,
+  ManifestBrokerIntegrityPort,
+  StaticGitFactsPort,
+  StaticHostFactsPort,
+  StaticRepositoryFactsPort,
+} from "./facts-ports.js";
+import { DurableReplayStore } from "./replay-store.js";
 
 export const BROKER_SCHEMA_VERSION = "aion.elevated-broker.request.v1" as const;
 export const BROKER_DEFAULTS = {
@@ -260,25 +281,41 @@ function mapToEnvelopeOperation(op: ElevatedBrokerOperationV1): OperationClassV1
     case "host.restart_authorized_service":
     case "process.authorized_start":
     case "process.authorized_stop":
-      return "host.reboot"; // requires planned host elevation class
+      return "host.reboot";
     default:
       return null;
   }
+}
+
+function isWriteCapableElevatedOp(op: ElevatedBrokerOperationV1): boolean {
+  return (
+    op === "filesystem.authorized_admin_write" ||
+    op === "repo.authorized_elevated_operation" ||
+    op === "process.authorized_start" ||
+    op === "process.authorized_stop" ||
+    op === "host.restart_authorized_service" ||
+    op === "docker.authorized_admin"
+  );
 }
 
 export interface ElevatedBrokerOptions {
   readonly brokerVersion: string;
   readonly activated: boolean;
   readonly installed: boolean;
-  readonly integrityMaterial: string;
   readonly presence: OwnerPresencePort;
-  readonly machineName: string;
-  readonly machineRole: string;
   readonly now?: () => string;
   /** Load envelope by authorizationId — broker validates independently. */
   readonly loadEnvelope: (authorizationId: string) => CapabilityEnvelopeV1 | null;
   readonly isSuperseded?: (authorizationId: string) => boolean;
-  readonly headCommitForRepo?: (repositoryRoot: string) => string;
+  /** Trusted observation ports (composition-owned; not request-supplied). */
+  readonly hostFacts: HostFactsPort;
+  readonly repositoryFacts: RepositoryFactsPort;
+  readonly gitFacts: GitFactsPort;
+  /** Independent integrity: expected from protected install, actual measured. */
+  readonly integrity: BrokerIntegrityPort;
+  /** Durable replay state directory (survives process restart). */
+  readonly replayStateDir: string;
+  readonly brokerInstanceId?: string;
 }
 
 /**
@@ -288,35 +325,52 @@ export interface ElevatedBrokerOptions {
 export class ElevatedOperatorBroker {
   readonly installed: boolean;
   readonly activated: boolean;
-  private readonly integrityMaterial: string;
   private readonly presence: OwnerPresencePort;
-  private readonly machineName: string;
-  private readonly machineRole: string;
   private readonly loadEnvelope: ElevatedBrokerOptions["loadEnvelope"];
   private readonly isSuperseded: (id: string) => boolean;
-  private readonly headCommitForRepo: (root: string) => string;
+  private readonly hostFacts: HostFactsPort;
+  private readonly repositoryFacts: RepositoryFactsPort;
+  private readonly gitFacts: GitFactsPort;
+  private readonly integrity: BrokerIntegrityPort;
+  private readonly replay: DurableReplayStore;
+  private readonly brokerInstanceId: string;
   private readonly now: () => string;
   private readonly brokerVersion: string;
   private readonly audit: ElevatedBrokerAuditEventV1[] = [];
-  private readonly seenRequestDigests = new Set<string>();
 
   constructor(options: ElevatedBrokerOptions) {
     this.installed = options.installed;
     this.activated = options.activated;
-    this.integrityMaterial = options.integrityMaterial;
     this.presence = options.presence;
-    this.machineName = options.machineName;
-    this.machineRole = options.machineRole;
     this.loadEnvelope = options.loadEnvelope;
     this.isSuperseded = options.isSuperseded ?? (() => false);
-    this.headCommitForRepo = options.headCommitForRepo ?? (() => "");
+    this.hostFacts = options.hostFacts;
+    this.repositoryFacts = options.repositoryFacts;
+    this.gitFacts = options.gitFacts;
+    this.integrity = options.integrity;
+    this.replay = new DurableReplayStore(options.replayStateDir);
+    this.brokerInstanceId = options.brokerInstanceId ?? "elevated-broker-v1";
     this.now = options.now ?? (() => new Date().toISOString());
     this.brokerVersion = options.brokerVersion;
   }
 
-  /** Startup integrity: fail closed if material empty/mismatched. */
-  verifyIntegrity(expectedMaterial: string): void {
-    if (!expectedMaterial || expectedMaterial !== this.integrityMaterial) {
+  /**
+   * Startup / request integrity: expected digests from protected install state
+   * compared to independently measured actual digests. Self-referential comparison forbidden.
+   */
+  verifyIntegrity(): void {
+    let expected: Readonly<Record<string, string>>;
+    let actual: Readonly<Record<string, string>>;
+    try {
+      expected = this.integrity.expectedDigests();
+      actual = this.integrity.measureActualDigests();
+    } catch (error) {
+      throw new DelegatedOperatorError(
+        "broker-integrity",
+        error instanceof Error ? error.message : "Broker integrity unavailable",
+      );
+    }
+    if (!digestsMatch(expected, actual)) {
       throw new DelegatedOperatorError("broker-integrity", "Broker integrity cannot be established");
     }
   }
@@ -346,28 +400,41 @@ export class ElevatedOperatorBroker {
     }
 
     if (!this.activated) {
-      // R6.5: policy may still be evaluated for tests in synthetic mode via activated=true synthetic instance.
-      // Production default activated=false → refuse real elevated execution.
-      // Synthetic tests construct broker with activated:true.
       this.record(request, "REFUSE", "not-activated");
       return refuse("not-activated", "Elevated broker is not activated (R6.5 inactive boundary)", false);
     }
 
     try {
-      this.verifyIntegrity(this.integrityMaterial);
+      this.verifyIntegrity();
     } catch (error) {
       return refuse("broker-integrity", error instanceof Error ? error.message : "integrity fail", false);
     }
 
-    // Replay protection on request body digest
-    const reqDigest = digestCanonical({
-      ...request,
-      args: Object.fromEntries(Object.entries(request.args).sort(([a], [b]) => a.localeCompare(b))),
-    });
-    if (this.seenRequestDigests.has(reqDigest)) {
-      return refuse("replay", "Stale/replayed broker request refused", false);
+    // M-4: refuse any write-capable op targeting protected install/state roots
+    if (isWriteCapableElevatedOp(request.operation)) {
+      const joined = JSON.stringify(request.args);
+      for (const v of Object.values(request.args)) {
+        if (isPathUnderProtectedRoot(v)) {
+          this.record(request, "REFUSE", "protected-install-root");
+          return refuse(
+            "protected-install-root",
+            "Write to OS-protected broker install/state root requires separate high-consequence maintenance envelope",
+            false,
+          );
+        }
+      }
+      if (
+        /Program Files\\AION\\ElevatedOperatorBroker|ProgramData\\AION\\ElevatedOperatorBroker/i.test(joined) ||
+        /broker|elevated-operator|AION-Elevated/i.test(joined)
+      ) {
+        this.record(request, "REFUSE", "broker-self-protect");
+        return refuse(
+          "broker-protected",
+          "Broker configuration/executable modification requires separate Owner maintenance envelope",
+          false,
+        );
+      }
     }
-    this.seenRequestDigests.add(reqDigest);
 
     const envelope = this.loadEnvelope(request.authorizationId);
     if (!envelope) {
@@ -383,25 +450,69 @@ export class ElevatedOperatorBroker {
     if (envelope.authorizationId !== request.authorizationId) {
       return refuse("auth-id", "authorizationId mismatch", false);
     }
-    if (normalize(envelope.machineName) !== normalize(this.machineName) || normalize(request.machineName) !== normalize(this.machineName)) {
+
+    let hostObs;
+    let repoObs;
+    let gitObs;
+    try {
+      hostObs = this.hostFacts.observe();
+      repoObs = this.repositoryFacts.observeBoundRepository();
+      gitObs = this.gitFacts.observe(envelope.baselineCommit, envelope.allowOrdinaryForwardCommits);
+    } catch (error) {
+      return refuse(
+        "facts-unavailable",
+        error instanceof Error ? error.message : "Trusted facts unavailable",
+        false,
+      );
+    }
+
+    if (
+      normalize(envelope.machineName) !== normalize(hostObs.machineName) ||
+      normalize(request.machineName) !== normalize(hostObs.machineName)
+    ) {
       return refuse("wrong-machine", "Machine binding mismatch", false);
     }
-    if (normalize(envelope.repositoryRoot) !== normalize(request.repositoryRoot)) {
-      return refuse("wrong-repo", "Repository binding mismatch", false);
+    if (normalize(envelope.repositoryRoot) !== normalize(repoObs.repositoryRoot)) {
+      return refuse("wrong-repo", "Repository binding mismatch (observed)", false);
+    }
+    if (normalize(request.repositoryRoot) !== normalize(repoObs.repositoryRoot)) {
+      return refuse("wrong-repo", "Request repository intent does not match observed root", false);
     }
     const actualDigest = envelopeDigest(envelope);
     if (request.envelopeDigest !== actualDigest) {
       return refuse("envelope-tamper", "Envelope digest mismatch (changed after approval)", false);
     }
 
-    const head = this.headCommitForRepo(envelope.repositoryRoot) || envelope.baselineCommit;
+    // M-5: durable anti-replay — consume BEFORE privileged execution
+    const reqDigest = digestCanonical({
+      ...request,
+      args: Object.fromEntries(Object.entries(request.args).sort(([a], [b]) => a.localeCompare(b))),
+    });
+    let consumed: boolean;
+    try {
+      consumed = this.replay.tryConsume({
+        authorizationId: request.authorizationId,
+        requestId: request.requestId,
+        requestDigest: reqDigest,
+        envelopeDigest: actualDigest,
+        sessionOrBrokerId: this.brokerInstanceId,
+      });
+    } catch (error) {
+      return refuse(
+        "replay-state-corrupt",
+        error instanceof Error ? error.message : "Replay state fail-closed",
+        false,
+      );
+    }
+    if (!consumed) {
+      return refuse("replay", "Stale/replayed broker request refused", false);
+    }
+
     const ctx: ValidationContextV1 = {
       nowUtc: this.now(),
-      machineName: this.machineName,
-      machineRole: this.machineRole,
-      repositoryRoot: envelope.repositoryRoot,
-      canonicalOrigin: envelope.canonicalOrigin,
-      headCommit: head,
+      hostFacts: hostObs,
+      repoFacts: repoObs,
+      gitFacts: gitObs,
       presence: this.presence,
       isSupersededId: this.isSuperseded,
     };
@@ -411,7 +522,6 @@ export class ElevatedOperatorBroker {
       return refuse("unknown-operation", "Operation cannot be mapped to envelope class", false);
     }
 
-    // CLAUDE cannot perform builder mutation elevated ops
     if (request.agentRole === "CLAUDE_AUDITOR") {
       if (
         request.operation === "filesystem.authorized_admin_write" ||
@@ -423,15 +533,6 @@ export class ElevatedOperatorBroker {
         this.record(request, "REFUSE", "auditor-mutation");
         return refuse("role-structural-deny", "CLAUDE_AUDITOR cannot request builder mutation elevated ops", false);
       }
-    }
-
-    // Broker self-protection: ordinary GROK repo.edit does not authorize broker config/binary changes
-    if (
-      request.operation === "filesystem.authorized_admin_write" &&
-      /broker|elevated-operator|AION-Elevated/i.test(JSON.stringify(request.args))
-    ) {
-      this.record(request, "REFUSE", "broker-self-protect");
-      return refuse("broker-protected", "Broker configuration/executable modification requires separate Owner maintenance envelope", false);
     }
 
     if (!roleAllowsOperation(request.agentRole, mapped)) {
@@ -478,12 +579,15 @@ export class ElevatedOperatorBroker {
     };
   }
 
+  static protectedInstallLayout() {
+    return DEFAULT_PROTECTED_INSTALL_LAYOUT;
+  }
+
   getAuditLog(): readonly ElevatedBrokerAuditEventV1[] {
     return this.audit;
   }
 
   private executeFixedTemplate(request: ElevatedBrokerRequestV1): { detail: string; resultDigest: string } {
-    // Broker owns scripts/templates; args are structured only.
     const payload = {
       op: request.operation,
       args: request.args,
@@ -577,17 +681,61 @@ export function createSyntheticActivatedBroker(options: {
   loadEnvelope: (id: string) => CapabilityEnvelopeV1 | null;
   isSuperseded?: (id: string) => boolean;
   headCommit?: string;
+  repositoryRoot?: string;
+  canonicalOrigin?: string;
+  replayStateDir: string;
+  integrityMaterial?: string;
 }): ElevatedOperatorBroker {
+  const root = options.repositoryRoot ?? "C:\\AION-HQ";
+  const origin = options.canonicalOrigin ?? "https://github.com/danieljames-dev/personalasist1.git";
+  const head = options.headCommit ?? "";
+  const material = options.integrityMaterial ?? "synthetic-integrity-v1";
+  const integrity = new ManifestBrokerIntegrityPort({ "synthetic": material }, () => ({ "synthetic": material }));
   return new ElevatedOperatorBroker({
-    brokerVersion: "0.1.0-r65",
+    brokerVersion: "0.1.0-r65r1",
     activated: true,
-    installed: false, // still not installed as OS service
-    integrityMaterial: "synthetic-integrity-v1",
+    installed: false,
     presence: options.presence,
-    machineName: options.machineName,
-    machineRole: options.machineRole,
     loadEnvelope: options.loadEnvelope,
     isSuperseded: options.isSuperseded ?? (() => false),
-    headCommitForRepo: () => options.headCommit ?? "",
+    hostFacts: new StaticHostFactsPort({ machineName: options.machineName, machineRole: options.machineRole }),
+    repositoryFacts: new StaticRepositoryFactsPort({
+      repositoryRoot: root,
+      canonicalOrigin: origin,
+      branch: "main",
+      headCommit: head || "0".repeat(40),
+    }),
+    gitFacts: new StaticGitFactsPort({
+      repositoryRoot: root,
+      headCommit: head || "0".repeat(40),
+      branch: "main",
+      canonicalOrigin: origin,
+      originMainCommit: head || null,
+      workingTreeClean: true,
+    }),
+    integrity,
+    replayStateDir: options.replayStateDir,
   });
 }
+
+/** Documented install packaging helper (does not install; pure planning). */
+export function planProtectedInstallCopy(sourceRoot: string): {
+  installRoot: string;
+  stateRoot: string;
+  subjects: string[];
+  note: string;
+} {
+  const layout = DEFAULT_PROTECTED_INSTALL_LAYOUT;
+  return {
+    installRoot: layout.installRoot,
+    stateRoot: layout.stateRoot,
+    subjects: [
+      join(layout.installRoot, layout.binaryRelative),
+      join(layout.installRoot, layout.policyRelative),
+      join(layout.installRoot, layout.serviceDefinitionRelative),
+    ],
+    note: `Copy reviewed/pinned artifacts from ${sourceRoot} into ${layout.installRoot}; store expected digests under ${layout.stateRoot}\\manifest.v1.json. Ordinary GROK_BUILD repo-write must not update these paths.`,
+  };
+}
+
+void join;

@@ -8,8 +8,6 @@ import {
   attachApproval,
   R65_PRODUCTION_DEFAULTS,
   OwnerAuthorizationUi,
-  OperatorHost,
-  SyntheticOwnerPresence,
   type CapabilityEnvelopeV1,
 } from "../src/index.js";
 import {
@@ -17,9 +15,8 @@ import {
   syntheticHost,
   inactiveHost,
   sampleEnvelope,
+  expiredEnvelope,
   approveAndRun,
-  BASELINE,
-  ROLE,
 } from "./helpers.js";
 
 test("production defaults: not activated, Founder authoritative", () => {
@@ -94,7 +91,7 @@ test("peer authorization: CLAUDE cannot open GROK session", () => {
     host.submitPending(env);
     host.ownerAuthorize(env.authorizationId);
     assert.throws(
-      () => host.openSession(env.authorizationId, "CLAUDE_AUDITOR", BASELINE),
+      () => host.openSession(env.authorizationId, "CLAUDE_AUDITOR"),
       /different role/,
     );
   } finally {
@@ -154,17 +151,14 @@ test("budget / ops / expiry widening invalidates digest", () => {
 test("wrong baseline refuses", () => {
   const { dir, cleanup } = tempStore();
   try {
-    const { host } = syntheticHost(dir);
+    // Caller-supplied HEAD is not trusted; host Git port observes unrelated commit
+    const { host } = syntheticHost(dir, undefined, {
+      headCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    });
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
-    const { sessionId, authorizationId } = approveAndRun(host, env);
-    const d = host.request(sessionId, {
-      authorizationId,
-      agentRole: "GROK_BUILD",
-      operation: "repo.read",
-      repositoryRoot: env.repositoryRoot,
-      args: {},
-    }, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-    assert.equal(d.outcome, "REFUSE");
+    host.submitPending(env);
+    host.ownerAuthorize(env.authorizationId);
+    assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /baseline|wrong-baseline/i);
   } finally {
     cleanup();
   }
@@ -173,18 +167,12 @@ test("wrong baseline refuses", () => {
 test("wrong machine refuses session", () => {
   const { dir, cleanup } = tempStore();
   try {
-    const presence = new SyntheticOwnerPresence();
-    const host = new OperatorHost({
-      storeDir: dir,
-      activationMode: "synthetic_test",
-      presence,
-      machineName: "OTHER-PC",
-      machineRole: ROLE,
-    });
+    // Host observes OTHER-PC; envelope expects DESKTOP-INLAQJQ
+    const { host } = syntheticHost(dir, undefined, { machineName: "OTHER-PC" });
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
     const approved = host.ownerAuthorize(env.authorizationId);
-    assert.throws(() => host.openSession(approved.authorizationId, "GROK_BUILD", BASELINE), /machine/i);
+    assert.throws(() => host.openSession(approved.authorizationId, "GROK_BUILD"), /machine/i);
   } finally {
     cleanup();
   }
@@ -194,12 +182,10 @@ test("expired approval refuses", () => {
   const { dir, cleanup } = tempStore();
   try {
     const { host } = syntheticHost(dir);
-    const env = sampleEnvelope("GROK_BUILD", ["repo.read"], {
-      expiresAtUtc: new Date(Date.now() - 1000).toISOString(),
-    });
+    const env = expiredEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
     host.ownerAuthorize(env.authorizationId);
-    assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD", BASELINE), /expir/i);
+    assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /expir/i);
   } finally {
     cleanup();
   }
@@ -217,7 +203,7 @@ test("superseded approval cannot be reused", () => {
     host.submitPending(env2);
     host.ownerAuthorize(env2.authorizationId);
     assert.equal(host.getStore().isSuperseded(first.authorizationId), true);
-    assert.throws(() => host.openSession(first.authorizationId, "GROK_BUILD", BASELINE), /superseded|not-active|lifecycle/i);
+    assert.throws(() => host.openSession(first.authorizationId, "GROK_BUILD"), /superseded|not-active|lifecycle/i);
   } finally {
     cleanup();
   }
@@ -234,7 +220,7 @@ test("deleted store does not create authority", () => {
     try {
       const h2 = syntheticHost(d2, presence).host;
       assert.equal(h2.getStore().listIds().length, 0);
-      assert.throws(() => h2.openSession(env.authorizationId, "GROK_BUILD", BASELINE), /not found|not-found/i);
+      assert.throws(() => h2.openSession(env.authorizationId, "GROK_BUILD"), /not found|not-found/i);
     } finally {
       c2();
     }
@@ -259,9 +245,9 @@ test("stale reboot token replay fails", () => {
     const { host } = syntheticHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["repo.read", "host.reboot"], { allowReboot: true });
     const { authorizationId } = approveAndRun(host, env);
-    const token = host.beginReboot(authorizationId, BASELINE);
-    host.resumeAfterReboot(token, authorizationId, BASELINE);
-    assert.throws(() => host.resumeAfterReboot(token, authorizationId, BASELINE), /replay|consumed/i);
+    const token = host.beginReboot(authorizationId);
+    host.resumeAfterReboot(token, authorizationId);
+    assert.throws(() => host.resumeAfterReboot(token, authorizationId), /replay|consumed/i);
   } finally {
     cleanup();
   }
@@ -281,7 +267,7 @@ test("concurrent builder write conflict", () => {
       operation: "repo.edit",
       repositoryRoot: a.repositoryRoot,
       args: {},
-    }, BASELINE);
+    });
     assert.equal(d1.outcome, "ALLOW");
     const d2 = host.request(sb.sessionId, {
       authorizationId: sb.authorizationId,
@@ -289,7 +275,7 @@ test("concurrent builder write conflict", () => {
       operation: "repo.edit",
       repositoryRoot: b.repositoryRoot,
       args: {},
-    }, BASELINE);
+    });
     assert.equal(d2.outcome, "REFUSE");
     assert.equal(d2.reasonCode, "writer-conflict");
   } finally {
@@ -322,7 +308,7 @@ test("auditor commit/push refused even if requested", () => {
         operation: op,
         repositoryRoot: env.repositoryRoot,
         args: {},
-      }, BASELINE);
+      });
       assert.equal(decision.outcome, "REFUSE");
     }
   } finally {
@@ -352,7 +338,7 @@ test("high-consequence intents always refuse under ordinary builder auth", () =>
         repositoryRoot: env.repositoryRoot,
         args: {},
         highConsequenceIntent: intent,
-      }, BASELINE);
+      });
       assert.equal(d.outcome, "REFUSE");
       assert.equal(d.reasonCode, "nested-owner-gate");
     }
@@ -424,7 +410,7 @@ test("session role swap refused", () => {
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
     host.ownerAuthorize(env.authorizationId);
-    const opened = host.openSession(env.authorizationId, "GROK_BUILD", BASELINE);
+    const opened = host.openSession(env.authorizationId, "GROK_BUILD");
     assert.throws(
       () => host.bindSession(opened.sessionId, opened.sessionToken, "CLAUDE_AUDITOR"),
       /role/i,
@@ -443,7 +429,7 @@ test("copy approval to other baseline fails openSession", () => {
     });
     host.submitPending(env);
     host.ownerAuthorize(env.authorizationId);
-    assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD", BASELINE), /baseline/i);
+    assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /baseline/i);
   } finally {
     cleanup();
   }

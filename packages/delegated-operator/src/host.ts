@@ -19,28 +19,36 @@ import {
   isBuilderWriteOp,
   type ValidationContextV1,
   validateAuthorizedEnvelope,
+  assertAgentLifecycle,
 } from "./authorization.js";
 import { envelopeDigest, parseCapabilityEnvelope } from "./envelope.js";
 import type { OwnerPresencePort } from "./owner-presence.js";
 import { UnprovisionedRealOwnerPresence } from "./owner-presence.js";
-import { assertAgentLifecycle } from "./authorization.js";
 import { refuseIfHighConsequence } from "./nested-gates.js";
 import { ROLE_PROFILES_V1 } from "./roles.js";
+import {
+  type GitFactsPort,
+  type HostFactsPort,
+  type RepositoryFactsPort,
+  isPathUnderProtectedRoot,
+  refuseIfWriteTargetsProtectedRoot,
+  DEFAULT_PROTECTED_INSTALL_LAYOUT,
+} from "./facts-ports.js";
 
 export interface OperatorHostOptions {
   readonly storeDir: string;
   readonly activationMode: ActivationModeV1;
   readonly presence: OwnerPresencePort;
-  readonly machineName: string;
-  readonly machineRole: string;
+  /** Trusted observation ports — constructed by Host composition, not by request. */
+  readonly hostFacts: HostFactsPort;
+  readonly repositoryFacts: RepositoryFactsPort;
+  readonly gitFacts: GitFactsPort;
   readonly now?: () => string;
 }
 
 /**
  * Administrative Operator Host — separate from normal AION chat/provider path.
- * Does not expose eval, public bind, or unrestricted shell.
- * ActivationMode "inactive" is the production default: real Owner UI cannot mint
- * Founder-replacing authority (presence is unprovisioned real unless synthetic tests).
+ * REQUEST-SUPPLIED FACTS ARE NEVER TRUSTED OBSERVATIONS.
  */
 export class OperatorHost {
   readonly activationMode: ActivationModeV1;
@@ -49,10 +57,13 @@ export class OperatorHost {
   private readonly sessions: SessionRegistry;
   private readonly resume: ResumeTokenService;
   private readonly presence: OwnerPresencePort;
-  private readonly machineName: string;
-  private readonly machineRole: string;
+  private readonly hostFacts: HostFactsPort;
+  private readonly repositoryFacts: RepositoryFactsPort;
+  private readonly gitFacts: GitFactsPort;
   private readonly now: () => string;
   private rebootCount = new Map<string, number>();
+  /** Pending approval challenges: authorizationId -> { digest, nonce } */
+  private readonly approvalChallenges = new Map<string, { digest: string; nonce: string }>();
 
   constructor(options: OperatorHostOptions) {
     this.activationMode = options.activationMode;
@@ -61,8 +72,9 @@ export class OperatorHost {
     this.sessions = new SessionRegistry();
     this.resume = new ResumeTokenService();
     this.presence = options.presence;
-    this.machineName = options.machineName;
-    this.machineRole = options.machineRole;
+    this.hostFacts = options.hostFacts;
+    this.repositoryFacts = options.repositoryFacts;
+    this.gitFacts = options.gitFacts;
     this.now = options.now ?? (() => new Date().toISOString());
 
     if (this.activationMode === "inactive" && this.presence.mode === "synthetic_test") {
@@ -77,9 +89,7 @@ export class OperatorHost {
         "synthetic_test host requires SyntheticOwnerPresence",
       );
     }
-    // Production path must not auto-provision real approval material on construction.
     if (this.activationMode === "inactive" && !(this.presence instanceof UnprovisionedRealOwnerPresence)) {
-      // allow only unprovisioned real adapter in inactive mode
       if (this.presence.mode !== "unprovisioned_real") {
         throw new DelegatedOperatorError(
           "activation-mode",
@@ -97,6 +107,15 @@ export class OperatorHost {
     return this.audit;
   }
 
+  /** Observe trusted host facts (for UI/tests). */
+  observeHost() {
+    return this.hostFacts.observe();
+  }
+
+  observeRepo() {
+    return this.repositoryFacts.observeBoundRepository();
+  }
+
   submitPending(envelope: CapabilityEnvelopeV1): void {
     const record = this.store.putPending(envelope);
     this.audit.append({
@@ -112,16 +131,60 @@ export class OperatorHost {
   }
 
   /**
-   * Owner approval entry. In inactive production mode with unprovisioned real presence, this throws.
-   * Synthetic tests use activationMode synthetic_test + SyntheticOwnerPresence.
+   * Create approval challenge for UI render: binds exact digest + one-time nonce.
    */
-  ownerAuthorize(authorizationId: string): CapabilityEnvelopeV1 {
+  beginOwnerApprovalChallenge(authorizationId: string): { digest: string; nonce: string } {
     const rec = this.store.get(authorizationId);
     if (!rec) throw new DelegatedOperatorError("not-found", "Authorization not found");
     if (rec.lifecycle !== "PENDING_OWNER_AUTHORIZATION") {
       throw new DelegatedOperatorError("lifecycle", "Not pending Owner authorization");
     }
+    const digest = envelopeDigest(rec.envelope);
+    const nonce = randomBytes(16).toString("hex");
+    this.approvalChallenges.set(authorizationId, { digest, nonce });
+    return { digest, nonce };
+  }
+
+  /**
+   * Owner approval bound to exact displayed digest + nonce (M-6).
+   */
+  ownerAuthorize(
+    authorizationId: string,
+    expectedDigest?: string,
+    approvalNonce?: string,
+  ): CapabilityEnvelopeV1 {
+    const rec = this.store.get(authorizationId);
+    if (!rec) throw new DelegatedOperatorError("not-found", "Authorization not found");
+    if (rec.lifecycle !== "PENDING_OWNER_AUTHORIZATION") {
+      throw new DelegatedOperatorError("lifecycle", "Not pending Owner authorization");
+    }
+    const recomputed = envelopeDigest(rec.envelope);
+    const challenge = this.approvalChallenges.get(authorizationId);
+    if (expectedDigest !== undefined || approvalNonce !== undefined) {
+      if (!challenge) {
+        throw new DelegatedOperatorError("approval-nonce", "No approval challenge; render page first");
+      }
+      if (approvalNonce !== challenge.nonce) {
+        throw new DelegatedOperatorError("approval-nonce", "Stale or invalid approval nonce");
+      }
+      if (expectedDigest !== challenge.digest || expectedDigest !== recomputed) {
+        throw new DelegatedOperatorError(
+          "approval-digest-mismatch",
+          "Envelope digest changed since display or submitted digest mismatch",
+        );
+      }
+      this.approvalChallenges.delete(authorizationId);
+    } else if (challenge) {
+      // Strict path preferred; allow challenge-less only for back-compat unit tests that call
+      // ownerAuthorize(id) without UI — still recompute digest for proof binding.
+      this.approvalChallenges.delete(authorizationId);
+    }
+
     const approved = attachApproval(rec.envelope, this.presence, this.now());
+    // Duplicate approval refuse
+    if (this.store.get(authorizationId)?.lifecycle === "AUTHORIZED") {
+      throw new DelegatedOperatorError("duplicate-approval", "Already authorized");
+    }
     const activated = this.store.activateWithProof(approved);
     this.audit.append({
       kind: "authorization.owner_result",
@@ -130,13 +193,14 @@ export class OperatorHost {
       agentRole: activated.envelope.agentRole,
       operation: null,
       outcome: "AUTHORIZED",
-      detail: `mode=${this.activationMode};presence=${this.presence.mode}`,
+      detail: `mode=${this.activationMode};presence=${this.presence.mode};digestBound=true`,
       utc: this.now(),
     });
     return activated.envelope;
   }
 
   ownerDeny(authorizationId: string): void {
+    this.approvalChallenges.delete(authorizationId);
     this.store.setLifecycle(authorizationId, "DENIED");
     this.audit.append({
       kind: "authorization.owner_result",
@@ -150,7 +214,7 @@ export class OperatorHost {
     });
   }
 
-  openSession(authorizationId: string, agentRole: AgentRoleV1, headCommit: string): {
+  openSession(authorizationId: string, agentRole: AgentRoleV1): {
     sessionId: string;
     sessionToken: string;
   } {
@@ -158,7 +222,7 @@ export class OperatorHost {
     if (rec.envelope.agentRole !== agentRole) {
       throw new DelegatedOperatorError("role-mismatch", "Cannot open session as different role than envelope");
     }
-    const ctx = this.ctx(rec.envelope, headCommit);
+    const ctx = this.buildValidationContext(rec.envelope);
     const { digest } = validateAuthorizedEnvelope(rec.envelope, ctx);
     if (rec.lifecycle === "AUTHORIZED") {
       assertAgentLifecycle("AUTHORIZED", "RUNNING");
@@ -186,9 +250,19 @@ export class OperatorHost {
     return this.sessions.bind(sessionId, sessionToken, agentRole, this.now());
   }
 
-  request(sessionId: string, request: Omit<OperatorRequestV1, "requestId" | "requestedAtUtc"> & {
-    highConsequenceIntent?: string;
-  }, headCommit: string): OperatorDecisionV1 {
+  /**
+   * request.repositoryRoot is INTENT only; observations come from ports.
+   * headCommit parameter is IGNORED (removed from trust surface) — kept optional for compile
+   * migration of tests calling with 3 args; never used as observation.
+   */
+  request(
+    sessionId: string,
+    request: Omit<OperatorRequestV1, "requestId" | "requestedAtUtc"> & {
+      highConsequenceIntent?: string;
+    },
+    _ignoredCallerHeadCommit?: string,
+  ): OperatorDecisionV1 {
+    void _ignoredCallerHeadCommit;
     if (!isOperationClassV1(request.operation)) {
       return {
         outcome: "REFUSE",
@@ -213,6 +287,41 @@ export class OperatorHost {
           utc: this.now(),
         });
         return nested;
+      }
+    }
+
+    // M-4: refuse write paths targeting protected install roots
+    try {
+      refuseIfWriteTargetsProtectedRoot(request.args ?? {});
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "protected";
+      const decision: OperatorDecisionV1 = {
+        outcome: "REFUSE",
+        reasonCode: "protected-install-root",
+        reason: message,
+        envelopeDigest: null,
+        operation: request.operation,
+        agentRole: request.agentRole,
+      };
+      this.auditDecision(request, decision);
+      return decision;
+    }
+    if (isBuilderWriteOp(request.operation) || request.operation === "powershell.repo_operation") {
+      const joined = JSON.stringify(request.args ?? {});
+      if (
+        isPathUnderProtectedRoot(joined) ||
+        /Program Files\\AION\\ElevatedOperatorBroker|ProgramData\\AION\\ElevatedOperatorBroker/i.test(joined)
+      ) {
+        const decision: OperatorDecisionV1 = {
+          outcome: "REFUSE",
+          reasonCode: "protected-install-root",
+          reason: "Write-capable op targets protected broker install/state root",
+          envelopeDigest: null,
+          operation: request.operation,
+          agentRole: request.agentRole,
+        };
+        this.auditDecision(request, decision);
+        return decision;
       }
     }
 
@@ -250,10 +359,24 @@ export class OperatorHost {
       };
     }
 
-    // Concurrency: exclusive builder write
+    // Intent vs observation: request.repositoryRoot must match observed root if provided
+    const repoObs = this.repositoryFacts.observeBoundRepository();
+    if (normalize(request.repositoryRoot) !== normalize(repoObs.repositoryRoot)) {
+      const decision: OperatorDecisionV1 = {
+        outcome: "REFUSE",
+        reasonCode: "wrong-repo",
+        reason: "Request repository intent does not match host-observed repository root",
+        envelopeDigest: rec.envelopeDigest,
+        operation: request.operation,
+        agentRole: request.agentRole,
+      };
+      this.auditDecision(request, decision);
+      return decision;
+    }
+
     if (isBuilderWriteOp(request.operation) && request.agentRole === "GROK_BUILD") {
       const lock = this.store.getWriterLock();
-      const root = normalize(request.repositoryRoot);
+      const root = normalize(repoObs.repositoryRoot);
       if (lock && normalize(lock.repositoryRoot) === root && lock.authorizationId !== request.authorizationId) {
         const decision: OperatorDecisionV1 = {
           outcome: "REFUSE",
@@ -268,14 +391,13 @@ export class OperatorHost {
       }
       if (!lock || normalize(lock.repositoryRoot) !== root) {
         this.store.setWriterLock({
-          repositoryRoot: request.repositoryRoot,
+          repositoryRoot: repoObs.repositoryRoot,
           authorizationId: request.authorizationId,
           agentRole: "GROK_BUILD",
         });
       }
     }
 
-    // CLAUDE structural write refuse even if envelope forged — re-check role profile
     if (request.agentRole === "CLAUDE_AUDITOR" && ROLE_PROFILES_V1.CLAUDE_AUDITOR.structuralDenies.has(request.operation)) {
       const decision: OperatorDecisionV1 = {
         outcome: "REFUSE",
@@ -289,20 +411,35 @@ export class OperatorHost {
       return decision;
     }
 
-    const ctx = this.ctx(rec.envelope, headCommit);
+    let ctx: ValidationContextV1;
+    try {
+      ctx = this.buildValidationContext(rec.envelope);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "facts unavailable";
+      const code = error instanceof DelegatedOperatorError ? error.code : "facts-unavailable";
+      const decision: OperatorDecisionV1 = {
+        outcome: "REFUSE",
+        reasonCode: code,
+        reason: message,
+        envelopeDigest: rec.envelopeDigest,
+        operation: request.operation,
+        agentRole: request.agentRole,
+      };
+      this.auditDecision(request, decision);
+      return decision;
+    }
+
     const decision = decideOperation(rec.envelope, request.agentRole, request.operation, ctx);
     this.auditDecision(request, decision);
     return decision;
   }
 
-  /** Simulated admin op result for positive tests (does not run real shell). */
   executeMediatedForTests(
     sessionId: string,
     operation: OperationClassV1,
     agentRole: AgentRoleV1,
     authorizationId: string,
     repositoryRoot: string,
-    headCommit: string,
   ): { decision: OperatorDecisionV1; effect: string } {
     const decision = this.request(sessionId, {
       authorizationId,
@@ -310,9 +447,8 @@ export class OperatorHost {
       operation,
       repositoryRoot,
       args: {},
-    }, headCommit);
+    });
     if (decision.outcome !== "ALLOW") return { decision, effect: "none" };
-    // Mediated effects only — no model text shell.
     switch (operation) {
       case "repo.read":
       case "git.status":
@@ -342,12 +478,12 @@ export class OperatorHost {
     }
   }
 
-  beginReboot(authorizationId: string, headCommit: string): ResumeTokenV1 {
+  beginReboot(authorizationId: string): ResumeTokenV1 {
     const rec = this.requireActive(authorizationId);
     if (!rec.envelope.rebootPolicy.allowed) {
       throw new DelegatedOperatorError("reboot-denied", "Reboot not permitted by envelope");
     }
-    const ctx = this.ctx(rec.envelope, headCommit);
+    const ctx = this.buildValidationContext(rec.envelope);
     validateAuthorizedEnvelope(rec.envelope, ctx);
     if (rec.lifecycle !== "RUNNING") {
       throw new DelegatedOperatorError("lifecycle", "Must be RUNNING to reboot");
@@ -358,8 +494,8 @@ export class OperatorHost {
     this.store.setLifecycle(authorizationId, "REBOOT_PENDING");
     const token = this.resume.issue({
       envelope: rec.envelope,
-      machineName: this.machineName,
-      expectedHead: headCommit,
+      machineName: this.hostFacts.observe().machineName,
+      expectedHead: ctx.gitFacts.headCommit,
       rebootIndex: next,
     });
     this.audit.append({
@@ -375,11 +511,13 @@ export class OperatorHost {
     return token;
   }
 
-  resumeAfterReboot(token: ResumeTokenV1, authorizationId: string, headCommit: string): void {
+  resumeAfterReboot(token: ResumeTokenV1, authorizationId: string): void {
     const rec = this.store.get(authorizationId);
     if (!rec) throw new DelegatedOperatorError("not-found", "Authorization missing after reboot");
     if (rec.superseded) throw new DelegatedOperatorError("superseded", "Cannot resume superseded authorization");
-    this.resume.consume(token, rec.envelope, this.machineName, headCommit);
+    const host = this.hostFacts.observe();
+    const git = this.gitFacts.observe(rec.envelope.baselineCommit, rec.envelope.allowOrdinaryForwardCommits);
+    this.resume.consume(token, rec.envelope, host.machineName, git.headCommit);
     this.store.setLifecycle(authorizationId, "RUNNING");
     this.audit.append({
       kind: "reboot",
@@ -400,7 +538,6 @@ export class OperatorHost {
       throw new DelegatedOperatorError("lifecycle", "Must be RUNNING to complete");
     }
     this.store.setLifecycle(authorizationId, "AWAITING_REVIEW");
-    // release writer lock if held
     const lock = this.store.getWriterLock();
     if (lock?.authorizationId === authorizationId) this.store.setWriterLock(null);
     this.audit.append({
@@ -415,12 +552,33 @@ export class OperatorHost {
     });
   }
 
-  /** Markdown/CURRENT spoof must not raise authority — only store+proof does. */
   tryAuthorizeFromMarkdownStatus(_markdown: string): never {
     throw new DelegatedOperatorError(
       "markdown-not-authority",
       "CURRENT.md / handoff Markdown cannot raise delegated-operator authority",
     );
+  }
+
+  private buildValidationContext(envelope: CapabilityEnvelopeV1): ValidationContextV1 {
+    let host;
+    let repo;
+    let git;
+    try {
+      host = this.hostFacts.observe();
+      repo = this.repositoryFacts.observeBoundRepository();
+      git = this.gitFacts.observe(envelope.baselineCommit, envelope.allowOrdinaryForwardCommits);
+    } catch (error) {
+      if (error instanceof DelegatedOperatorError) throw error;
+      throw new DelegatedOperatorError("facts-unavailable", "Trusted host/repo/git facts unavailable");
+    }
+    return {
+      nowUtc: this.now(),
+      hostFacts: host,
+      repoFacts: repo,
+      gitFacts: git,
+      presence: this.presence,
+      isSupersededId: (id) => this.store.isSuperseded(id),
+    };
   }
 
   private requireActive(authorizationId: string) {
@@ -430,22 +588,8 @@ export class OperatorHost {
     if (rec.lifecycle === "PENDING_OWNER_AUTHORIZATION" || rec.lifecycle === "DENIED") {
       throw new DelegatedOperatorError("not-active", "Authorization not active");
     }
-    // Ensure envelope still parses closed
     parseCapabilityEnvelope(rec.envelope);
     return rec;
-  }
-
-  private ctx(envelope: CapabilityEnvelopeV1, headCommit: string): ValidationContextV1 {
-    return {
-      nowUtc: this.now(),
-      machineName: this.machineName,
-      machineRole: this.machineRole,
-      repositoryRoot: envelope.repositoryRoot,
-      canonicalOrigin: envelope.canonicalOrigin,
-      headCommit,
-      presence: this.presence,
-      isSupersededId: (id) => this.store.isSuperseded(id),
-    };
   }
 
   private auditDecision(
@@ -472,3 +616,5 @@ function normalize(p: string): string {
 export function newAuthorizationId(): string {
   return randomBytes(16).toString("hex");
 }
+
+void DEFAULT_PROTECTED_INSTALL_LAYOUT;

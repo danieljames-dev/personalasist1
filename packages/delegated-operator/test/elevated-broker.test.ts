@@ -9,15 +9,22 @@ import {
   parseElevatedBrokerRequest,
   BROKER_SCHEMA_VERSION,
   type ElevatedBrokerRequestV1,
-} from "../src/elevated-broker.js";
+  ManifestBrokerIntegrityPort,
+  StaticHostFactsPort,
+  StaticRepositoryFactsPort,
+  StaticGitFactsPort,
+} from "../src/index.js";
 import {
   tempStore,
   syntheticHost,
   sampleEnvelope,
+  expiredEnvelope,
   approveAndRun,
   BASELINE,
   MACHINE,
   ROLE,
+  REPO,
+  ORIGIN,
 } from "./helpers.js";
 
 function baseRequest(
@@ -32,13 +39,32 @@ function baseRequest(
     authorizationId,
     agentRole: "GROK_BUILD",
     operation,
-    repositoryRoot: "C:\\AION-HQ",
+    repositoryRoot: REPO,
     machineName: MACHINE,
     args: {},
     envelopeDigest,
     requestedAtUtc: new Date().toISOString(),
     ...extra,
   };
+}
+
+function synthBroker(
+  dir: string,
+  presence: Parameters<typeof createSyntheticActivatedBroker>[0]["presence"],
+  loadEnvelope: (id: string) => import("../src/index.js").CapabilityEnvelopeV1 | null,
+  extra?: Partial<Parameters<typeof createSyntheticActivatedBroker>[0]>,
+) {
+  return createSyntheticActivatedBroker({
+    presence,
+    machineName: MACHINE,
+    machineRole: ROLE,
+    loadEnvelope,
+    headCommit: BASELINE,
+    repositoryRoot: REPO,
+    canonicalOrigin: ORIGIN,
+    replayStateDir: dir,
+    ...extra,
+  });
 }
 
 test("broker defaults: not installed/activated, no UAC disable, no password store", () => {
@@ -57,13 +83,8 @@ test("1 authorized elevated op succeeds without interactive UAC in synthetic act
     const env = sampleEnvelope("GROK_BUILD", ["host.read", "host.reboot"], { allowReboot: true });
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null, {
       isSuperseded: (id) => host.getStore().isSuperseded(id),
-      headCommit: BASELINE,
     });
     const d = broker.handle(baseRequest(authorizationId, rec.envelopeDigest, "host.read_security"));
     assert.equal(d.outcome, "ALLOW");
@@ -78,12 +99,7 @@ test("2 without envelope refuses", () => {
   const { dir, cleanup } = tempStore();
   try {
     const { presence } = syntheticHost(dir);
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: () => null,
-    });
+    const broker = synthBroker(dir, presence, () => null);
     const d = broker.handle(baseRequest("missing", "0".repeat(64), "host.read_security"));
     assert.equal(d.outcome, "REFUSE");
   } finally {
@@ -95,19 +111,11 @@ test("3 expired envelope refuses", () => {
   const { dir, cleanup } = tempStore();
   try {
     const { host, presence } = syntheticHost(dir);
-    const env = sampleEnvelope("GROK_BUILD", ["host.read"], {
-      expiresAtUtc: new Date(Date.now() - 1000).toISOString(),
-    });
+    const env = expiredEnvelope("GROK_BUILD", ["host.read"]);
     host.submitPending(env);
     host.ownerAuthorize(env.authorizationId);
     const rec = host.getStore().get(env.authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(baseRequest(env.authorizationId, rec.envelopeDigest, "host.read_security"));
     assert.equal(d.outcome, "REFUSE");
   } finally {
@@ -126,13 +134,8 @@ test("4 superseded envelope refuses", () => {
     host.submitPending(second);
     host.ownerAuthorize(second.authorizationId);
     const rec = host.getStore().get(first.authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null, {
       isSuperseded: (id) => host.getStore().isSuperseded(id),
-      headCommit: BASELINE,
     });
     const d = broker.handle(baseRequest(first.authorizationId, rec.envelopeDigest, "host.read_security"));
     assert.equal(d.outcome, "REFUSE");
@@ -148,13 +151,7 @@ test("5 wrong agent role refuses", () => {
     const env = sampleEnvelope("GROK_BUILD", ["host.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(
       baseRequest(authorizationId, rec.envelopeDigest, "host.read_security", { agentRole: "CLAUDE_AUDITOR" }),
     );
@@ -171,12 +168,8 @@ test("6 wrong machine refuses", () => {
     const env = sampleEnvelope("GROK_BUILD", ["host.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null, {
       machineName: "OTHER-PC",
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
     });
     const d = broker.handle(baseRequest(authorizationId, rec.envelopeDigest, "host.read_security"));
     assert.equal(d.outcome, "REFUSE");
@@ -192,13 +185,7 @@ test("7 wrong repository refuses", () => {
     const env = sampleEnvelope("GROK_BUILD", ["host.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(
       baseRequest(authorizationId, rec.envelopeDigest, "host.read_security", {
         repositoryRoot: "C:\\OTHER",
@@ -216,16 +203,8 @@ test("8 modified arguments after approval / digest mismatch refuses", () => {
     const { host, presence } = syntheticHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["host.read"]);
     const { authorizationId } = approveAndRun(host, env);
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
-    const d = broker.handle(
-      baseRequest(authorizationId, "ff".repeat(32), "host.read_security"),
-    );
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
+    const d = broker.handle(baseRequest(authorizationId, "ff".repeat(32), "host.read_security"));
     assert.equal(d.outcome, "REFUSE");
     assert.match(d.reasonCode, /tamper|digest/i);
   } finally {
@@ -242,7 +221,7 @@ test("9-12 arbitrary PowerShell / EncodedCommand / cmd / executable refuse", () 
         authorizationId: "a",
         agentRole: "GROK_BUILD",
         operation: "host.read_security",
-        repositoryRoot: "C:\\AION-HQ",
+        repositoryRoot: REPO,
         machineName: MACHINE,
         args: { cmd: "powershell.exe -Command Get-Process" },
         envelopeDigest: "00".repeat(32),
@@ -258,7 +237,7 @@ test("9-12 arbitrary PowerShell / EncodedCommand / cmd / executable refuse", () 
         authorizationId: "a",
         agentRole: "GROK_BUILD",
         operation: "host.read_security",
-        repositoryRoot: "C:\\AION-HQ",
+        repositoryRoot: REPO,
         machineName: MACHINE,
         args: { x: "powershell.exe -EncodedCommand AAAA" },
         envelopeDigest: "00".repeat(32),
@@ -274,7 +253,7 @@ test("9-12 arbitrary PowerShell / EncodedCommand / cmd / executable refuse", () 
         authorizationId: "a",
         agentRole: "GROK_BUILD",
         operation: "not.a.real.op",
-        repositoryRoot: "C:\\AION-HQ",
+        repositoryRoot: REPO,
         machineName: MACHINE,
         args: {},
         envelopeDigest: "00".repeat(32),
@@ -293,7 +272,7 @@ test("13 model/chat injection cannot invent broker operation classes", () => {
         authorizationId: "a",
         agentRole: "GROK_BUILD",
         operation: "eval",
-        repositoryRoot: "C:\\AION-HQ",
+        repositoryRoot: REPO,
         machineName: MACHINE,
         args: {},
         envelopeDigest: "00".repeat(32),
@@ -310,13 +289,7 @@ test("14 CLAUDE_AUDITOR cannot request builder mutation elevated ops", () => {
     const env = sampleEnvelope("CLAUDE_AUDITOR", ["host.read", "repo.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(
       baseRequest(authorizationId, rec.envelopeDigest, "filesystem.authorized_admin_write", {
         agentRole: "CLAUDE_AUDITOR",
@@ -337,13 +310,7 @@ test("15 high-consequence BitLocker refuses under ordinary builder envelope", ()
     });
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(
       baseRequest(authorizationId, rec.envelopeDigest, "host.read_security", {
         highConsequenceIntent: "bitlocker",
@@ -363,20 +330,14 @@ test("16-17 broker config/binary modification refuses", () => {
     const env = sampleEnvelope("GROK_BUILD", ["powershell.repo_operation", "host.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(
       baseRequest(authorizationId, rec.envelopeDigest, "filesystem.authorized_admin_write", {
-        args: { path: "C:\\Program Files\\AION\\elevated-broker\\broker.exe" },
+        args: { path: "C:\\Program Files\\AION\\ElevatedOperatorBroker\\bin\\aion-elevated-broker.exe" },
       }),
     );
     assert.equal(d.outcome, "REFUSE");
-    assert.match(d.reasonCode, /broker-protected|role|not-authorized|host/i);
+    assert.match(d.reasonCode, /protected-install-root|broker-protected|role|not-authorized|host/i);
   } finally {
     cleanup();
   }
@@ -389,13 +350,7 @@ test("18 stale request replay refuses", () => {
     const env = sampleEnvelope("GROK_BUILD", ["host.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const req = baseRequest(authorizationId, rec.envelopeDigest, "host.read_security");
     assert.equal(broker.handle(req).outcome, "ALLOW");
     const d2 = broker.handle(req);
@@ -413,13 +368,7 @@ test("19 authorized reboot operation can complete autonomously in synthetic brok
     const env = sampleEnvelope("GROK_BUILD", ["host.reboot", "host.read"], { allowReboot: true });
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
-    const broker = createSyntheticActivatedBroker({
-      presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
-      loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommit: BASELINE,
-    });
+    const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(baseRequest(authorizationId, rec.envelopeDigest, "host.reboot"));
     assert.equal(d.outcome, "ALLOW");
     assert.equal(d.executed, true);
@@ -435,16 +384,30 @@ test("20 inactive/not-activated broker refuses (no authority from missing activa
     const env = sampleEnvelope("GROK_BUILD", ["host.read"]);
     const { authorizationId } = approveAndRun(host, env);
     const rec = host.getStore().get(authorizationId)!;
+    const integrity = new ManifestBrokerIntegrityPort({ synthetic: "x" }, () => ({ synthetic: "x" }));
     const broker = new ElevatedOperatorBroker({
       brokerVersion: "0.1.0",
       activated: false,
       installed: false,
-      integrityMaterial: "x",
       presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
+      hostFacts: new StaticHostFactsPort({ machineName: MACHINE, machineRole: ROLE }),
+      repositoryFacts: new StaticRepositoryFactsPort({
+        repositoryRoot: REPO,
+        canonicalOrigin: ORIGIN,
+        branch: "main",
+        headCommit: BASELINE,
+      }),
+      gitFacts: new StaticGitFactsPort({
+        repositoryRoot: REPO,
+        headCommit: BASELINE,
+        branch: "main",
+        canonicalOrigin: ORIGIN,
+        originMainCommit: BASELINE,
+        workingTreeClean: true,
+      }),
+      integrity,
+      replayStateDir: dir,
       loadEnvelope: (id) => host.getStore().get(id)?.envelope ?? null,
-      headCommitForRepo: () => BASELINE,
     });
     const d = broker.handle(baseRequest(authorizationId, rec.envelopeDigest, "host.read_security"));
     assert.equal(d.outcome, "REFUSE");
@@ -465,21 +428,36 @@ test("pipe framing MAC prevents bare blob reuse without session key", () => {
   assert.throws(() => other.open(sealed), /MAC|pipe/i);
 });
 
-test("broker integrity fail-closed", () => {
+test("broker integrity fail-closed on expected/actual mismatch", () => {
   const { dir, cleanup } = tempStore();
   try {
     const { presence } = syntheticHost(dir);
+    const integrity = new ManifestBrokerIntegrityPort({ synthetic: "good" }, () => ({ synthetic: "bad" }));
     const broker = new ElevatedOperatorBroker({
       brokerVersion: "0.1.0",
       activated: true,
       installed: false,
-      integrityMaterial: "good",
       presence,
-      machineName: MACHINE,
-      machineRole: ROLE,
+      hostFacts: new StaticHostFactsPort({ machineName: MACHINE, machineRole: ROLE }),
+      repositoryFacts: new StaticRepositoryFactsPort({
+        repositoryRoot: REPO,
+        canonicalOrigin: ORIGIN,
+        branch: "main",
+        headCommit: BASELINE,
+      }),
+      gitFacts: new StaticGitFactsPort({
+        repositoryRoot: REPO,
+        headCommit: BASELINE,
+        branch: "main",
+        canonicalOrigin: ORIGIN,
+        originMainCommit: BASELINE,
+        workingTreeClean: true,
+      }),
+      integrity,
+      replayStateDir: dir,
       loadEnvelope: () => null,
     });
-    assert.throws(() => broker.verifyIntegrity("bad"), /integrity/i);
+    assert.throws(() => broker.verifyIntegrity(), /integrity/i);
   } finally {
     cleanup();
   }
