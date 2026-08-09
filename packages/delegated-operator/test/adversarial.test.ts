@@ -17,6 +17,7 @@ import {
   sampleEnvelope,
   expiredEnvelope,
   approveAndRun,
+  ownerApproveExact,
 } from "./helpers.js";
 
 test("production defaults: not activated, Founder authoritative", () => {
@@ -65,7 +66,7 @@ test("inactive host refuses real Owner authorize (unprovisioned root)", () => {
     const host = inactiveHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
-    assert.throws(() => host.ownerAuthorize(env.authorizationId), /not provisioned|unprovisioned|approval-root/i);
+    assert.throws(() => ownerApproveExact(host, env.authorizationId), /not provisioned|unprovisioned|approval-root/i);
   } finally {
     cleanup();
   }
@@ -89,7 +90,7 @@ test("peer authorization: CLAUDE cannot open GROK session", () => {
     const { host } = syntheticHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["repo.read", "repo.edit"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(
       () => host.openSession(env.authorizationId, "CLAUDE_AUDITOR"),
       /different role/,
@@ -157,7 +158,7 @@ test("wrong baseline refuses", () => {
     });
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /baseline|wrong-baseline/i);
   } finally {
     cleanup();
@@ -171,7 +172,7 @@ test("wrong machine refuses session", () => {
     const { host } = syntheticHost(dir, undefined, { machineName: "OTHER-PC" });
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
-    const approved = host.ownerAuthorize(env.authorizationId);
+    const approved = ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(approved.authorizationId, "GROK_BUILD"), /machine/i);
   } finally {
     cleanup();
@@ -184,7 +185,7 @@ test("expired approval refuses", () => {
     const { host } = syntheticHost(dir);
     const env = expiredEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /expir/i);
   } finally {
     cleanup();
@@ -197,11 +198,11 @@ test("superseded approval cannot be reused", () => {
     const { host } = syntheticHost(dir);
     const first = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(first);
-    host.ownerAuthorize(first.authorizationId);
+    ownerApproveExact(host, first.authorizationId);
     const second = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     const env2 = { ...second, supersedesAuthorizationId: first.authorizationId };
     host.submitPending(env2);
-    host.ownerAuthorize(env2.authorizationId);
+    ownerApproveExact(host, env2.authorizationId);
     assert.equal(host.getStore().isSuperseded(first.authorizationId), true);
     assert.throws(() => host.openSession(first.authorizationId, "GROK_BUILD"), /superseded|not-active|lifecycle/i);
   } finally {
@@ -215,7 +216,7 @@ test("deleted store does not create authority", () => {
     const { host, presence } = syntheticHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     const { dir: d2, cleanup: c2 } = tempStore();
     try {
       const h2 = syntheticHost(d2, presence).host;
@@ -409,7 +410,7 @@ test("session role swap refused", () => {
     const { host } = syntheticHost(dir);
     const env = sampleEnvelope("GROK_BUILD", ["repo.read"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     const opened = host.openSession(env.authorizationId, "GROK_BUILD");
     assert.throws(
       () => host.bindSession(opened.sessionId, opened.sessionToken, "CLAUDE_AUDITOR"),
@@ -428,7 +429,7 @@ test("copy approval to other baseline fails openSession", () => {
       baselineCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /baseline/i);
   } finally {
     cleanup();

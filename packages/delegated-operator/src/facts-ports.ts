@@ -8,8 +8,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash as cryptoHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve, win32 } from "node:path";
 import { hostname } from "node:os";
 import { DelegatedOperatorError } from "./contracts.js";
 
@@ -78,10 +78,70 @@ export const DEFAULT_PROTECTED_INSTALL_LAYOUT: ProtectedInstallLayoutV1 = {
   serviceDefinitionRelative: "service\\aion-elevated-broker.xml",
 };
 
-export function isPathUnderProtectedRoot(targetPath: string, layout: ProtectedInstallLayoutV1 = DEFAULT_PROTECTED_INSTALL_LAYOUT): boolean {
-  const n = normalizePath(targetPath);
-  const roots = [layout.installRoot, layout.stateRoot].map(normalizePath);
-  return roots.some((root) => n === root || n.startsWith(root + "\\"));
+/**
+ * Canonicalize a Windows path for protected-root comparison (R6.5-R2 M-4).
+ * Resolves relative segments, device/UNC aliases, reparse points on existing
+ * prefixes, and expands standard 8.3 short-name aliases. Does not require the
+ * final path to exist (future install roots).
+ */
+export function canonicalizeProtectionPath(input: string): string {
+  if (typeof input !== "string" || input.length === 0 || input.includes("\0")) {
+    return "";
+  }
+  let p = input.trim();
+  if (!p) return "";
+
+  // Device / extended-length prefixes
+  if (p.startsWith("\\\\?\\UNC\\")) p = "\\\\" + p.slice("\\\\?\\UNC\\".length);
+  else if (p.startsWith("\\\\?\\")) p = p.slice(4);
+  else if (p.startsWith("\\\\.\\")) p = p.slice(4);
+
+  // Localhost admin share -> drive path
+  const uncLocal = /^\\\\(localhost|127\.0\.0\.1)\\([A-Za-z])\$\\?/i.exec(p);
+  if (uncLocal) {
+    p = `${uncLocal[2]!.toUpperCase()}:\\${p.slice(uncLocal[0].length)}`;
+  }
+
+  p = p.replace(/\//g, "\\");
+  // Collapse . / .. without requiring existence
+  try {
+    p = isAbsolute(p) || /^[A-Za-z]:/.test(p) ? win32.normalize(p) : win32.resolve(p);
+  } catch {
+    p = win32.normalize(p);
+  }
+
+  // Expand 8.3 / reparse for every existing prefix
+  p = expandExistingPrefixes(p);
+  // Standard short-name rewrites for well-known Windows directories (English)
+  p = applyStandardShortNameAliases(p);
+  // Second pass after alias rewrite
+  p = expandExistingPrefixes(p);
+
+  return normalizePath(p);
+}
+
+/**
+ * True when target addresses a protected install/state root under any Windows
+ * path alias that resolves to the same final identity. Does not depend on the
+ * substring "broker" appearing in the caller path.
+ */
+export function isPathUnderProtectedRoot(
+  targetPath: string,
+  layout: ProtectedInstallLayoutV1 = DEFAULT_PROTECTED_INSTALL_LAYOUT,
+): boolean {
+  const candidates = protectionPathCandidates(targetPath);
+  if (candidates.size === 0) return false;
+  const roots = new Set<string>();
+  for (const root of [layout.installRoot, layout.stateRoot]) {
+    for (const c of protectionPathCandidates(root)) roots.add(c);
+  }
+  for (const candidate of candidates) {
+    for (const root of roots) {
+      if (!root) continue;
+      if (candidate === root || candidate.startsWith(root + "\\")) return true;
+    }
+  }
+  return false;
 }
 
 /** Ordinary repo write must never treat protected roots as in-repo paths. */
@@ -89,16 +149,80 @@ export function refuseIfWriteTargetsProtectedRoot(
   args: Readonly<Record<string, string>>,
   layout: ProtectedInstallLayoutV1 = DEFAULT_PROTECTED_INSTALL_LAYOUT,
 ): void {
-  for (const [k, v] of Object.entries(args)) {
-    if (/path|file|target|dest|root|exe|binary|config/i.test(k) || isPathUnderProtectedRoot(v, layout)) {
-      if (isPathUnderProtectedRoot(v, layout)) {
-        throw new DelegatedOperatorError(
-          "protected-install-root",
-          "Write to OS-protected broker install/state root requires separate high-consequence maintenance envelope",
-        );
-      }
+  for (const v of Object.values(args)) {
+    if (typeof v !== "string" || !v) continue;
+    // Any arg value that resolves into a protected root is refused.
+    if (isPathUnderProtectedRoot(v, layout)) {
+      throw new DelegatedOperatorError(
+        "protected-install-root",
+        "Write to OS-protected broker install/state root requires separate high-consequence maintenance envelope",
+      );
     }
   }
+}
+
+function protectionPathCandidates(input: string): Set<string> {
+  const out = new Set<string>();
+  const add = (s: string) => {
+    const n = normalizePath(s);
+    if (n) out.add(n);
+  };
+  add(input);
+  add(canonicalizeProtectionPath(input));
+  add(applyStandardShortNameAliases(input));
+  // Case / separator only
+  add(input.replace(/\//g, "\\"));
+  return out;
+}
+
+function applyStandardShortNameAliases(p: string): string {
+  let s = p.replace(/\//g, "\\");
+  // Common English Windows 8.3 aliases (defense in depth when path does not exist yet)
+  s = s.replace(/(^|[\\/])PROGRA~1([\\/]|$)/gi, "$1Program Files$2");
+  s = s.replace(/(^|[\\/])PROGRA~2([\\/]|$)/gi, "$1Program Files (x86)$2");
+  s = s.replace(/(^|[\\/])PROGRA~3([\\/]|$)/gi, "$1ProgramData$2");
+  // ElevatedOperatorBroker short forms vary; expand known pattern used in attacks
+  s = s.replace(/(^|[\\/])ELEVAT~1([\\/]|$)/gi, "$1ElevatedOperatorBroker$2");
+  return s;
+}
+
+function expandExistingPrefixes(absolutePath: string): string {
+  const p = absolutePath.replace(/\//g, "\\");
+  if (!p) return p;
+
+  const tryReal = (target: string): string => {
+    try {
+      return realpathSync.native(target);
+    } catch {
+      try {
+        return realpathSync(target);
+      } catch {
+        return target;
+      }
+    }
+  };
+
+  const match = /^([A-Za-z]:)(.*)$/.exec(p);
+  if (!match) {
+    return existsSync(p) ? tryReal(p) : p;
+  }
+  const drive = match[1]!.toUpperCase();
+  const segments = (match[2] ?? "").split("\\").filter((s) => s.length > 0);
+  let acc = drive + "\\";
+  for (let i = 0; i < segments.length; i++) {
+    const next = join(acc, segments[i]!);
+    if (existsSync(next)) {
+      // Resolve reparse points / junctions / short names of existing nodes
+      void lstatSync(next);
+      acc = tryReal(next);
+    } else {
+      for (let j = i; j < segments.length; j++) {
+        acc = join(acc, segments[j]!);
+      }
+      break;
+    }
+  }
+  return acc;
 }
 
 export class StaticHostFactsPort implements HostFactsPort {

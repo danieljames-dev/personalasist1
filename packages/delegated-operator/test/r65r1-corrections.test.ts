@@ -34,6 +34,7 @@ import {
   syntheticHost,
   sampleEnvelope,
   approveAndRun,
+  ownerApproveExact,
   BASELINE,
   MACHINE,
   ROLE,
@@ -72,7 +73,7 @@ test("M-1: envelope wrong-repo is refused when host observes different root", ()
       repositoryRoot: "C:\\TOTALLY-OTHER-REPO",
     });
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /wrong-repo|Repository root/i);
   } finally {
     cleanup();
@@ -87,7 +88,7 @@ test("M-1: envelope wrong-origin is refused when host observes canonical origin"
       canonicalOrigin: "https://evil.example/x.git",
     });
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /wrong-origin|origin/i);
   } finally {
     cleanup();
@@ -476,7 +477,7 @@ test("M-7: caller cannot force-accept forged ordinary-forward boolean", () => {
     });
     const env = sampleEnvelope("GROK_BUILD", ["repo.read", "git.commit_forward", "git.push_canonical"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     assert.throws(() => host.openSession(env.authorizationId, "GROK_BUILD"), /baseline|wrong-baseline/i);
   } finally {
     cleanup();

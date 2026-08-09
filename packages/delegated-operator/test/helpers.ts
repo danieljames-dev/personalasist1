@@ -159,12 +159,18 @@ export function expiredEnvelope(
   });
 }
 
+/** Owner-approve with mandatory digest+nonce challenge (M-6). */
+export function ownerApproveExact(host: OperatorHost, authorizationId: string) {
+  const challenge = host.beginOwnerApprovalChallenge(authorizationId);
+  return host.ownerAuthorize(authorizationId, challenge.digest, challenge.nonce);
+}
+
 export function approveAndRun(
   host: OperatorHost,
   envelope: CapabilityEnvelopeV1,
 ): { authorizationId: string; sessionId: string } {
   host.submitPending(envelope);
-  const approved = host.ownerAuthorize(envelope.authorizationId);
+  const approved = ownerApproveExact(host, envelope.authorizationId);
   const opened = host.openSession(approved.authorizationId, approved.agentRole);
   host.bindSession(opened.sessionId, opened.sessionToken, approved.agentRole);
   return { authorizationId: approved.authorizationId, sessionId: opened.sessionId };

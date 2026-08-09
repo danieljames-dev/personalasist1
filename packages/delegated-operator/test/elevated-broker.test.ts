@@ -20,6 +20,7 @@ import {
   sampleEnvelope,
   expiredEnvelope,
   approveAndRun,
+  ownerApproveExact,
   BASELINE,
   MACHINE,
   ROLE,
@@ -113,7 +114,7 @@ test("3 expired envelope refuses", () => {
     const { host, presence } = syntheticHost(dir);
     const env = expiredEnvelope("GROK_BUILD", ["host.read"]);
     host.submitPending(env);
-    host.ownerAuthorize(env.authorizationId);
+    ownerApproveExact(host, env.authorizationId);
     const rec = host.getStore().get(env.authorizationId)!;
     const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null);
     const d = broker.handle(baseRequest(env.authorizationId, rec.envelopeDigest, "host.read_security"));
@@ -129,10 +130,10 @@ test("4 superseded envelope refuses", () => {
     const { host, presence } = syntheticHost(dir);
     const first = sampleEnvelope("GROK_BUILD", ["host.read"]);
     host.submitPending(first);
-    host.ownerAuthorize(first.authorizationId);
+    ownerApproveExact(host, first.authorizationId);
     const second = { ...sampleEnvelope("GROK_BUILD", ["host.read"]), supersedesAuthorizationId: first.authorizationId };
     host.submitPending(second);
-    host.ownerAuthorize(second.authorizationId);
+    ownerApproveExact(host, second.authorizationId);
     const rec = host.getStore().get(first.authorizationId)!;
     const broker = synthBroker(dir, presence, (id) => host.getStore().get(id)?.envelope ?? null, {
       isSuperseded: (id) => host.getStore().isSuperseded(id),

@@ -146,13 +146,20 @@ export class OperatorHost {
   }
 
   /**
-   * Owner approval bound to exact displayed digest + nonce (M-6).
+   * Owner approval bound to exact displayed digest + one-time nonce (M-6 / R6.5-R2).
+   * authorizationId alone is never sufficient. No compatibility overload.
    */
   ownerAuthorize(
     authorizationId: string,
-    expectedDigest?: string,
-    approvalNonce?: string,
+    expectedDigest: string,
+    approvalNonce: string,
   ): CapabilityEnvelopeV1 {
+    if (typeof expectedDigest !== "string" || expectedDigest.length === 0) {
+      throw new DelegatedOperatorError("approval-digest-required", "Owner approval requires exact envelope digest");
+    }
+    if (typeof approvalNonce !== "string" || approvalNonce.length === 0) {
+      throw new DelegatedOperatorError("approval-nonce-required", "Owner approval requires one-time approval nonce");
+    }
     const rec = this.store.get(authorizationId);
     if (!rec) throw new DelegatedOperatorError("not-found", "Authorization not found");
     if (rec.lifecycle !== "PENDING_OWNER_AUTHORIZATION") {
@@ -160,28 +167,22 @@ export class OperatorHost {
     }
     const recomputed = envelopeDigest(rec.envelope);
     const challenge = this.approvalChallenges.get(authorizationId);
-    if (expectedDigest !== undefined || approvalNonce !== undefined) {
-      if (!challenge) {
-        throw new DelegatedOperatorError("approval-nonce", "No approval challenge; render page first");
-      }
-      if (approvalNonce !== challenge.nonce) {
-        throw new DelegatedOperatorError("approval-nonce", "Stale or invalid approval nonce");
-      }
-      if (expectedDigest !== challenge.digest || expectedDigest !== recomputed) {
-        throw new DelegatedOperatorError(
-          "approval-digest-mismatch",
-          "Envelope digest changed since display or submitted digest mismatch",
-        );
-      }
-      this.approvalChallenges.delete(authorizationId);
-    } else if (challenge) {
-      // Strict path preferred; allow challenge-less only for back-compat unit tests that call
-      // ownerAuthorize(id) without UI — still recompute digest for proof binding.
-      this.approvalChallenges.delete(authorizationId);
+    if (!challenge) {
+      throw new DelegatedOperatorError("approval-nonce", "No approval challenge; render/bind digest first");
+    }
+    if (approvalNonce !== challenge.nonce) {
+      throw new DelegatedOperatorError("approval-nonce", "Stale or invalid approval nonce");
+    }
+    // Consume nonce before activation (single-use even if later steps fail)
+    this.approvalChallenges.delete(authorizationId);
+    if (expectedDigest !== challenge.digest || expectedDigest !== recomputed) {
+      throw new DelegatedOperatorError(
+        "approval-digest-mismatch",
+        "Envelope digest changed since display or submitted digest mismatch",
+      );
     }
 
     const approved = attachApproval(rec.envelope, this.presence, this.now());
-    // Duplicate approval refuse
     if (this.store.get(authorizationId)?.lifecycle === "AUTHORIZED") {
       throw new DelegatedOperatorError("duplicate-approval", "Already authorized");
     }
@@ -193,7 +194,7 @@ export class OperatorHost {
       agentRole: activated.envelope.agentRole,
       operation: null,
       outcome: "AUTHORIZED",
-      detail: `mode=${this.activationMode};presence=${this.presence.mode};digestBound=true`,
+      detail: `mode=${this.activationMode};presence=${this.presence.mode};digestBound=true;nonceConsumed=true`,
       utc: this.now(),
     });
     return activated.envelope;
