@@ -1,13 +1,12 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   AionAssistantV1, AuthorityGatedStateRepositoryV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
-  FileStateRepositoryV1, FileWriterAuthorityV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
-  CompositeBrainRuntimeV1, InProcessBrainRuntimeV1,
+  FileStateRepositoryV1, LocalArchiveImportSourceV1, LocalEchoCapabilityV1, NodePrivateBackupV1,
+  CompositeBrainRuntimeV1, InProcessBrainRuntimeV1, OwnerAuthorityRuntimeV2,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
@@ -156,33 +155,30 @@ export async function createAionServer(options = {}) {
     ?? new CompositeBrainRuntimeV1(new InProcessBrainRuntimeV1(offlineProvider), new HttpBrainRuntimeV1());
   const codeSandbox = options.codeSandbox ?? createDockerCodeSandboxV1();
   /*
-   * Writer authority is host-local and machine-verifiable. Production always binds it so UI,
-   * phone, scheduler, and capability paths share one durable mutation gate. Missing authority is
-   * bootstrapped once for the existing laptop primary (legacy upgrade path) and never self-promotes
-   * after READ_ONLY or REVOKED.
+   * Writer authority V2 (R6.1-R1):
+   * - External trusted Owner key material (never self-declared solely by the mutable anchor)
+   * - Portable authority anchor (current + ledger) when configured
+   * - Local SystemInstanceIdV1 when explicitly supplied
+   * - Live re-evaluation on every durable save (no cached WRITER)
+   * - Absence of trust / anchor / identity / valid grant => READ_ONLY (fail closed)
+   * - No production bootstrap, no randomUUID identity fallback, no runtime signing
+   * - Does not read real private identity files unless the caller injects an SI id
    */
-  const authority = options.authority ?? new FileWriterAuthorityV1(dataRoot);
-  if (!options.authority) {
-    let systemInstanceId = null;
-    try {
-      const identity = JSON.parse(await readFile(join(repositoryRoot, "private", "identity", "identity-state-v1.json"), "utf8"));
-      const record = Array.isArray(identity.records)
-        ? identity.records.find((entry) => entry && entry.kind === "system-instance" && typeof entry.id === "string")
-        : null;
-      if (record?.id) systemInstanceId = record.id;
-    } catch {
-      /* Identity may be absent in synthetic servers; bootstrap still needs a UUID. */
-    }
-    if (!systemInstanceId) systemInstanceId = randomUUID();
-    await authority.bootstrapLegacyWriterIfAbsent({
-      systemInstanceId,
-      grantedAt: new Date().toISOString(),
-    });
-  }
+  const authority = options.authority ?? new OwnerAuthorityRuntimeV2({
+    getTrustedOwner: () => options.trustedOwnerVerification ?? null,
+    getAnchorRoot: () => {
+      const root = options.authorityAnchorRoot;
+      if (typeof root !== "string" || !root.trim()) return null;
+      return resolve(root);
+    },
+    getLocalSystemInstanceId: () => {
+      const id = options.localSystemInstanceId;
+      return typeof id === "string" && id.trim() ? id.trim() : null;
+    },
+  });
+  // Always wrap the durable repository — injected repositories cannot bypass the authority gate.
   const rawRepository = options.repository ?? new FileStateRepositoryV1(dataRoot);
-  const repository = options.repository
-    ? rawRepository
-    : new AuthorityGatedStateRepositoryV1(rawRepository, authority);
+  const repository = new AuthorityGatedStateRepositoryV1(rawRepository, authority);
   const service = new AionAssistantV1({
     repository, clock: options.clock ?? new SystemClockV1(), ids: options.ids ?? new RandomIdGeneratorV1(),
     providers,

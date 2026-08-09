@@ -20,10 +20,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   CompositeBrainRuntimeV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  EVALUATION_SUITE, GPU_STATUS_LABELS, InProcessBrainRuntimeV1, LocalEchoCapabilityV1,
-  OFFLINE_ENDPOINT_ID, ScriptedBrainRuntimeV1, SelectableDeveloperAgentRegistryV1,
+  EVALUATION_SUITE, GPU_STATUS_LABELS, InMemoryWriterAuthorityV1, InProcessBrainRuntimeV1,
+  LocalEchoCapabilityV1, OFFLINE_ENDPOINT_ID, ScriptedBrainRuntimeV1, SelectableDeveloperAgentRegistryV1,
   StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, SyntheticGpuInfrastructureV1,
-  SyntheticVerificationRunnerV1, V13_BUDGET_CEILING_CENTS,
+  SyntheticVerificationRunnerV1, V13_BUDGET_CEILING_CENTS, createWriterGrantForTest,
 } from "../packages/local-assistant/dist/index.js";
 import { createAionServer } from "./aion/server.mjs";
 
@@ -58,13 +58,14 @@ function stubFetch(url, init) {
 async function open(dataRoot, exportRoot, { gpu, script, clock }) {
   const offline = new DeterministicModelProviderV1();
   const scripted = new ScriptedBrainRuntimeV1(script ?? { answer: "READY" });
+  const authority = new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
   const app = await createAionServer({
     repositoryRoot, dataRoot, exportRoot,
     clock, ids: new DeterministicIdGeneratorV1(),
     providers: [offline],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
     developerAgents: new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]),
-    verificationRunner: new SyntheticVerificationRunnerV1(),
+    verificationRunner: new SyntheticVerificationRunnerV1(), authority,
     // The production composition, with the scripted adapter where HTTP would be: the floor runs
     // in-process because it has no address, and anything with one goes to a transport adapter.
     brainRuntime: new CompositeBrainRuntimeV1(new InProcessBrainRuntimeV1(offline, () => clock.now()), scripted),

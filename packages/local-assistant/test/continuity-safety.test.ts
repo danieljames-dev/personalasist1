@@ -17,6 +17,7 @@ import {
   DeterministicModelProviderV1,
   FileStateRepositoryV1,
   InMemoryStateRepositoryV1,
+  FileWriterAuthorityV1,
   InMemoryWriterAuthorityV1,
   LocalArchiveImportSourceV1,
   LocalEchoCapabilityV1,
@@ -277,28 +278,20 @@ test("A10 read-only access remains available where permitted", async () => {
   assert.equal((await service.inspectWriterAuthority())?.state, "READ_ONLY");
 });
 
-test("A-bootstrap legacy writer only when absent; never after revoke", async () => {
-  const authority = new InMemoryWriterAuthorityV1(null);
-  const created = await authority.bootstrapLegacyWriterIfAbsent({
-    systemInstanceId: SYSTEM_A,
-    grantedAt: "2030-01-01T00:00:00.000Z",
-  });
-  assert.equal(created.created, true);
-  assert.equal(created.grant?.state, "WRITER");
-  await authority.applyOwnerCommand({
-    schema: "aion.owner-authority-command.v1",
-    command: "revoke",
-    systemInstanceId: SYSTEM_A,
-    authorityEpoch: 2,
-    grantDirectiveId: "END",
-    at: "2030-01-01T00:07:00.000Z",
-  });
-  const again = await authority.bootstrapLegacyWriterIfAbsent({
-    systemInstanceId: SYSTEM_A,
-    grantedAt: "2030-01-01T00:08:00.000Z",
-  });
-  assert.equal(again.created, false);
-  assert.equal(again.grant?.state, "REVOKED");
+test("A-bootstrap FileWriterAuthorityV1 never auto-creates WRITER (V1 non-authoritative)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aion-v1-auth-"));
+  try {
+    const authority = new FileWriterAuthorityV1(root);
+    const created = await authority.bootstrapLegacyWriterIfAbsent({
+      systemInstanceId: SYSTEM_A,
+      grantedAt: "2030-01-01T00:00:00.000Z",
+    });
+    assert.equal(created.created, false);
+    assert.equal(created.grant, null);
+    await assert.rejects(authority.assertWritable("test"), /V1_NOT_AUTHORITATIVE|READ_ONLY/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

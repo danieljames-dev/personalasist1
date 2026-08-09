@@ -19,9 +19,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
-  StaticCapabilityRegistryV1, SyntheticBuildPipelineV1, SyntheticDeveloperAgentBridgeV1,
-  SyntheticResearchProviderV1, SyntheticVerificationRunnerV1, VerificationCapabilityV1,
+  DeveloperAgentCapabilityV1, InMemoryWriterAuthorityV1, LocalEchoCapabilityV1,
+  SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SyntheticBuildPipelineV1,
+  SyntheticDeveloperAgentBridgeV1, SyntheticResearchProviderV1, SyntheticVerificationRunnerV1,
+  VerificationCapabilityV1, createWriterGrantForTest,
 } from "../packages/local-assistant/dist/index.js";
 import { createAionServer } from "./aion/server.mjs";
 
@@ -44,12 +45,13 @@ const CORPUS = {
 async function open(dataRoot, exportRoot) {
   const developerAgents = new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]);
   const verificationRunner = new SyntheticVerificationRunnerV1();
+  const authority = new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
   const app = await createAionServer({
     repositoryRoot, dataRoot, exportRoot,
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(),
     providers: [new DeterministicModelProviderV1()],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
-    developerAgents, verificationRunner,
+    developerAgents, verificationRunner, authority,
     research: new SyntheticResearchProviderV1(CORPUS),
     pipeline: new SyntheticBuildPipelineV1(),
     // The brain runtime is never reached in this demo: no endpoint is probed and no completion is

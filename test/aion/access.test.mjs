@@ -5,8 +5,9 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1,
-  SyntheticDeveloperAgentBridgeV1, validateBindAddress,
+  InMemoryWriterAuthorityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
+  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, createWriterGrantForTest,
+  validateBindAddress,
 } from "../../packages/local-assistant/dist/index.js";
 import { createAionServer } from "../../apps/aion/server.mjs";
 
@@ -15,11 +16,13 @@ const repositoryRoot = resolve(import.meta.dirname, "..", "..");
 /** One isolated Command Center over synthetic temporary state. Devices below are all invented. */
 async function withServer(run) {
   const root = await mkdtemp(join(tmpdir(), "aion-access-test-"));
+  const authority = new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
   const app = await createAionServer({
     repositoryRoot, dataRoot: join(root, "private", "aion"), exportRoot: join(root, "private", "aion", "exports"),
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
     developerAgents: new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]),
+    authority,
   });
   const address = await app.listen(0);
   try { return await run({ app, address, base: `http://127.0.0.1:${address.port}` }); }

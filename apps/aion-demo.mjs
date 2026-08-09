@@ -13,9 +13,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
-  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, SyntheticVerificationRunnerV1,
-  VerificationCapabilityV1,
+  DeveloperAgentCapabilityV1, InMemoryWriterAuthorityV1, LocalEchoCapabilityV1,
+  SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
+  SyntheticVerificationRunnerV1, VerificationCapabilityV1, createWriterGrantForTest,
 } from "../packages/local-assistant/dist/index.js";
 import { createAionServer } from "./aion/server.mjs";
 
@@ -28,12 +28,14 @@ async function open(dataRoot, exportRoot) {
   const verificationRunner = new SyntheticVerificationRunnerV1({
     "npm.verify": { exitCode: 1, stdout: "ok 1 - a passing thing\nnot ok 2 - the synthetic failing assertion\n# tests 2\n# pass 1\n# fail 1\n" },
   });
+  // Synthetic demo-only authority gate (not Owner V2 real keys/anchors).
+  const authority = new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
   const app = await createAionServer({
     repositoryRoot, dataRoot, exportRoot,
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(),
     providers: [new DeterministicModelProviderV1()],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
-    developerAgents, verificationRunner,
+    developerAgents, verificationRunner, authority,
   });
   const address = await app.listen(0);
   assert.equal(address.address, "127.0.0.1", "the Command Center must bind loopback only");

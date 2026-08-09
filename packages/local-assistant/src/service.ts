@@ -77,9 +77,11 @@ type AssistantPorts = {
   backup: PrivateBackupV1;
   developerAgents: DeveloperAgentRegistryV1;
   /**
-   * Machine writer authority. When provided, every durable mutation through `mutate` requires a
-   * valid WRITER grant. Production always injects a host-local store. Unit tests that omit the
-   * port remain unbound only for synthetic fixtures; they must not be used for multi-host safety.
+   * Machine writer authority. When provided, every durable mutation through `mutate` and every
+   * startup migration save requires effective WRITER (re-evaluated at each durable save).
+   * Production injects Owner Authority V2 (verify-only, external trust root). Unit tests that
+   * omit the port remain unbound only for synthetic fixtures; they must not be used for
+   * multi-host safety.
    */
   authority?: WriterAuthorityPortV1;
   /** Optional. Absent means AION has no way to research anything, which is the default. */
@@ -221,6 +223,12 @@ export class AionAssistantV1 {
       // changes nothing is not written, so opening AION repeatedly does not churn revisions.
       const migrated = migrateStateV1(this.state, this.ports.clock.now(), (kind) => this.ports.ids.next(kind));
       if (migrated.applied) {
+        // M2 fix: startup migration is a durable save and requires effective WRITER.
+        // Prefer initialization failure over silent persistence while READ_ONLY / foreign / revoked.
+        // Service-level gate is mandatory; repository wrapper is defense-in-depth only.
+        if (this.ports.authority) {
+          await this.ports.authority.assertWritable("startup migration");
+        }
         const expected = this.state.revision;
         const next = { ...migrated.state, revision: expected + 1 };
         for (const record of migrated.records) this.#recordMigration(next, record);

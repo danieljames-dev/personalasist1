@@ -5,8 +5,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1,
-  SyntheticDeveloperAgentBridgeV1,
+  InMemoryWriterAuthorityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
+  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, createWriterGrantForTest,
 } from "../../packages/local-assistant/dist/index.js";
 import { createAionServer } from "../../apps/aion/server.mjs";
 
@@ -27,6 +27,10 @@ const UNAVAILABLE_PRIVATE = "10.255.255.254";
 /** IPv6 loopback: a genuinely different address from 127.0.0.1, bindable anywhere, never public. */
 const SECOND_LOCAL = "::1";
 
+function syntheticWriter() {
+  return new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
+}
+
 async function withAion(remoteAccess, run) {
   const root = await mkdtemp(join(tmpdir(), "aion-bind-test-"));
   const app = await createAionServer({
@@ -34,6 +38,7 @@ async function withAion(remoteAccess, run) {
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
     developerAgents: new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]),
+    authority: syntheticWriter(),
   });
   try {
     // Persist the access setting BEFORE listening, exactly as a restart would find it.
@@ -87,6 +92,7 @@ test("disabling access again returns to loopback-only on the next start", async 
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
     developerAgents: new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]),
+    authority: syntheticWriter(),
   });
   try {
     const first = await make();
@@ -131,6 +137,7 @@ test("a wildcard or public address is refused and never bound", async () => {
       clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
       capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
       developerAgents: new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]),
+      authority: syntheticWriter(),
     });
     try {
       // Settings refuses it outright, so it can never even be persisted.

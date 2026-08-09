@@ -10,8 +10,8 @@
  * (RFC 9562 UUID string): a logical instance id, not a hardware fingerprint.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 
 export const WRITER_AUTHORITY_SCHEMA = "aion.writer-authority.v1" as const;
 export const OWNER_AUTHORITY_COMMAND_SCHEMA = "aion.owner-authority-command.v1" as const;
@@ -248,8 +248,11 @@ export function createWriterGrantForTest(input: {
 }
 
 /**
- * Durable host-local authority file under the assistant data root
- * (`private/aion/writer-authority-v1.json`). Not portable active CURRENT.md.
+ * Legacy V1 host-local authority file (`private/aion/writer-authority-v1.json`).
+ *
+ * V1 is NON-AUTHORITATIVE for production writes under R6.1-R1.
+ * Presence of a V1 WRITER file never grants durable mutation rights.
+ * Absence never auto-creates authority. Prefer Owner Authority V2.
  */
 export class FileWriterAuthorityV1 implements WriterAuthorityPortV1 {
   readonly path: string;
@@ -267,40 +270,21 @@ export class FileWriterAuthorityV1 implements WriterAuthorityPortV1 {
       throw error;
     }
   }
-  async assertWritable(context?: string): Promise<AuthorityGrantV1> {
-    return assertWritableGrant(await this.load(), context);
+  /** V1 records cannot authorize production WRITER. */
+  async assertWritable(context = "persistent owner-state mutation"): Promise<AuthorityGrantV1> {
+    fail(`Writer authority is READ_ONLY (V1_NOT_AUTHORITATIVE); refusing ${context}. V1 writer-authority files are not Owner-authenticated.`);
   }
-  async applyOwnerCommand(command: OwnerAuthorityCommandV1): Promise<AuthorityGrantV1> {
-    const memory = new InMemoryWriterAuthorityV1(await this.load());
-    const next = await memory.applyOwnerCommand(command);
-    await this.#write(next);
-    return next;
+  async applyOwnerCommand(_command: OwnerAuthorityCommandV1): Promise<AuthorityGrantV1> {
+    fail("V1 owner authority commands are non-authoritative; use offline Owner Authority V2 signing.");
   }
-  async bootstrapLegacyWriterIfAbsent(input: { systemInstanceId: string; grantedAt: string }): Promise<{ created: boolean; grant: AuthorityGrantV1 | null }> {
-    const existing = await this.load();
-    if (existing) return { created: false, grant: existing };
-    const memory = new InMemoryWriterAuthorityV1(null);
-    const result = await memory.bootstrapLegacyWriterIfAbsent(input);
-    if (result.grant) await this.#write(result.grant);
-    return result;
-  }
-  async #write(grant: AuthorityGrantV1): Promise<void> {
-    const valid = validateAuthorityGrantV1(grant);
-    await mkdir(dirname(this.path), { recursive: true });
-    const text = `${JSON.stringify(valid, null, 2)}\n`;
-    const temporary = join(dirname(this.path), `.writer-authority-${process.pid}-${Date.now()}.tmp`);
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(text, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    try {
-      await rename(temporary, this.path);
-    } finally {
-      await rm(temporary, { force: true });
-    }
+  /**
+   * Production absence bootstrap removed. Never creates WRITER from missing proof.
+   */
+  async bootstrapLegacyWriterIfAbsent(_input: {
+    systemInstanceId: string;
+    grantedAt: string;
+  }): Promise<{ created: boolean; grant: AuthorityGrantV1 | null }> {
+    return { created: false, grant: await this.load() };
   }
 }
 

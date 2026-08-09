@@ -5,9 +5,9 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  DeveloperAgentCapabilityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
-  StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1, SyntheticVerificationRunnerV1,
-  VerificationCapabilityV1,
+  DeveloperAgentCapabilityV1, InMemoryWriterAuthorityV1, LocalEchoCapabilityV1,
+  SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
+  SyntheticVerificationRunnerV1, VerificationCapabilityV1, createWriterGrantForTest,
 } from "../../packages/local-assistant/dist/index.js";
 import { createAionServer } from "../../apps/aion/server.mjs";
 
@@ -19,11 +19,12 @@ async function withServer(run) {
   const developerAgents = new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]);
   // A synthetic verification runner: the suite must never actually shell out to npm or git.
   const verificationRunner = new SyntheticVerificationRunnerV1({ "npm.verify": { exitCode: 1, stdout: "not ok 3 - synthetic failure\n# fail 1\n" } });
+  const authority = new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
   const app = await createAionServer({
     repositoryRoot, dataRoot: join(root, "private", "aion"), exportRoot: join(root, "private", "aion", "exports"),
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(), providers: [new DeterministicModelProviderV1()],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
-    developerAgents, verificationRunner,
+    developerAgents, verificationRunner, authority,
   });
   const address = await app.listen(0);
   try { return await run({ app, address, base: `http://127.0.0.1:${address.port}`, root }); }

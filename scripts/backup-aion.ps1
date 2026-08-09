@@ -35,6 +35,14 @@ $ForbiddenPatterns = @(
 
 function Write-Step { param([string]$Message) Write-Host "  [backup] $Message" }
 function Write-Fail { param([string]$Message) Write-Host "  [backup] FAIL: $Message" -ForegroundColor Red }
+# Join path segments without requiring the base drive to be mounted (DriveNotFound-safe).
+function Join-AionPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Base,
+        [Parameter(Mandatory = $true)][string]$Child
+    )
+    return [System.IO.Path]::Combine($Base, $Child)
+}
 function Invoke-Git {
     param([string[]]$Arguments, [string]$WorkingDirectory)
     if ($WorkingDirectory) { Push-Location $WorkingDirectory }
@@ -52,20 +60,20 @@ if ($ExpectedTests -lt 0) {
     $ExpectedTests = Get-AionExpectedVerifyPassCount -RepositoryPath $RepositoryPath
 }
 
-$mirrorRoot    = Join-Path $BackupRoot 'repository-mirror'
-$mirrorPath    = Join-Path $mirrorRoot 'AION.git'
-$stagingRoot   = Join-Path $mirrorRoot 'staging'
-$quarantineRoot= Join-Path $mirrorRoot 'quarantine'
-$stagedMirror  = Join-Path $stagingRoot "AION-$timestamp.git"
-$cloneCheck    = Join-Path $stagingRoot "clone-check-$timestamp"
-$quarantinePath= Join-Path $quarantineRoot "AION-before-ref-policy-$timestamp.git"
-$snapshotDir   = Join-Path $BackupRoot 'working-snapshots'
-$manifestDir   = Join-Path $BackupRoot 'manifests'
-$logDir        = Join-Path $BackupRoot 'logs'
-$bundlePath    = Join-Path $snapshotDir "AION-$timestamp.bundle"
-$untrackedZip  = Join-Path $snapshotDir "AION-$timestamp-untracked.zip"
-$manifestPath  = Join-Path $manifestDir "backup-$timestamp.json"
-$logPath       = Join-Path $logDir "backup-$timestamp.log"
+$mirrorRoot    = Join-AionPath $BackupRoot 'repository-mirror'
+$mirrorPath    = Join-AionPath $mirrorRoot 'AION.git'
+$stagingRoot   = Join-AionPath $mirrorRoot 'staging'
+$quarantineRoot= Join-AionPath $mirrorRoot 'quarantine'
+$stagedMirror  = Join-AionPath $stagingRoot "AION-$timestamp.git"
+$cloneCheck    = Join-AionPath $stagingRoot "clone-check-$timestamp"
+$quarantinePath= Join-AionPath $quarantineRoot "AION-before-ref-policy-$timestamp.git"
+$snapshotDir   = Join-AionPath $BackupRoot 'working-snapshots'
+$manifestDir   = Join-AionPath $BackupRoot 'manifests'
+$logDir        = Join-AionPath $BackupRoot 'logs'
+$bundlePath    = Join-AionPath $snapshotDir "AION-$timestamp.bundle"
+$untrackedZip  = Join-AionPath $snapshotDir "AION-$timestamp-untracked.zip"
+$manifestPath  = Join-AionPath $manifestDir "backup-$timestamp.json"
+$logPath       = Join-AionPath $logDir "backup-$timestamp.log"
 
 $manifest = [ordered]@{
     schema='aion.backup-manifest.v2'; timestampUtc=$timestamp
@@ -166,7 +174,7 @@ try {
     }
 
     foreach ($dir in @($BackupRoot,$mirrorRoot,$stagingRoot,$quarantineRoot,$snapshotDir,$manifestDir,$logDir,
-        (Join-Path $BackupRoot 'releases'),(Join-Path $BackupRoot 'databases'),(Join-Path $BackupRoot 'restore-tests'))) {
+        (Join-AionPath $BackupRoot 'releases'),(Join-AionPath $BackupRoot 'databases'),(Join-AionPath $BackupRoot 'restore-tests'))) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 

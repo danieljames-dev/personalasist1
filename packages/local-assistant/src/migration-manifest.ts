@@ -62,10 +62,21 @@ export interface MigrationManifestV1 {
     expectedVerifyPassCount: number;
     evaluatorDigest: string;
   };
+  /**
+   * Descriptive authority snapshot only. NEVER grants effective writer rights.
+   * V2 fields are optional for forward description; missing fields remain valid.
+   */
   authority: {
     epoch: number;
-    sourceState: "WRITER" | "READ_ONLY" | "REVOKED";
-    targetState: "WRITER" | "READ_ONLY" | "REVOKED" | "absent";
+    sourceState: "WRITER" | "QUIESCENT" | "READ_ONLY" | "REVOKED";
+    targetState: "WRITER" | "QUIESCENT" | "READ_ONLY" | "REVOKED" | "absent";
+    authoritySchema?: string;
+    anchorId?: string | null;
+    currentDigest?: string | null;
+    writerSystemInstanceId?: string | null;
+    sourceSystemInstanceId?: string | null;
+    targetSystemInstanceId?: string | null;
+    trustedOwnerKeyId?: string | null;
   };
   cutover: {
     state: "designed" | "frozen" | "restored" | "verified" | "promoted" | "aborted";
@@ -261,9 +272,19 @@ export function validateMigrationManifestV1(value: unknown): MigrationManifestV1
   if (!authority || !Number.isSafeInteger(authority.epoch) || (authority.epoch as number) < 1) fail("authority.epoch is invalid.");
   for (const key of ["sourceState", "targetState"] as const) {
     const allowed = key === "targetState"
-      ? ["WRITER", "READ_ONLY", "REVOKED", "absent"]
-      : ["WRITER", "READ_ONLY", "REVOKED"];
+      ? ["WRITER", "QUIESCENT", "READ_ONLY", "REVOKED", "absent"]
+      : ["WRITER", "QUIESCENT", "READ_ONLY", "REVOKED"];
     if (!allowed.includes(String(authority[key]))) fail(`authority.${key} is invalid.`);
+  }
+  // Optional descriptive V2 fields — never grant authority; reject secrets via rejectSecretKeys already.
+  if (authority.authoritySchema !== undefined && (typeof authority.authoritySchema !== "string" || !authority.authoritySchema.trim())) {
+    fail("authority.authoritySchema is invalid.");
+  }
+  if (authority.trustedOwnerKeyId !== undefined && authority.trustedOwnerKeyId !== null && !isSha256Hex(authority.trustedOwnerKeyId)) {
+    fail("authority.trustedOwnerKeyId must be SHA-256 hex when present.");
+  }
+  if (authority.currentDigest !== undefined && authority.currentDigest !== null && !isSha256Hex(authority.currentDigest)) {
+    fail("authority.currentDigest must be SHA-256 hex when present.");
   }
 
   const cutover = m.cutover as Record<string, unknown> | undefined;
@@ -331,6 +352,23 @@ export function validateMigrationManifestV1(value: unknown): MigrationManifestV1
       epoch: authority.epoch as number,
       sourceState: authority.sourceState as MigrationManifestV1["authority"]["sourceState"],
       targetState: authority.targetState as MigrationManifestV1["authority"]["targetState"],
+      ...(typeof authority.authoritySchema === "string" ? { authoritySchema: authority.authoritySchema.trim() } : {}),
+      ...(authority.anchorId === null || typeof authority.anchorId === "string" ? { anchorId: authority.anchorId as string | null } : {}),
+      ...(authority.currentDigest === null || typeof authority.currentDigest === "string"
+        ? { currentDigest: authority.currentDigest as string | null }
+        : {}),
+      ...(authority.writerSystemInstanceId === null || typeof authority.writerSystemInstanceId === "string"
+        ? { writerSystemInstanceId: authority.writerSystemInstanceId as string | null }
+        : {}),
+      ...(authority.sourceSystemInstanceId === null || typeof authority.sourceSystemInstanceId === "string"
+        ? { sourceSystemInstanceId: authority.sourceSystemInstanceId as string | null }
+        : {}),
+      ...(authority.targetSystemInstanceId === null || typeof authority.targetSystemInstanceId === "string"
+        ? { targetSystemInstanceId: authority.targetSystemInstanceId as string | null }
+        : {}),
+      ...(authority.trustedOwnerKeyId === null || typeof authority.trustedOwnerKeyId === "string"
+        ? { trustedOwnerKeyId: authority.trustedOwnerKeyId as string | null }
+        : {}),
     },
     cutover: {
       state: cutover.state as MigrationManifestV1["cutover"]["state"],

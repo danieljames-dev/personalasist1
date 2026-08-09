@@ -17,10 +17,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
-  EVALUATION_SUITE, InProcessBrainRuntimeV1, LocalEchoCapabilityV1, OFFLINE_ENDPOINT_ID,
-  SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SyntheticDeveloperAgentBridgeV1,
-  SyntheticGpuInfrastructureV1, SyntheticVerificationRunnerV1, UnavailableGpuInfrastructureV1,
-  V13_BUDGET_CEILING_CENTS, scoreCase,
+  EVALUATION_SUITE, InMemoryWriterAuthorityV1, InProcessBrainRuntimeV1, LocalEchoCapabilityV1,
+  OFFLINE_ENDPOINT_ID, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1,
+  SyntheticDeveloperAgentBridgeV1, SyntheticGpuInfrastructureV1, SyntheticVerificationRunnerV1,
+  UnavailableGpuInfrastructureV1, V13_BUDGET_CEILING_CENTS, createWriterGrantForTest, scoreCase,
 } from "../packages/local-assistant/dist/index.js";
 import { PublicUrlResearchProviderV1 } from "./aion/research-fetch.mjs";
 import { createAionServer } from "./aion/server.mjs";
@@ -63,12 +63,13 @@ function stubFetch(url, init) {
 async function open(dataRoot, exportRoot, { gpu } = {}) {
   const developerAgents = new SelectableDeveloperAgentRegistryV1([new SyntheticDeveloperAgentBridgeV1()]);
   const offline = new DeterministicModelProviderV1();
+  const authority = new InMemoryWriterAuthorityV1(createWriterGrantForTest({ state: "WRITER" }));
   const app = await createAionServer({
     repositoryRoot, dataRoot, exportRoot,
     clock: new DeterministicClockV1(), ids: new DeterministicIdGeneratorV1(),
     providers: [offline],
     capabilities: new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1()]),
-    developerAgents,
+    developerAgents, authority,
     verificationRunner: new SyntheticVerificationRunnerV1(),
     research: new PublicUrlResearchProviderV1({ resolver: RESOLVER, now: () => "2030-01-01T00:00:00.000Z" }),
     // Only the in-process adapter: the demo can evaluate the floor and reaches no address at all.

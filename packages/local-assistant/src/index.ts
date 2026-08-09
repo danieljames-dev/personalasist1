@@ -23,6 +23,7 @@ export * from "./sales.js";
 export * from "./sales-coach.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
+export * from "./owner-authority-v2.js";
 export * from "./migration-manifest.js";
 export * from "./cold-restore.js";
 export * from "./control-plane-archive.js";
