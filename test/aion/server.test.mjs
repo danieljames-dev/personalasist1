@@ -309,7 +309,9 @@ test("the Sales UI is phone-first: large targets, one-tap actions, and a timelin
   for (const action of ["+ Prospect", "+ Note", "Follow-up", "Appointment", "Coach", "Metrics"]) assert.ok(js.includes(action), `${action} is a quick action`);
   for (const action of ["Call Prep", "Add Note", "Follow-up Draft", "Change Stage"]) assert.ok(js.includes(action), `${action} is on the person view`);
   assert.match(js, /Timeline/u, "the person view shows the durable timeline");
-  assert.match(css, /@media \(max-width: 700px\)/u, "there is a real phone layout, not just a narrower desktop");
+  // Phone layout is a dedicated shell (body.aion-phone-mode), not a narrow desktop reflow.
+  assert.match(css, /body\.aion-phone-mode\s+\.aion-phone-shell/u, "there is a real phone layout, not just a narrower desktop");
+  assert.match(css, /\.aion-phone-shell\s*\{[^}]*flex-direction:\s*column/su, "phone shell is a flex column app chrome");
   assert.match(css, /font-size: 16px/u, "inputs are 16px so iOS does not zoom on focus");
   assert.match(css, /min-height: 2\.(?:75|9)rem/u, "tap targets are thumb-sized");
 });
