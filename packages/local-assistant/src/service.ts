@@ -68,6 +68,7 @@ import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, disco
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
 import {
   buildAccountSummary,
+  buildDailyBriefing,
   buildEmailDraftFromCustomer,
   buildWorkQueue,
   findRelationshipsByName,
@@ -85,6 +86,11 @@ import {
   type OwnerKnowledgeFactV1,
   type OwnerKnowledgeStateV1,
 } from "./owner-knowledge.js";
+import {
+  extractCommitmentsFromBody,
+  searchGmailFixtures as searchGmailFixtureMessages,
+  type GmailMessageFixtureV1,
+} from "./connectors/gmail-connector.js";
 import type { CrmDocumentV1, EmailDraftV1 } from "./contracts.js";
 
 type AssistantPorts = {
@@ -2604,6 +2610,75 @@ export class AionAssistantV1 {
     return buildWorkQueue(state.relationships, this.ports.clock.now());
   }
 
+  async dailyBriefing() {
+    const state = await this.snapshot();
+    const workspaceId = state.settings.activeWorkspace;
+    const inWorkspace = state.relationships.filter((r) => r.workspace === workspaceId && !r.archived);
+    return buildDailyBriefing({
+      relationships: inWorkspace,
+      tasks: state.tasks ?? [],
+      drafts: (state.emailDrafts ?? []).filter((d) => d.workspace === workspaceId),
+      documents: (state.crmDocuments ?? []).filter((d) => d.workspace === workspaceId),
+      brands: (state.workspaces ?? [])
+        .filter((w) => w.kind === "business" && !w.archived)
+        .map((w) => ({ name: w.brand?.name || w.label })),
+      workspaceId,
+      nowIso: this.ports.clock.now(),
+    });
+  }
+
+  /**
+   * Gmail fixture mailbox (pre-OAuth). Synthetic messages only — never scrapes browser credentials.
+   * Live Gmail waits for Owner OAuth; until then assistant/search use fixtures when seeded.
+   */
+  private gmailFixtures: GmailMessageFixtureV1[] = [];
+
+  seedGmailFixtures(messages: GmailMessageFixtureV1[]): number {
+    this.gmailFixtures = messages.slice(0, 200);
+    return this.gmailFixtures.length;
+  }
+
+  searchGmailFixtures(query: string) {
+    const hits = searchGmailFixtureMessages(this.gmailFixtures, query);
+    return {
+      mode: "fixture" as const,
+      messages: hits,
+      commitments: hits.flatMap((m) =>
+        extractCommitmentsFromBody(m.bodyText).map((c) => ({ messageId: m.id, text: c })),
+      ),
+    };
+  }
+
+  async associateGmailFixtureWithCrm(messageId: string): Promise<{
+    message: GmailMessageFixtureV1 | null;
+    customer: CustomerV1 | null;
+    reply: string;
+  }> {
+    const msg = this.gmailFixtures.find((m) => m.id === messageId) ?? null;
+    if (!msg) return { message: null, customer: null, reply: "Fixture message not found." };
+    const state = await this.snapshot();
+    const hay = `${msg.from} ${msg.subject} ${msg.snippet}`;
+    const matches = findRelationshipsByName(
+      state.relationships.filter((r) => r.workspace === state.settings.activeWorkspace && !r.archived),
+      hay,
+    );
+    const customer = matches[0] ?? null;
+    if (customer) {
+      await this.recordCustomerInteraction(customer.id, {
+        kind: "email",
+        summary: `Email (fixture): ${msg.subject}`,
+        detail: msg.bodyText.slice(0, 4000),
+      });
+    }
+    return {
+      message: msg,
+      customer,
+      reply: customer
+        ? `Associated fixture email “${msg.subject}” with ${customer.displayName} (stored interaction).`
+        : `Fixture email “${msg.subject}” from ${msg.from} — no CRM match yet. Create a contact or name the company.`,
+    };
+  }
+
   async attachCrmDocument(input: Record<string, unknown> = {}): Promise<CrmDocumentV1> {
     return this.mutate((draft) => {
       const now = this.ports.clock.now();
@@ -2738,34 +2813,102 @@ export class AionAssistantV1 {
     const sources: Array<{ type: string; id: string; label: string }> = [];
 
     if (route.intent === "WORK_QUEUE" || route.intent === "LIST_FOLLOWUPS") {
-      const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
-      // Brand / collaborator context when the prompt asks about brands (grounded only).
-      let brandExtra = "";
-      if (/\bbrand|caleb|collaborator\b/i.test(text)) {
-        const brands = (state.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived);
-        const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
-        brandExtra = [
-          "",
-          brands.length
-            ? `Active brand workspaces (${brands.length}):\n${brands
-                .map((b) => `  - ${b.brand?.name || b.label}${b.brand?.channels?.length ? ` · ${b.brand.channels.join(", ")}` : ""}`)
-                .join("\n")}`
-            : "Active brand workspaces: none recorded (create under Knowledge / Import).",
-          collabs.length
-            ? `Collaborators (owner-supplied only):\n${collabs
-                .slice(0, 12)
-                .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
-                .join("\n")}`
-            : "Collaborators: none recorded. AION does not invent who manages a brand.",
-        ].join("\n");
+      const useBriefing =
+        route.intent === "WORK_QUEUE" ||
+        /\bbriefing|what needs me|what can you handle|what changed|prepare me for today|what did i forget\b/i.test(text);
+      if (useBriefing) {
+        const brands = (state.workspaces ?? [])
+          .filter((w) => w.kind === "business" && !w.archived)
+          .map((w) => ({ name: w.brand?.name || w.label }));
+        const briefing = buildDailyBriefing({
+          relationships: inWorkspace,
+          tasks: state.tasks ?? [],
+          drafts: (state.emailDrafts ?? []).filter((d) => d.workspace === workspaceId),
+          documents: (state.crmDocuments ?? []).filter((d) => d.workspace === workspaceId),
+          brands,
+          workspaceId,
+          nowIso: this.ports.clock.now(),
+        });
+        let brandExtra = "";
+        if (/\bbrand|caleb|collaborator\b/i.test(text)) {
+          const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
+          brandExtra = [
+            "",
+            brands.length
+              ? `Active brand workspaces (${brands.length}): ${brands.map((b) => b.name).join(", ")}`
+              : "Active brand workspaces: none recorded.",
+            collabs.length
+              ? `Collaborators (owner-supplied only):\n${collabs
+                  .slice(0, 12)
+                  .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
+                  .join("\n")}`
+              : "Collaborators: none recorded. AION does not invent who manages a brand.",
+          ].join("\n");
+        }
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: briefing.text + brandExtra,
+          sources,
+          action: "work.briefing",
+          data: briefing,
+        };
       }
+      const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
       return {
         intent: route.intent,
         confidence: route.confidence,
-        reply: queue.text + brandExtra,
+        reply: queue.text,
         sources,
         action: "work.queue",
         data: { queue },
+      };
+    }
+
+    if (route.intent === "RESEARCH_COMPANY") {
+      const subject = route.subject || text.replace(/^\s*research\b/i, "").trim() || "company research";
+      const prior = (state.researchJobs ?? [])
+        .filter((j) => j.workspace === workspaceId && j.question.toLowerCase().includes(subject.toLowerCase().slice(0, 40)))
+        .slice(0, 3);
+      if (prior.length && prior[0]!.state === "complete") {
+        const job = prior[0]!;
+        sources.push({ type: "research", id: job.id, label: job.question });
+        const findings = (job.findings ?? []).slice(0, 8).map((f) => `  - [${f.class}] ${f.statement}`).join("\n");
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: [
+            `Stored research for “${job.question}” (state: ${job.state}):`,
+            findings || "  (no findings recorded)",
+            "",
+            "Claims are research findings — not confirmed facts unless owner-promoted.",
+            "To re-run: approve/run a new research job from Research screen.",
+          ].join("\n"),
+          sources,
+          action: "research.reuse",
+          data: { job },
+        };
+      }
+      const job = await this.proposeResearchJob({
+        question: `Research: ${subject}`.slice(0, 2000),
+        scope: "public-web",
+        limits: { maxSources: 8, maxCostCents: 0 },
+      });
+      sources.push({ type: "research", id: job.id, label: job.question });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: [
+          `Proposed research job (not run yet): “${job.question}”.`,
+          `State: ${job.state}. Approve and run from Research when ready.`,
+          this.ports.research
+            ? `Provider available: ${this.ports.research.id}.`
+            : "No research provider is configured — job is recorded for when one is available.",
+          "AION will not invent company facts. Results will cite sources.",
+        ].join("\n"),
+        sources,
+        action: "research.propose",
+        data: { job },
       };
     }
 

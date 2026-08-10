@@ -591,6 +591,10 @@ export async function createAionServer(options = {}) {
       case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
       case "connector.image.status": return imageUnderstandingStatus();
       case "work.queue": return service.workQueue();
+      case "work.briefing": return service.dailyBriefing();
+      case "gmail.fixture.seed": return { count: service.seedGmailFixtures(input.messages ?? []) };
+      case "gmail.fixture.search": return service.searchGmailFixtures(String(input.query ?? ""));
+      case "gmail.fixture.associate": return service.associateGmailFixtureWithCrm(String(input.messageId ?? ""));
       case "coach": return service.coach(input.kind, input.input ?? {});
       case "sales.routine.create": return service.createRoutineFromTemplate(input.templateId);
       case "sales.metrics": return service.recordSalesMetrics(input.date, input.counts ?? {}, input.note ?? "");

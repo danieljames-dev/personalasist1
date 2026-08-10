@@ -179,6 +179,35 @@ async function main() {
   });
   rec("BRAND_COLLABORATOR", collab.name === "E2E Collaborator" && !!collab.brandResponsibility, collab.id);
 
+  const brief = await api("work.briefing", {});
+  rec("DAILY_BRIEFING", /Daily briefing|What needs you|follow/i.test(brief.text || ""), (brief.text || "").slice(0, 120));
+
+  const briefNl = await api("assistant.prompt", { text: "What needs me?" });
+  rec("NL_WHAT_NEEDS_ME", /needs you|follow|task|draft/i.test(briefNl.reply || ""), (briefNl.reply || "").slice(0, 120));
+
+  await api("gmail.fixture.seed", {
+    messages: [
+      {
+        id: "fix-e2e-1",
+        threadId: "thr-e2e-1",
+        from: "Jane Test <jane@acme-r7.test>",
+        to: "owner@test",
+        subject: "Pricing follow-up",
+        snippet: "We will decide by Friday",
+        bodyText: "Thanks for the call. We will decide by Friday on Product Alpha.",
+        internalDate: new Date().toISOString(),
+        labelIds: ["INBOX"],
+      },
+    ],
+  });
+  const gmail = await api("gmail.fixture.search", { query: "pricing" });
+  rec("GMAIL_FIXTURE_SEARCH", (gmail.messages?.length ?? 0) >= 1 && (gmail.commitments?.length ?? 0) >= 1, `msgs=${gmail.messages?.length} commitments=${gmail.commitments?.length}`);
+  const assoc = await api("gmail.fixture.associate", { messageId: "fix-e2e-1" });
+  rec("GMAIL_FIXTURE_ASSOCIATE", /Jane|ACME|Associated/i.test(assoc.reply || ""), (assoc.reply || "").slice(0, 120));
+
+  const research = await api("assistant.prompt", { text: "Research ACME R7 TEST COMPANY." });
+  rec("RESEARCH_PROPOSE", /research job|Proposed research|Stored research/i.test(research.reply || ""), (research.reply || "").slice(0, 120));
+
   // Capture pre-restart digests of reply content existence via state
   const mid = await state();
   const hasJane = (mid.state.relationships || []).some((r) => /Jane Test/i.test(r.displayName));

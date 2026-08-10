@@ -58,11 +58,16 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     patterns: [
       /\bwhat (should|do) i (do|work on|focus on)\b/i,
       /\bwhat needs (my )?attention\b/i,
+      /\bwhat needs me\b/i,
       /\bwhat can you handle\b/i,
+      /\bwhat changed since\b/i,
+      /\bdaily briefing\b/i,
+      /\bmorning briefing\b/i,
       /\btoday'?s (priorities|work|plan)\b/i,
       /\bwork queue\b/i,
       /\bprepare me for (today|my day|my calls)\b/i,
       /\bhelp me prepare for today\b/i,
+      /\bwhat did i forget\b/i,
     ],
   },
   {
@@ -317,6 +322,86 @@ export function buildWorkQueue(relationships: readonly RelationshipV1[], nowIso:
     staleAccounts.length ? `Quiet accounts (14+ days):\n${staleAccounts.slice(0, 8).map((s) => `  - ${s.customer} (last ${s.lastContact.slice(0, 10)})`).join("\n")}` : "Quiet accounts: none flagged",
   ].join("\n\n");
   return { overdue, dueSoon, staleAccounts, text };
+}
+
+/**
+ * Checkpoint M — practical daily briefing from stored state only.
+ * Distinguishes what needs the Owner vs what AION can prepare without sending.
+ */
+export function buildDailyBriefing(input: {
+  relationships: readonly RelationshipV1[];
+  tasks: ReadonlyArray<{ title: string; state: string; workspace: string; updatedAt?: string }>;
+  drafts: ReadonlyArray<{ subject: string; status: string; toName: string }>;
+  documents: ReadonlyArray<{ filename: string; createdAt: string }>;
+  brands: ReadonlyArray<{ name: string }>;
+  workspaceId: string;
+  nowIso: string;
+  sinceIso?: string;
+}): { text: string; canHandleWithoutOwner: string[]; needsOwner: string[] } {
+  const queue = buildWorkQueue(input.relationships, input.nowIso);
+  const openTasks = input.tasks.filter(
+    (t) => t.workspace === input.workspaceId && t.state !== "completed" && t.state !== "cancelled",
+  );
+  const pendingDrafts = input.drafts.filter((d) => d.status === "draft").slice(0, 8);
+  const since = input.sinceIso ? Date.parse(input.sinceIso) : Date.parse(input.nowIso) - 86400000;
+  const recentInteractions: string[] = [];
+  for (const r of input.relationships) {
+    if (r.archived) continue;
+    for (const i of r.interactions) {
+      if (Date.parse(i.at) >= since) {
+        recentInteractions.push(`${r.displayName}: [${i.kind}] ${i.summary}`);
+      }
+    }
+  }
+  recentInteractions.sort();
+  const recentDocs = input.documents
+    .filter((d) => Date.parse(d.createdAt) >= since)
+    .map((d) => d.filename);
+
+  const needsOwner: string[] = [];
+  if (queue.overdue.length) needsOwner.push(`Complete or reschedule ${queue.overdue.length} overdue follow-up(s).`);
+  if (queue.dueSoon.length) needsOwner.push(`Work ${queue.dueSoon.length} follow-up(s) due soon.`);
+  if (pendingDrafts.length) needsOwner.push(`Review ${pendingDrafts.length} email draft(s) before any send.`);
+  if (openTasks.length) needsOwner.push(`Advance ${openTasks.length} open task(s).`);
+
+  const canHandleWithoutOwner = [
+    "Refresh work queue and account summaries from stored CRM.",
+    "Draft follow-up emails for named contacts (never send).",
+    "Attach/summarize owner-selected documents under Knowledge / Import.",
+    "Propose research jobs for owner approval.",
+    "Prepare call prep notes from stored interactions only.",
+  ];
+
+  const text = [
+    `Daily briefing (${input.nowIso.slice(0, 10)}) — stored facts only:`,
+    "",
+    queue.text,
+    "",
+    openTasks.length
+      ? `Open tasks (${openTasks.length}):\n${openTasks.slice(0, 10).map((t) => `  - ${t.title} [${t.state}]`).join("\n")}`
+      : "Open tasks: none.",
+    pendingDrafts.length
+      ? `Drafts awaiting your review (${pendingDrafts.length}):\n${pendingDrafts.map((d) => `  - ${d.subject} → ${d.toName || "unknown"}`).join("\n")}`
+      : "Email drafts awaiting review: none.",
+    input.brands.length
+      ? `Brand workspaces: ${input.brands.map((b) => b.name).join(", ")}`
+      : "Brand workspaces: none recorded.",
+    "",
+    recentInteractions.length
+      ? `What changed since ${new Date(since).toISOString().slice(0, 10)} (${recentInteractions.length} interaction(s)):\n${recentInteractions.slice(0, 12).map((x) => `  - ${x}`).join("\n")}`
+      : `What changed since ${new Date(since).toISOString().slice(0, 10)}: no new CRM interactions recorded.`,
+    recentDocs.length ? `Documents added: ${recentDocs.slice(0, 8).join(", ")}` : "",
+    "",
+    "What needs you:",
+    ...(needsOwner.length ? needsOwner.map((x) => `  · ${x}`) : ["  · Nothing urgent from stored CRM."]),
+    "",
+    "What AION can handle without you (no send/post/apply):",
+    ...canHandleWithoutOwner.map((x) => `  · ${x}`),
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
+
+  return { text, canHandleWithoutOwner, needsOwner };
 }
 
 export function buildEmailDraftFromCustomer(
