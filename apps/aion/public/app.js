@@ -510,11 +510,30 @@ function knowledgeArea(s) {
   const docs = (s.crmDocuments ?? []).filter((d) => d.workspace === s.settings.activeWorkspace).slice(0, 40);
   const people = (s.relationships ?? []).filter((r) => r.workspace === s.settings.activeWorkspace && !r.archived);
   const brands = (s.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived);
+  const ok = s.ownerKnowledge ?? { profile: { displayName: "", summary: "" }, facts: [] };
+  const facts = (ok.facts ?? []).filter((f) => f.enabled !== false).slice(0, 40);
+  const collabs = s.brandCollaborators ?? [];
+  const cats = ["profile","employment","skill","experience","project","preference","goal","product-service","sales-experience","writing","business-role","process","other"];
   return `<h1>Knowledge / Import</h1>
-<p class="lead">Upload real files into AION. Originals are preserved under private intake with filename, type, size, tags, timestamp, and optional CRM association. AION never scans your drives automatically.</p>
+<p class="lead">Owner profile, brand registry, and real file intake. Originals are preserved under private intake. AION never scans your drives automatically and never invents collaborator roles.</p>
+<div class="card"><h2>Owner profile</h2>
+<form data-form="owner-profile">
+<label>Display name<input name="displayName" maxlength="200" value="${esc(ok.profile?.displayName || "")}"></label>
+<label>Short bio / summary<textarea name="summary" maxlength="8000">${esc(ok.profile?.summary || "")}</textarea></label>
+<button>Save profile</button>
+</form>
+<form data-form="owner-fact">
+<label>Category<select name="category">${cats.map((c) => `<option value="${c}">${c}</option>`).join("")}</select></label>
+<label>Title<input name="title" required maxlength="200" placeholder="e.g. Current role, Skill: negotiation"></label>
+<label>Fact<textarea name="content" required maxlength="20000" placeholder="Owner-supplied fact only"></textarea></label>
+<label>Confidence 0–100<input name="confidence" type="number" min="0" max="100" value="90"></label>
+<button>Add knowledge fact</button>
+</form>
+${facts.length ? facts.map((f) => `<p class="meta"><b>${esc(f.category)}</b> · ${esc(f.title)} (${f.confidence}%) — ${esc(f.content.slice(0, 180))}${f.content.length > 180 ? "…" : ""}</p>`).join("") : `<p class="meta">No structured owner facts yet.</p>`}
+</div>
 <div class="card"><h2>Upload file</h2>
 <form data-form="document-upload" id="docUploadForm">
-<label>File<input type="file" name="file" required accept=".txt,.csv,.json,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp,.log,text/*,image/*"></label>
+<label>File or camera photo<input type="file" name="file" required accept=".txt,.csv,.json,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp,.log,text/*,image/*" capture="environment"></label>
 <label>Associate with customer/contact (optional)
 <select name="relationshipId"><option value="">— none yet —</option>
 ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organisation ? ` (${esc(p.organisation)})` : ""}</option>`).join("")}
@@ -534,6 +553,18 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 <button>Create brand workspace</button>
 </form>
 ${brands.length ? brands.map((w) => `<p class="meta"><b>${esc(w.brand?.name || w.label)}</b> — ${esc(w.purpose || "business")}${w.brand?.channels?.length ? ` · ${esc(w.brand.channels.join(", "))}` : ""}</p>`).join("") : `<p class="meta">No brand workspaces yet. Create one only with facts you supply.</p>`}
+<form data-form="brand-collaborator">
+<label>Collaborator name<input name="name" required maxlength="200" placeholder="Only names you supply"></label>
+<label>Role<input name="role" maxlength="200" placeholder="e.g. social manager — only if known"></label>
+<label>Brand workspace
+<select name="brandWorkspaceId"><option value="">— none —</option>
+${brands.map((w) => `<option value="${esc(w.id)}">${esc(w.brand?.name || w.label)}</option>`).join("")}
+</select></label>
+<label>Brand responsibility (owner-supplied only)<input name="brandResponsibility" maxlength="2000"></label>
+<label>Notes<textarea name="notes" maxlength="10000"></textarea></label>
+<button>Add collaborator</button>
+</form>
+${collabs.length ? collabs.map((c) => `<p class="meta"><b>${esc(c.name)}</b>${c.role ? ` · ${esc(c.role)}` : ""}${c.brandResponsibility ? ` — ${esc(c.brandResponsibility)}` : ""}</p>`).join("") : `<p class="meta">No collaborators recorded. AION will not invent who manages a brand.</p>`}
 </div>
 <div class="card"><h2>Recent documents (${docs.length})</h2>
 ${docs.length ? docs.map((d) => `<article class="card"><h3>${esc(d.filename)}</h3>
@@ -542,6 +573,9 @@ ${docs.length ? docs.map((d) => `<article class="card"><h3>${esc(d.filename)}</h
 ${d.extractedText ? `<details><summary>Extracted text</summary><pre class="meta">${esc(d.extractedText.slice(0, 2000))}</pre></details>` : ""}
 <p class="meta">Stored: <code>${esc(d.storedPath)}</code>${d.relationshipId ? ` · CRM link ${esc(d.relationshipId.slice(0, 8))}…` : " · unassociated"}</p>
 </article>`).join("") : `<p class="empty">No documents yet. Upload a file above.</p>`}
+</div>
+<div class="card"><h2>Phone intake</h2>
+<p class="meta">On the same private network (after enabling Private phone access in Settings), open <code>/phone</code> on your phone, pair once, then take a photo and upload. Originals land under private intake with tags including <code>phone-intake</code>.</p>
 </div>
 <div class="card"><h2>Conversation archive import</h2>
 <p class="meta">Legacy chat archive import remains on the Imports screen (dry-run first, explicit path only).</p>
@@ -788,6 +822,38 @@ document.addEventListener("submit", async (event) => {
         },
       });
       toast(`Brand workspace created: ${d.label}`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "owner-profile") {
+      await api("owner.profile.update", { displayName: d.displayName, summary: d.summary });
+      toast("Owner profile saved.");
+      await load();
+      return;
+    }
+    if (kind === "owner-fact") {
+      await api("owner.knowledge.add", {
+        category: d.category,
+        title: d.title,
+        content: d.content,
+        confidence: Number(d.confidence || 90),
+        sourceRef: "owner.ui",
+      });
+      toast("Knowledge fact added.");
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "brand-collaborator") {
+      await api("brand.collaborator.add", {
+        name: d.name,
+        role: d.role,
+        brandWorkspaceId: d.brandWorkspaceId || null,
+        brandResponsibility: d.brandResponsibility,
+        notes: d.notes,
+      });
+      toast(`Collaborator recorded: ${d.name}`);
       form.reset();
       await load();
       return;

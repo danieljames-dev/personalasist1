@@ -594,6 +594,13 @@ export interface AssistantStateV1 {
   crmDocuments: CrmDocumentV1[];
   /** R7 email drafts (never auto-sent). Newest first; bounded on write. */
   emailDrafts: EmailDraftV1[];
+  /**
+   * Structured permanent Owner knowledge (profile, employment, skills, goals, …).
+   * Additive; defaulted forward when missing on load.
+   */
+  ownerKnowledge: import("./owner-knowledge.js").OwnerKnowledgeStateV1;
+  /** Brand/business collaborators (never invent roles). Newest first; bounded. */
+  brandCollaborators: import("./owner-knowledge.js").BrandCollaboratorV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */

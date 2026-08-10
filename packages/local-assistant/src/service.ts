@@ -75,6 +75,16 @@ import {
   newEmailDraft,
   routeCrmAssistantIntent,
 } from "./crm-assistant.js";
+import {
+  applyOwnerProfileSummary,
+  buildBrandCollaborator,
+  buildOwnerKnowledgeFact,
+  correctOwnerKnowledgeFact,
+  emptyOwnerKnowledge,
+  type BrandCollaboratorV1,
+  type OwnerKnowledgeFactV1,
+  type OwnerKnowledgeStateV1,
+} from "./owner-knowledge.js";
 import type { CrmDocumentV1, EmailDraftV1 } from "./contracts.js";
 
 type AssistantPorts = {
@@ -2502,6 +2512,85 @@ export class AionAssistantV1 {
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
   async verifyPrivateBackup(destination: string, passphrase: string): Promise<AssistantStateV1> { const state = await this.ports.backup.restore(destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.verify", "Encrypted private backup integrity and restore validated.", null); }); return state; }
 
+  // --- R7.1 Owner knowledge + brand collaborators -----------------------------------------------
+
+  async getOwnerKnowledge(): Promise<OwnerKnowledgeStateV1> {
+    const state = await this.snapshot();
+    return state.ownerKnowledge ?? emptyOwnerKnowledge();
+  }
+
+  async updateOwnerProfile(change: Record<string, unknown> = {}): Promise<OwnerKnowledgeStateV1> {
+    return this.mutate((draft) => {
+      if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+      const now = this.ports.clock.now();
+      draft.ownerKnowledge.profile = applyOwnerProfileSummary(draft.ownerKnowledge.profile, change, now);
+      this.activity(draft, "settings", "owner.profile", "Owner profile summary updated.", "owner-profile");
+      return draft.ownerKnowledge;
+    });
+  }
+
+  async addOwnerKnowledgeFact(input: Record<string, unknown> = {}): Promise<OwnerKnowledgeFactV1> {
+    return this.mutate((draft) => {
+      if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+      const now = this.ports.clock.now();
+      const fact = buildOwnerKnowledgeFact(input, { id: this.ports.ids.next("owner-fact"), now });
+      draft.ownerKnowledge.facts.unshift(fact);
+      if (draft.ownerKnowledge.facts.length > 1000) draft.ownerKnowledge.facts.length = 1000;
+      this.activity(draft, "memory", "owner.knowledge", `Owner knowledge: ${fact.category} — ${fact.title}`, fact.id);
+      return fact;
+    });
+  }
+
+  async correctOwnerKnowledgeFact(id: string, content: string, reason: string): Promise<OwnerKnowledgeFactV1> {
+    return this.mutate((draft) => {
+      if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+      const idx = draft.ownerKnowledge.facts.findIndex((f) => f.id === id);
+      if (idx < 0) throw new Error("Owner knowledge fact not found.");
+      const now = this.ports.clock.now();
+      const next = correctOwnerKnowledgeFact(draft.ownerKnowledge.facts[idx]!, content, reason, now);
+      draft.ownerKnowledge.facts[idx] = next;
+      this.activity(draft, "memory", "owner.knowledge.correct", `Corrected: ${next.title}`, next.id);
+      return next;
+    });
+  }
+
+  async setOwnerKnowledgeEnabled(id: string, enabled: boolean): Promise<OwnerKnowledgeFactV1> {
+    return this.mutate((draft) => {
+      if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+      const fact = draft.ownerKnowledge.facts.find((f) => f.id === id);
+      if (!fact) throw new Error("Owner knowledge fact not found.");
+      fact.enabled = enabled === true;
+      fact.updatedAt = this.ports.clock.now();
+      return fact;
+    });
+  }
+
+  async listBrandCollaborators(): Promise<BrandCollaboratorV1[]> {
+    const state = await this.snapshot();
+    return Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
+  }
+
+  async addBrandCollaborator(input: Record<string, unknown> = {}): Promise<BrandCollaboratorV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.brandCollaborators)) draft.brandCollaborators = [];
+      const now = this.ports.clock.now();
+      const brandWorkspaceId =
+        typeof input.brandWorkspaceId === "string" && input.brandWorkspaceId
+          ? input.brandWorkspaceId
+          : null;
+      if (brandWorkspaceId) {
+        const ws = draft.workspaces.find((w) => w.id === brandWorkspaceId);
+        if (!ws) throw new Error("Brand workspace not found for collaborator.");
+        if (ws.kind !== "business") throw new Error("Collaborators attach only to business/brand workspaces.");
+      }
+      const collab = buildBrandCollaborator(input, { id: this.ports.ids.next("collaborator"), now });
+      draft.brandCollaborators.unshift(collab);
+      if (draft.brandCollaborators.length > 200) draft.brandCollaborators.length = 200;
+      this.activity(draft, "settings", "brand.collaborator", `Collaborator: ${collab.name}`, collab.id);
+      return collab;
+    });
+  }
+
   // --- R7 CRM assistant surface -----------------------------------------------------------------
 
   async accountSummary(customerId: string) {
@@ -2650,7 +2739,34 @@ export class AionAssistantV1 {
 
     if (route.intent === "WORK_QUEUE" || route.intent === "LIST_FOLLOWUPS") {
       const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
-      return { intent: route.intent, confidence: route.confidence, reply: queue.text, sources, action: "work.queue", data: queue };
+      // Brand / collaborator context when the prompt asks about brands (grounded only).
+      let brandExtra = "";
+      if (/\bbrand|caleb|collaborator\b/i.test(text)) {
+        const brands = (state.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived);
+        const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
+        brandExtra = [
+          "",
+          brands.length
+            ? `Active brand workspaces (${brands.length}):\n${brands
+                .map((b) => `  - ${b.brand?.name || b.label}${b.brand?.channels?.length ? ` · ${b.brand.channels.join(", ")}` : ""}`)
+                .join("\n")}`
+            : "Active brand workspaces: none recorded (create under Knowledge / Import).",
+          collabs.length
+            ? `Collaborators (owner-supplied only):\n${collabs
+                .slice(0, 12)
+                .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
+                .join("\n")}`
+            : "Collaborators: none recorded. AION does not invent who manages a brand.",
+        ].join("\n");
+      }
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: queue.text + brandExtra,
+        sources,
+        action: "work.queue",
+        data: { queue },
+      };
     }
 
     if (route.intent === "CRM_LOOKUP" || route.intent === "ACCOUNT_SUMMARY") {

@@ -11,6 +11,7 @@ import {
   CompositeBrainRuntimeV1, InProcessBrainRuntimeV1, OwnerAuthorityRuntimeV2,
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
+  defaultGmailConfig, gmailConnectorStatus, defaultMetricoolConfig, metricoolConnectorStatus,
 } from "../../packages/local-assistant/dist/index.js";
 import { HttpBrainRuntimeV1 } from "./brain-runtime.mjs";
 import { createDockerCodeSandboxV1 } from "./code-sandbox.mjs";
@@ -22,6 +23,8 @@ import { remoteAccessStatus } from "./private-network.mjs";
 
 const ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/phone", ["phone.html", "text/html; charset=utf-8"]],
+  ["/phone.html", ["phone.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
@@ -29,7 +32,7 @@ const ASSETS = new Map([
   ["/icon.svg", ["icon.svg", "image/svg+xml; charset=utf-8"]],
 ]);
 /** The shell an unpaired device may fetch so it can render the pairing screen. Never any data. */
-const PUBLIC_ASSETS = new Set(["/", "/app.js", "/styles.css", "/sw.js", "/manifest.webmanifest", "/icon.svg"]);
+const PUBLIC_ASSETS = new Set(["/", "/phone", "/phone.html", "/app.js", "/styles.css", "/sw.js", "/manifest.webmanifest", "/icon.svg"]);
 const MAX_BODY = 8 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
 const ASSET_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
@@ -511,6 +514,15 @@ export async function createAionServer(options = {}) {
       case "crm.document.list": return { documents: await service.listCrmDocuments(input.relationshipId) };
       case "crm.email.draft": return service.createEmailDraft(input.draft ?? input);
       case "crm.email.list": return { drafts: await service.listEmailDrafts(input.relationshipId) };
+      case "owner.knowledge.get": return service.getOwnerKnowledge();
+      case "owner.profile.update": return service.updateOwnerProfile(input.profile ?? input.change ?? input);
+      case "owner.knowledge.add": return service.addOwnerKnowledgeFact(input.fact ?? input);
+      case "owner.knowledge.correct": return service.correctOwnerKnowledgeFact(input.id, String(input.content ?? ""), String(input.reason ?? ""));
+      case "owner.knowledge.enable": return service.setOwnerKnowledgeEnabled(input.id, input.enabled === true);
+      case "brand.collaborator.list": return { collaborators: await service.listBrandCollaborators() };
+      case "brand.collaborator.add": return service.addBrandCollaborator(input.collaborator ?? input);
+      case "connector.gmail.status": return gmailConnectorStatus(defaultGmailConfig());
+      case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
       case "work.queue": return service.workQueue();
       case "coach": return service.coach(input.kind, input.input ?? {});
       case "sales.routine.create": return service.createRoutineFromTemplate(input.templateId);

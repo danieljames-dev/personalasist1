@@ -158,6 +158,16 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat do we know about them\b/i,
     ],
   },
+  {
+    intent: "WORK_QUEUE",
+    confidence: "medium",
+    patterns: [
+      /\bwhat brands? (are )?active\b/i,
+      /\bhow are the brands doing\b/i,
+      /\bwhat('?s| is) caleb working on\b/i,
+      /\bwhich brand\b/i,
+    ],
+  },
 ];
 
 export function routeCrmAssistantIntent(text: string): CrmIntentRouteV1 {

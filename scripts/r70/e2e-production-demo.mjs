@@ -148,6 +148,37 @@ async function main() {
   });
   rec("RELATIONSHIP_UPDATE", /Buyer \(E2E\)/i.test(renamed.role || ""), renamed.role || "");
 
+  // Owner knowledge + brand registry (Checkpoint C/D foundations)
+  const profile = await api("owner.profile.update", {
+    displayName: "E2E Owner",
+    summary: "Synthetic profile for runway e2e — not production identity.",
+  });
+  rec("OWNER_PROFILE", /E2E Owner/i.test(profile.profile?.displayName || ""), profile.profile?.displayName || "");
+  const fact = await api("owner.knowledge.add", {
+    category: "skill",
+    title: "E2E Skill",
+    content: "Synthetic skill fact for tests.",
+    confidence: 85,
+    sourceRef: "e2e",
+  });
+  rec("OWNER_KNOWLEDGE_FACT", fact.category === "skill" && fact.confidence === 85, `${fact.title}@${fact.confidence}`);
+  const brand = await api("workspace.create", {
+    workspace: {
+      label: `E2E Brand ${Date.now().toString(36)}`,
+      kind: "business",
+      purpose: "Synthetic brand for e2e",
+      brand: { name: "E2E Brand", positioning: "test only", audience: "testers", channels: ["web"], valueProposition: "", notes: "" },
+    },
+  });
+  rec("BRAND_WORKSPACE", brand.kind === "business" && !!brand.brand?.name, brand.id);
+  const collab = await api("brand.collaborator.add", {
+    name: "E2E Collaborator",
+    role: "test role",
+    brandWorkspaceId: brand.id,
+    brandResponsibility: "Owner-supplied e2e responsibility only",
+  });
+  rec("BRAND_COLLABORATOR", collab.name === "E2E Collaborator" && !!collab.brandResponsibility, collab.id);
+
   // Capture pre-restart digests of reply content existence via state
   const mid = await state();
   const hasJane = (mid.state.relationships || []).some((r) => /Jane Test/i.test(r.displayName));

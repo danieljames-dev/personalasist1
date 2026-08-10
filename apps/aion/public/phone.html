@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1419">
+  <title>AION Phone Intake</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 1rem; background: #0f1419; color: #e7ecf1; max-width: 28rem; margin-inline: auto; }
+    h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+    p { color: #9aa7b5; font-size: 0.9rem; line-height: 1.4; }
+    label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.85rem; }
+    input, select, button, textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid #2a3540; background: #1a222c; color: inherit; }
+    button { background: #2b6cb0; border: none; font-weight: 600; margin-top: 1rem; cursor: pointer; }
+    button:disabled { opacity: 0.5; }
+    .ok { color: #6fcf97; }
+    .err { color: #f08080; }
+    .card { background: #161d26; border-radius: 0.75rem; padding: 1rem; margin-top: 1rem; }
+    code { font-size: 0.8rem; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>AION phone intake</h1>
+  <p>Take a photo or pick a file. AION stores the original under private intake on the desktop. Pair once from Settings if this device is new.</p>
+
+  <div class="card" id="pairCard">
+    <label>Pairing code (from desktop Settings)<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12"></label>
+    <label>This phone’s label<input id="label" value="Phone" maxlength="80"></label>
+    <button type="button" id="pairBtn">Pair device</button>
+    <p id="pairMsg" class="err" hidden></p>
+  </div>
+
+  <div class="card" id="upCard" hidden>
+    <p class="ok" id="sessionMsg">Paired — ready to upload.</p>
+    <label>Photo / file
+      <input id="file" type="file" accept="image/*,.txt,.pdf,.csv,.json,.docx,.jpg,.jpeg,.png,.webp" capture="environment">
+    </label>
+    <label>Tags (optional)<input id="tags" placeholder="receipt, note, brand"></label>
+    <label>Note (optional)<input id="summary" maxlength="500"></label>
+    <button type="button" id="upBtn">Upload to AION</button>
+    <p id="upMsg" hidden></p>
+  </div>
+
+  <p><a href="/" style="color:#7eb6ff">Open full Command Center</a></p>
+
+  <script>
+    const TOKEN_KEY = "aion.sessionToken";
+    const token = () => localStorage.getItem(TOKEN_KEY) || "";
+    const setToken = (t) => localStorage.setItem(TOKEN_KEY, t);
+    const pairCard = document.getElementById("pairCard");
+    const upCard = document.getElementById("upCard");
+    const pairMsg = document.getElementById("pairMsg");
+    const upMsg = document.getElementById("upMsg");
+
+    function showUpload() {
+      pairCard.hidden = true;
+      upCard.hidden = false;
+    }
+    if (token()) showUpload();
+
+    document.getElementById("pairBtn").onclick = async () => {
+      pairMsg.hidden = true;
+      try {
+        const res = await fetch("/api/pair", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: document.getElementById("code").value.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Pair failed");
+        setToken(data.result.token);
+        showUpload();
+      } catch (e) {
+        pairMsg.hidden = false;
+        pairMsg.textContent = e.message || String(e);
+      }
+    };
+
+    document.getElementById("upBtn").onclick = async () => {
+      upMsg.hidden = true;
+      const file = document.getElementById("file").files?.[0];
+      if (!file) { upMsg.hidden = false; upMsg.className = "err"; upMsg.textContent = "Choose a photo or file."; return; }
+      if (file.size > 6 * 1024 * 1024) { upMsg.hidden = false; upMsg.className = "err"; upMsg.textContent = "Max 6 MB."; return; }
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      const contentBase64 = btoa(binary);
+      const tags = document.getElementById("tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+      tags.push("phone-intake");
+      try {
+        const res = await fetch("/api/action", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: "Bearer " + token(),
+          },
+          body: JSON.stringify({
+            type: "crm.document.upload",
+            filename: file.name || "phone-photo.jpg",
+            mimeType: file.type || "image/jpeg",
+            contentBase64,
+            tags,
+            summary: document.getElementById("summary").value || `Phone intake ${new Date().toISOString()}`,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Upload failed");
+        const doc = data.result || data;
+        upMsg.hidden = false;
+        upMsg.className = "ok";
+        upMsg.textContent = `Stored ${doc.filename} (${doc.byteLength} bytes). Image understanding expands when a multimodal provider is available.`;
+        document.getElementById("file").value = "";
+      } catch (e) {
+        upMsg.hidden = false;
+        upMsg.className = "err";
+        upMsg.textContent = e.message || String(e);
+        if (/not paired|401/i.test(String(e.message))) {
+          localStorage.removeItem(TOKEN_KEY);
+          pairCard.hidden = false;
+          upCard.hidden = true;
+        }
+      }
+    };
+  </script>
+</body>
+</html>
