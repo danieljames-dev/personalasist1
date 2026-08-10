@@ -534,6 +534,12 @@ export function newCrmDocument(input: {
   summary: string;
   extractedText: string;
   now: IsoTimestamp;
+  contentHash?: string;
+  sourceRelativePath?: string;
+  sourceModifiedAt?: IsoTimestamp | null;
+  sourceRootPath?: string;
+  entityKind?: string;
+  entityConfidence?: number;
 }): CrmDocumentV1 {
   return {
     id: input.id,
@@ -550,6 +556,12 @@ export function newCrmDocument(input: {
     provenance: makeProvenance(input.now, "crm.document.intake"),
     createdAt: input.now,
     updatedAt: input.now,
+    contentHash: input.contentHash ? String(input.contentHash).slice(0, 128) : "",
+    sourceRelativePath: input.sourceRelativePath ? String(input.sourceRelativePath).slice(0, 2000) : "",
+    sourceModifiedAt: input.sourceModifiedAt ?? null,
+    sourceRootPath: input.sourceRootPath ? String(input.sourceRootPath).slice(0, 1000) : "",
+    entityKind: input.entityKind ? String(input.entityKind).slice(0, 80) : "",
+    ...(typeof input.entityConfidence === "number" ? { entityConfidence: input.entityConfidence } : {}),
   };
 }
 

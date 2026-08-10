@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { NETWORK_BOUNDARY, classifyBindAddress } from "../../packages/local-assistant/dist/index.js";
+import { NETWORK_BOUNDARY, classifyBindAddress, discoverPrivateLanAddresses, buildPhoneUrl } from "../../packages/local-assistant/dist/index.js";
 
 /**
  * Private-network detection.
@@ -128,6 +128,14 @@ export async function remoteAccessStatus(settings, listeners = [], env = process
     return "Private phone access is on but no private listener is active. Restart AION so the setting takes effect.";
   })();
 
+  const lan = discoverPrivateLanAddresses();
+  const phoneListener = privateLive[0] ?? null;
+  const phoneUrl = phoneListener && port
+    ? buildPhoneUrl(phoneListener.address, port, "/phone")
+    : lan.preferred && port
+      ? buildPhoneUrl(lan.preferred.address, port, "/phone")
+      : null;
+
   return {
     enabled,
     /** What the owner asked for. */
@@ -144,6 +152,14 @@ export async function remoteAccessStatus(settings, listeners = [], env = process
     /** True when the owner asked for private access but AION does not actually have it. */
     configurationApplied: !enabled || privateLive.length > 0,
     privateNetwork: network,
+    /** Live private LAN discovery (physical preferred; virtual adapters demoted). */
+    lanDiscovery: {
+      preferred: lan.preferred,
+      candidates: lan.candidates.slice(0, 8),
+      suggestedBind: lan.preferred?.address ?? null,
+    },
+    /** Exact URL a phone on the same LAN should open. */
+    phoneUrl,
     summary,
     publiclyExposed: live.some((entry) => ["0.0.0.0", "::", "*"].includes(entry.address)),
   };

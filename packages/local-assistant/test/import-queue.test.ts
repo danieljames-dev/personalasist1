@@ -28,4 +28,7 @@ test("queued import source is owner-selected only", () => {
   assert.equal(s.status, "queued");
   assert.equal(s.associateWith, "owner");
   assert.match(s.path, /Selected/);
+  assert.ok(s.stats);
+  assert.equal(s.stats.filesDiscovered, 0);
+  assert.deepEqual(s.errorLog, []);
 });

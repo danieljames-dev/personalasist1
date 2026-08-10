@@ -101,6 +101,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     brandCollaborators: [],
     jobApplications: [],
     importSourceQueue: [],
+    importReviewQueue: [],
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
@@ -318,6 +319,22 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(ak.brandCollaborators)) ak.brandCollaborators = [];
   if (!Array.isArray(ak.jobApplications)) ak.jobApplications = [];
   if (!Array.isArray(ak.importSourceQueue)) ak.importSourceQueue = [];
+  if (!Array.isArray(ak.importReviewQueue)) ak.importReviewQueue = [];
+  for (const src of ak.importSourceQueue) {
+    if (!src.stats || typeof src.stats !== "object") {
+      src.stats = {
+        filesDiscovered: 0,
+        filesProcessed: src.itemsImported ?? 0,
+        duplicatesSkipped: 0,
+        unsupportedSkipped: 0,
+        factsExtracted: 0,
+        entitiesAssociated: 0,
+        reviewItems: 0,
+        errors: 0,
+      };
+    }
+    if (!Array.isArray(src.errorLog)) src.errorLog = [];
+  }
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
   return clone;

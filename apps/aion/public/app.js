@@ -546,7 +546,7 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 <label>Import folder (absolute path under approved import root or private AION data)
 <input name="path" required maxlength="4096" placeholder="C:\path\to\owner-selected-folder"></label>
 <label>Tags (comma separated)<input name="tags" maxlength="500" placeholder="resume, brand-doc"></label>
-<button>Import folder (top-level files only)</button>
+<button>Import folder (recursive, bounded)</button>
 </form>
 <form data-form="csv-contacts">
 <label>Import contacts CSV (paste or upload later via file)
@@ -563,7 +563,11 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 </form>
 ${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
 <p class="meta">Sources: ${(s.importSourceQueue ?? []).slice(0, 8).map((q) => `${esc(q.label)} [${esc(q.status)}] +${q.itemsImported || 0}`).join("; ")}</p>` : ""}
-<p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Max ~6 MB/file. Never scans whole drives — folder must be under Settings import roots or private/aion. Historical AI-assistant archives are not auto-scanned.</p>
+<div class="card"><h2>Import dashboard</h2>
+<div class="actions"><button data-do="import-dashboard-refresh" type="button">Refresh import status</button></div>
+${importDashboardHtml(s)}
+</div>
+<p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Recursive under Owner-approved roots only — content-hash dedupe, resume, per-file error continuation. Max ~6 MB/file, depth/count caps. Never scans whole drives.</p>
 </div>
 <div class="card"><h2>Business / brand workspaces</h2>
 <form data-form="workspace-brand">
@@ -621,15 +625,24 @@ ${r.state === "dry-run" ? `<form data-form="import-execute"><input type="hidden"
 function privateAccessCard() {
   const r = model.remoteAccess ?? { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30, privateNetwork: { available: false, detail: "" }, summary: "" };
   const devices = model.devices ?? [];
+  const suggested = r.lanDiscovery?.suggestedBind || r.lanDiscovery?.preferred?.address || "";
+  const phoneUrl = r.phoneUrl || (suggested && r.port ? `http://${suggested}:${r.port}/phone` : "");
   return `<div class="card"><h2>Private phone access</h2>
 <p>${esc(r.summary)}</p>
 <p class="meta">AION binds <code>${esc(r.boundAddress ?? "127.0.0.1")}</code>. It never opens a public port, never creates a tunnel, and never changes your router. Reaching AION over a private network is not enough on its own: a device must also be paired.</p>
-<p class="meta">Private network: ${r.privateNetwork.available ? `${esc(r.privateNetwork.tool)} ${esc(r.privateNetwork.version ?? "")} detected` : "not configured"} — ${esc(r.privateNetwork.detail)}</p>
+${phoneUrl ? `<p class="meta"><b>Phone URL (current LAN):</b> <a href="${esc(phoneUrl)}"><code>${esc(phoneUrl)}</code></a></p>
+<p class="meta">On your phone (same Wi-Fi), open that URL, enter the pairing code from below, then upload.</p>` : `<p class="meta">No phone URL yet — enable private access and ensure a private LAN IPv4 is active.</p>`}
+<p class="meta">Live LAN discovery: ${suggested ? `<code>${esc(suggested)}</code> (${esc(r.lanDiscovery?.preferred?.interfaceName || "")} · ${esc(r.lanDiscovery?.preferred?.reason || "")})` : "no usable private IPv4 on active interfaces"}</p>
+${(r.lanDiscovery?.candidates || []).length ? `<details><summary>All private candidates</summary>${r.lanDiscovery.candidates.map((c) => `<p class="meta"><code>${esc(c.address)}</code> · ${esc(c.interfaceName)} · score ${c.score} · ${esc(c.reason)}</p>`).join("")}</details>` : ""}
+<p class="meta">Private network tool: ${r.privateNetwork.available ? `${esc(r.privateNetwork.tool)} ${esc(r.privateNetwork.version ?? "")} detected` : "not configured"} — ${esc(r.privateNetwork.detail)}</p>
 <form data-form="remote-access">
 <label><input type="checkbox" name="enabled" ${r.enabled ? "checked" : ""}> Allow paired devices to reach AION</label>
-<label>Bind address (loopback or a private range only)<input name="bindAddress" value="${esc(r.bindAddress)}" maxlength="60"></label>
+<label>Bind address (loopback or a private range only; leave loopback to auto-discover LAN)
+<input name="bindAddress" value="${esc(r.bindAddress)}" maxlength="60" placeholder="${esc(suggested || "127.0.0.1")}"></label>
 <label>Sign a device out after (days)<input name="sessionDays" type="number" min="1" max="365" value="${r.sessionDays}"></label>
 <button>Save access settings</button></form>
+<div class="actions"><button data-do="lan-discover" type="button">Refresh LAN discovery</button>
+${suggested ? `<button data-do="lan-use-suggested" data-ip="${esc(suggested)}" type="button">Use discovered ${esc(suggested)}</button>` : ""}</div>
 ${r.enabled ? `<form data-form="pair-code"><label>Pair a new device — name it so you can tell phones apart<input name="label" required maxlength="80" placeholder="Work phone"></label><button>Create pairing code</button></form>` : `<p class="meta">Turn access on to pair a device.</p>`}
 ${pairingCode ? `<div class="card next"><h2>Pairing code</h2><p style="font-size:1.6rem;letter-spacing:.12em"><code>${esc(pairingCode.code)}</code></p>
 <p class="meta">Type it on the phone within ten minutes. It works once, and AION does not store it — if you lose it, make another.</p>
@@ -639,6 +652,30 @@ ${devices.length ? devices.map((device) => `<p class="meta"><b>${esc(device.labe
 ${device.revokedAt ? "" : `<button data-do="device-revoke" data-id="${esc(device.id)}" class="danger">Revoke</button>`}</p>`).join("") : `<p class="meta">No device is paired.</p>`}
 ${devices.some((device) => !device.revokedAt) ? `<div class="actions"><button data-do="device-revoke-all" class="danger">Sign out all devices</button></div>` : ""}
 <p class="meta">Revoking a device ends its access only. No conversation, memory, task, relationship, or Career record is changed.</p></div>`;
+}
+
+function importDashboardHtml(s) {
+  const dash = s._importDashboard;
+  if (!dash) {
+    return `<p class="meta">Open refresh to load live counts: Queued / Processing / Completed / Needs Review / Failed, plus files discovered, processed, duplicates, facts, entities, review items, errors.</p>`;
+  }
+  const t = dash.totals || {};
+  const st = dash.byStatus || {};
+  const reviews = dash.reviewItems || [];
+  return `<p class="meta"><b>Status:</b> Queued ${st.queued || 0} · Processing ${st.processing || 0} · Completed ${st.completed || 0} · Needs Review ${st["needs-review"] || 0} · Failed ${st.failed || 0}</p>
+<p class="meta"><b>Counts:</b> discovered ${t.filesDiscovered || 0} · processed ${t.filesProcessed || 0} · duplicates skipped ${t.duplicatesSkipped || 0} · facts ${t.factsExtracted || 0} · entities ${t.entitiesAssociated || 0} · review ${dash.reviewOpen || 0} · errors ${t.errors || 0} · documents ${dash.documents || 0}</p>
+${(dash.sources || []).slice(0, 12).map((q) => {
+    const qs = q.stats || {};
+    return `<article class="card"><h3>${esc(q.label)} · <span class="meta">${esc(q.status)}</span></h3>
+<p class="meta">${esc(q.path)}</p>
+<p class="meta">+${q.itemsImported || 0} imported · ${q.itemsSkipped || 0} skipped · disc ${qs.filesDiscovered || 0} · dup ${qs.duplicatesSkipped || 0} · review ${qs.reviewItems || 0} · err ${qs.errors || 0}</p>
+${q.lastError ? `<p class="warn">${esc(q.lastError)}</p>` : ""}
+</article>`;
+  }).join("")}
+${reviews.length ? `<h3>Needs review (${reviews.length})</h3>${reviews.map((r) => `<p class="meta"><b>${esc(r.relativePath)}</b> — ${esc(r.reason)}
+<button data-do="import-review-accept" data-id="${esc(r.id)}">Accept</button>
+<button data-do="import-review-reject" data-id="${esc(r.id)}" class="danger">Reject</button>
+</p>`).join("")}` : `<p class="meta">No open review items.</p>`}`;
 }
 
 function settingsArea(s) {
@@ -781,6 +818,35 @@ document.addEventListener("click", async (event) => {
     if (verb === "conversation-memory") await api("conversation.update", { id, change: { memoryContextEnabled: enabled === "true" } });
     if (verb === "conversation-delete") await api("conversation.delete", { id });
     if (verb === "import-cancel") await api("import.cancel", { id });
+    if (verb === "import-dashboard-refresh") {
+      const dash = await api("import.dashboard", {});
+      if (model.state) model.state._importDashboard = dash;
+      toast(`Import dashboard: ${dash.documents || 0} docs · review ${dash.reviewOpen || 0}`);
+      render();
+      return;
+    }
+    if (verb === "import-review-accept") {
+      await api("import.review.resolve", { id, decision: "accepted" });
+      toast("Review item accepted.");
+    }
+    if (verb === "import-review-reject") {
+      await api("import.review.resolve", { id, decision: "rejected" });
+      toast("Review item rejected.");
+    }
+    if (verb === "lan-discover") {
+      const lan = await api("network.lan.discover", {});
+      toast(lan.phoneUrl ? `LAN: ${lan.preferred?.address} · ${lan.phoneUrl}` : "No private LAN IPv4 found.");
+      await load();
+      return;
+    }
+    if (verb === "lan-use-suggested") {
+      const ip = button.dataset.ip;
+      if (!ip) throw new Error("No suggested IP.");
+      await api("settings.update", { settings: { remoteAccess: { enabled: true, bindAddress: ip, sessionDays: model.remoteAccess?.sessionDays ?? 30 } } });
+      toast(`Bind address set to ${ip}. Restart AION for the private listener to bind.`);
+      await load();
+      return;
+    }
     await load();
   } catch (error) { toast(error.message); }
 });
@@ -832,7 +898,8 @@ document.addEventListener("submit", async (event) => {
     if (kind === "folder-import") {
       const tags = String(d.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const result = await api("crm.document.importFolder", { path: d.path, tags });
-      toast(`Imported ${result.imported?.length ?? 0} file(s); skipped ${result.skipped?.length ?? 0}.`);
+      const st = result.stats || {};
+      toast(`Recursive import: ${result.imported?.length ?? 0} stored · ${st.duplicatesSkipped || 0} dup · ${st.reviewItems || 0} review · ${st.errors || 0} err${result.truncated ? " (truncated)" : ""}`);
       form.reset();
       await load();
       return;

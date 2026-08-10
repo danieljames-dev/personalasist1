@@ -88,9 +88,22 @@ import {
 import {
   buildQueuedImportSource,
   csvRowToRelationship,
+  emptyImportStats,
   parseSimpleCsv,
+  type ImportSourceStatsV1,
+  type ImportSourceStatusV1,
   type QueuedImportSourceV1,
 } from "./import-queue.js";
+import {
+  buildImportReviewItem,
+  classifyImportMaterial,
+  factDraftFromCandidate,
+  needsReview,
+  shouldAutoAssociate,
+  type ImportReviewItemV1,
+  type ImportReviewStatusV1,
+} from "./import-classify.js";
+import { discoverPrivateLanAddresses, buildPhoneUrl, type LanDiscoveryResultV1 } from "./lan-discovery.js";
 import {
   applyOwnerProfileSummary,
   buildBrandCollaborator,
@@ -2669,7 +2682,14 @@ export class AionAssistantV1 {
   /** Mark a queued import source completed/failed after server-side processing. */
   async finalizeImportSource(
     id: string,
-    result: { status: "completed" | "failed" | "cancelled"; itemsImported?: number; itemsSkipped?: number; lastError?: string },
+    result: {
+      status: ImportSourceStatusV1;
+      itemsImported?: number;
+      itemsSkipped?: number;
+      lastError?: string;
+      stats?: Partial<ImportSourceStatsV1>;
+      errorLog?: string[];
+    },
   ): Promise<QueuedImportSourceV1> {
     return this.mutate((draft) => {
       if (!Array.isArray(draft.importSourceQueue)) draft.importSourceQueue = [];
@@ -2680,8 +2700,21 @@ export class AionAssistantV1 {
       src.itemsImported = Number(result.itemsImported ?? src.itemsImported) || 0;
       src.itemsSkipped = Number(result.itemsSkipped ?? src.itemsSkipped) || 0;
       src.lastError = String(result.lastError ?? "").slice(0, 2000);
+      if (!src.stats) src.stats = emptyImportStats();
+      if (result.stats) {
+        for (const key of Object.keys(emptyImportStats()) as (keyof ImportSourceStatsV1)[]) {
+          if (result.stats[key] !== undefined) src.stats[key] = Number(result.stats[key]) || 0;
+        }
+      }
+      if (Array.isArray(result.errorLog)) {
+        src.errorLog = result.errorLog.map((e) => String(e).slice(0, 500)).slice(0, 50);
+      }
+      if (!Array.isArray(src.errorLog)) src.errorLog = [];
       src.updatedAt = now;
-      src.completedAt = result.status === "completed" || result.status === "failed" ? now : src.completedAt;
+      src.completedAt =
+        result.status === "completed" || result.status === "failed" || result.status === "needs-review"
+          ? now
+          : src.completedAt;
       this.activity(
         draft,
         "import",
@@ -2701,6 +2734,208 @@ export class AionAssistantV1 {
       src.updatedAt = this.ports.clock.now();
       return src;
     });
+  }
+
+  async listImportReviewQueue(): Promise<ImportReviewItemV1[]> {
+    const state = await this.snapshot();
+    return Array.isArray(state.importReviewQueue) ? state.importReviewQueue : [];
+  }
+
+  async addImportReviewItem(input: Record<string, unknown> = {}): Promise<ImportReviewItemV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.importReviewQueue)) draft.importReviewQueue = [];
+      const now = this.ports.clock.now();
+      const item = buildImportReviewItem(
+        {
+          documentId: typeof input.documentId === "string" ? input.documentId : null,
+          sourcePath: String(input.sourcePath ?? ""),
+          relativePath: String(input.relativePath ?? ""),
+          candidates: Array.isArray(input.candidates) ? (input.candidates as ImportReviewItemV1["candidates"]) : [],
+          reason: String(input.reason ?? "Needs review"),
+          errors: Array.isArray(input.errors) ? input.errors.map(String) : [],
+          status: (input.status as ImportReviewStatusV1) || "needs-review",
+        },
+        { id: this.ports.ids.next("import-review"), now },
+      );
+      draft.importReviewQueue.unshift(item);
+      if (draft.importReviewQueue.length > 500) draft.importReviewQueue.length = 500;
+      this.activity(draft, "import", "import.review", `Review item: ${item.reason}`, item.id);
+      return item;
+    });
+  }
+
+  async resolveImportReviewItem(
+    id: string,
+    decision: "accepted" | "rejected",
+  ): Promise<ImportReviewItemV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.importReviewQueue)) draft.importReviewQueue = [];
+      const item = draft.importReviewQueue.find((r) => r.id === id);
+      if (!item) throw new Error("Import review item not found.");
+      const now = this.ports.clock.now();
+      item.status = decision;
+      item.updatedAt = now;
+      item.resolvedAt = now;
+      this.activity(draft, "import", "import.review.resolve", `Review ${decision}: ${item.relativePath}`, item.id);
+      return item;
+    });
+  }
+
+  /**
+   * Aggregate import dashboard for Owner UI: queue statuses, document counts, review backlog.
+   */
+  async importDashboard(): Promise<{
+    sources: QueuedImportSourceV1[];
+    reviewOpen: number;
+    reviewItems: ImportReviewItemV1[];
+    documents: number;
+    documentsWithHash: number;
+    totals: ImportSourceStatsV1;
+    byStatus: Record<string, number>;
+  }> {
+    const state = await this.snapshot();
+    const sources = Array.isArray(state.importSourceQueue) ? state.importSourceQueue : [];
+    const reviewItems = Array.isArray(state.importReviewQueue) ? state.importReviewQueue : [];
+    const docs = Array.isArray(state.crmDocuments) ? state.crmDocuments : [];
+    const totals = emptyImportStats();
+    const byStatus: Record<string, number> = {
+      queued: 0,
+      processing: 0,
+      completed: 0,
+      "needs-review": 0,
+      failed: 0,
+      cancelled: 0,
+    };
+    for (const src of sources) {
+      byStatus[src.status] = (byStatus[src.status] ?? 0) + 1;
+      const st = src.stats ?? emptyImportStats();
+      totals.filesDiscovered += st.filesDiscovered || 0;
+      totals.filesProcessed += st.filesProcessed || src.itemsImported || 0;
+      totals.duplicatesSkipped += st.duplicatesSkipped || 0;
+      totals.unsupportedSkipped += st.unsupportedSkipped || 0;
+      totals.factsExtracted += st.factsExtracted || 0;
+      totals.entitiesAssociated += st.entitiesAssociated || 0;
+      totals.reviewItems += st.reviewItems || 0;
+      totals.errors += st.errors || 0;
+    }
+    const reviewOpen = reviewItems.filter((r) => r.status === "needs-review").length;
+    return {
+      sources,
+      reviewOpen,
+      reviewItems: reviewItems.filter((r) => r.status === "needs-review").slice(0, 50),
+      documents: docs.length,
+      documentsWithHash: docs.filter((d) => d.contentHash).length,
+      totals,
+      byStatus,
+    };
+  }
+
+  /** Known content hashes from CRM documents (for skip/dedupe). */
+  async knownDocumentHashes(): Promise<Set<string>> {
+    const state = await this.snapshot();
+    const set = new Set<string>();
+    for (const d of state.crmDocuments ?? []) {
+      if (d.contentHash) set.add(d.contentHash);
+    }
+    return set;
+  }
+
+  /** Provenance index for resume: relativePath -> prior ingest metadata. */
+  async knownDocumentProvenance(sourceRootPath?: string): Promise<
+    Map<string, { contentHash: string; byteLength: number; modifiedAtMs: number }>
+  > {
+    const state = await this.snapshot();
+    const map = new Map<string, { contentHash: string; byteLength: number; modifiedAtMs: number }>();
+    for (const d of state.crmDocuments ?? []) {
+      if (!d.contentHash || !d.sourceRelativePath) continue;
+      if (sourceRootPath && d.sourceRootPath && d.sourceRootPath !== sourceRootPath) continue;
+      const ms = d.sourceModifiedAt ? Date.parse(d.sourceModifiedAt) : 0;
+      map.set(d.sourceRelativePath, {
+        contentHash: d.contentHash,
+        byteLength: d.byteLength,
+        modifiedAtMs: Number.isFinite(ms) ? ms : 0,
+      });
+    }
+    return map;
+  }
+
+  /**
+   * Classify extracted material: high confidence auto-associates owner knowledge;
+   * uncertain cases become review items. Does not invent facts beyond extracted text.
+   */
+  async classifyAndAssociateImport(input: {
+    documentId?: string;
+    filename: string;
+    relativePath?: string;
+    extractedText?: string;
+    tags?: string[];
+    sourcePath?: string;
+    extractionError?: string;
+  }): Promise<{
+    candidates: ReturnType<typeof classifyImportMaterial>;
+    auto: ReturnType<typeof shouldAutoAssociate>;
+    reviewItem: ImportReviewItemV1 | null;
+    factId: string | null;
+  }> {
+    const candidates = classifyImportMaterial({
+      filename: input.filename,
+      ...(input.relativePath !== undefined ? { relativePath: input.relativePath } : {}),
+      ...(input.extractedText !== undefined ? { extractedText: input.extractedText } : {}),
+      ...(input.tags !== undefined ? { tags: input.tags } : {}),
+    });
+    const auto = shouldAutoAssociate(candidates);
+    const review = needsReview(candidates, input.extractionError);
+    let factId: string | null = null;
+    let reviewItem: ImportReviewItemV1 | null = null;
+
+    if (auto && !review.needs) {
+      const draft = factDraftFromCandidate(auto, input.extractedText || "", input.relativePath || input.filename);
+      if (draft) {
+        const fact = await this.addOwnerKnowledgeFact({
+          category: draft.category,
+          title: draft.title,
+          content: draft.content,
+          confidence: draft.confidence,
+          sourceType: "import",
+          sourceRef: `import:${input.relativePath || input.filename}`.slice(0, 500),
+        });
+        factId = fact.id;
+      }
+      // Still record auto association on the document when id provided
+      if (input.documentId) {
+        await this.mutate((draft) => {
+          const doc = (draft.crmDocuments ?? []).find((d) => d.id === input.documentId);
+          if (doc) {
+            doc.entityKind = auto.kind;
+            doc.entityConfidence = auto.confidence;
+            doc.updatedAt = this.ports.clock.now();
+          }
+        });
+      }
+    }
+
+    if (review.needs) {
+      reviewItem = await this.addImportReviewItem({
+        documentId: input.documentId ?? null,
+        sourcePath: input.sourcePath || input.relativePath || input.filename,
+        relativePath: input.relativePath || input.filename,
+        candidates,
+        reason: review.reason,
+        errors: input.extractionError ? [input.extractionError] : [],
+        status: "needs-review",
+      });
+    }
+
+    return { candidates, auto, reviewItem, factId };
+  }
+
+  /** Live LAN discovery for phone access (no bind yet). */
+  discoverLan(): LanDiscoveryResultV1 {
+    return discoverPrivateLanAddresses();
+  }
+
+  phoneUrlFor(address: string, port: number): string {
+    return buildPhoneUrl(address, port, "/phone");
   }
 
   /**
@@ -2935,8 +3170,22 @@ export class AionAssistantV1 {
         summary: String(input.summary ?? "").slice(0, 4000),
         extractedText: String(input.extractedText ?? "").slice(0, 100_000),
         now,
+        contentHash: typeof input.contentHash === "string" ? input.contentHash : "",
+        sourceRelativePath: typeof input.sourceRelativePath === "string" ? input.sourceRelativePath : "",
+        sourceModifiedAt: typeof input.sourceModifiedAt === "string" ? input.sourceModifiedAt : null,
+        sourceRootPath: typeof input.sourceRootPath === "string" ? input.sourceRootPath : "",
+        entityKind: typeof input.entityKind === "string" ? input.entityKind : "",
+        ...(typeof input.entityConfidence === "number" ? { entityConfidence: input.entityConfidence as number } : {}),
       });
       doc.tags = tags;
+      // Dedupe by content hash: if identical content already stored, return existing (idempotent).
+      if (doc.contentHash) {
+        const existing = (draft.crmDocuments ?? []).find((d) => d.contentHash === doc.contentHash);
+        if (existing) {
+          this.activity(draft, "import", "crm.document.dedupe", `Skipped duplicate content: ${filename}`, existing.id);
+          return existing;
+        }
+      }
       if (!Array.isArray(draft.crmDocuments)) draft.crmDocuments = [];
       draft.crmDocuments.unshift(doc);
       if (draft.crmDocuments.length > 500) draft.crmDocuments.length = 500;

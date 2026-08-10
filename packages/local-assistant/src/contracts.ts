@@ -410,6 +410,18 @@ export interface CrmDocumentV1 {
   provenance: ProvenanceV1;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+  /** SHA-256 of original file bytes for skip/dedupe. Empty when unknown (legacy). */
+  contentHash?: string;
+  /** Path relative to the Owner-selected import folder root. */
+  sourceRelativePath?: string;
+  /** Source file mtime ISO when known. */
+  sourceModifiedAt?: IsoTimestamp | null;
+  /** Absolute approved root / selected folder root used for this import. */
+  sourceRootPath?: string;
+  /** Classified entity kind when auto-associated. */
+  entityKind?: string;
+  /** Classification confidence 0–100 when known. */
+  entityConfidence?: number;
 }
 
 /** R7 email draft — drafting only; never auto-sent in R7. */
@@ -605,6 +617,8 @@ export interface AssistantStateV1 {
   jobApplications: import("./job-agent.js").JobApplicationV1[];
   /** Owner-selected import sources queue (never auto whole-drive scan). */
   importSourceQueue: import("./import-queue.js").QueuedImportSourceV1[];
+  /** Ambiguous import entity classification items awaiting Owner review. */
+  importReviewQueue: import("./import-classify.js").ImportReviewItemV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */

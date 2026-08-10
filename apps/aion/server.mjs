@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve, basename, relative, sep } from "node:path";
+import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import {
@@ -13,6 +13,8 @@ import {
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
   defaultGmailConfig, gmailConnectorStatus, defaultMetricoolConfig, metricoolConnectorStatus,
   imageUnderstandingStatus, extractImageMetadataOnly,
+  walkAuthorizedFolder, mimeForBulkExtension, hashBytes,
+  discoverPrivateLanAddresses, buildPhoneUrl,
 } from "../../packages/local-assistant/dist/index.js";
 import { HttpBrainRuntimeV1 } from "./brain-runtime.mjs";
 import { createDockerCodeSandboxV1 } from "./code-sandbox.mjs";
@@ -505,6 +507,9 @@ export async function createAionServer(options = {}) {
           if (!input.summary) input.summary = meta.description.slice(0, 400);
         }
         const summary = String(input.summary ?? (extractedText ? extractedText.slice(0, 400) : `Uploaded ${filename}`)).slice(0, 4000);
+        const contentHash = typeof input.contentHash === "string" && input.contentHash
+          ? String(input.contentHash).slice(0, 128)
+          : hashBytes(bytes);
         return service.attachCrmDocument({
           relationshipId: input.relationshipId ?? null,
           filename,
@@ -515,70 +520,159 @@ export async function createAionServer(options = {}) {
           summary,
           extractedText: String(input.extractedText ?? extractedText).slice(0, 100_000),
           tags: input.tags,
+          contentHash,
+          sourceRelativePath: input.sourceRelativePath,
+          sourceModifiedAt: input.sourceModifiedAt,
+          sourceRootPath: input.sourceRootPath,
+          entityKind: input.entityKind,
+          entityConfidence: input.entityConfidence,
         });
       }
       case "crm.document.list": return { documents: await service.listCrmDocuments(input.relationshipId) };
       case "crm.document.importFolder": {
-        // Owner-selected folder only (not whole-drive scan). Non-recursive first level files.
+        // Owner-selected folder only (not whole-drive scan). Bounded recursive hierarchy.
         const rawPath = String(input.path ?? "").trim();
         if (!rawPath) throw new Error("Import folder path is required.");
         const folder = resolve(rawPath);
         if (!existsSync(folder) || !statSync(folder).isDirectory()) throw new Error("Import folder does not exist or is not a directory.");
         const settings = (await service.snapshot()).settings;
         const roots = Array.isArray(settings.importRoots) ? settings.importRoots : [];
-        const underRoot = roots.some((root) => {
+        let approvedRoot = null;
+        for (const root of roots) {
           try {
             const r = resolve(root);
             const rel = relative(r, folder);
-            return rel === "" || (!rel.startsWith("..") && !rel.includes(`..${sep}`));
-          } catch { return false; }
-        });
-        // Also allow private/aion intake sources explicitly selected under dataRoot
-        const underData = (() => {
+            if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+              approvedRoot = r;
+              break;
+            }
+          } catch { /* next */ }
+        }
+        if (!approvedRoot) {
           try {
             const rel = relative(dataRoot, folder);
-            return rel === "" || (!rel.startsWith("..") && !rel.includes(`..${sep}`));
-          } catch { return false; }
-        })();
-        if (!underRoot && !underData) {
+            if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) approvedRoot = dataRoot;
+          } catch { /* no */ }
+        }
+        if (!approvedRoot) {
           throw new Error("Folder must be under an approved import root (Settings) or private AION data root. AION will not scan arbitrary drives.");
         }
-        const entries = readdirSync(folder, { withFileTypes: true }).filter((e) => e.isFile()).slice(0, 40);
+        const knownHashes = await service.knownDocumentHashes();
+        const knownProv = await service.knownDocumentProvenance(folder);
+        const limits = {
+          maxDepth: Number(input.maxDepth ?? 12) || 12,
+          maxFiles: Number(input.maxFiles ?? 500) || 500,
+          maxFileBytes: Number(input.maxFileBytes ?? MAX_UPLOAD_BYTES) || MAX_UPLOAD_BYTES,
+          maxTotalBytes: Number(input.maxTotalBytes ?? (200 * 1024 * 1024)) || (200 * 1024 * 1024),
+        };
+        const walk = walkAuthorizedFolder({
+          folder,
+          approvedRoot,
+          limits,
+          knownHashes,
+          knownProvenance: knownProv,
+        });
         const imported = [];
-        const skipped = [];
-        for (const entry of entries) {
-          const full = join(folder, entry.name);
-          const st = statSync(full);
-          if (st.size > MAX_UPLOAD_BYTES) {
-            skipped.push({ filename: entry.name, reason: "too large" });
-            continue;
+        const skipped = walk.skipped.map((s) => ({
+          filename: s.relativePath || s.absolutePath,
+          reason: s.reason,
+          detail: s.detail,
+        }));
+        const errors = [...walk.errors];
+        let duplicatesSkipped = walk.skipped.filter((s) => s.reason === "duplicate-in-batch").length;
+        let unsupportedSkipped = walk.skipped.filter((s) => s.reason === "unsupported-type").length;
+        let factsExtracted = 0;
+        let entitiesAssociated = 0;
+        let reviewItems = 0;
+        const errorLog = [];
+
+        for (const file of walk.files) {
+          try {
+            const bytes = readFileSync(file.absolutePath);
+            if (hashBytes(bytes) !== file.contentHash) {
+              // TOCTOU: re-hash after read
+              file.contentHash = hashBytes(bytes);
+            }
+            if (knownHashes.has(file.contentHash)) {
+              duplicatesSkipped++;
+              skipped.push({ filename: file.relativePath, reason: "duplicate-in-batch", detail: "content-hash-already-ingested" });
+              continue;
+            }
+            const contentBase64 = bytes.toString("base64");
+            const mimeType = mimeForBulkExtension(file.extension || file.relativePath);
+            const tags = [...(Array.isArray(input.tags) ? input.tags : []), "folder-import", "recursive-bulk"];
+            const sourceModifiedAt = new Date(file.modifiedAtMs).toISOString();
+            const doc = await dispatch({
+              type: "crm.document.upload",
+              filename: basename(file.relativePath),
+              mimeType,
+              contentBase64,
+              relationshipId: input.relationshipId ?? null,
+              tags,
+              summary: input.summary ?? `Imported from ${file.relativePathPosix || file.relativePath}`,
+              contentHash: file.contentHash,
+              sourceRelativePath: file.relativePathPosix || file.relativePath,
+              sourceModifiedAt,
+              sourceRootPath: folder,
+            });
+            // If dedupe returned an existing doc, count as duplicate not new import
+            if (doc.contentHash === file.contentHash && knownHashes.has(file.contentHash)) {
+              duplicatesSkipped++;
+              skipped.push({ filename: file.relativePath, reason: "duplicate-in-batch", detail: "dedupe-on-attach" });
+              continue;
+            }
+            knownHashes.add(file.contentHash);
+            const classified = await service.classifyAndAssociateImport({
+              documentId: doc.id,
+              filename: doc.filename,
+              relativePath: file.relativePathPosix || file.relativePath,
+              extractedText: doc.extractedText,
+              tags: doc.tags,
+              sourcePath: file.absolutePath,
+            });
+            if (classified.factId) {
+              factsExtracted++;
+              entitiesAssociated++;
+            }
+            if (classified.reviewItem) reviewItems++;
+            imported.push({
+              id: doc.id,
+              filename: doc.filename,
+              byteLength: doc.byteLength,
+              contentHash: doc.contentHash,
+              sourceRelativePath: doc.sourceRelativePath,
+              entityKind: doc.entityKind || classified.auto?.kind || null,
+              review: Boolean(classified.reviewItem),
+            });
+          } catch (error) {
+            const message = String(error?.message || error).slice(0, 500);
+            errors.push({ path: file.relativePath, message });
+            errorLog.push(`${file.relativePath}: ${message}`);
+            skipped.push({ filename: file.relativePath, reason: "unreadable", detail: message });
+            // Continue — never abort entire import for one file
           }
-          if (!/\.(txt|csv|json|md|log|pdf|docx|png|jpe?g|webp)$/i.test(entry.name)) {
-            skipped.push({ filename: entry.name, reason: "unsupported type" });
-            continue;
-          }
-          const bytes = readFileSync(full);
-          const contentBase64 = bytes.toString("base64");
-          const mimeType =
-            /\.png$/i.test(entry.name) ? "image/png"
-              : /\.jpe?g$/i.test(entry.name) ? "image/jpeg"
-                : /\.webp$/i.test(entry.name) ? "image/webp"
-                  : /\.pdf$/i.test(entry.name) ? "application/pdf"
-                    : /\.json$/i.test(entry.name) ? "application/json"
-                      : /\.csv$/i.test(entry.name) ? "text/csv"
-                        : "text/plain";
-          const doc = await dispatch({
-            type: "crm.document.upload",
-            filename: entry.name,
-            mimeType,
-            contentBase64,
-            relationshipId: input.relationshipId ?? null,
-            tags: [...(Array.isArray(input.tags) ? input.tags : []), "folder-import"],
-            summary: input.summary ?? `Imported from owner-selected folder`,
-          });
-          imported.push({ id: doc.id, filename: doc.filename, byteLength: doc.byteLength });
         }
-        return { imported, skipped, folder };
+
+        return {
+          imported,
+          skipped,
+          errors,
+          folder,
+          approvedRoot,
+          recursive: true,
+          truncated: walk.truncated,
+          stats: {
+            filesDiscovered: walk.files.length + walk.skipped.length,
+            filesProcessed: imported.length,
+            duplicatesSkipped,
+            unsupportedSkipped,
+            factsExtracted,
+            entitiesAssociated,
+            reviewItems,
+            errors: errors.length,
+          },
+          errorLog,
+        };
       }
       case "crm.email.draft": return service.createEmailDraft(input.draft ?? input);
       case "crm.email.list": return { drafts: await service.listEmailDrafts(input.relationshipId) };
@@ -610,10 +704,17 @@ export async function createAionServer(options = {}) {
               tags: ["queue-import", src.kind],
               summary: `Queue import: ${src.label}`,
             });
+            const stats = result.stats ?? {};
+            const status = (stats.reviewItems > 0 && (result.imported?.length ?? 0) > 0)
+              ? "needs-review"
+              : "completed";
             return service.finalizeImportSource(src.id, {
-              status: "completed",
+              status,
               itemsImported: result.imported?.length ?? 0,
               itemsSkipped: result.skipped?.length ?? 0,
+              stats,
+              errorLog: result.errorLog ?? [],
+              lastError: (result.errors?.length ? `${result.errors.length} file error(s); continued` : "") || undefined,
             });
           }
           if (src.kind === "csv" || (src.kind === "file" && /\.csv$/i.test(src.path))) {
@@ -624,6 +725,17 @@ export async function createAionServer(options = {}) {
               status: "completed",
               itemsImported: result.created,
               itemsSkipped: result.skipped,
+              stats: {
+                filesDiscovered: result.created + result.skipped,
+                filesProcessed: result.created,
+                duplicatesSkipped: 0,
+                unsupportedSkipped: 0,
+                factsExtracted: 0,
+                entitiesAssociated: result.created,
+                reviewItems: 0,
+                errors: result.errors?.length ?? 0,
+              },
+              errorLog: result.errors ?? [],
             });
           }
           if (src.kind === "file" || src.kind === "json") {
@@ -638,11 +750,32 @@ export async function createAionServer(options = {}) {
               contentBase64: bytes.toString("base64"),
               tags: ["queue-import"],
               summary: `Queue import file: ${src.label}`,
+              contentHash: hashBytes(bytes),
+              sourceRelativePath: filename,
+              sourceRootPath: resolve(src.path, ".."),
+            });
+            const classified = await service.classifyAndAssociateImport({
+              documentId: doc.id,
+              filename: doc.filename,
+              relativePath: filename,
+              extractedText: doc.extractedText,
+              tags: doc.tags,
+              sourcePath: src.path,
             });
             return service.finalizeImportSource(src.id, {
-              status: "completed",
+              status: classified.reviewItem ? "needs-review" : "completed",
               itemsImported: doc?.id ? 1 : 0,
               itemsSkipped: 0,
+              stats: {
+                filesDiscovered: 1,
+                filesProcessed: 1,
+                duplicatesSkipped: 0,
+                unsupportedSkipped: 0,
+                factsExtracted: classified.factId ? 1 : 0,
+                entitiesAssociated: classified.factId ? 1 : 0,
+                reviewItems: classified.reviewItem ? 1 : 0,
+                errors: 0,
+              },
             });
           }
           throw new Error(`Unsupported import kind: ${src.kind}`);
@@ -652,6 +785,18 @@ export async function createAionServer(options = {}) {
             lastError: String(error?.message || error).slice(0, 2000),
           });
         }
+      }
+      case "import.dashboard": return service.importDashboard();
+      case "import.review.list": return { items: await service.listImportReviewQueue() };
+      case "import.review.resolve": return service.resolveImportReviewItem(String(input.id ?? ""), input.decision === "accepted" ? "accepted" : "rejected");
+      case "network.lan.discover": {
+        const lan = discoverPrivateLanAddresses();
+        const port = boundPort || Number(process.env.AION_PORT || 31415);
+        return {
+          ...lan,
+          phoneUrl: lan.preferred ? buildPhoneUrl(lan.preferred.address, port, "/phone") : null,
+          port,
+        };
       }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
@@ -822,26 +967,67 @@ export async function createAionServer(options = {}) {
       const remote = (await service.snapshot()).settings.remoteAccess;
       if (remote?.enabled) {
         let host = null;
+        let bindSource = "configured";
         try { host = validateBindAddress(remote.bindAddress); }
         catch (error) {
           listeners.push({ address: String(remote.bindAddress ?? ""), port: boundPort, state: "refused", scope: "private", detail: privacySafe(error.message) });
         }
-        if (host && host !== "127.0.0.1") {
+        // When private access is on but bind is loopback/stale, try live LAN discovery
+        // so phone access works without a hard-coded 192.168.x.x that may no longer exist.
+        const tryBindPrivate = async (address, source) => {
           const extra = createServer(handler);
           try {
-            await bind(extra, host, boundPort);
+            await bind(extra, address, boundPort);
             servers.push(extra);
-            listeners.push({ address: host, port: boundPort, state: "listening", scope: "private", detail: "Reachable from a paired device on this private network. Pairing is still required." });
+            listeners.push({
+              address,
+              port: boundPort,
+              state: "listening",
+              scope: "private",
+              detail: source === "discovered"
+                ? `Auto-discovered LAN address. Reachable from a paired device on this private network. Pairing is still required. Phone: ${buildPhoneUrl(address, boundPort, "/phone")}`
+                : "Reachable from a paired device on this private network. Pairing is still required.",
+            });
+            return true;
           } catch (error) {
             try { extra.close(); } catch { /* it never bound */ }
             const why = error.code === "EADDRNOTAVAIL" ? "that address does not belong to this computer right now"
               : error.code === "EADDRINUSE" ? "another program is already using that address and port"
                 : error.code === "EACCES" ? "the operating system refused permission to bind it"
                   : `the operating system reported ${String(error.code ?? "an error")}`;
-            listeners.push({ address: host, port: boundPort, state: "failed", scope: "private", detail: `AION could not listen on ${host}: ${why}. Loopback is unaffected and AION did not widen the bind.` });
+            listeners.push({
+              address,
+              port: boundPort,
+              state: "failed",
+              scope: "private",
+              detail: `AION could not listen on ${address}: ${why}. Loopback is unaffected and AION did not widen the bind.`,
+            });
+            return false;
           }
-        } else if (host === "127.0.0.1") {
-          listeners.push({ address: host, port: boundPort, state: "loopback-only", scope: "private", detail: "Private access is on, but the configured address is loopback, so no other device can reach AION. Enter this computer's private network address in Settings." });
+        };
+
+        if (host && host !== "127.0.0.1" && host !== "::1") {
+          const ok = await tryBindPrivate(host, bindSource);
+          if (!ok) {
+            // Configured address failed (often stale DHCP). Fall back to live discovery once.
+            const lan = discoverPrivateLanAddresses();
+            if (lan.preferred && lan.preferred.address !== host) {
+              await tryBindPrivate(lan.preferred.address, "discovered");
+            }
+          }
+        } else if (host === "127.0.0.1" || host === "::1" || !host) {
+          const lan = discoverPrivateLanAddresses();
+          if (lan.preferred) {
+            await tryBindPrivate(lan.preferred.address, "discovered");
+          } else {
+            listeners.push({
+              address: host || "127.0.0.1",
+              port: boundPort,
+              state: "loopback-only",
+              scope: "private",
+              detail: "Private access is on, but no usable private LAN IPv4 was found on active interfaces. Connect to Wi-Fi/Ethernet or set a bind address manually.",
+            });
+          }
         }
       }
       return server.address();

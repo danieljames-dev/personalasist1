@@ -13,7 +13,25 @@ export type ImportSourceKindV1 =
   | "document-batch"
   | "other";
 
-export type ImportSourceStatusV1 = "queued" | "processing" | "completed" | "failed" | "cancelled";
+export type ImportSourceStatusV1 =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "needs-review"
+  | "failed"
+  | "cancelled";
+
+/** Live counters shown on the import dashboard. */
+export interface ImportSourceStatsV1 {
+  filesDiscovered: number;
+  filesProcessed: number;
+  duplicatesSkipped: number;
+  unsupportedSkipped: number;
+  factsExtracted: number;
+  entitiesAssociated: number;
+  reviewItems: number;
+  errors: number;
+}
 
 export interface QueuedImportSourceV1 {
   id: OpaqueId;
@@ -27,10 +45,26 @@ export interface QueuedImportSourceV1 {
   lastError: string;
   itemsImported: number;
   itemsSkipped: number;
+  stats: ImportSourceStatsV1;
+  /** Recent per-file errors (bounded). */
+  errorLog: string[];
   provenance: ProvenanceV1;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
   completedAt: IsoTimestamp | null;
+}
+
+export function emptyImportStats(): ImportSourceStatsV1 {
+  return {
+    filesDiscovered: 0,
+    filesProcessed: 0,
+    duplicatesSkipped: 0,
+    unsupportedSkipped: 0,
+    factsExtracted: 0,
+    entitiesAssociated: 0,
+    reviewItems: 0,
+    errors: 0,
+  };
 }
 
 export function buildQueuedImportSource(
@@ -56,6 +90,8 @@ export function buildQueuedImportSource(
     lastError: "",
     itemsImported: 0,
     itemsSkipped: 0,
+    stats: emptyImportStats(),
+    errorLog: [],
     provenance: {
       sourceType: "owner",
       sourceRef: String(input.sourceRef ?? "import.queue").slice(0, 500),
