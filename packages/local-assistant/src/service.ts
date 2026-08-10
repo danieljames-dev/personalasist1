@@ -2666,6 +2666,43 @@ export class AionAssistantV1 {
     });
   }
 
+  /** Mark a queued import source completed/failed after server-side processing. */
+  async finalizeImportSource(
+    id: string,
+    result: { status: "completed" | "failed" | "cancelled"; itemsImported?: number; itemsSkipped?: number; lastError?: string },
+  ): Promise<QueuedImportSourceV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.importSourceQueue)) draft.importSourceQueue = [];
+      const src = draft.importSourceQueue.find((s) => s.id === id);
+      if (!src) throw new Error("Import source not found.");
+      const now = this.ports.clock.now();
+      src.status = result.status;
+      src.itemsImported = Number(result.itemsImported ?? src.itemsImported) || 0;
+      src.itemsSkipped = Number(result.itemsSkipped ?? src.itemsSkipped) || 0;
+      src.lastError = String(result.lastError ?? "").slice(0, 2000);
+      src.updatedAt = now;
+      src.completedAt = result.status === "completed" || result.status === "failed" ? now : src.completedAt;
+      this.activity(
+        draft,
+        "import",
+        "import.queue.finalize",
+        `Import source ${src.label}: ${src.status} (+${src.itemsImported}/skip ${src.itemsSkipped})`,
+        src.id,
+      );
+      return src;
+    });
+  }
+
+  async markImportSourceProcessing(id: string): Promise<QueuedImportSourceV1> {
+    return this.mutate((draft) => {
+      const src = (draft.importSourceQueue ?? []).find((s) => s.id === id);
+      if (!src) throw new Error("Import source not found.");
+      src.status = "processing";
+      src.updatedAt = this.ports.clock.now();
+      return src;
+    });
+  }
+
   /**
    * Import contacts from CSV text (Owner-supplied). Creates CRM prospects; does not invent fields.
    */

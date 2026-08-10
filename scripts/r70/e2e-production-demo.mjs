@@ -236,6 +236,8 @@ async function main() {
     label: "e2e-queue-intake",
   });
   rec("IMPORT_QUEUE", !!queued.id && queued.status === "queued", queued.id || "");
+  const processed = await api("import.queue.process", { id: queued.id });
+  rec("IMPORT_QUEUE_PROCESS", processed.status === "completed" || processed.status === "failed", `${processed.status} +${processed.itemsImported || 0}`);
 
   await api("metricool.fixture.seed", {
     brands: [

@@ -555,13 +555,14 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 <button>Import contacts from CSV</button>
 </form>
 <form data-form="import-queue">
-<label>Queue import source path (Owner-selected once; AION processes later)
+<label>Queue import source path (Owner-selected once; AION processes on demand)
 <input name="path" required maxlength="4096" placeholder="C:\path\selected-by-owner"></label>
 <label>Kind<select name="kind"><option>folder</option><option>file</option><option>csv</option><option>json</option><option>document-batch</option></select></label>
 <label>Associate<select name="associateWith"><option value="none">none</option><option>owner</option><option>business</option><option>brand</option><option>customer</option></select></label>
 <button>Add to import queue</button>
 </form>
-${(s.importSourceQueue ?? []).length ? `<p class="meta">Queued sources: ${(s.importSourceQueue ?? []).slice(0, 8).map((q) => `${esc(q.label)} [${esc(q.status)}]`).join("; ")}</p>` : ""}
+${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
+<p class="meta">Sources: ${(s.importSourceQueue ?? []).slice(0, 8).map((q) => `${esc(q.label)} [${esc(q.status)}] +${q.itemsImported || 0}`).join("; ")}</p>` : ""}
 <p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Max ~6 MB/file. Never scans whole drives — folder must be under Settings import roots or private/aion. Historical AI-assistant archives are not auto-scanned.</p>
 </div>
 <div class="card"><h2>Business / brand workspaces</h2>
@@ -752,6 +753,10 @@ document.addEventListener("click", async (event) => {
     if (verb === "appt-status") { await api("customer.appointment.status", { id, appointmentId: appt, status }); }
     if (verb === "customer-archive") { await api("customer.archive", { id, archived: archived === "true" }); openCustomer = null; }
     if (verb === "sales-routine") { await api("sales.routine.create", { templateId: template }); toast("Routine created. Enable it when you want it to run."); }
+    if (verb === "import-queue-process") {
+      const done = await api("import.queue.process", {});
+      toast(done.status === "completed" ? `Import done: +${done.itemsImported || 0} (skip ${done.itemsSkipped || 0})` : `Import ${done.status}: ${done.lastError || ""}`);
+    }
     if (action === "onboarding") await api("onboarding.complete");
     if (verb === "task") await api("task.transition", { id, state, reason: "Command Center" });
     if (verb === "routine") await api("routine.run", { id });

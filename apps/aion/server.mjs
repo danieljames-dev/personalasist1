@@ -520,7 +520,9 @@ export async function createAionServer(options = {}) {
       case "crm.document.list": return { documents: await service.listCrmDocuments(input.relationshipId) };
       case "crm.document.importFolder": {
         // Owner-selected folder only (not whole-drive scan). Non-recursive first level files.
-        const folder = absolute(String(input.path ?? ""), "Import folder");
+        const rawPath = String(input.path ?? "").trim();
+        if (!rawPath) throw new Error("Import folder path is required.");
+        const folder = resolve(rawPath);
         if (!existsSync(folder) || !statSync(folder).isDirectory()) throw new Error("Import folder does not exist or is not a directory.");
         const settings = (await service.snapshot()).settings;
         const roots = Array.isArray(settings.importRoots) ? settings.importRoots : [];
@@ -592,6 +594,65 @@ export async function createAionServer(options = {}) {
       case "job.prepare": return service.prepareJobApplication(input.id);
       case "import.queue.list": return { sources: await service.listImportSourceQueue() };
       case "import.queue.add": return service.queueImportSource(input.source ?? input);
+      case "import.queue.process": {
+        // Process one Owner-queued source (folder/file/csv). Never invents new roots.
+        const id = String(input.id ?? "");
+        const sources = await service.listImportSourceQueue();
+        const src = sources.find((s) => s.id === id) || sources.find((s) => s.status === "queued");
+        if (!src) throw new Error("No queued import source to process.");
+        await service.markImportSourceProcessing(src.id);
+        try {
+          if (src.kind === "folder" || src.kind === "document-batch") {
+            const result = await dispatch({
+              type: "crm.document.importFolder",
+              path: src.path,
+              relationshipId: src.associateWith === "customer" ? src.associateId : null,
+              tags: ["queue-import", src.kind],
+              summary: `Queue import: ${src.label}`,
+            });
+            return service.finalizeImportSource(src.id, {
+              status: "completed",
+              itemsImported: result.imported?.length ?? 0,
+              itemsSkipped: result.skipped?.length ?? 0,
+            });
+          }
+          if (src.kind === "csv" || (src.kind === "file" && /\.csv$/i.test(src.path))) {
+            if (!existsSync(src.path)) throw new Error("CSV path does not exist.");
+            const text = readFileSync(src.path, "utf8");
+            const result = await service.importContactsFromCsv(text, { sourceLabel: src.label });
+            return service.finalizeImportSource(src.id, {
+              status: "completed",
+              itemsImported: result.created,
+              itemsSkipped: result.skipped,
+            });
+          }
+          if (src.kind === "file" || src.kind === "json") {
+            if (!existsSync(src.path) || !statSync(src.path).isFile()) throw new Error("Import file does not exist.");
+            const bytes = readFileSync(src.path);
+            if (bytes.length > MAX_UPLOAD_BYTES) throw new Error("File too large.");
+            const filename = basename(src.path);
+            const doc = await dispatch({
+              type: "crm.document.upload",
+              filename,
+              mimeType: /\.json$/i.test(filename) ? "application/json" : "application/octet-stream",
+              contentBase64: bytes.toString("base64"),
+              tags: ["queue-import"],
+              summary: `Queue import file: ${src.label}`,
+            });
+            return service.finalizeImportSource(src.id, {
+              status: "completed",
+              itemsImported: doc?.id ? 1 : 0,
+              itemsSkipped: 0,
+            });
+          }
+          throw new Error(`Unsupported import kind: ${src.kind}`);
+        } catch (error) {
+          return service.finalizeImportSource(src.id, {
+            status: "failed",
+            lastError: String(error?.message || error).slice(0, 2000),
+          });
+        }
+      }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
       case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
