@@ -542,7 +542,13 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 <label>Summary (optional)<input name="summary" maxlength="2000" placeholder="Short note about this file"></label>
 <button>Upload into AION</button>
 </form>
-<p class="meta">Supported now: TXT, CSV, JSON, MD, PNG/JPG/WEBP (bytes stored; image understanding expands later), PDF/DOCX (bytes stored; text extraction best-effort). Max ~6 MB per file.</p>
+<form data-form="folder-import">
+<label>Import folder (absolute path under approved import root or private AION data)
+<input name="path" required maxlength="4096" placeholder="C:\path\to\owner-selected-folder"></label>
+<label>Tags (comma separated)<input name="tags" maxlength="500" placeholder="resume, brand-doc"></label>
+<button>Import folder (top-level files only)</button>
+</form>
+<p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Max ~6 MB/file. Never scans whole drives — folder must be under Settings import roots or private/aion.</p>
 </div>
 <div class="card"><h2>Business / brand workspaces</h2>
 <form data-form="workspace-brand">
@@ -800,6 +806,14 @@ document.addEventListener("submit", async (event) => {
         summary: d.summary || undefined,
       });
       toast(`Stored ${doc.filename} (${doc.byteLength} bytes)${doc.tags?.length ? ` · ${doc.tags.join(", ")}` : ""}`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "folder-import") {
+      const tags = String(d.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
+      const result = await api("crm.document.importFolder", { path: d.path, tags });
+      toast(`Imported ${result.imported?.length ?? 0} file(s); skipped ${result.skipped?.length ?? 0}.`);
       form.reset();
       await load();
       return;

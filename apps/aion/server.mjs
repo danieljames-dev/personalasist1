@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve, basename } from "node:path";
+import { join, resolve, basename, relative, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import {
@@ -518,6 +518,66 @@ export async function createAionServer(options = {}) {
         });
       }
       case "crm.document.list": return { documents: await service.listCrmDocuments(input.relationshipId) };
+      case "crm.document.importFolder": {
+        // Owner-selected folder only (not whole-drive scan). Non-recursive first level files.
+        const folder = absolute(String(input.path ?? ""), "Import folder");
+        if (!existsSync(folder) || !statSync(folder).isDirectory()) throw new Error("Import folder does not exist or is not a directory.");
+        const settings = (await service.snapshot()).settings;
+        const roots = Array.isArray(settings.importRoots) ? settings.importRoots : [];
+        const underRoot = roots.some((root) => {
+          try {
+            const r = resolve(root);
+            const rel = relative(r, folder);
+            return rel === "" || (!rel.startsWith("..") && !rel.includes(`..${sep}`));
+          } catch { return false; }
+        });
+        // Also allow private/aion intake sources explicitly selected under dataRoot
+        const underData = (() => {
+          try {
+            const rel = relative(dataRoot, folder);
+            return rel === "" || (!rel.startsWith("..") && !rel.includes(`..${sep}`));
+          } catch { return false; }
+        })();
+        if (!underRoot && !underData) {
+          throw new Error("Folder must be under an approved import root (Settings) or private AION data root. AION will not scan arbitrary drives.");
+        }
+        const entries = readdirSync(folder, { withFileTypes: true }).filter((e) => e.isFile()).slice(0, 40);
+        const imported = [];
+        const skipped = [];
+        for (const entry of entries) {
+          const full = join(folder, entry.name);
+          const st = statSync(full);
+          if (st.size > MAX_UPLOAD_BYTES) {
+            skipped.push({ filename: entry.name, reason: "too large" });
+            continue;
+          }
+          if (!/\.(txt|csv|json|md|log|pdf|docx|png|jpe?g|webp)$/i.test(entry.name)) {
+            skipped.push({ filename: entry.name, reason: "unsupported type" });
+            continue;
+          }
+          const bytes = readFileSync(full);
+          const contentBase64 = bytes.toString("base64");
+          const mimeType =
+            /\.png$/i.test(entry.name) ? "image/png"
+              : /\.jpe?g$/i.test(entry.name) ? "image/jpeg"
+                : /\.webp$/i.test(entry.name) ? "image/webp"
+                  : /\.pdf$/i.test(entry.name) ? "application/pdf"
+                    : /\.json$/i.test(entry.name) ? "application/json"
+                      : /\.csv$/i.test(entry.name) ? "text/csv"
+                        : "text/plain";
+          const doc = await dispatch({
+            type: "crm.document.upload",
+            filename: entry.name,
+            mimeType,
+            contentBase64,
+            relationshipId: input.relationshipId ?? null,
+            tags: [...(Array.isArray(input.tags) ? input.tags : []), "folder-import"],
+            summary: input.summary ?? `Imported from owner-selected folder`,
+          });
+          imported.push({ id: doc.id, filename: doc.filename, byteLength: doc.byteLength });
+        }
+        return { imported, skipped, folder };
+      }
       case "crm.email.draft": return service.createEmailDraft(input.draft ?? input);
       case "crm.email.list": return { drafts: await service.listEmailDrafts(input.relationshipId) };
       case "owner.knowledge.get": return service.getOwnerKnowledge();
