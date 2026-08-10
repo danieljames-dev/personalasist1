@@ -2574,6 +2574,20 @@ export class AionAssistantV1 {
     });
   }
 
+  /** Latest phone-intake document timestamp (for Mobile status). No secrets. */
+  async lastPhoneIntakeAt(): Promise<string | null> {
+    const state = await this.snapshot();
+    const docs = Array.isArray(state.crmDocuments) ? state.crmDocuments : [];
+    let best: string | null = null;
+    for (const d of docs) {
+      const tags = Array.isArray(d.tags) ? d.tags : [];
+      if (!tags.some((t) => /phone-intake/i.test(String(t)))) continue;
+      const at = d.createdAt || d.updatedAt || null;
+      if (at && (!best || at > best)) best = at;
+    }
+    return best;
+  }
+
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
   async verifyPrivateBackup(destination: string, passphrase: string): Promise<AssistantStateV1> { const state = await this.ports.backup.restore(destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.verify", "Encrypted private backup integrity and restore validated.", null); }); return state; }
 

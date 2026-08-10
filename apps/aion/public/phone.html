@@ -4,28 +4,37 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f1419">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg">
   <title>AION Phone Intake</title>
   <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; padding: 1rem; background: #0f1419; color: #e7ecf1; max-width: 28rem; margin-inline: auto; }
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; padding: 1rem; padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0)); background: #0f1419; color: #e7ecf1; max-width: 28rem; margin-inline: auto; }
     h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
-    p { color: #9aa7b5; font-size: 0.9rem; line-height: 1.4; }
+    p { color: #9aa7b5; font-size: 0.9rem; line-height: 1.45; }
     label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.85rem; }
-    input, select, button, textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid #2a3540; background: #1a222c; color: inherit; }
-    button { background: #2b6cb0; border: none; font-weight: 600; margin-top: 1rem; cursor: pointer; }
+    input, select, button, textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 0.85rem; border-radius: 0.55rem; border: 1px solid #2a3540; background: #1a222c; color: inherit; min-height: 2.85rem; }
+    textarea { min-height: 4.5rem; resize: vertical; }
+    button { background: #2b6cb0; border: none; font-weight: 600; margin-top: 0.65rem; cursor: pointer; }
+    button.secondary { background: #243041; }
     button:disabled { opacity: 0.5; }
     .ok { color: #6fcf97; }
     .err { color: #f08080; }
     .card { background: #161d26; border-radius: 0.75rem; padding: 1rem; margin-top: 1rem; }
+    .row { display: grid; gap: 0.5rem; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    a { color: #7eb6ff; }
     code { font-size: 0.8rem; word-break: break-all; }
   </style>
 </head>
 <body>
   <h1>AION phone intake</h1>
-  <p>Take a photo or pick a file. AION stores the original under private intake on the desktop. Pair once from Settings if this device is new.</p>
+  <p>Take a photo, pick a screenshot/file, or add a note. Originals land in private intake on the desktop. Pair once — AION remembers this phone.</p>
 
   <div class="card" id="pairCard">
-    <label>Pairing code (from desktop Settings)<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="12"></label>
+    <label>Pairing code (from desktop Settings → Mobile)<input id="code" inputmode="text" autocomplete="one-time-code" maxlength="12" autocapitalize="characters"></label>
     <label>This phone’s label<input id="label" value="Phone" maxlength="80"></label>
     <button type="button" id="pairBtn">Pair device</button>
     <p id="pairMsg" class="err" hidden></p>
@@ -33,31 +42,68 @@
 
   <div class="card" id="upCard" hidden>
     <p class="ok" id="sessionMsg">Paired — ready to upload.</p>
-    <label>Photo / file
-      <input id="file" type="file" accept="image/*,.txt,.pdf,.csv,.json,.docx,.jpg,.jpeg,.png,.webp" capture="environment">
+    <div class="actions">
+      <button type="button" class="secondary" id="btnCamera">Take photo</button>
+      <button type="button" class="secondary" id="btnGallery">Choose photo</button>
+    </div>
+    <div class="actions">
+      <button type="button" class="secondary" id="btnFile">Choose file</button>
+      <button type="button" class="secondary" id="btnNoteOnly">Add note only</button>
+    </div>
+    <input id="fileCamera" type="file" accept="image/*" capture="environment" hidden>
+    <input id="fileGallery" type="file" accept="image/*" hidden>
+    <input id="fileAny" type="file" accept="image/*,.txt,.pdf,.csv,.json,.md,.docx,.png,.jpg,.jpeg,.webp" hidden>
+    <p class="meta" id="fileName" style="color:#9aa7b5;font-size:0.85rem"></p>
+    <label>Note (optional)<textarea id="summary" maxlength="500" placeholder="What is this?"></textarea></label>
+    <label>Associate with customer (optional)
+      <select id="relationshipId"><option value="">— none —</option></select>
     </label>
-    <label>Tags (optional)<input id="tags" placeholder="receipt, note, brand"></label>
-    <label>Note (optional)<input id="summary" maxlength="500"></label>
+    <label>Tags (optional)<input id="tags" placeholder="receipt, quote, whiteboard" value="phone-intake"></label>
     <button type="button" id="upBtn">Upload to AION</button>
     <p id="upMsg" hidden></p>
+    <p style="margin-top:1rem"><a href="/">Open full AION</a> · <button type="button" class="secondary" id="unpairBtn" style="margin-top:0.5rem">Forget this phone</button></p>
   </div>
-
-  <p><a href="/" style="color:#7eb6ff">Open full Command Center</a></p>
 
   <script>
     const TOKEN_KEY = "aion.sessionToken";
-    const token = () => localStorage.getItem(TOKEN_KEY) || "";
-    const setToken = (t) => localStorage.setItem(TOKEN_KEY, t);
+    // Prefer shared Command Center key if already paired from full app
+    const token = () => localStorage.getItem(TOKEN_KEY) || localStorage.getItem("aion.session") || "";
+    const setToken = (t) => {
+      localStorage.setItem(TOKEN_KEY, t);
+      try { localStorage.setItem("aion.session", t); } catch {}
+    };
+    const clearToken = () => {
+      localStorage.removeItem(TOKEN_KEY);
+      try { localStorage.removeItem("aion.session"); } catch {}
+    };
     const pairCard = document.getElementById("pairCard");
     const upCard = document.getElementById("upCard");
     const pairMsg = document.getElementById("pairMsg");
     const upMsg = document.getElementById("upMsg");
+    const fileName = document.getElementById("fileName");
+    let selectedFile = null;
 
     function showUpload() {
       pairCard.hidden = true;
       upCard.hidden = false;
+      loadCustomers();
     }
     if (token()) showUpload();
+
+    async function loadCustomers() {
+      try {
+        const res = await fetch("/api/state", { headers: { authorization: "Bearer " + token() } });
+        if (!res.ok) return;
+        const data = await res.json();
+        const ws = data.state?.settings?.activeWorkspace || "work";
+        const people = (data.state?.relationships || []).filter((r) => !r.archivedAt && (r.workspace || "personal") === ws);
+        const sel = document.getElementById("relationshipId");
+        const cur = sel.value;
+        sel.innerHTML = `<option value="">— none —</option>` + people.slice(0, 80).map((p) =>
+          `<option value="${p.id}">${(p.displayName || p.id).replace(/[<>&]/g, (c) => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}</option>`).join("");
+        if (cur) sel.value = cur;
+      } catch { /* offline shell */ }
+    }
 
     document.getElementById("pairBtn").onclick = async () => {
       pairMsg.hidden = true;
@@ -77,47 +123,94 @@
       }
     };
 
-    document.getElementById("upBtn").onclick = async () => {
-      upMsg.hidden = true;
-      const file = document.getElementById("file").files?.[0];
-      if (!file) { upMsg.hidden = false; upMsg.className = "err"; upMsg.textContent = "Choose a photo or file."; return; }
-      if (file.size > 6 * 1024 * 1024) { upMsg.hidden = false; upMsg.className = "err"; upMsg.textContent = "Max 6 MB."; return; }
+    document.getElementById("unpairBtn").onclick = () => {
+      clearToken();
+      pairCard.hidden = false;
+      upCard.hidden = true;
+    };
+
+    function pick(input) {
+      input.onchange = () => {
+        selectedFile = input.files?.[0] || null;
+        fileName.textContent = selectedFile ? `Selected: ${selectedFile.name} (${Math.round(selectedFile.size / 1024)} KB)` : "";
+      };
+      input.click();
+    }
+    document.getElementById("btnCamera").onclick = () => pick(document.getElementById("fileCamera"));
+    document.getElementById("btnGallery").onclick = () => pick(document.getElementById("fileGallery"));
+    document.getElementById("btnFile").onclick = () => pick(document.getElementById("fileAny"));
+    document.getElementById("btnNoteOnly").onclick = () => {
+      selectedFile = null;
+      fileName.textContent = "Note only (no file) — will store as text note.";
+    };
+
+    async function fileToBase64(file) {
       const buf = await file.arrayBuffer();
       const bytes = new Uint8Array(buf);
       let binary = "";
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-      const contentBase64 = btoa(binary);
+      return btoa(binary);
+    }
+
+    document.getElementById("upBtn").onclick = async () => {
+      upMsg.hidden = true;
+      const note = document.getElementById("summary").value.trim();
       const tags = document.getElementById("tags").value.split(",").map((t) => t.trim()).filter(Boolean);
-      tags.push("phone-intake");
+      if (!tags.includes("phone-intake")) tags.push("phone-intake");
+      const relationshipId = document.getElementById("relationshipId").value || null;
+
       try {
+        let payload;
+        if (selectedFile) {
+          if (selectedFile.size > 6 * 1024 * 1024) throw new Error("Max 6 MB.");
+          payload = {
+            type: "crm.document.upload",
+            filename: selectedFile.name || "phone-photo.jpg",
+            mimeType: selectedFile.type || "image/jpeg",
+            contentBase64: await fileToBase64(selectedFile),
+            tags,
+            summary: note || `Phone intake ${new Date().toISOString()}`,
+            relationshipId,
+          };
+        } else if (note) {
+          const text = note + "\n";
+          payload = {
+            type: "crm.document.upload",
+            filename: `phone-note-${Date.now()}.txt`,
+            mimeType: "text/plain",
+            contentBase64: btoa(unescape(encodeURIComponent(text))),
+            tags: [...tags, "phone-note"],
+            summary: note.slice(0, 400),
+            relationshipId,
+          };
+        } else {
+          throw new Error("Choose a photo/file or enter a note.");
+        }
+
         const res = await fetch("/api/action", {
           method: "POST",
           headers: {
             "content-type": "application/json",
             authorization: "Bearer " + token(),
           },
-          body: JSON.stringify({
-            type: "crm.document.upload",
-            filename: file.name || "phone-photo.jpg",
-            mimeType: file.type || "image/jpeg",
-            contentBase64,
-            tags,
-            summary: document.getElementById("summary").value || `Phone intake ${new Date().toISOString()}`,
-          }),
+          body: JSON.stringify(payload),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Upload failed");
         const doc = data.result || data;
         upMsg.hidden = false;
         upMsg.className = "ok";
-        upMsg.textContent = `Stored ${doc.filename} (${doc.byteLength} bytes). Image understanding expands when a multimodal provider is available.`;
-        document.getElementById("file").value = "";
+        upMsg.textContent = `Stored ${doc.filename || "item"} (${doc.byteLength || "?"} bytes) on the desktop. Vision expands later when available.`;
+        selectedFile = null;
+        fileName.textContent = "";
+        document.getElementById("summary").value = "";
+        ["fileCamera", "fileGallery", "fileAny"].forEach((id) => { document.getElementById(id).value = ""; });
       } catch (e) {
         upMsg.hidden = false;
         upMsg.className = "err";
         upMsg.textContent = e.message || String(e);
-        if (/not paired|401/i.test(String(e.message))) {
-          localStorage.removeItem(TOKEN_KEY);
+        if (/not paired|401|403/i.test(String(e.message))) {
+          clearToken();
           pairCard.hidden = false;
           upCard.hidden = true;
         }

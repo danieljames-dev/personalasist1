@@ -36,7 +36,7 @@ test("private phone access is off by default and AION binds loopback only", asyn
     assert.equal(address.address, "127.0.0.1", "the default bind is loopback");
     const state = await (await fetch(`${base}/api/state`)).json();
     assert.equal(state.state.settings.remoteAccess.enabled, false, "phone access is opt-in");
-    assert.equal(state.state.settings.remoteAccess.bindAddress, "127.0.0.1");
+    assert.equal(state.state.settings.remoteAccess.bindAddress === "127.0.0.1" || state.state.settings.remoteAccess.bindAddress === "auto", true, "default bind is loopback or auto");
     const refused = await post(base, { type: "device.pair.code", label: "Phone" });
     assert.equal(refused.status, 400);
     assert.match((await refused.json()).error, /Turn on private phone access/u);
@@ -45,6 +45,7 @@ test("private phone access is off by default and AION binds loopback only", asyn
 
 test("a bind address is never a wildcard and never a public address", () => {
   for (const bad of ["0.0.0.0", "::", "*", "8.8.8.8", "203.0.113.7", ""]) assert.throws(() => validateBindAddress(bad), /wildcard|private-network|required/u, bad);
+  assert.equal(validateBindAddress("auto"), "auto");
   for (const good of ["127.0.0.1", "::1", "10.2.3.4", "192.168.1.20", "172.16.0.9", "100.101.102.103", "fd7a::1"]) {
     assert.equal(validateBindAddress(good), good, good);
   }

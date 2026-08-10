@@ -91,7 +91,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       memoryContextEnabled: true, schedulerEnabled: true, externalActionsRequireApproval: true,
       importRoots: [], exportRoot: "", credentialEnvironmentVariable: "", developerBridgeId: "",
       activeWorkspace: DEFAULT_WORKSPACE, workspaceLabels: { personal: "Personal", work: "Work" },
-      remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 },
+      remoteAccess: { enabled: false, bindAddress: "auto", sessionDays: 90 },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
       connectors: {
         gmailClientId: "",
@@ -342,7 +342,8 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(src.errorLog)) src.errorLog = [];
   }
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
-  if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
+  if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "auto", sessionDays: 90 };
+  if (clone.settings.remoteAccess && !clone.settings.remoteAccess.bindAddress) clone.settings.remoteAccess.bindAddress = "auto";
   {
     const defaults = {
       gmailClientId: "",

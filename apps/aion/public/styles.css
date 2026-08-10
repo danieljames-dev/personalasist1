@@ -98,14 +98,27 @@ details summary { cursor: pointer; color: var(--muted); font-size: .86rem; }
 
 /* Phone layout. 16px inputs stop iOS zooming on focus; 2.75rem is a comfortable thumb target. */
 @media (max-width: 700px) {
-  .layout { padding: .7rem; gap: .7rem; }
+  .layout { padding: .7rem .7rem 5.5rem; gap: .7rem; }
   header { padding: .55rem .8rem; flex-wrap: wrap; }
-  nav { position: static; display: flex; overflow-x: auto; gap: .3rem; padding-bottom: .2rem; }
-  nav button { white-space: nowrap; }
+  header small { display: none; }
+  nav.mobile-nav, body.phone-shell nav {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 0;
+    padding: .35rem .25rem calc(.35rem + env(safe-area-inset-bottom, 0));
+    background: var(--panel); border-top: 1px solid var(--line);
+    overflow: hidden;
+  }
+  nav.mobile-nav button, body.phone-shell nav button {
+    white-space: nowrap; font-size: .68rem; padding: .45rem .15rem;
+    min-height: 2.9rem; text-align: center; border-radius: .4rem;
+    justify-self: stretch;
+  }
   .grid { grid-template-columns: 1fr; }
   input, textarea, select, button { min-height: 2.75rem; font-size: 16px; }
   .facts { grid-template-columns: 1fr 1fr; }
   .tl { grid-template-columns: 5.2rem 1fr; }
+  .home-mobile .tap-grid { grid-template-columns: 1fr 1fr; }
+  #toast { bottom: 5.25rem; }
 }
 
 /* V1.2 areas. The same shell as Sales: tap targets first, and a nav that wraps on a phone. */

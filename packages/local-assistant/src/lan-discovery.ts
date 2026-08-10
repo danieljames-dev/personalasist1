@@ -24,6 +24,19 @@ export interface LanDiscoveryResultV1 {
   phoneUrlPath: string;
 }
 
+/** Separates home LAN from private overlay (Tailscale CGNAT, etc.) for remote phone access. */
+export interface AccessEndpointDiscoveryV1 {
+  /** Best physical LAN address (home Wi-Fi / Ethernet). Null if none. */
+  physical: DiscoveredLanAddressV1 | null;
+  /** Best private-overlay address (Tailscale 100.x / unique-local). Null if none. */
+  overlay: DiscoveredLanAddressV1 | null;
+  /** Prefer overlay for away-from-home; fall back to physical for same-LAN. */
+  preferredRemote: DiscoveredLanAddressV1 | null;
+  /** All scored candidates (physical + overlay). */
+  candidates: DiscoveredLanAddressV1[];
+  phoneUrlPath: string;
+}
+
 const VIRTUAL_IFACE_RE =
   /^(vEthernet|veth|docker|br-|vmware|virtualbox|vbox|hyper-v|WSL|Loopback|Teredo|isatap|Bluetooth|Local Area Connection\*)/i;
 const VIRTUAL_IFACE_CONTAINS_RE = /WSL|Hyper-V|Virtual|VMware|VirtualBox|Docker|vEthernet|Tailscale|WireGuard|NordLynx|ZeroTier|Hamachi/i;
@@ -48,6 +61,14 @@ function isLoopback(address: string): boolean {
   return address === "127.0.0.1" || address.startsWith("127.");
 }
 
+function isOverlayIpv4(address: string): boolean {
+  const parts = address.split(".").map((p) => Number(p));
+  if (parts.length !== 4) return false;
+  const [a, b] = parts as [number, number, number, number];
+  // Tailscale and similar private overlays use CGNAT 100.64/10
+  return a === 100 && b >= 64 && b <= 127;
+}
+
 function scoreInterface(name: string, info: NetworkInterfaceInfo): { score: number; reason: string } | null {
   // Node historically used number 4; modern typings use "IPv4"
   const family = String(info.family);
@@ -60,8 +81,21 @@ function scoreInterface(name: string, info: NetworkInterfaceInfo): { score: numb
 
   let score = 50;
   const reasons: string[] = ["private-ipv4"];
-
+  const overlayAddr = isOverlayIpv4(address);
+  const nameLooksOverlay = /tailscale|wireguard|nordlynx|zerotier|hamachi|ts\d|wintun/i.test(name);
   const virtual = VIRTUAL_IFACE_RE.test(name) || VIRTUAL_IFACE_CONTAINS_RE.test(name);
+
+  // Overlay addresses: score high for remote use (not demoted as "virtual adapter")
+  if (overlayAddr || nameLooksOverlay) {
+    score += 60;
+    reasons.push(overlayAddr ? "cgnat-overlay" : "overlay-adapter-name");
+    if (nameLooksOverlay) {
+      score += 20;
+      reasons.push("named-private-overlay");
+    }
+    return { score, reason: reasons.join(", ") };
+  }
+
   if (virtual) {
     score -= 40;
     reasons.push("virtual-adapter");
@@ -81,9 +115,6 @@ function scoreInterface(name: string, info: NetworkInterfaceInfo): { score: numb
     // Often Hyper-V/WSL default switch — demote unless non-virtual name
     score += virtual ? -10 : 10;
     reasons.push("rfc1918-172");
-  } else if (address.startsWith("100.")) {
-    score += 5;
-    reasons.push("cgnat-overlay");
   }
 
   // Prefer Ethernet / Wi-Fi naming
@@ -129,8 +160,42 @@ export function discoverPrivateLanAddresses(
   };
 }
 
+/**
+ * Discover physical LAN and private-overlay endpoints separately.
+ * Prefer overlay for remote (away-from-home) phone use; physical for home Wi-Fi.
+ */
+export function discoverAccessEndpoints(
+  interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces(),
+): AccessEndpointDiscoveryV1 {
+  const base = discoverPrivateLanAddresses(interfaces);
+  const physical = base.candidates.filter(
+    (c) => !isOverlayIpv4(c.address) && !/tailscale|wireguard|nordlynx|zerotier|hamachi|wintun/i.test(c.interfaceName),
+  );
+  const overlay = base.candidates.filter(
+    (c) => isOverlayIpv4(c.address) || /tailscale|wireguard|nordlynx|zerotier|hamachi|wintun/i.test(c.interfaceName),
+  );
+  physical.sort((a, b) => b.score - a.score || a.address.localeCompare(b.address));
+  overlay.sort((a, b) => b.score - a.score || a.address.localeCompare(b.address));
+  const physicalBest = physical[0] ?? null;
+  const overlayBest = overlay[0] ?? null;
+  return {
+    physical: physicalBest,
+    overlay: overlayBest,
+    preferredRemote: overlayBest ?? physicalBest,
+    candidates: base.candidates,
+    phoneUrlPath: "/phone",
+  };
+}
+
 /** Build phone URL for a host:port. */
 export function buildPhoneUrl(address: string, port: number, path = "/phone"): string {
   const host = address.includes(":") && !address.startsWith("[") ? `[${address}]` : address;
   return `http://${host}:${port}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+/** Command Center / main app URL on a private host. */
+export function buildAppUrl(address: string, port: number, path = "/"): string {
+  const host = address.includes(":") && !address.startsWith("[") ? `[${address}]` : address;
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `http://${host}:${port}${p === "/" ? "/" : p}`;
 }

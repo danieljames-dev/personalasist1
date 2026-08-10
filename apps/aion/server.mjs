@@ -14,7 +14,7 @@ import {
   defaultGmailConfig, gmailConnectorStatus, defaultMetricoolConfig, metricoolConnectorStatus,
   imageUnderstandingStatus, extractImageMetadataOnly, extractImageWithLocalVision,
   walkAuthorizedFolder, mimeForBulkExtension, hashBytes,
-  discoverPrivateLanAddresses, buildPhoneUrl,
+  discoverPrivateLanAddresses, discoverAccessEndpoints, buildPhoneUrl, buildAppUrl,
 } from "../../packages/local-assistant/dist/index.js";
 import { HttpBrainRuntimeV1 } from "./brain-runtime.mjs";
 import { createDockerCodeSandboxV1 } from "./code-sandbox.mjs";
@@ -115,15 +115,18 @@ function isLoopbackPeer(request, treatPeerAsRemote) {
 }
 
 /**
- * Same-origin enforcement. The allowed hosts are loopback plus, only when the owner has turned
- * private access on, the one private interface they named. A wildcard is never allowed, and an
- * `Origin` from anywhere else is rejected outright, which is what keeps a web page on the phone
- * from driving AION behind the owner's back.
+ * Same-origin enforcement. Allowed hosts: loopback plus every private address AION is actually
+ * listening on (LAN and/or Tailscale overlay). Wildcards are never allowed.
  */
-function sameOrigin(request, address, extraHost) {
+function sameOrigin(request, address, extraHosts) {
   const host = request.headers.host; const origin = request.headers.origin;
   const hosts = new Set([`127.0.0.1:${address.port}`, `localhost:${address.port}`, `[::1]:${address.port}`]);
-  if (extraHost) { hosts.add(`${extraHost}:${address.port}`); hosts.add(`[${extraHost}]:${address.port}`); }
+  const list = Array.isArray(extraHosts) ? extraHosts : (extraHosts ? [extraHosts] : []);
+  for (const extraHost of list) {
+    if (!extraHost || extraHost === "auto") continue;
+    hosts.add(`${extraHost}:${address.port}`);
+    hosts.add(`[${extraHost}]:${address.port}`);
+  }
   if (!host || !hosts.has(host.toLowerCase())) return false;
   if (!origin) return true;
   return [...hosts].some((candidate) => origin.toLowerCase() === `http://${candidate}`);
@@ -813,12 +816,28 @@ export async function createAionServer(options = {}) {
       case "import.review.resolve": return service.resolveImportReviewItem(String(input.id ?? ""), input.decision === "accepted" ? "accepted" : "rejected");
       case "network.lan.discover": {
         const lan = discoverPrivateLanAddresses();
+        const access = discoverAccessEndpoints();
         const port = boundPort || Number(process.env.AION_PORT || 31415);
         return {
           ...lan,
-          phoneUrl: lan.preferred ? buildPhoneUrl(lan.preferred.address, port, "/phone") : null,
+          access,
+          phoneUrl: (access.preferredRemote || lan.preferred)
+            ? buildPhoneUrl((access.preferredRemote || lan.preferred).address, port, "/phone")
+            : null,
+          remoteUrl: access.overlay ? buildAppUrl(access.overlay.address, port, "/") : null,
+          localUrl: access.physical ? buildAppUrl(access.physical.address, port, "/") : null,
           port,
         };
+      }
+      case "mobile.status": {
+        const settings = (await service.snapshot()).settings;
+        const devices = await service.deviceInventory();
+        const lastIntake = await service.lastPhoneIntakeAt();
+        return remoteAccessStatus(settings, listeners, process.env, process.platform, {
+          port: boundPort || Number(process.env.AION_PORT || 31415),
+          devices,
+          lastPhoneIntake: lastIntake,
+        });
       }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
@@ -867,7 +886,10 @@ export async function createAionServer(options = {}) {
       const address = { port: boundPort };
       const settings = (await service.snapshot()).settings;
       const remote = settings.remoteAccess;
-      if (!boundPort || !sameOrigin(request, address, remote.enabled ? remote.bindAddress : null)) {
+      const privateHosts = listeners
+        .filter((entry) => entry.state === "listening" && entry.scope === "private")
+        .map((entry) => entry.address);
+      if (!boundPort || !sameOrigin(request, address, remote.enabled ? privateHosts : [])) {
         return json(response, 403, { error: "Request origin is not allowed." });
       }
       const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
@@ -911,13 +933,17 @@ export async function createAionServer(options = {}) {
         return response.end(data);
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
+        const devices = await service.deviceInventory();
+        const lastIntake = await service.lastPhoneIntakeAt();
         return json(response, 200, {
           state: await service.snapshot(), providers: await service.providerHealth(), capabilities: service.capabilities(),
           developerBridge: await service.developerBridgeStatus(), developerBridges: await service.developerBridgeInventory(),
           verificationOperations: verificationRunner.operations(),
           salesRoutineTemplates: service.salesRoutineTemplates(),
-          remoteAccess: await remoteAccessStatus(settings, listeners),
-          devices: await service.deviceInventory(),
+          remoteAccess: await remoteAccessStatus(settings, listeners, process.env, process.platform, {
+            port: boundPort, devices, lastPhoneIntake: lastIntake,
+          }),
+          devices,
           // V1.2 surfaces. Everything here is already workspace-scoped by the service.
           independence: await service.independence(),
           lessons: await service.lessons(),
@@ -1060,23 +1086,27 @@ export async function createAionServer(options = {}) {
         catch (error) {
           listeners.push({ address: String(remote.bindAddress ?? ""), port: boundPort, state: "refused", scope: "private", detail: privacySafe(error.message) });
         }
-        // Bind the Owner-configured private address when it is a real second interface
-        // (including IPv6 loopback ::1). IPv4 loopback alone cannot give phone access, so when
-        // the saved bind is 127.0.0.1 (or missing after validation), try live LAN discovery.
-        // If a non-loopback configured address fails (stale DHCP), fall back to discovery once.
+        // Bind private addresses without requiring Owner-maintained IPs.
+        // "auto" / loopback / empty → bind both physical LAN and private overlay when present.
+        // Explicit host → bind that first, then still add overlay+LAN discovery for resilience.
         const tryBindPrivate = async (address, source) => {
+          if (!address || address === "127.0.0.1" || address === "auto") return false;
+          if (listeners.some((e) => e.state === "listening" && e.address === address)) return true;
           const extra = createServer(handler);
           try {
             await bind(extra, address, boundPort);
             servers.push(extra);
+            const isOverlay = source === "overlay" || /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./u.test(address);
             listeners.push({
               address,
               port: boundPort,
               state: "listening",
               scope: "private",
-              detail: source === "discovered"
-                ? `Auto-discovered LAN address. Reachable from a paired device on this private network. Pairing is still required. Phone: ${buildPhoneUrl(address, boundPort, "/phone")}`
-                : "Reachable from a paired device on this private network. Pairing is still required.",
+              detail: isOverlay
+                ? `Private overlay address. Reachable from a paired phone anywhere the overlay reaches (e.g. work cellular). App: ${buildAppUrl(address, boundPort, "/")} · Phone: ${buildPhoneUrl(address, boundPort, "/phone")}`
+                : source === "discovered" || source === "lan"
+                  ? `Auto-discovered LAN address. Same-network phone access. App: ${buildAppUrl(address, boundPort, "/")} · Phone: ${buildPhoneUrl(address, boundPort, "/phone")}`
+                  : `Reachable from a paired device on this private network. App: ${buildAppUrl(address, boundPort, "/")}`,
             });
             return true;
           } catch (error) {
@@ -1096,35 +1126,36 @@ export async function createAionServer(options = {}) {
           }
         };
 
-        const tryDiscoverLan = async () => {
+        const access = discoverAccessEndpoints();
+        const targets = [];
+        if (host && host !== "127.0.0.1" && host !== "::1" && host !== "auto") {
+          targets.push({ address: host, source: bindSource });
+        }
+        if (host === "::1") targets.push({ address: "::1", source: "configured" });
+        // Always auto-bind overlay + physical when access is on (covers "auto" and stale single IPs).
+        if (access.overlay?.address) targets.push({ address: access.overlay.address, source: "overlay" });
+        if (access.physical?.address) targets.push({ address: access.physical.address, source: "lan" });
+        // Fallback: older discoverPrivateLanAddresses preferred
+        if (!access.overlay && !access.physical) {
           const lan = discoverPrivateLanAddresses();
-          if (lan.preferred) {
-            await tryBindPrivate(lan.preferred.address, "discovered");
-            return true;
-          }
-          return false;
-        };
+          if (lan.preferred?.address) targets.push({ address: lan.preferred.address, source: "discovered" });
+        }
 
-        if (host && host !== "127.0.0.1") {
-          // Configured second address (private IPv4, Tailscale, or ::1). Bind exactly that first.
-          const ok = await tryBindPrivate(host, bindSource);
-          if (!ok) {
-            await tryDiscoverLan();
-          }
-        } else if (host === "127.0.0.1" || !host) {
-          // Private access on but bind is loopback / unset — discover a usable LAN address.
-          const discovered = await tryDiscoverLan();
-          if (!discovered) {
-            listeners.push({
-              address: host || "127.0.0.1",
-              port: boundPort,
-              state: "loopback-only",
-              scope: "private",
-              detail: host === "127.0.0.1"
-                ? "Private access is on, but the saved bind address is loopback, so no other device can reach AION. Set a private LAN address or connect to a network with a usable private IPv4."
-                : "Private access is on, but no usable private LAN IPv4 was found on active interfaces. Connect to Wi-Fi/Ethernet or set a bind address manually.",
-            });
-          }
+        const seen = new Set();
+        let anyPrivate = false;
+        for (const t of targets) {
+          if (!t.address || seen.has(t.address)) continue;
+          seen.add(t.address);
+          if (await tryBindPrivate(t.address, t.source)) anyPrivate = true;
+        }
+        if (!anyPrivate) {
+          listeners.push({
+            address: host || "auto",
+            port: boundPort,
+            state: "loopback-only",
+            scope: "private",
+            detail: "Private access is on, but no usable private LAN or overlay IPv4 is bound yet. Connect Ethernet/Wi-Fi and/or install+sign-in Tailscale on this desktop, then restart AION. Bind address \"auto\" needs no manual IP.",
+          });
         }
       }
       return server.address();

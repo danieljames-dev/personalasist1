@@ -1,11 +1,15 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Sales", "People", "Chat", "Knowledge", "Brain", "Studio", "Research", "Projects", "Learning", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"];
+const areas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
+/** Primary phone bottom-nav. Desktop still shows full area list. */
+const mobileAreas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Mobile"];
 let model = null;
-let area = "Chat";
+let area = "Home";
 let streaming = "";
 let openConversation = null;
 /** Held in memory only, shown once, never persisted. */
 let pairingCode = null;
+const isPhoneViewport = () => typeof window !== "undefined" && window.matchMedia && window.matchMedia("(max-width: 700px)").matches;
+const isDeviceViewer = () => model?.viewer === "device";
 
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 /** Nothing from another workspace is ever rendered. Work material never appears in Personal. */
@@ -81,11 +85,34 @@ async function sendStreamed(id, content) {
   await load();
 }
 
+function homeArea(s) {
+  const brief = window.__aionLastBriefing;
+  return `<div class="sales home-mobile"><h1>Home</h1>
+<p class="lead">Daily briefing and the actions you use from your phone.</p>
+<div class="tap-grid quick">
+<button type="button" data-do="briefing-refresh">What needs me?</button>
+<button type="button" data-area-jump="Chat">Chat</button>
+<button type="button" data-area-jump="Customers">Customers</button>
+<button type="button" data-area-jump="Tasks">Tasks</button>
+<button type="button" data-area-jump="Intake">Intake</button>
+<button type="button" data-area-jump="Knowledge">Knowledge</button>
+</div>
+<div class="card next"><h2>Briefing</h2>
+${brief ? `<pre class="msg assistant">${esc(brief)}</pre>` : `<p class="meta">Tap <b>What needs me?</b> for today's queue from stored facts only.</p>`}
+<form data-form="assistant-prompt" class="quick-form"><label>Ask AION<textarea name="text" required maxlength="10000" placeholder="What should I follow up on?" rows="3"></textarea></label>
+<div class="actions"><button type="submit">Ask</button>
+<button type="button" data-do="voice-prompt" title="Browser speech if available">🎤 Voice</button></div></form>
+${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p></div>` : ""}
+</div>
+<p class="meta"><a href="/phone">Open phone photo/file intake →</a></p></div>`;
+}
+
 function chatArea(s) {
-  return `<h1>Assistant</h1><p class="lead">Daily CRM assistant: natural language works. CRM lookup, notes, follow-ups, account summaries, email drafts (never auto-sent), plus offline chat. Answers ground in stored Work-workspace records.</p>
+  return `<h1>Chat</h1><p class="lead">Daily CRM assistant: natural language works. CRM lookup, notes, follow-ups, account summaries, email drafts (never auto-sent), plus offline chat. Answers ground in stored Work-workspace records.</p>
 <div class="card"><h2>Ask AION</h2>
 <p class="meta">Try: What should I follow up on? · Who do I need to call? · What should I do today? · What do we know about Jane? · What's going on with ACME? · Draft John an email · Research ACME · Remember this</p>
-<form data-form="assistant-prompt"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What do we know about …"></textarea></label><button>Ask</button></form>
+<form data-form="assistant-prompt"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What do we know about …" rows="3"></textarea></label>
+<div class="actions"><button type="submit">Ask</button><button type="button" data-do="voice-prompt">🎤 Voice</button></div></form>
 ${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>assistant · ${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p>
 ${(window.__aionLastAssistant.sources || []).length ? `<p class="meta">Sources: ${window.__aionLastAssistant.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}</div>` : ""}
 </div>
@@ -625,28 +652,62 @@ ${r.state === "dry-run" ? `<form data-form="import-execute"><input type="hidden"
 <div class="actions"><button data-do="import-cancel" data-id="${esc(r.id)}" class="danger">Cancel this dry run</button></div>` : ""}</article>`, "No imports yet. Start with a dry run above.")}`;
 }
 
-/** Console-only. A paired phone can drive AION but never changes how access itself works. */
-function privateAccessCard() {
-  const r = model.remoteAccess ?? { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30, privateNetwork: { available: false, detail: "" }, summary: "" };
+function mobileArea() {
+  const r = model.remoteAccess ?? {};
+  const m = r.mobile ?? {};
   const devices = model.devices ?? [];
-  const suggested = r.lanDiscovery?.suggestedBind || r.lanDiscovery?.preferred?.address || "";
-  const phoneUrl = r.phoneUrl || (suggested && r.port ? `http://${suggested}:${r.port}/phone` : "");
+  return `<h1>Mobile access</h1>
+<p class="lead">Use AION from your phone at home (LAN) or away (private overlay such as Tailscale). No public port. Pair once.</p>
+<div class="grid">
+<article class="card"><h2>Desktop AION</h2><p class="meta"><b>${esc(m.desktopAion || "ONLINE")}</b></p>
+<p class="meta">Local: <code>${esc(m.localAccessUrl || `http://127.0.0.1:${r.port || 31415}/`)}</code></p></article>
+<article class="card"><h2>Private remote access</h2><p class="meta"><b>${esc(m.privateRemote || r.privateRemoteState || "OFF")}</b></p>
+<p class="meta">${esc(r.summary || "")}</p>
+${r.remoteUrl ? `<p class="meta"><b>Remote URL:</b> <a href="${esc(r.remoteUrl)}"><code>${esc(r.remoteUrl)}</code></a></p>` : `<p class="meta">No overlay URL yet — install Tailscale on desktop + phone for work cellular access.</p>`}
+${r.remotePhoneUrl ? `<p class="meta"><b>Remote /phone:</b> <code>${esc(r.remotePhoneUrl)}</code></p>` : ""}
+${r.localAppUrl ? `<p class="meta"><b>Home LAN URL:</b> <code>${esc(r.localAppUrl)}</code></p>` : ""}
+</article>
+<article class="card"><h2>Phone paired</h2><p class="meta"><b>${m.phonePaired ? "YES" : "NO"}</b>${m.phoneActiveSession ? " · session active" : ""}</p>
+<p class="meta">Last connection: ${esc(m.lastPhoneConnection || "never")}</p>
+<p class="meta">Last phone intake: ${esc(m.lastPhoneIntake || "never")}</p>
+${devices.filter((d) => !d.revokedAt).map((d) => `<p class="meta"><b>${esc(d.label)}</b> · last ${esc(d.lastSeenAt || "—")}
+<button data-do="device-revoke" data-id="${esc(d.id)}" class="danger">Revoke</button></p>`).join("") || "<p class=\"meta\">No paired phone.</p>"}
+${devices.some((d) => !d.revokedAt) ? `<div class="actions"><button data-do="device-revoke-all" class="danger">Revoke all phones</button></div>` : ""}
+</article>
+<article class="card"><h2>Tailscale / overlay</h2>
+<p class="meta">${r.tailscale?.installed ? `Installed ${esc(r.tailscale.version || "")}` : "Not installed on this desktop"}</p>
+<p class="meta">${esc(r.tailscale?.detail || r.privateNetwork?.detail || "")}</p>
+${r.tailscale?.ipv4 ? `<p class="meta">Overlay IPv4: <code>${esc(r.tailscale.ipv4)}</code></p>` : ""}
+${r.tailscale?.dnsName ? `<p class="meta">Name: <code>${esc(r.tailscale.dnsName)}</code></p>` : ""}
+</article>
+</div>
+${privateAccessCard()}`;
+}
+
+/** Console-only controls for bind/pair. Phones can read Mobile status but not mint codes. */
+function privateAccessCard() {
+  const r = model.remoteAccess ?? { enabled: false, bindAddress: "auto", sessionDays: 90, privateNetwork: { available: false, detail: "" }, summary: "" };
+  const devices = model.devices ?? [];
+  const suggested = r.lanDiscovery?.suggestedBind || "auto";
+  const phoneUrl = r.remotePhoneUrl || r.phoneUrl || r.localPhoneUrl || "";
+  const remoteUrl = r.remoteUrl || "";
   return `<div class="card"><h2>Private phone access</h2>
 <p>${esc(r.summary)}</p>
-<p class="meta">AION binds <code>${esc(r.boundAddress ?? "127.0.0.1")}</code>. It never opens a public port, never creates a tunnel, and never changes your router. Reaching AION over a private network is not enough on its own: a device must also be paired.</p>
-${phoneUrl ? `<p class="meta"><b>Phone URL (current LAN):</b> <a href="${esc(phoneUrl)}"><code>${esc(phoneUrl)}</code></a></p>
-<p class="meta">On your phone (same Wi-Fi), open that URL, enter the pairing code from below, then upload.</p>` : `<p class="meta">No phone URL yet — enable private access and ensure a private LAN IPv4 is active.</p>`}
-<p class="meta">Live LAN discovery: ${suggested ? `<code>${esc(suggested)}</code> (${esc(r.lanDiscovery?.preferred?.interfaceName || "")} · ${esc(r.lanDiscovery?.preferred?.reason || "")})` : "no usable private IPv4 on active interfaces"}</p>
+<p class="meta">AION never opens a public port, never creates a tunnel, and never changes your router. Bind <code>auto</code> discovers LAN + Tailscale/overlay addresses — no manual IP to maintain. Pairing is still required.</p>
+<p class="meta">Bound now: <code>${esc(r.boundAddress ?? "127.0.0.1")}</code> · remote state: <b>${esc(r.privateRemoteState || "OFF")}</b></p>
+${remoteUrl ? `<p class="meta"><b>Away-from-home app URL:</b> <a href="${esc(remoteUrl)}"><code>${esc(remoteUrl)}</code></a></p>` : ""}
+${phoneUrl ? `<p class="meta"><b>Phone intake URL:</b> <a href="${esc(phoneUrl)}"><code>${esc(phoneUrl)}</code></a></p>` : `<p class="meta">No phone URL yet — enable access and ensure LAN or Tailscale is up, then restart AION.</p>`}
+<p class="meta">Physical LAN: ${r.lanDiscovery?.preferred ? `<code>${esc(r.lanDiscovery.preferred.address)}</code> (${esc(r.lanDiscovery.preferred.interfaceName || "")})` : "none"} · Overlay: ${r.lanDiscovery?.overlay ? `<code>${esc(r.lanDiscovery.overlay.address)}</code>` : (r.tailscale?.ipv4 ? `<code>${esc(r.tailscale.ipv4)}</code>` : "none")}</p>
 ${(r.lanDiscovery?.candidates || []).length ? `<details><summary>All private candidates</summary>${r.lanDiscovery.candidates.map((c) => `<p class="meta"><code>${esc(c.address)}</code> · ${esc(c.interfaceName)} · score ${c.score} · ${esc(c.reason)}</p>`).join("")}</details>` : ""}
-<p class="meta">Private network tool: ${r.privateNetwork.available ? `${esc(r.privateNetwork.tool)} ${esc(r.privateNetwork.version ?? "")} detected` : "not configured"} — ${esc(r.privateNetwork.detail)}</p>
+<p class="meta">Private network tool: ${r.privateNetwork?.available ? `${esc(r.privateNetwork.tool)} ${esc(r.privateNetwork.version ?? "")} detected` : "not configured"} — ${esc(r.privateNetwork?.detail || "")}</p>
 <form data-form="remote-access">
 <label><input type="checkbox" name="enabled" ${r.enabled ? "checked" : ""}> Allow paired devices to reach AION</label>
-<label>Bind address (loopback or a private range only; leave loopback to auto-discover LAN)
-<input name="bindAddress" value="${esc(r.bindAddress)}" maxlength="60" placeholder="${esc(suggested || "127.0.0.1")}"></label>
-<label>Sign a device out after (days)<input name="sessionDays" type="number" min="1" max="365" value="${r.sessionDays}"></label>
+<label>Bind address (<code>auto</code> recommended — discovers LAN + overlay)
+<input name="bindAddress" value="${esc(r.bindAddress === "127.0.0.1" ? "auto" : (r.bindAddress || "auto"))}" maxlength="60" placeholder="auto"></label>
+<label>Keep phone signed in (days)<input name="sessionDays" type="number" min="1" max="365" value="${r.sessionDays || 90}"></label>
 <button>Save access settings</button></form>
-<div class="actions"><button data-do="lan-discover" type="button">Refresh LAN discovery</button>
-${suggested ? `<button data-do="lan-use-suggested" data-ip="${esc(suggested)}" type="button">Use discovered ${esc(suggested)}</button>` : ""}</div>
+<div class="actions"><button data-do="lan-discover" type="button">Refresh discovery</button>
+<button data-do="lan-use-suggested" data-ip="auto" type="button">Use auto discovery</button></div>
 ${r.enabled ? `<form data-form="pair-code"><label>Pair a new device — name it so you can tell phones apart<input name="label" required maxlength="80" placeholder="Work phone"></label><button>Create pairing code</button></form>` : `<p class="meta">Turn access on to pair a device.</p>`}
 ${pairingCode ? `<div class="card next"><h2>Pairing code</h2><p style="font-size:1.6rem;letter-spacing:.12em"><code>${esc(pairingCode.code)}</code></p>
 <p class="meta">Type it on the phone within ten minutes. It works once, and AION does not store it — if you lose it, make another.</p>
@@ -760,9 +821,31 @@ ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <c
 <div class="actions"><button data-do="state-export">Export all local data</button></div></div>`;
 }
 
+function intakeArea(s) {
+  const people = scoped(s.relationships ?? []).filter((r) => !r.archivedAt);
+  return `<h1>Intake</h1>
+<p class="lead">Upload photos, screenshots, and files from this phone into production AION. Vision extraction is optional later — upload works now.</p>
+<div class="tap-grid"><a class="row" href="/phone" style="text-decoration:none"><span class="row-main"><b>Open dedicated phone intake</b><span class="row-sub">Take photo · choose file · note</span></span></a></div>
+<div class="card"><h2>Upload here</h2>
+<form data-form="document-upload">
+<label>Take or choose photo / file
+<input type="file" name="file" required accept="image/*,.txt,.pdf,.csv,.json,.md,.docx,.png,.jpg,.jpeg,.webp" capture="environment"></label>
+<label>Associate with customer (optional)
+<select name="relationshipId"><option value="">— none —</option>
+${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}</option>`).join("")}</select></label>
+<label>Note<input name="summary" maxlength="2000" placeholder="Optional note"></label>
+<label>Tags<input name="tags" maxlength="500" value="phone-intake" placeholder="phone-intake, receipt"></label>
+<button>Upload to AION</button>
+</form></div>
+<p class="meta">Recent documents: ${(s.crmDocuments ?? []).slice(0, 8).map((d) => `${esc(d.filename || d.id)} (${esc((d.tags || []).join(",") || "no tags")})`).join(" · ") || "none yet"}</p>`;
+}
+
 function page() {
   const s = model.state;
-  if (area === "People") return peopleArea(s);
+  if (area === "Home") return homeArea(s);
+  if (area === "Customers" || area === "People") return area === "Customers" ? salesArea(s) : peopleArea(s);
+  if (area === "Intake") return intakeArea(s);
+  if (area === "Mobile") return mobileArea();
   if (area === "Brain") return brainArea(s);
   if (area === "Studio") return studioArea(s);
   if (area === "Research") return researchArea(s);
@@ -797,7 +880,12 @@ function render() {
     switcher.innerHTML = registry.map((w) => `<button class="${w.id === active ? "active" : ""}" data-workspace="${esc(w.id)}">${esc(w.label)}</button>`).join("");
     switcher.dataset.active = active;
   }
-  document.querySelector("nav").innerHTML = areas.map((x) => `<button class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`).join("");
+  const phoneUi = isPhoneViewport() || isDeviceViewer();
+  const navAreas = phoneUi ? mobileAreas : areas;
+  const nav = document.querySelector("nav");
+  nav.classList.toggle("mobile-nav", phoneUi);
+  nav.innerHTML = navAreas.map((x) => `<button class="${x === area ? "active" : ""}" data-area="${x}">${x === "Home" ? "Home" : x}</button>`).join("");
+  document.body.classList.toggle("phone-shell", phoneUi);
   document.querySelector("#onboarding").hidden = model.state.onboardingComplete;
   document.querySelector("#content").hidden = !model.state.onboardingComplete;
   document.querySelector("#content").innerHTML = page();
@@ -812,6 +900,29 @@ document.addEventListener("click", async (event) => {
   try {
     if (workspace) { await api("settings.update", { settings: { activeWorkspace: workspace } }); openCustomer = null; openSheet = null; coachPanel = null; await load(); toast(`Switched to ${model.state.settings.workspaceLabels?.[workspace] ?? workspace}. Records stay in the workspace they were created in.`); return; }
     if (target) { area = target; openCustomer = null; openSheet = null; coachPanel = null; render(); return; }
+    if (button.dataset.areaJump) { area = button.dataset.areaJump; openCustomer = null; openSheet = null; coachPanel = null; render(); return; }
+    if (verb === "briefing-refresh") {
+      const b = await api("work.briefing", {});
+      window.__aionLastBriefing = b.text || b.reply || JSON.stringify(b).slice(0, 2000);
+      render();
+      toast("Briefing refreshed from stored facts.");
+      return;
+    }
+    if (verb === "voice-prompt") {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) { toast("Voice input is not available in this browser. Type instead."); return; }
+      const rec = new SR();
+      rec.lang = "en-US";
+      rec.onresult = (ev) => {
+        const text = ev.results?.[0]?.[0]?.transcript || "";
+        const ta = document.querySelector('textarea[name="text"]');
+        if (ta && text) { ta.value = text; toast("Voice captured — review and tap Ask."); }
+      };
+      rec.onerror = () => toast("Voice capture failed. Type instead.");
+      rec.start();
+      toast("Listening…");
+      return;
+    }
     if (verb === "tab") { salesTab = tab; coachPanel = null; render(); return; }
     if (verb === "sheet") { openSheet = { sheet: sheetName, id }; render(); return; }
     if (verb === "sheet-close") { openSheet = null; render(); return; }

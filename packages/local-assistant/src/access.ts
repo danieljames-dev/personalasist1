@@ -155,6 +155,8 @@ export function pruneAccess(state: AssistantStateV1, now: IsoTimestamp): void {
 export function validateBindAddress(value: string): string {
   const address = String(value ?? "").trim();
   if (!address) fail("A bind address is required.");
+  // "auto" = discover LAN + private overlay at listen time; no Owner-maintained stale IP.
+  if (address.toLowerCase() === "auto") return "auto";
   if (["0.0.0.0", "::", "*", "::0"].includes(address)) fail("AION never binds a wildcard address. Name the exact private interface instead.");
   if (address === "127.0.0.1" || address === "::1") return address;
   const parts = address.split(".");
@@ -197,6 +199,15 @@ export function classifyBindAddress(value: string): BindAddressClassificationV1 
   const lower = address.toLowerCase();
   const octets = address.split(".").map((part) => Number(part));
 
+  if (address === "auto") {
+    return {
+      address: "auto",
+      scope: "overlay",
+      worksAwayFromHome: true,
+      likelyProvider: "auto-discovery (LAN + Tailscale/overlay when present)",
+      detail: "AION discovers active private LAN and private-overlay addresses at start. Prefer overlay for away-from-home; physical LAN for home Wi-Fi. No manual IP to maintain.",
+    };
+  }
   if (address === "127.0.0.1" || address === "::1") {
     return {
       address, scope: "loopback", worksAwayFromHome: false, likelyProvider: "this computer",

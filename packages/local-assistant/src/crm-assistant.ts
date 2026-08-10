@@ -76,6 +76,12 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     ],
   },
   {
+    // Must beat LIST_FOLLOWUPS when Owner says "Remember this: … follow-ups …"
+    intent: "ADD_NOTE",
+    confidence: "high",
+    patterns: [/\bsave (this )?note\b/i, /\bremember that\b/i, /\badd a note\b/i, /\bnote that\b/i, /\bremember this\b/i],
+  },
+  {
     intent: "LIST_FOLLOWUPS",
     confidence: "high",
     patterns: [
@@ -85,19 +91,15 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\b(open|overdue|due) (follow[- ]?ups|tasks)\b/i,
       /\bwho (do i need to call|needs (follow|attention|a call))\b/i,
       /\bwho needs follow[- ]?up\b/i,
-      /\bfollow[- ]?ups?\b/i,
       /\bwho needs attention\b/i,
+      // Bare "follow-ups" only when not an Owner memory instruction
+      /^(?!.*\bremember this\b).*\bfollow[- ]?ups?\b/i,
     ],
   },
   {
     intent: "RESEARCH_COMPANY",
     confidence: "high",
     patterns: [/\bresearch\b/i, /\blook up (the )?company\b/i, /\bprepare me for a (sales )?call\b/i, /\bpublic research\b/i],
-  },
-  {
-    intent: "ADD_NOTE",
-    confidence: "high",
-    patterns: [/\bsave (this )?note\b/i, /\bremember that\b/i, /\badd a note\b/i, /\bnote that\b/i, /\bremember this\b/i],
   },
   {
     intent: "ADD_INTERACTION",

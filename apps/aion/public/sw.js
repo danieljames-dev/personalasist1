@@ -10,8 +10,8 @@
  * If the network is unavailable the API simply fails. Showing stale customer information would be
  * worse than showing none.
  */
-const SHELL = "aion-shell-v1";
-const SHELL_FILES = ["/", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg"];
+const SHELL = "aion-shell-v2-mobile";
+const SHELL_FILES = ["/", "/phone", "/phone.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((cache) => cache.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
