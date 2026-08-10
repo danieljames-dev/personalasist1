@@ -24,6 +24,8 @@ import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
 
+/** Bump when shipping mobile UI fixes so phones load new CSS/JS without manual cache clear. */
+const ASSET_VERSION = "20260810m7";
 const ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/phone", ["phone.html", "text/html; charset=utf-8"]],
@@ -928,8 +930,24 @@ export async function createAionServer(options = {}) {
       }
       if (request.method === "GET" && ASSETS.has(url.pathname)) {
         const [file, type] = ASSETS.get(url.pathname);
-        const data = await readFile(join(import.meta.dirname, "public", file));
-        response.writeHead(200, { "content-type": type, "content-length": data.length, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "content-security-policy": ASSET_CSP });
+        let data = await readFile(join(import.meta.dirname, "public", file));
+        // Cache-bust asset URLs embedded in HTML so iPhone Safari loads new UI without wiping site data.
+        if (file === "index.html" || file === "phone.html") {
+          const html = data.toString("utf8").replaceAll("ASSET_V", ASSET_VERSION);
+          data = Buffer.from(html, "utf8");
+        }
+        const cache = file.endsWith(".html") || file === "sw.js"
+          ? "no-store"
+          : `public, max-age=60, must-revalidate`;
+        response.writeHead(200, {
+          "content-type": type,
+          "content-length": data.length,
+          "cache-control": cache,
+          "x-aion-asset-version": ASSET_VERSION,
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+          "content-security-policy": ASSET_CSP,
+        });
         return response.end(data);
       }
       if (request.method === "GET" && url.pathname === "/api/state") {

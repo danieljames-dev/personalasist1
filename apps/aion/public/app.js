@@ -1,7 +1,8 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
 const areas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
-/** Primary phone bottom-nav. Desktop still shows full area list. */
-const mobileAreas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Mobile"];
+/** Primary phone bottom bar (5 slots). More opens a sheet for Intake / Knowledge / Mobile / Settings. */
+const mobilePrimaryAreas = ["Home", "Chat", "Customers", "Tasks", "More"];
+const mobileMoreAreas = new Set(["Intake", "Knowledge", "Mobile", "Settings", "Sales", "People", "Imports"]);
 let model = null;
 let area = "Home";
 let streaming = "";
@@ -10,6 +11,8 @@ let openConversation = null;
 let pairingCode = null;
 const isPhoneViewport = () => typeof window !== "undefined" && window.matchMedia && window.matchMedia("(max-width: 700px)").matches;
 const isDeviceViewer = () => model?.viewer === "device";
+/** Paired phone over Tailscale/LAN must use phone layout even if Safari "desktop site" widens the viewport. */
+const usePhoneChrome = () => isDeviceViewer() || isPhoneViewport();
 
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 /** Nothing from another workspace is ever rendered. Work material never appears in Personal. */
@@ -111,11 +114,28 @@ ${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>
 }
 
 function chatArea(s) {
+  const phone = usePhoneChrome();
+  const reply = window.__aionLastAssistant;
+  // Phone-first: one prompt card + last reply. Conversations list is secondary (desktop).
+  if (phone) {
+    return `<div class="aion-chat-phone">
+<h1>Chat</h1>
+<p class="meta">Ask about follow-ups, customers, or “What needs me?”. Answers use stored Work CRM facts when available.</p>
+<form data-form="assistant-prompt" class="quick-form aion-chat-compose">
+<label>Message<textarea name="text" id="aionChatInput" required maxlength="10000" rows="3" placeholder="What needs me?"></textarea></label>
+<div class="actions"><button type="submit">Ask AION</button><button type="button" data-do="voice-prompt">Voice</button></div>
+</form>
+${reply ? `<div class="card next aion-chat-reply"><p class="meta">${esc(reply.intent || "reply")}</p>
+<pre class="msg assistant" style="white-space:pre-wrap;margin:0;max-height:50svh;overflow:auto">${esc(reply.reply || "")}</pre>
+${(reply.sources || []).length ? `<p class="meta">Sources: ${reply.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}
+</div>` : `<div class="empty">Your reply will show here. Try: <b>What needs me?</b></div>`}
+</div>`;
+  }
   return `<h1>Chat</h1><p class="lead">Daily CRM assistant: natural language works. CRM lookup, notes, follow-ups, account summaries, email drafts (never auto-sent), plus offline chat. Answers ground in stored Work-workspace records.</p>
 <div class="card"><h2>Ask AION</h2>
 <p class="meta">Try: What should I follow up on? · Who do I need to call? · What should I do today? · What do we know about Jane? · What's going on with ACME? · Draft John an email · Research ACME · Remember this</p>
 <form data-form="assistant-prompt"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What do we know about …" rows="3"></textarea></label>
-<div class="actions"><button type="submit">Ask</button><button type="button" data-do="voice-prompt">🎤 Voice</button></div></form>
+<div class="actions"><button type="submit">Ask</button><button type="button" data-do="voice-prompt">Voice</button></div></form>
 ${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>assistant · ${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p>
 ${(window.__aionLastAssistant.sources || []).length ? `<p class="meta">Sources: ${window.__aionLastAssistant.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}</div>` : ""}
 </div>
@@ -875,38 +895,88 @@ function page() {
   return settingsArea(s);
 }
 
+function connectionBadgeText() {
+  const ra = model?.remoteAccess;
+  const provider = (model?.providers ?? []).find((x) => x.id === model?.state?.settings?.providerId);
+  if (model?.viewer === "device") {
+    if (ra?.privateRemoteState === "READY" || ra?.tailscale?.ipv4) return "● Private remote";
+    if (ra?.enabled) return "● Private";
+    return "● Connected";
+  }
+  if (ra?.privateRemoteState === "READY") return "● Tailscale ready";
+  if (provider?.location === "remote") return `● Remote model (${provider.id})`;
+  return "● Local desktop";
+}
+
 function render() {
-  const provider = (model.providers ?? []).find((x) => x.id === model.state.settings.providerId);
+  if (!model) return;
+  const phoneUi = usePhoneChrome();
+  document.documentElement.classList.toggle("aion-phone", phoneUi);
+  document.body.classList.toggle("aion-phone", phoneUi);
+  document.body.classList.toggle("phone-shell", phoneUi);
+
   const badge = document.querySelector("#providerBadge");
-  badge.textContent = provider?.location === "remote" ? `● Remote provider selected (${provider.id})` : "● Local-only";
-  badge.className = provider?.location === "remote" ? "remote" : "local";
+  if (badge) {
+    badge.textContent = connectionBadgeText();
+    badge.className = `aion-conn-badge ${model.viewer === "device" || model.remoteAccess?.privateRemoteState === "READY" ? "private connected" : "local"}`;
+  }
+
   const active = model.state.settings.activeWorkspace ?? "personal";
-  // The switcher is the one place that legitimately spans workspaces. It shows names only — never
-  // a count, a record, or anything else from inside a workspace you are not currently in.
   const registry = (model.state.workspaces ?? []).filter((w) => !w.archived);
   const switcher = document.querySelector("#workspaceSwitch");
   if (switcher) {
-    switcher.innerHTML = registry.map((w) => `<button class="${w.id === active ? "active" : ""}" data-workspace="${esc(w.id)}">${esc(w.label)}</button>`).join("");
+    switcher.innerHTML = registry.map((w) => `<button type="button" class="${w.id === active ? "active" : ""}" data-workspace="${esc(w.id)}">${esc(w.label)}</button>`).join("");
     switcher.dataset.active = active;
   }
-  const phoneUi = isPhoneViewport() || isDeviceViewer();
-  const navAreas = phoneUi ? mobileAreas : areas;
-  // Only the main area switcher — never Sales <nav class="tabs">.
-  const nav = document.querySelector('nav[aria-label="AION areas"]') || document.querySelector(".layout > nav");
+
+  // Main area nav only — class aion-mobile-nav on phone (never generic bare nav).
+  const nav = document.getElementById("aionAreaNav") || document.querySelector(".aion-area-nav");
   if (nav) {
-    nav.classList.toggle("mobile-nav", phoneUi);
+    nav.classList.add("aion-area-nav");
+    nav.classList.toggle("aion-mobile-nav", phoneUi);
     nav.setAttribute("aria-label", "AION areas");
-    nav.innerHTML = navAreas.map((x) => `<button type="button" class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`).join("");
+    if (phoneUi) {
+      if (!window.__aionPhoneAreaInit) {
+        window.__aionPhoneAreaInit = true;
+        area = "Chat"; // first acceptance target
+      }
+      const primaryActive = mobileMoreAreas.has(area) ? "More" : area;
+      nav.innerHTML = mobilePrimaryAreas.map((x) => {
+        const isActive = x === primaryActive || (x !== "More" && x === area);
+        if (x === "More") {
+          return `<button type="button" class="${primaryActive === "More" ? "active" : ""}" data-do="more-open">More</button>`;
+        }
+        return `<button type="button" class="${isActive ? "active" : ""}" data-area="${x}">${x}</button>`;
+      }).join("");
+    } else {
+      nav.innerHTML = areas.map((x) => `<button type="button" class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`).join("");
+    }
   }
-  document.body.classList.toggle("phone-shell", phoneUi);
-  // Phones land on Home (usable briefing/chat), not a broken full Sales canvas.
-  if (phoneUi && !window.__aionPhoneAreaInit) {
-    window.__aionPhoneAreaInit = true;
-    if (!["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Mobile"].includes(area)) area = "Home";
+
+  const onboarded = model.state.onboardingComplete === true;
+  const onboardingEl = document.querySelector("#onboarding");
+  const contentEl = document.querySelector("#content");
+  if (onboardingEl) onboardingEl.hidden = onboarded;
+  if (contentEl) {
+    contentEl.classList.add("aion-content");
+    contentEl.hidden = !onboarded;
+    if (onboarded) {
+      try {
+        const html = page();
+        contentEl.innerHTML = html && String(html).trim()
+          ? html
+          : `<div class="empty">Panel failed to render. Tap Chat.</div>`;
+      } catch (err) {
+        contentEl.innerHTML = `<div class="empty">UI error: ${esc(err?.message || err)}. Tap Chat.</div>`;
+      }
+      // Force visibility — blank white was often a hidden/zero-height panel on iPhone.
+      contentEl.hidden = false;
+      contentEl.style.display = "block";
+      contentEl.style.visibility = "visible";
+      contentEl.style.opacity = "1";
+      contentEl.style.minHeight = "40vh";
+    }
   }
-  document.querySelector("#onboarding").hidden = model.state.onboardingComplete;
-  document.querySelector("#content").hidden = !model.state.onboardingComplete;
-  document.querySelector("#content").innerHTML = page();
 }
 
 document.addEventListener("click", async (event) => {
@@ -918,7 +988,24 @@ document.addEventListener("click", async (event) => {
   try {
     if (workspace) { await api("settings.update", { settings: { activeWorkspace: workspace } }); openCustomer = null; openSheet = null; coachPanel = null; await load(); toast(`Switched to ${model.state.settings.workspaceLabels?.[workspace] ?? workspace}. Records stay in the workspace they were created in.`); return; }
     if (target) { area = target; openCustomer = null; openSheet = null; coachPanel = null; render(); return; }
-    if (button.dataset.areaJump) { area = button.dataset.areaJump; openCustomer = null; openSheet = null; coachPanel = null; render(); return; }
+    if (button.dataset.areaJump) {
+      area = button.dataset.areaJump;
+      openCustomer = null; openSheet = null; coachPanel = null;
+      const more = document.getElementById("aionMoreSheet");
+      if (more) more.hidden = true;
+      render();
+      return;
+    }
+    if (verb === "more-open") {
+      const more = document.getElementById("aionMoreSheet");
+      if (more) more.hidden = false;
+      return;
+    }
+    if (verb === "more-close") {
+      const more = document.getElementById("aionMoreSheet");
+      if (more) more.hidden = true;
+      return;
+    }
     if (verb === "briefing-refresh") {
       const b = await api("work.briefing", {});
       window.__aionLastBriefing = b.text || b.reply || JSON.stringify(b).slice(0, 2000);
