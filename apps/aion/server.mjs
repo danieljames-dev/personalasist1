@@ -12,6 +12,7 @@ import {
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
   defaultGmailConfig, gmailConnectorStatus, defaultMetricoolConfig, metricoolConnectorStatus,
+  imageUnderstandingStatus, extractImageMetadataOnly,
 } from "../../packages/local-assistant/dist/index.js";
 import { HttpBrainRuntimeV1 } from "./brain-runtime.mjs";
 import { createDockerCodeSandboxV1 } from "./code-sandbox.mjs";
@@ -498,6 +499,11 @@ export async function createAionServer(options = {}) {
           : /\.(csv|xlsx?)$/i.test(lower)
             ? "spreadsheet"
             : "document";
+        if (kind === "image" && !extractedText) {
+          const meta = extractImageMetadataOnly({ filename, mimeType, byteLength: bytes.length });
+          extractedText = meta.description;
+          if (!input.summary) input.summary = meta.description.slice(0, 400);
+        }
         const summary = String(input.summary ?? (extractedText ? extractedText.slice(0, 400) : `Uploaded ${filename}`)).slice(0, 4000);
         return service.attachCrmDocument({
           relationshipId: input.relationshipId ?? null,
@@ -523,6 +529,7 @@ export async function createAionServer(options = {}) {
       case "brand.collaborator.add": return service.addBrandCollaborator(input.collaborator ?? input);
       case "connector.gmail.status": return gmailConnectorStatus(defaultGmailConfig());
       case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
+      case "connector.image.status": return imageUnderstandingStatus();
       case "work.queue": return service.workQueue();
       case "coach": return service.coach(input.kind, input.input ?? {});
       case "sales.routine.create": return service.createRoutineFromTemplate(input.templateId);
