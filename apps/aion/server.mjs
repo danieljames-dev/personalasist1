@@ -405,6 +405,32 @@ export async function createAionServer(options = {}) {
       case "customer.link.task": return service.linkCustomerTask(input.id, input.taskId);
       case "customer.find": return { customers: await service.findCustomers(input.query ?? { kind: "all" }) };
       case "customer.timeline": return service.customerTimeline(input.id);
+      case "customer.summary": return service.accountSummary(input.id);
+      case "assistant.prompt": {
+        const text = String(input.text ?? input.content ?? "");
+        const result = await service.assistantPrompt(text);
+        if (result.action === "chat.fallback") {
+          // Create/use a short-lived conversation for general chat when CRM intent is unclear.
+          let conversationId = input.conversationId;
+          if (!conversationId) {
+            const conv = await service.createConversation(text.slice(0, 80) || "Assistant");
+            conversationId = conv.id;
+          }
+          const turn = await service.sendMessage(conversationId, text);
+          return {
+            ...result,
+            conversationId,
+            reply: turn.message?.content ?? JSON.stringify(turn).slice(0, 2000),
+            data: turn,
+          };
+        }
+        return result;
+      }
+      case "crm.document.attach": return service.attachCrmDocument(input.document ?? input);
+      case "crm.document.list": return { documents: await service.listCrmDocuments(input.relationshipId) };
+      case "crm.email.draft": return service.createEmailDraft(input.draft ?? input);
+      case "crm.email.list": return { drafts: await service.listEmailDrafts(input.relationshipId) };
+      case "work.queue": return service.workQueue();
       case "coach": return service.coach(input.kind, input.input ?? {});
       case "sales.routine.create": return service.createRoutineFromTemplate(input.templateId);
       case "sales.metrics": return service.recordSalesMetrics(input.date, input.counts ?? {}, input.note ?? "");

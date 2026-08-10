@@ -66,6 +66,16 @@ import {
 import { PAIRING_TTL_MINUTES, authenticate, checkRateLimit, clearRateLimit, issuePairingToken, pruneAccess, recordFailure, redeemPairingCode, revokeAllDevices, revokeDevice, validateBindAddress } from "./access.js";
 import { SALES_ROUTINE_TEMPLATES, appointmentPreparation, callPreparation, discoveryQuestions, endOfDayRecap, followUpDraft, followUpQueue, morningPlan, nextActionSuggestion, objectionPrompts, rolePlay } from "./sales-coach.js";
 import type { CoachOutputV1, SalesRoutineTemplateV1 } from "./sales-coach.js";
+import {
+  buildAccountSummary,
+  buildEmailDraftFromCustomer,
+  buildWorkQueue,
+  findRelationshipsByName,
+  newCrmDocument,
+  newEmailDraft,
+  routeCrmAssistantIntent,
+} from "./crm-assistant.js";
+import type { CrmDocumentV1, EmailDraftV1 } from "./contracts.js";
 
 type AssistantPorts = {
   repository: StateRepositoryV1;
@@ -2491,4 +2501,337 @@ export class AionAssistantV1 {
 
   async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
   async verifyPrivateBackup(destination: string, passphrase: string): Promise<AssistantStateV1> { const state = await this.ports.backup.restore(destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.verify", "Encrypted private backup integrity and restore validated.", null); }); return state; }
+
+  // --- R7 CRM assistant surface -----------------------------------------------------------------
+
+  async accountSummary(customerId: string) {
+    const state = await this.snapshot();
+    const customer = find(state.relationships, customerId, "Customer");
+    return buildAccountSummary(customer);
+  }
+
+  async workQueue() {
+    const state = await this.snapshot();
+    return buildWorkQueue(state.relationships, this.ports.clock.now());
+  }
+
+  async attachCrmDocument(input: Record<string, unknown> = {}): Promise<CrmDocumentV1> {
+    return this.mutate((draft) => {
+      const now = this.ports.clock.now();
+      const workspace = requireWorkspace(draft.workspaces, draft.settings.activeWorkspace);
+      const relationshipId = typeof input.relationshipId === "string" && input.relationshipId ? input.relationshipId : null;
+      if (relationshipId) find(draft.relationships, relationshipId, "Customer");
+      const filename = String(input.filename ?? "document.bin").slice(0, 260);
+      const mimeType = String(input.mimeType ?? "application/octet-stream").slice(0, 120);
+      const kind =
+        input.kind === "image" || input.kind === "spreadsheet" || input.kind === "document" || input.kind === "other"
+          ? input.kind
+          : mimeType.startsWith("image/")
+            ? "image"
+            : "document";
+      const doc = newCrmDocument({
+        id: this.ports.ids.next("crm-doc"),
+        workspace: workspace.id,
+        relationshipId,
+        filename,
+        storedPath: String(input.storedPath ?? "").slice(0, 1000),
+        mimeType,
+        byteLength: Number(input.byteLength ?? 0) || 0,
+        kind,
+        summary: String(input.summary ?? "").slice(0, 4000),
+        extractedText: String(input.extractedText ?? "").slice(0, 100_000),
+        now,
+      });
+      if (!Array.isArray(draft.crmDocuments)) draft.crmDocuments = [];
+      draft.crmDocuments.unshift(doc);
+      if (draft.crmDocuments.length > 500) draft.crmDocuments.length = 500;
+      if (relationshipId) {
+        const customer = find(draft.relationships, relationshipId, "Customer");
+        customer.interactions.push({
+          id: this.ports.ids.next("interaction"),
+          at: now,
+          kind: "note",
+          summary: `Document attached: ${filename}`,
+          detail: doc.summary || doc.extractedText.slice(0, 2000),
+          lifecycleAfter: null,
+          actor: "owner",
+        });
+        customer.updatedAt = now;
+      }
+      this.activity(draft, "import", "crm.document", `Document intake: ${filename}`, doc.id);
+      return doc;
+    });
+  }
+
+  async listCrmDocuments(relationshipId?: string): Promise<CrmDocumentV1[]> {
+    const state = await this.snapshot();
+    const docs = Array.isArray(state.crmDocuments) ? state.crmDocuments : [];
+    if (!relationshipId) return docs;
+    return docs.filter((d) => d.relationshipId === relationshipId);
+  }
+
+  async createEmailDraft(input: Record<string, unknown> = {}): Promise<EmailDraftV1> {
+    return this.mutate((draft) => {
+      const now = this.ports.clock.now();
+      const workspace = requireWorkspace(draft.workspaces, draft.settings.activeWorkspace);
+      const relationshipId = typeof input.relationshipId === "string" ? input.relationshipId : null;
+      let toName = String(input.toName ?? "").slice(0, 200);
+      let subject = String(input.subject ?? "").slice(0, 300);
+      let body = String(input.body ?? "").slice(0, 20_000);
+      let basedOn = String(input.basedOn ?? "owner-supplied").slice(0, 1000);
+      if (relationshipId) {
+        const customer = find(draft.relationships, relationshipId, "Customer");
+        const built = buildEmailDraftFromCustomer(customer, "email");
+        toName = toName || customer.displayName;
+        subject = subject || built.subject;
+        body = body || built.body;
+        basedOn = basedOn === "owner-supplied" ? built.basedOn : basedOn;
+        customer.interactions.push({
+          id: this.ports.ids.next("interaction"),
+          at: now,
+          kind: "email",
+          summary: `Email draft created: ${subject}`,
+          detail: body.slice(0, 2000),
+          lifecycleAfter: null,
+          actor: "aion",
+        });
+        customer.updatedAt = now;
+      }
+      const email = contactEmail(findOptional(draft.relationships, relationshipId));
+      const draftRec = newEmailDraft({
+        id: this.ports.ids.next("email-draft"),
+        workspace: workspace.id,
+        relationshipId,
+        toName,
+        toAddress: String(input.toAddress ?? email).slice(0, 320),
+        subject,
+        body,
+        basedOn,
+        now,
+      });
+      if (!Array.isArray(draft.emailDrafts)) draft.emailDrafts = [];
+      draft.emailDrafts.unshift(draftRec);
+      if (draft.emailDrafts.length > 200) draft.emailDrafts.length = 200;
+      this.activity(draft, "export", "crm.email.draft", `Email draft: ${subject}`, draftRec.id);
+      return draftRec;
+    });
+  }
+
+  async listEmailDrafts(relationshipId?: string): Promise<EmailDraftV1[]> {
+    const state = await this.snapshot();
+    const drafts = Array.isArray(state.emailDrafts) ? state.emailDrafts : [];
+    if (!relationshipId) return drafts;
+    return drafts.filter((d) => d.relationshipId === relationshipId);
+  }
+
+  /**
+   * R7 natural-language assistant entry for CRM/sales. Deterministic structured CRM first;
+   * falls back to chat when no CRM intent matches or subject cannot be resolved.
+   */
+  async assistantPrompt(text: string): Promise<{
+    intent: string;
+    confidence: string;
+    reply: string;
+    sources: Array<{ type: string; id: string; label: string }>;
+    action: string | null;
+    data: unknown;
+  }> {
+    const route = routeCrmAssistantIntent(text);
+    const state = await this.snapshot();
+    const workspaceId = state.settings.activeWorkspace;
+    const inWorkspace = state.relationships.filter((r) => r.workspace === workspaceId && !r.archived);
+    const sources: Array<{ type: string; id: string; label: string }> = [];
+
+    if (route.intent === "WORK_QUEUE" || route.intent === "LIST_FOLLOWUPS") {
+      const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
+      return { intent: route.intent, confidence: route.confidence, reply: queue.text, sources, action: "work.queue", data: queue };
+    }
+
+    if (route.intent === "CRM_LOOKUP" || route.intent === "ACCOUNT_SUMMARY") {
+      const matches = [
+        ...findRelationshipsByName(inWorkspace, route.subject),
+        ...findRelationshipsByName(inWorkspace, text),
+      ].filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i);
+      if (!matches.length) {
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: route.subject
+            ? `No stored CRM record matched "${route.subject}". You can create a customer with: create a customer for ${route.subject}.`
+            : "Say who or which company to look up.",
+          sources,
+          action: "crm.lookup.empty",
+          data: { matches: [] },
+        };
+      }
+      const primary = matches[0]!;
+      sources.push({ type: "relationship", id: primary.id, label: primary.displayName });
+      const summary = buildAccountSummary(primary);
+      const extra =
+        matches.length > 1
+          ? `\n\nAlso matched: ${matches.slice(1, 5).map((m) => m.displayName).join(", ")}`
+          : "";
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: summary.text + extra,
+        sources,
+        action: "crm.account.summary",
+        data: { summary, matches: matches.map((m) => ({ id: m.id, name: m.displayName })) },
+      };
+    }
+
+    if (route.intent === "DRAFT_EMAIL") {
+      const matches = [
+        ...findRelationshipsByName(inWorkspace, route.subject),
+        ...findRelationshipsByName(inWorkspace, text),
+      ].filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i);
+      if (!matches.length) {
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: "I need a stored contact/company to draft from. Create or name the customer first.",
+          sources,
+          action: null,
+          data: null,
+        };
+      }
+      const customer = matches[0]!;
+      sources.push({ type: "relationship", id: customer.id, label: customer.displayName });
+      const draft = await this.createEmailDraft({ relationshipId: customer.id });
+      sources.push({ type: "emailDraft", id: draft.id, label: draft.subject });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: `Email draft (not sent):\nSubject: ${draft.subject}\n\n${draft.body}\n\n— Based on: ${draft.basedOn}`,
+        sources,
+        action: "crm.email.draft",
+        data: draft,
+      };
+    }
+
+    if (route.intent === "CRM_CREATE") {
+      const name = route.subject || "New contact";
+      const created = await this.createCustomer({
+        displayName: name,
+        organisation: name,
+        relationshipType: "prospect",
+        notes: `Created via assistant: ${text.slice(0, 500)}`,
+      });
+      sources.push({ type: "relationship", id: created.id, label: created.displayName });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: `Created CRM record "${created.displayName}" (${created.relationshipType}, ${created.lifecycle}). Reference ${created.reference}.`,
+        sources,
+        action: "customer.create",
+        data: created,
+      };
+    }
+
+    if (route.intent === "ADD_NOTE" || route.intent === "ADD_INTERACTION") {
+      const matches = findRelationshipsByName(inWorkspace, route.subject);
+      const customer = matches[0] ?? findRelationshipsByName(inWorkspace, text)[0];
+      if (!customer) {
+        return {
+          intent: route.intent,
+          confidence: "low",
+          reply: "Name the customer/company to attach this note to.",
+          sources,
+          action: null,
+          data: null,
+        };
+      }
+      const noteText = text.trim();
+      const updated = await this.recordCustomerInteraction(customer.id, {
+        kind: route.intent === "ADD_INTERACTION" ? "call" : "note",
+        summary: noteText.slice(0, 500),
+        detail: noteText,
+      });
+      // Capture objections when language suggests concern
+      if (/concern|worried|pricing|delivery|budget/i.test(noteText)) {
+        await this.updateCustomer(customer.id, {
+          objections: [...new Set([...(customer.objections || []), noteText.slice(0, 300)])],
+        });
+      }
+      sources.push({ type: "relationship", id: updated.id, label: updated.displayName });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: `Saved to ${updated.displayName}. Timeline now has ${updated.interactions.length} interaction(s).`,
+        sources,
+        action: "customer.interaction",
+        data: { customerId: updated.id },
+      };
+    }
+
+    if (route.intent === "ADD_TASK") {
+      const matches = findRelationshipsByName(inWorkspace, route.subject || text);
+      const customer = matches[0];
+      const due = new Date(Date.parse(this.ports.clock.now()) + 86400000).toISOString();
+      if (customer) {
+        const updated = await this.addCustomerFollowUp(customer.id, {
+          dueAt: due,
+          channel: "email",
+          reason: text.slice(0, 500),
+        });
+        sources.push({ type: "relationship", id: updated.id, label: updated.displayName });
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: `Follow-up task added for ${updated.displayName}, due ${due.slice(0, 10)}.`,
+          sources,
+          action: "customer.followup",
+          data: updated,
+        };
+      }
+      const task = await this.createTask({ title: text.slice(0, 200), description: text });
+      sources.push({ type: "task", id: task.id, label: task.title });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: `Task created: ${task.title}`,
+        sources,
+        action: "task.create",
+        data: task,
+      };
+    }
+
+    // If the prompt names a known CRM record, answer from stored data before chat fallback.
+    const named = findRelationshipsByName(inWorkspace, text);
+    if (named.length) {
+      const primary = named[0]!;
+      sources.push({ type: "relationship", id: primary.id, label: primary.displayName });
+      const summary = buildAccountSummary(primary);
+      return {
+        intent: "ACCOUNT_SUMMARY",
+        confidence: "medium",
+        reply: summary.text,
+        sources,
+        action: "crm.account.summary",
+        data: { summary },
+      };
+    }
+
+    // Fallback: chat path (conversation may be created by caller)
+    return {
+      intent: "GENERAL_ASSISTANT_QUERY",
+      confidence: route.confidence,
+      reply: "I could not match a CRM intent or stored record. Try naming a company/contact, or use Sales screens for structured entry.",
+      sources,
+      action: "crm.no_match",
+      data: { route },
+    };
+  }
+}
+
+function contactEmail(customer: CustomerV1 | null | undefined): string {
+  if (!customer) return "";
+  const hit = customer.contactMethods.find((c) => c.channel === "email" && c.value);
+  return hit?.value ?? "";
+}
+
+function findOptional(list: CustomerV1[], id: string | null): CustomerV1 | null {
+  if (!id) return null;
+  return list.find((c) => c.id === id) ?? null;
 }

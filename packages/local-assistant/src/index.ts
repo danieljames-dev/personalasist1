@@ -21,6 +21,7 @@ export * from "./research.js";
 export * from "./research-agent.js";
 export * from "./sales.js";
 export * from "./sales-coach.js";
+export * from "./crm-assistant.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
 export * from "./owner-authority-v2.js";

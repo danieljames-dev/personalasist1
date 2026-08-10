@@ -1,0 +1,161 @@
+/**
+ * R7 real production E2E demo against localhost:31415 (not unit fixtures only).
+ */
+import { createHash } from "node:crypto";
+
+const BASE = process.env.AION_URL || "http://127.0.0.1:31415";
+
+async function api(type, body = {}) {
+  const res = await fetch(`${BASE}/api/action`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type, ...body }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(`${type} ${res.status}: ${json.error || JSON.stringify(json)}`);
+  return json.result ?? json;
+}
+
+async function state() {
+  const res = await fetch(`${BASE}/api/state`);
+  if (!res.ok) throw new Error(`state ${res.status}`);
+  return res.json();
+}
+
+function assert(cond, msg) {
+  if (!cond) throw new Error(msg);
+}
+
+const results = [];
+function rec(id, ok, detail) {
+  results.push({ id, ok, detail });
+  console.log(`${ok ? "PASS" : "FAIL"} ${id}: ${detail}`);
+}
+
+async function main() {
+  const s0 = await state();
+  rec("PRODUCTION_REACHABLE", true, `workspace=${s0.state?.settings?.activeWorkspace}`);
+
+  // Switch to Work workspace for CRM (clear stale developer bridge if it blocks settings.update)
+  if (s0.state?.settings?.activeWorkspace !== "work") {
+    await api("settings.update", {
+      settings: { activeWorkspace: "work", developerBridgeId: "" },
+    });
+  }
+
+  const company = await api("relationship.create", {
+    relationship: {
+      displayName: "ACME R7 TEST COMPANY",
+      organisation: "ACME R7 TEST COMPANY",
+      relationshipType: "prospect",
+      notes: "Synthetic R7 demo company",
+    },
+  });
+  rec("CREATE_COMPANY", !!company.id, company.id);
+
+  const contact = await api("relationship.create", {
+    relationship: {
+      displayName: "Jane Test",
+      organisation: "ACME R7 TEST COMPANY",
+      relationshipType: "contact",
+      role: "Buyer",
+      notes: "Synthetic contact for ACME R7",
+    },
+  });
+  rec("CREATE_CONTACT", !!contact.id, contact.id);
+
+  await api("customer.interaction", {
+    id: contact.id,
+    interaction: {
+      kind: "call",
+      summary: "Jane is interested in Product Alpha but is concerned about delivery time.",
+      detail: "Synthetic interaction for R7 demo.",
+    },
+  });
+  await api("customer.update", {
+    id: contact.id,
+    change: { objections: ["delivery time"], interests: [{ kind: "product", description: "Product Alpha" }] },
+  });
+  await api("customer.followup", {
+    id: contact.id,
+    followUp: {
+      dueAt: new Date(Date.now() + 86400000).toISOString(),
+      channel: "email",
+      reason: "Follow up tomorrow about Product Alpha delivery.",
+    },
+  });
+  rec("SEED_INTERACTION_TASK", true, "interaction+objection+followup");
+
+  const q1 = await api("assistant.prompt", { text: "What do we know about ACME R7 TEST COMPANY?" });
+  rec("R7_ASSISTANT_QUERY", /ACME R7|Jane|delivery/i.test(q1.reply || ""), (q1.reply || "").slice(0, 160));
+
+  const q2 = await api("assistant.prompt", { text: "What is Jane concerned about?" });
+  rec("CONCERN_LOOKUP", /delivery/i.test(q2.reply || ""), (q2.reply || "").slice(0, 160));
+
+  const q3 = await api("assistant.prompt", { text: "What should I do next?" });
+  rec("NEXT_ACTION", /follow|attention|Product Alpha|Jane|ACME/i.test(q3.reply || ""), (q3.reply || "").slice(0, 160));
+
+  const q4 = await api("assistant.prompt", { text: "Draft Jane a follow-up email." });
+  rec("R7_EMAIL_DRAFT", /DRAFT|Subject|Jane|follow/i.test(q4.reply || ""), (q4.reply || "").slice(0, 160));
+
+  // Document intake (metadata path)
+  const doc = await api("crm.document.attach", {
+    relationshipId: company.id,
+    filename: "acme-r7-quote.txt",
+    storedPath: "C:\\AION-HQ\\private\\aion\\intake\\acme-r7-quote.txt",
+    mimeType: "text/plain",
+    byteLength: 42,
+    summary: "Synthetic quote attachment for ACME R7",
+    extractedText: "Product Alpha delivery estimate 6 weeks.",
+    kind: "document",
+  });
+  rec("DOCUMENT_INTAKE", !!doc.id, doc.filename);
+
+  // Capture pre-restart digests of reply content existence via state
+  const mid = await state();
+  const hasJane = (mid.state.relationships || []).some((r) => /Jane Test/i.test(r.displayName));
+  rec("R7_REAL_CRM_PERSISTENCE", hasJane, `relationships=${(mid.state.relationships || []).length}`);
+
+  // Restart production process
+  const { spawnSync } = await import("node:child_process");
+  spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\AION-HQ\\scripts\\aion-production.ps1", "-Action", "restart"],
+    { encoding: "utf8", timeout: 120000 },
+  );
+  // wait for health
+  let healthy = false;
+  for (let i = 0; i < 30; i++) {
+    try {
+      const s = await state();
+      if (s.state) {
+        healthy = true;
+        const still = (s.state.relationships || []).some((r) => /ACME R7 TEST COMPANY/i.test(r.displayName + r.organisation));
+        rec("R7_RESTART_MEMORY", still, `after restart relationships=${(s.state.relationships || []).length}`);
+        break;
+      }
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  if (!healthy) rec("R7_RESTART_MEMORY", false, "production not healthy after restart");
+
+  // Cleanup synthetic data
+  try {
+    await api("customer.archive", { id: company.id, archived: true });
+    await api("customer.archive", { id: contact.id, archived: true });
+    rec("CLEANUP", true, "archived synthetic CRM rows");
+  } catch (e) {
+    rec("CLEANUP", false, String(e.message || e));
+  }
+
+  const pass = results.filter((r) => r.ok).length;
+  const fail = results.filter((r) => !r.ok).length;
+  console.log(JSON.stringify({ pass, fail, results }, null, 2));
+  process.exit(fail ? 1 : 0);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

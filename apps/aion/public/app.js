@@ -82,8 +82,14 @@ async function sendStreamed(id, content) {
 }
 
 function chatArea(s) {
-  return `<h1>Chat</h1><p class="lead">Offline by default. Memory context is explicit per conversation, and the model can only propose actions or memories.</p>
-<p class="hint">With the offline provider, <code>propose: check the local echo</code> and <code>remember: preferred timezone: UTC</code> exercise approvals and unconfirmed memories. <code>developer: review the repository and tell me what tests are failing</code> prepares a <em>read-only</em> developer-agent task for your approval — nothing runs until you approve it, and the agent may not modify anything.</p>
+  return `<h1>Assistant</h1><p class="lead">R7 production assistant: CRM lookup, notes, follow-ups, account summaries, email drafts (never auto-sent), plus offline chat. All CRM answers use stored Work-workspace records.</p>
+<div class="card"><h2>Ask AION</h2>
+<p class="meta">Examples: What do we know about ACME? · Create a customer for … · Save this note to … · Draft a follow-up email · What needs my attention?</p>
+<form data-form="assistant-prompt"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What do we know about …"></textarea></label><button>Ask</button></form>
+${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>assistant · ${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p>
+${(window.__aionLastAssistant.sources || []).length ? `<p class="meta">Sources: ${window.__aionLastAssistant.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}</div>` : ""}
+</div>
+<p class="hint">Raw model chat (below) is offline by default. CRM prompts above use structured production CRM first.</p>
 <form data-form="conversation"><label>Conversation title<input name="title" value="New conversation" maxlength="200"></label><button>Create conversation</button></form>
 ${cards(scoped(s.conversations), (c) => `<article class="card"><h2>${esc(c.title)}</h2><p class="meta">${esc(c.state)} · ${c.messages.length} messages · memory context ${c.memoryContextEnabled ? "on" : "off"} · updated ${esc(c.updatedAt)}</p>
 <div class="thread">${c.messages.slice(-8).map((m) => `<p class="msg ${esc(m.role)}"><b>${esc(m.role)}${m.providerId ? ` · ${esc(m.providerId)}` : ""}:</b> ${esc(m.content)}</p>`).join("")}${streaming && openConversation === c.id ? `<p class="msg assistant streaming"><b>assistant:</b> ${esc(streaming)}<span class="cursor">▍</span></p>` : ""}</div>
@@ -106,7 +112,7 @@ ${t.state === "ready" ? `<button data-do="task" data-id="${esc(t.id)}" data-stat
 }
 
 function routinesArea(s) {
-  return `<h1>Routines</h1><p class="lead">Schedules run only while AION is open. No Windows service or startup task is installed.</p>
+  return `<h1>Routines</h1><p class="lead">In-app routines run while AION is open. Production autostart (R7) is a separate Windows logon task for the Command Center process — see <code>scripts/aion-production.ps1</code>.</p>
 <form data-form="routine"><label>Name<input name="name" required maxlength="500"></label><label>Instructions<textarea name="instructions" required maxlength="10000"></textarea></label>
 <label>Every minutes<input name="intervalMinutes" type="number" min="1" max="525600" value="60"></label><button>Create routine</button></form>
 ${cards(scoped(s.routines), (r) => `<article class="card"><h2>${esc(r.name)}</h2><p>${esc(r.instructions)}</p>
@@ -684,6 +690,15 @@ document.addEventListener("submit", async (event) => {
   try {
     if (kind === "conversation") await api("conversation.create", { title: d.title });
     if (kind === "conversation-rename") await api("conversation.update", { id: d.id, change: { title: d.title } });
+    if (kind === "assistant-prompt") {
+      const result = await api("assistant.prompt", { text: d.text });
+      window.__aionLastAssistant = result;
+      toast(result.intent ? `Intent: ${result.intent}` : "Assistant replied.");
+      form.reset();
+      await load();
+      render();
+      return;
+    }
     if (kind === "message") { form.reset(); await sendStreamed(d.id, d.content); return; }
     if (kind === "task") await api("task.create", { task: { title: d.title, description: d.description, priority: d.priority, tags: d.tags.split(",").map((x) => x.trim()).filter(Boolean) } });
     if (kind === "task-edit") await api("task.update", { id: d.id, change: { title: d.title, description: d.description } });

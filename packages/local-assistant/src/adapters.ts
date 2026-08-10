@@ -96,6 +96,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
     workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
+    crmDocuments: [], emailDrafts: [],
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
@@ -299,6 +300,9 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   }
   if (!Array.isArray(clone.usage)) clone.usage = [];
   if (!Array.isArray(clone.salesMetrics)) clone.salesMetrics = [];
+  // R7 additive CRM document / email-draft indexes (default forward; no migration record).
+  if (!Array.isArray((clone as AssistantStateV1).crmDocuments)) (clone as AssistantStateV1).crmDocuments = [];
+  if (!Array.isArray((clone as AssistantStateV1).emailDrafts)) (clone as AssistantStateV1).emailDrafts = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
   return clone;

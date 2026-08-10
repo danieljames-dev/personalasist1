@@ -390,6 +390,45 @@ export interface RelationshipV1 {
 export type CustomerV1 = RelationshipV1;
 
 /**
+ * R7 durable CRM document / image intake record.
+ * Original bytes are stored under an intake root; this object is the durable index.
+ */
+export interface CrmDocumentV1 {
+  id: OpaqueId;
+  workspace: WorkspaceIdV1;
+  /** Related company/contact relationship id, or null if not yet associated. */
+  relationshipId: OpaqueId | null;
+  filename: string;
+  /** Absolute path under private intake when available; never a network path. */
+  storedPath: string;
+  mimeType: string;
+  byteLength: number;
+  kind: "document" | "image" | "spreadsheet" | "other";
+  summary: string;
+  extractedText: string;
+  tags: string[];
+  provenance: ProvenanceV1;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}
+
+/** R7 email draft — drafting only; never auto-sent in R7. */
+export interface EmailDraftV1 {
+  id: OpaqueId;
+  workspace: WorkspaceIdV1;
+  relationshipId: OpaqueId | null;
+  toName: string;
+  toAddress: string;
+  subject: string;
+  body: string;
+  status: "draft" | "reviewed" | "archived";
+  basedOn: string;
+  provenance: ProvenanceV1;
+  createdAt: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}
+
+/**
  * Owner-entered daily activity counts. These are the owner's own record of their day, not any
  * dealership system's numbers, and AION labels them that way wherever they are shown.
  */
@@ -548,6 +587,13 @@ export interface AssistantStateV1 {
   usage: InferenceUsageV1[];
   /** Owner-entered daily activity counts, newest first. */
   salesMetrics: SalesMetricsEntryV1[];
+  /**
+   * R7 CRM document intake — original files live under private intake; this records
+   * metadata, summaries, and optional extracted text. Newest first; bounded on write.
+   */
+  crmDocuments: CrmDocumentV1[];
+  /** R7 email drafts (never auto-sent). Newest first; bounded on write. */
+  emailDrafts: EmailDraftV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */
