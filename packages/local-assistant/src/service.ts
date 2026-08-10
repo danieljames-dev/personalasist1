@@ -3106,6 +3106,69 @@ export class AionAssistantV1 {
 
     if (route.intent === "SALES_INSIGHT") {
       const now = this.ports.clock.now();
+      // Brand-centric questions: registry + Metricool fixtures/live status (no fabrication).
+      if (/\bbrand|caleb|collaborator|scheduled|performed|posted recently\b/i.test(text)) {
+        const brands = (state.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived);
+        const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
+        const m = this.metricoolInsight(now);
+        const lines = [
+          "Brand / business status (stored registry + connector data only):",
+          "",
+          brands.length
+            ? `Brand registry (${brands.length}):\n${brands
+                .map((b) => {
+                  const bname = b.brand?.name || b.label;
+                  const ch = b.brand?.channels?.length ? ` · channels: ${b.brand.channels.join(", ")}` : "";
+                  const pos = b.brand?.positioning ? ` · positioning: ${b.brand.positioning.slice(0, 120)}` : "";
+                  return `  - ${bname}${ch}${pos}`;
+                })
+                .join("\n")}`
+            : "Brand registry: none yet. Create one under Knowledge / Import.",
+          "",
+          collabs.length
+            ? `Collaborators (owner-supplied only):\n${collabs
+                .slice(0, 12)
+                .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
+                .join("\n")}`
+            : "Collaborators: none recorded. AION does not invent who manages a brand.",
+          "",
+          m.activeBrands.length
+            ? `Metricool active brands (${m.mode}):\n${m.activeBrands.map((b) => `  - ${b.name} · ${b.networks.join(", ") || "no networks"}`).join("\n")}`
+            : `Metricool (${m.mode}): ${m.status.message}`,
+          m.scheduled.length
+            ? `Scheduled content:\n${m.scheduled
+                .slice(0, 8)
+                .map((p) => {
+                  const bname = m.activeBrands.find((b) => b.id === p.brandId)?.name || p.brandId;
+                  return `  - ${bname} · ${p.network} · ${p.scheduledAt?.slice(0, 16)} · ${p.text.slice(0, 80)}`;
+                })
+                .join("\n")}`
+            : "Scheduled content: none in connector data.",
+          m.bestPosts.length
+            ? `Best performing:\n${m.bestPosts
+                .slice(0, 5)
+                .map((p) => {
+                  const bname = m.activeBrands.find((b) => b.id === p.brandId)?.name || p.brandId;
+                  return `  - ${bname} · ${p.network} · likes ${p.metrics.likes ?? 0}, comments ${p.metrics.comments ?? 0}, reach ${p.metrics.reach ?? 0} · ${p.text.slice(0, 60)}`;
+                })
+                .join("\n")}`
+            : "Best performing: none in connector data.",
+          m.needsAttention.length
+            ? `Needs attention:\n${m.needsAttention.map((n) => `  - ${n.brand}: ${n.reason}`).join("\n")}`
+            : "Needs attention: none flagged from connector data.",
+        ].join("\n");
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: lines,
+          sources: [
+            ...brands.slice(0, 5).map((b) => ({ type: "brand", id: b.brand?.name || b.label, label: b.brand?.name || b.label })),
+            ...m.activeBrands.slice(0, 5).map((b) => ({ type: "metricool-brand", id: b.id, label: b.name })),
+          ],
+          action: "brand.status",
+          data: { brands, collaborators: collabs, metricool: m },
+        };
+      }
       if (/\bpricing\b/i.test(text) || /\bmentioned\b/i.test(text)) {
         const topic = /\bpricing\b/i.test(text) ? "pricing" : (route.subject || "pricing");
         const hits = findCustomersMentioning(inWorkspace, topic);

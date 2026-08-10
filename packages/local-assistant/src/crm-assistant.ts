@@ -167,16 +167,6 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     ],
   },
   {
-    intent: "WORK_QUEUE",
-    confidence: "medium",
-    patterns: [
-      /\bwhat brands? (are )?active\b/i,
-      /\bhow are the brands doing\b/i,
-      /\bwhat('?s| is) caleb working on\b/i,
-      /\bwhich brand\b/i,
-    ],
-  },
-  {
     intent: "SALES_INSIGHT",
     confidence: "high",
     patterns: [
@@ -188,6 +178,13 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bprepare me for my calls\b/i,
       /\bwhat should i ask (this |the )?prospect\b/i,
       /\bdraft follow[- ]?ups\b/i,
+      /\bwhat brands? (are )?active\b/i,
+      /\bhow are the brands doing\b/i,
+      /\bwhat('?s| is) caleb working on\b/i,
+      /\bwhich brand\b/i,
+      /\bwhat is scheduled\b/i,
+      /\bwhat has performed best\b/i,
+      /\bwhich brand hasn'?t posted\b/i,
     ],
   },
   {
