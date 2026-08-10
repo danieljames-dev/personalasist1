@@ -86,6 +86,12 @@ import {
   type JobApplicationV1,
 } from "./job-agent.js";
 import {
+  buildQueuedImportSource,
+  csvRowToRelationship,
+  parseSimpleCsv,
+  type QueuedImportSourceV1,
+} from "./import-queue.js";
+import {
   applyOwnerProfileSummary,
   buildBrandCollaborator,
   buildOwnerKnowledgeFact,
@@ -2631,6 +2637,67 @@ export class AionAssistantV1 {
     });
   }
 
+  async listImportSourceQueue(): Promise<QueuedImportSourceV1[]> {
+    const state = await this.snapshot();
+    return Array.isArray(state.importSourceQueue) ? state.importSourceQueue : [];
+  }
+
+  async queueImportSource(input: Record<string, unknown> = {}): Promise<QueuedImportSourceV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.importSourceQueue)) draft.importSourceQueue = [];
+      const now = this.ports.clock.now();
+      const src = buildQueuedImportSource(input, { id: this.ports.ids.next("import-src"), now });
+      draft.importSourceQueue.unshift(src);
+      if (draft.importSourceQueue.length > 100) draft.importSourceQueue.length = 100;
+      this.activity(draft, "import", "import.queue", `Import source queued: ${src.label}`, src.id);
+      return src;
+    });
+  }
+
+  /**
+   * Import contacts from CSV text (Owner-supplied). Creates CRM prospects; does not invent fields.
+   */
+  async importContactsFromCsv(csvText: string, opts: { sourceLabel?: string } = {}): Promise<{
+    created: number;
+    skipped: number;
+    errors: string[];
+    ids: string[];
+  }> {
+    const { rows } = parseSimpleCsv(csvText);
+    let created = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    const ids: string[] = [];
+    for (const row of rows) {
+      const payload = csvRowToRelationship(row);
+      if (!payload) {
+        skipped++;
+        continue;
+      }
+      try {
+        const rel = await this.createCustomer({
+          ...payload,
+          notes: `${payload.notes || ""}\n[csv-import: ${opts.sourceLabel || "upload"}]`.trim(),
+        });
+        ids.push(rel.id);
+        created++;
+      } catch (e) {
+        skipped++;
+        errors.push(String((e as Error).message || e).slice(0, 200));
+      }
+    }
+    await this.mutate((draft) => {
+      this.activity(
+        draft,
+        "import",
+        "import.csv.contacts",
+        `CSV contact import: ${created} created, ${skipped} skipped.`,
+        null,
+      );
+    });
+    return { created, skipped, errors: errors.slice(0, 20), ids };
+  }
+
   async addBrandCollaborator(input: Record<string, unknown> = {}): Promise<BrandCollaboratorV1> {
     return this.mutate((draft) => {
       if (!Array.isArray(draft.brandCollaborators)) draft.brandCollaborators = [];
@@ -3230,11 +3297,33 @@ export class AionAssistantV1 {
     if (route.intent === "ADD_NOTE" || route.intent === "ADD_INTERACTION") {
       const matches = findRelationshipsByName(inWorkspace, route.subject);
       const customer = matches[0] ?? findRelationshipsByName(inWorkspace, text)[0];
+      // "Remember this" / "Save this under X" without a CRM hit → durable owner knowledge.
+      if (!customer && (/\bremember this\b/i.test(text) || /\bsave this under\b/i.test(text) || /\bremember that\b/i.test(text))) {
+        const under = text.match(/\bsave this under\s+(.+?)(?:\.|$)/i);
+        const title = (under?.[1] || route.subject || "Owner note").trim().slice(0, 200);
+        const content = text.replace(/^\s*(remember this|remember that|save this under\s+[^.]+\.?)\s*/i, "").trim() || text;
+        const fact = await this.addOwnerKnowledgeFact({
+          category: under ? "other" : "preference",
+          title,
+          content: content.slice(0, 20_000) || text.slice(0, 20_000),
+          confidence: 85,
+          sourceRef: "assistant.remember",
+        });
+        sources.push({ type: "owner-knowledge", id: fact.id, label: fact.title });
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: `Saved as owner knowledge “${fact.title}” (category: ${fact.category}). Not a CRM note — open Knowledge to correct.`,
+          sources,
+          action: "owner.knowledge.add",
+          data: fact,
+        };
+      }
       if (!customer) {
         return {
           intent: route.intent,
           confidence: "low",
-          reply: "Name the customer/company to attach this note to.",
+          reply: "Name the customer/company to attach this note to, or say “remember this: …” to save as owner knowledge.",
           sources,
           action: null,
           data: null,

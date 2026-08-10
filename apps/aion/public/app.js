@@ -548,7 +548,21 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 <label>Tags (comma separated)<input name="tags" maxlength="500" placeholder="resume, brand-doc"></label>
 <button>Import folder (top-level files only)</button>
 </form>
-<p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Max ~6 MB/file. Never scans whole drives — folder must be under Settings import roots or private/aion.</p>
+<form data-form="csv-contacts">
+<label>Import contacts CSV (paste or upload later via file)
+<textarea name="csvText" required maxlength="500000" placeholder="name,email,company&#10;Jane,jane@acme.test,Acme"></textarea></label>
+<label>Source label<input name="sourceLabel" maxlength="200" value="owner-csv"></label>
+<button>Import contacts from CSV</button>
+</form>
+<form data-form="import-queue">
+<label>Queue import source path (Owner-selected once; AION processes later)
+<input name="path" required maxlength="4096" placeholder="C:\path\selected-by-owner"></label>
+<label>Kind<select name="kind"><option>folder</option><option>file</option><option>csv</option><option>json</option><option>document-batch</option></select></label>
+<label>Associate<select name="associateWith"><option value="none">none</option><option>owner</option><option>business</option><option>brand</option><option>customer</option></select></label>
+<button>Add to import queue</button>
+</form>
+${(s.importSourceQueue ?? []).length ? `<p class="meta">Queued sources: ${(s.importSourceQueue ?? []).slice(0, 8).map((q) => `${esc(q.label)} [${esc(q.status)}]`).join("; ")}</p>` : ""}
+<p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Max ~6 MB/file. Never scans whole drives — folder must be under Settings import roots or private/aion. Historical AI-assistant archives are not auto-scanned.</p>
 </div>
 <div class="card"><h2>Business / brand workspaces</h2>
 <form data-form="workspace-brand">
@@ -814,6 +828,20 @@ document.addEventListener("submit", async (event) => {
       const tags = String(d.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const result = await api("crm.document.importFolder", { path: d.path, tags });
       toast(`Imported ${result.imported?.length ?? 0} file(s); skipped ${result.skipped?.length ?? 0}.`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "csv-contacts") {
+      const result = await api("import.csv.contacts", { csvText: d.csvText, sourceLabel: d.sourceLabel || "owner-csv" });
+      toast(`CSV import: ${result.created} created, ${result.skipped} skipped.`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "import-queue") {
+      await api("import.queue.add", { path: d.path, kind: d.kind, associateWith: d.associateWith, label: d.path });
+      toast("Import source queued.");
       form.reset();
       await load();
       return;

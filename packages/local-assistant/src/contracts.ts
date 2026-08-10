@@ -603,6 +603,8 @@ export interface AssistantStateV1 {
   brandCollaborators: import("./owner-knowledge.js").BrandCollaboratorV1[];
   /** Job application tracker (submission always owner-gated). Newest first; bounded. */
   jobApplications: import("./job-agent.js").JobApplicationV1[];
+  /** Owner-selected import sources queue (never auto whole-drive scan). */
+  importSourceQueue: import("./import-queue.js").QueuedImportSourceV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */

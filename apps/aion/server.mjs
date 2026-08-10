@@ -590,6 +590,9 @@ export async function createAionServer(options = {}) {
       case "job.list": return { applications: await service.listJobApplications() };
       case "job.track": return service.addJobApplication(input.application ?? input);
       case "job.prepare": return service.prepareJobApplication(input.id);
+      case "import.queue.list": return { sources: await service.listImportSourceQueue() };
+      case "import.queue.add": return service.queueImportSource(input.source ?? input);
+      case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return gmailConnectorStatus(defaultGmailConfig());
       case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
       case "connector.image.status": return imageUnderstandingStatus();

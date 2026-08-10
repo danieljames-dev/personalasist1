@@ -220,6 +220,23 @@ async function main() {
   const product = await api("assistant.prompt", { text: "Find a product opportunity for local services." });
   rec("PRODUCT_PROJECT", /Created project|opportunity|stage idea/i.test(product.reply || ""), (product.reply || "").slice(0, 140));
 
+  const remember = await api("assistant.prompt", { text: "Remember this: Prefer morning calls over afternoon." });
+  rec("REMEMBER_KNOWLEDGE", /owner knowledge|Saved as/i.test(remember.reply || ""), (remember.reply || "").slice(0, 120));
+
+  const csv = await api("import.csv.contacts", {
+    csvText: "name,email,company\nCSV E2E Contact,csv-e2e@test.example,CSV E2E Co\n",
+    sourceLabel: "e2e-csv",
+  });
+  rec("CSV_CONTACTS", csv.created >= 1, `created=${csv.created} skipped=${csv.skipped}`);
+
+  const queued = await api("import.queue.add", {
+    path: "C:\\AION-HQ\\private\\aion\\intake",
+    kind: "folder",
+    associateWith: "none",
+    label: "e2e-queue-intake",
+  });
+  rec("IMPORT_QUEUE", !!queued.id && queued.status === "queued", queued.id || "");
+
   // Capture pre-restart digests of reply content existence via state
   const mid = await state();
   const hasJane = (mid.state.relationships || []).some((r) => /Jane Test/i.test(r.displayName));
