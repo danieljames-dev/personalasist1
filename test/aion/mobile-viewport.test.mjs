@@ -87,6 +87,16 @@ test("Knowledge Add Source includes import-root-add and rejects whole drives", (
   assert.match(js, /REAL_OWNER_IMPORT_READY/);
 });
 
+test("Inventory Walk phone workflow is present", () => {
+  assert.match(js, /Inventory Walk/);
+  assert.match(js, /inventoryWalkArea/);
+  assert.match(js, /data-form="walk-observe"/);
+  assert.match(js, /START WALK/);
+  assert.match(js, /SAVE · NEXT VEHICLE|NEXT VEHICLE/);
+  assert.match(js, /inventory\.walk\.observe/);
+  assert.match(js, /dealership-lakeland/);
+});
+
 test("viewport contract for common iPhone sizes", () => {
   for (const vp of VIEWPORTS) {
     const usable = vp.h - 56 - 56 - 34;

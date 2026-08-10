@@ -35,7 +35,8 @@ export type CrmAssistantIntentV1 =
   | "JOB_WORK"
   | "PRODUCT_BUILD"
   | "IMPORT_STATUS"
-  | "CONNECTOR_STATUS";
+  | "CONNECTOR_STATUS"
+  | "VEHICLE_INVENTORY";
 
 export interface CrmIntentRouteV1 {
   intent: CrmAssistantIntentV1;
@@ -47,6 +48,26 @@ export interface CrmIntentRouteV1 {
 
 /** Alias patterns: any match (word-boundary-ish includes) routes to intent. Order = priority. */
 const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidence: "high" | "medium" }> = [
+  {
+    intent: "VEHICLE_INVENTORY",
+    confidence: "high",
+    patterns: [
+      /\b(i work at|use .+ as my current dealership|current dealership)\b/i,
+      /\b(lakeland toyota|inventory walk|refresh .+ inventory)\b/i,
+      /\bdo we have\b.{0,60}\b(vin|camrys?|tacomas?|highlanders?|rav4s?|corollas?|tundras?|4runners?|toyotas?)\b/i,
+      /\bwhat (tacomas?|camrys?|highlanders?|rav4s?|trucks?|cars?) (are )?listed\b/i,
+      /\bfind me a (used |new )?.{0,40}(under|below)\s*\$?\d/i,
+      /\bdecode (this )?vin\b/i,
+      /\bwhat car is this\b/i,
+      /\b(verify|verified) (today|this morning|on the lot)\b/i,
+      /\bonline (but )?(i )?(didn'?t|did not) (see|verify)\b/i,
+      /\bprice change on (this )?(car|vehicle|vin)\b/i,
+      /\bresearch (this )?(car|vehicle|vin|toyota)\b/i,
+      /\bwas this vehicle here\b/i,
+      /\binventory (summary|walk|refresh)\b/i,
+      /\b[A-HJ-NPR-Z0-9]{17}\b/,
+    ],
+  },
   {
     intent: "DRAFT_EMAIL",
     confidence: "high",

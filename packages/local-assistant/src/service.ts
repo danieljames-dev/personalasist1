@@ -106,6 +106,27 @@ import {
 import { discoverPrivateLanAddresses, buildPhoneUrl, type LanDiscoveryResultV1 } from "./lan-discovery.js";
 import { buildImportReadinessReport, type ImportReadinessReportV1 } from "./import-readiness.js";
 import { imageUnderstandingStatus } from "./connectors/image-understanding.js";
+import { refreshDealershipPublicInventory } from "./connectors/dealership-inventory.js";
+import {
+  applyOnlineListings,
+  buildDealershipContext,
+  decodeVinNhtsa,
+  emptyVehicleInventoryState,
+  emptyVinDecode,
+  extractVinCandidatesFromText,
+  LAKELAND_TOYOTA_DEFAULT,
+  matchObservationToInventory,
+  normalizeVinCandidate,
+  queryVehicles,
+  reconcileInventoryWalk,
+  validateVin,
+  type DealershipContextV1,
+  type InventoryWalkV1,
+  type PhysicalObservationV1,
+  type VehicleInventoryStateV1,
+  type VehicleRecordV1,
+  type WalkReconciliationV1,
+} from "./vehicle-inventory.js";
 import {
   applyOwnerProfileSummary,
   buildBrandCollaborator,
@@ -3078,6 +3099,439 @@ export class AionAssistantV1 {
     return buildAccountSummary(customer);
   }
 
+  // ─── Dealership / vehicle inventory ───────────────────────────────────────
+
+  private vehicleInv(state: AssistantStateV1): VehicleInventoryStateV1 {
+    return state.vehicleInventory ?? emptyVehicleInventoryState();
+  }
+
+  async ensureLakelandToyotaContext(opts: { setCurrent?: boolean; ownerWorksHere?: boolean } = {}): Promise<DealershipContextV1> {
+    return this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      const inv = draft.vehicleInventory;
+      const now = this.ports.clock.now();
+      let d = inv.dealerships.find((x) => x.slug === LAKELAND_TOYOTA_DEFAULT.slug);
+      if (!d) {
+        d = buildDealershipContext(
+          {
+            ...LAKELAND_TOYOTA_DEFAULT,
+            ownerWorksHere: opts.ownerWorksHere === true,
+            isCurrent: opts.setCurrent !== false,
+            sourceRef: "owner.dealership.lakeland-toyota",
+          },
+          { id: this.ports.ids.next("dealership"), now },
+        );
+        inv.dealerships.unshift(d);
+      } else {
+        d = {
+          ...d,
+          ownerWorksHere: opts.ownerWorksHere === true ? true : d.ownerWorksHere,
+          isCurrent: opts.setCurrent === false ? d.isCurrent : true,
+          updatedAt: now,
+        };
+        inv.dealerships = inv.dealerships.map((x) => (x.id === d!.id ? d! : { ...x, isCurrent: opts.setCurrent === false ? x.isCurrent : false }));
+      }
+      if (opts.setCurrent !== false) {
+        inv.dealerships = inv.dealerships.map((x) => ({ ...x, isCurrent: x.id === d!.id }));
+      }
+      // Mirror into owner knowledge (employment) with provenance — never GPS-inferred.
+      if (opts.ownerWorksHere) {
+        if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+        const exists = draft.ownerKnowledge.facts.some(
+          (f) => f.category === "employer" && /lakeland toyota/i.test(f.title + f.content) && f.enabled,
+        );
+        if (!exists) {
+          const fact = buildOwnerKnowledgeFact(
+            {
+              category: "employer",
+              title: "Lakeland Toyota",
+              content: "Owner works at Lakeland Toyota (Owner-supplied).",
+              confidence: 100,
+              sourceType: "owner",
+              sourceRef: "owner.dealership.context",
+            },
+            { id: this.ports.ids.next("owner-fact"), now },
+          );
+          draft.ownerKnowledge.facts.unshift(fact);
+        }
+      }
+      this.activity(draft, "settings", "dealership.context", `Dealership context: ${d!.name}`, d!.id);
+      return d!;
+    });
+  }
+
+  async setCurrentDealership(nameOrSlug: string): Promise<DealershipContextV1> {
+    const key = String(nameOrSlug ?? "").trim();
+    if (!key) throw new Error("Dealership name is required.");
+    if (/lakeland/i.test(key)) {
+      return this.ensureLakelandToyotaContext({ setCurrent: true });
+    }
+    return this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      const inv = draft.vehicleInventory;
+      const now = this.ports.clock.now();
+      let d = inv.dealerships.find(
+        (x) => x.slug === key.toLowerCase() || x.name.toLowerCase() === key.toLowerCase(),
+      );
+      if (!d) {
+        d = buildDealershipContext(
+          { name: key, isCurrent: true, sourceRef: "owner.dealership" },
+          { id: this.ports.ids.next("dealership"), now },
+        );
+        inv.dealerships.unshift(d);
+      }
+      inv.dealerships = inv.dealerships.map((x) => ({
+        ...x,
+        isCurrent: x.id === d!.id,
+        updatedAt: x.id === d!.id ? now : x.updatedAt,
+      }));
+      const current = inv.dealerships.find((x) => x.isCurrent)!;
+      this.activity(draft, "settings", "dealership.current", `Current dealership: ${current.name}`, current.id);
+      return current;
+    });
+  }
+
+  async currentDealership(): Promise<DealershipContextV1 | null> {
+    const inv = this.vehicleInv(await this.snapshot());
+    return inv.dealerships.find((d) => d.isCurrent) ?? inv.dealerships[0] ?? null;
+  }
+
+  async validateVinAction(raw: string) {
+    return validateVin(raw);
+  }
+
+  async decodeVinAction(raw: string, opts: { offline?: boolean } = {}) {
+    const v = validateVin(raw);
+    const now = this.ports.clock.now();
+    if (!v.valid || !v.normalized) return { validation: v, decode: emptyVinDecode(raw, now) };
+    if (opts.offline) {
+      return { validation: v, decode: emptyVinDecode(v.normalized, now) };
+    }
+    try {
+      const decode = await decodeVinNhtsa(v.normalized, now);
+      return { validation: v, decode };
+    } catch (err) {
+      const decode = emptyVinDecode(v.normalized, now);
+      decode.errorText = err instanceof Error ? err.message : String(err);
+      return { validation: v, decode };
+    }
+  }
+
+  async refreshDealershipInventory(opts: {
+    dealershipName?: string;
+    useFixture?: boolean;
+    fixtureVins?: string[];
+  } = {}) {
+    let dealer = await this.currentDealership();
+    if (!dealer || (opts.dealershipName && /lakeland/i.test(opts.dealershipName))) {
+      dealer = await this.ensureLakelandToyotaContext({ setCurrent: true });
+    }
+    if (opts.dealershipName && !/lakeland/i.test(opts.dealershipName)) {
+      dealer = await this.setCurrentDealership(opts.dealershipName);
+    }
+    const now = this.ports.clock.now();
+    const ids: string[] = [];
+    const nextId = (kind: string) => {
+      const id = this.ports.ids.next(kind);
+      ids.push(id);
+      return id;
+    };
+    const result = await refreshDealershipPublicInventory({
+      dealership: dealer!,
+      now,
+      nextId,
+      useFixture: opts.useFixture === true,
+      ...(opts.fixtureVins ? { fixtureVins: opts.fixtureVins } : {}),
+    });
+    await this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      draft.vehicleInventory = applyOnlineListings(
+        draft.vehicleInventory,
+        dealer!,
+        result.listings,
+        now,
+        (kind) => this.ports.ids.next(kind),
+      );
+      this.activity(
+        draft,
+        "agent",
+        "inventory.refresh",
+        `Public inventory refresh (${result.mode}): ${result.listings.length} listing(s) for ${dealer!.name}`,
+        dealer!.id,
+      );
+      return draft.vehicleInventory;
+    });
+    return result;
+  }
+
+  async startInventoryWalk(note = ""): Promise<InventoryWalkV1> {
+    let dealer = await this.currentDealership();
+    if (!dealer) dealer = await this.ensureLakelandToyotaContext({ setCurrent: true });
+    return this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      const now = this.ports.clock.now();
+      // Complete any prior active walk without coverage claim.
+      draft.vehicleInventory.walks = draft.vehicleInventory.walks.map((w) =>
+        w.state === "active"
+          ? { ...w, state: "complete" as const, endedAt: now, coverageDeclaredComplete: false }
+          : w,
+      );
+      const walk: InventoryWalkV1 = {
+        id: this.ports.ids.next("walk"),
+        dealershipId: dealer!.id,
+        dealershipName: dealer!.name,
+        state: "active",
+        coverageDeclaredComplete: false,
+        startedAt: now,
+        endedAt: null,
+        observationIds: [],
+        notes: String(note ?? "").slice(0, 2000),
+        provenance: { sourceType: "owner", sourceRef: "inventory.walk", recordedAt: now },
+      };
+      draft.vehicleInventory.walks.unshift(walk);
+      if (draft.vehicleInventory.walks.length > 100) draft.vehicleInventory.walks.length = 100;
+      this.activity(draft, "agent", "inventory.walk.start", `Inventory walk started at ${dealer!.name}`, walk.id);
+      return walk;
+    });
+  }
+
+  async activeInventoryWalk(): Promise<InventoryWalkV1 | null> {
+    const inv = this.vehicleInv(await this.snapshot());
+    return inv.walks.find((w) => w.state === "active") ?? null;
+  }
+
+  async recordWalkObservation(input: {
+    vin?: string;
+    stockNumber?: string;
+    note?: string;
+    photoDocumentIds?: string[];
+    recognitionConfidence?: number | null;
+    entryMethod?: "manual" | "photo" | "mixed";
+    walkId?: string;
+  }): Promise<{ observation: PhysicalObservationV1; vehicle: VehicleRecordV1 | null; validation: ReturnType<typeof validateVin> }> {
+    let walk = input.walkId
+      ? this.vehicleInv(await this.snapshot()).walks.find((w) => w.id === input.walkId) ?? null
+      : await this.activeInventoryWalk();
+    if (!walk) walk = await this.startInventoryWalk();
+    const rawVin = String(input.vin ?? "").trim();
+    const validation = rawVin ? validateVin(rawVin) : validateVin("");
+    const vin = validation.valid ? validation.normalized : rawVin ? normalizeVinCandidate(rawVin) : null;
+    const stockNumber = String(input.stockNumber ?? "").trim().slice(0, 64) || null;
+    const confidence =
+      input.recognitionConfidence === undefined || input.recognitionConfidence === null
+        ? rawVin && validation.valid
+          ? 100
+          : null
+        : Number(input.recognitionConfidence);
+
+    // Uncertain photo VIN must not silently verify
+    let matchStatusForced: PhysicalObservationV1["matchStatus"] | null = null;
+    if (input.entryMethod === "photo" && confidence !== null && confidence < 70) {
+      matchStatusForced = "PHOTO_REVIEW_REQUIRED";
+    }
+    if (rawVin && !validation.valid) {
+      matchStatusForced = "PHOTO_REVIEW_REQUIRED";
+    }
+
+    return this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      const inv = draft.vehicleInventory;
+      const now = this.ports.clock.now();
+      const w = inv.walks.find((x) => x.id === walk!.id)!;
+      const match = matchStatusForced
+        ? { vehicle: null as VehicleRecordV1 | null, matchStatus: matchStatusForced }
+        : matchObservationToInventory({ vin, stockNumber }, inv.vehicles, w.dealershipName);
+
+      // Duplicate observation in same walk
+      const prior = inv.observations.filter((o) => o.walkId === w.id && vin && o.vin === vin);
+      const matchStatus =
+        prior.length > 0 && match.matchStatus === "VERIFIED_ON_LOT"
+          ? ("DUPLICATE_OBSERVATION" as const)
+          : match.matchStatus === "VERIFIED_ON_LOT" && !rawVin
+            ? match.matchStatus
+            : match.matchStatus;
+
+      let vehicle = match.vehicle;
+      if (!vehicle && vin && validation.valid) {
+        // Create physical-only vehicle record
+        vehicle = {
+          id: this.ports.ids.next("vehicle"),
+          vin,
+          dealershipId: w.dealershipId,
+          dealershipName: w.dealershipName,
+          stockNumber,
+          year: null,
+          make: null,
+          model: null,
+          trim: null,
+          condition: null,
+          exteriorColor: null,
+          interiorColor: null,
+          mileage: null,
+          presenceStatus: "PHYSICALLY_VERIFIED",
+          listingUrl: null,
+          detailUrl: null,
+          lastOnlineAt: null,
+          lastPhysicalAt: now,
+          priceHistory: [],
+          statusHistory: [{ at: now, status: "PHYSICALLY_VERIFIED", note: "Physical Owner walk." }],
+          listingObservations: [],
+          relationshipIds: [],
+          opportunityIds: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        inv.vehicles.unshift(vehicle);
+      } else if (vehicle) {
+        inv.vehicles = inv.vehicles.map((v) => {
+          if (v.id !== vehicle!.id) return v;
+          return {
+            ...v,
+            stockNumber: stockNumber || v.stockNumber,
+            presenceStatus: "PHYSICALLY_VERIFIED" as const,
+            lastPhysicalAt: now,
+            statusHistory: [
+              { at: now, status: "PHYSICALLY_VERIFIED" as const, note: "Physical Owner walk." },
+              ...v.statusHistory,
+            ].slice(0, 50),
+            updatedAt: now,
+          };
+        });
+        vehicle = inv.vehicles.find((v) => v.id === vehicle!.id) ?? vehicle;
+      }
+
+      const observation: PhysicalObservationV1 = {
+        id: this.ports.ids.next("obs"),
+        walkId: w.id,
+        dealershipId: w.dealershipId,
+        dealershipName: w.dealershipName,
+        vin: validation.valid ? vin : vin,
+        stockNumber,
+        note: String(input.note ?? "").slice(0, 2000),
+        photoDocumentIds: Array.isArray(input.photoDocumentIds) ? input.photoDocumentIds.slice(0, 20) : [],
+        recognitionConfidence: confidence,
+        matchStatus:
+          matchStatusForced ||
+          (input.entryMethod === "manual" && matchStatus === "VERIFIED_ON_LOT"
+            ? "VERIFIED_ON_LOT"
+            : input.entryMethod === "manual" && matchStatus === "SEEN_ON_LOT_NOT_ONLINE"
+              ? "SEEN_ON_LOT_NOT_ONLINE"
+              : matchStatus === "DUPLICATE_OBSERVATION"
+                ? "DUPLICATE_OBSERVATION"
+                : matchStatus),
+        vehicleId: vehicle?.id ?? null,
+        source: "PHYSICAL_OWNER_WALK",
+        entryMethod: input.entryMethod ?? "manual",
+        observedAt: now,
+        provenance: {
+          sourceType: "owner",
+          sourceRef: "inventory.walk.observation",
+          recordedAt: now,
+        },
+      };
+      // Prefer MANUAL_ENTRY label when manual and matched
+      if (observation.entryMethod === "manual" && observation.matchStatus === "VERIFIED_ON_LOT") {
+        /* keep VERIFIED_ON_LOT — stronger */
+      } else if (observation.entryMethod === "manual" && !observation.matchStatus) {
+        observation.matchStatus = "MANUAL_ENTRY";
+      }
+
+      inv.observations.unshift(observation);
+      if (inv.observations.length > 5000) inv.observations.length = 5000;
+      w.observationIds = [observation.id, ...w.observationIds];
+      inv.walks = inv.walks.map((x) => (x.id === w.id ? w : x));
+      this.activity(
+        draft,
+        "agent",
+        "inventory.observation",
+        `Walk observation: VIN ${observation.vin ?? "?"} · ${observation.matchStatus}`,
+        observation.id,
+      );
+      return { observation, vehicle, validation };
+    });
+  }
+
+  async endInventoryWalk(opts: { coverageDeclaredComplete?: boolean; walkId?: string } = {}): Promise<{
+    walk: InventoryWalkV1;
+    summary: WalkReconciliationV1;
+  }> {
+    return this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      const inv = draft.vehicleInventory;
+      const now = this.ports.clock.now();
+      const w =
+        inv.walks.find((x) => x.id === opts.walkId) ||
+        inv.walks.find((x) => x.state === "active");
+      if (!w) throw new Error("No active inventory walk.");
+      const walk: InventoryWalkV1 = {
+        ...w,
+        state: "complete",
+        endedAt: now,
+        coverageDeclaredComplete: opts.coverageDeclaredComplete === true,
+      };
+      inv.walks = inv.walks.map((x) => (x.id === walk.id ? walk : x));
+      const summary = reconcileInventoryWalk(walk, inv.observations, inv.vehicles, now);
+      this.activity(draft, "agent", "inventory.walk.end", `Inventory walk ended · ${summary.physicallyObservedCount} observed`, walk.id);
+      return { walk, summary };
+    });
+  }
+
+  async inventoryWalkSummary(walkId?: string): Promise<WalkReconciliationV1 | null> {
+    const inv = this.vehicleInv(await this.snapshot());
+    const walk =
+      (walkId ? inv.walks.find((w) => w.id === walkId) : null) ||
+      inv.walks.find((w) => w.state === "active") ||
+      inv.walks[0];
+    if (!walk) return null;
+    return reconcileInventoryWalk(walk, inv.observations, inv.vehicles, this.ports.clock.now());
+  }
+
+  async listVehicles(query: Parameters<typeof queryVehicles>[1] = {}): Promise<VehicleRecordV1[]> {
+    const inv = this.vehicleInv(await this.snapshot());
+    return queryVehicles(inv.vehicles, { ...query, nowIso: this.ports.clock.now() });
+  }
+
+  async associateVehicleWithCustomer(input: {
+    vehicleId?: string;
+    vin?: string;
+    relationshipId: string;
+    opportunityId?: string;
+  }): Promise<VehicleRecordV1> {
+    return this.mutate((draft) => {
+      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+      const rel = draft.relationships.find((r) => r.id === input.relationshipId);
+      if (!rel) throw new Error("Customer/relationship not found.");
+      let vehicle = input.vehicleId
+        ? draft.vehicleInventory.vehicles.find((v) => v.id === input.vehicleId)
+        : draft.vehicleInventory.vehicles.find((v) => v.vin === normalizeVinCandidate(String(input.vin ?? "")));
+      if (!vehicle) throw new Error("Vehicle not found. Provide vehicleId or known VIN.");
+      vehicle = {
+        ...vehicle,
+        relationshipIds: [...new Set([...vehicle.relationshipIds, rel.id])],
+        opportunityIds: input.opportunityId
+          ? [...new Set([...vehicle.opportunityIds, input.opportunityId])]
+          : vehicle.opportunityIds,
+        updatedAt: this.ports.clock.now(),
+      };
+      draft.vehicleInventory.vehicles = draft.vehicleInventory.vehicles.map((v) =>
+        v.id === vehicle!.id ? vehicle! : v,
+      );
+      this.activity(
+        draft,
+        "agent",
+        "vehicle.associate",
+        `Vehicle ${vehicle.vin ?? vehicle.id} linked to ${rel.displayName}`,
+        vehicle.id,
+      );
+      return vehicle;
+    });
+  }
+
+  async extractVinFromText(text: string) {
+    const candidates = extractVinCandidatesFromText(text);
+    return candidates.map((c) => validateVin(c));
+  }
+
   async workQueue() {
     const state = await this.snapshot();
     return buildWorkQueue(state.relationships, this.ports.clock.now());
@@ -3488,6 +3942,220 @@ export class AionAssistantV1 {
         sources,
         action: "connector.status",
         data: { gmail, metricool, image, lan, phoneUrl },
+      };
+    }
+
+    if (route.intent === "VEHICLE_INVENTORY") {
+      const inv = this.vehicleInv(state);
+      // Owner work context
+      if (/\bi work at\s+(.+?)(?:\.|$)/i.test(text) || /\bi work at lakeland toyota\b/i.test(text)) {
+        const m = text.match(/\bi work at\s+(.+?)(?:\.|$)/i);
+        const name = (m?.[1] || "Lakeland Toyota").trim();
+        const d = /lakeland/i.test(name)
+          ? await this.ensureLakelandToyotaContext({ ownerWorksHere: true, setCurrent: true })
+          : await this.setCurrentDealership(name);
+        if (!/lakeland/i.test(name)) {
+          await this.mutate((draft) => {
+            if (!draft.vehicleInventory) return null;
+            draft.vehicleInventory.dealerships = draft.vehicleInventory.dealerships.map((x) =>
+              x.id === d.id ? { ...x, ownerWorksHere: true } : x,
+            );
+            return null;
+          });
+        }
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: `Stored Owner-supplied work context: you work at ${d.name}. Provenance: owner.dealership (not GPS). Use “Use ${d.name} as my current dealership” anytime.`,
+          sources: [{ type: "dealership", id: d.id, label: d.name }],
+          action: "dealership.work-context",
+          data: d,
+        };
+      }
+      if (/\buse\s+(.+?)\s+as my current dealership\b/i.test(text) || /\bcurrent dealership\b/i.test(text)) {
+        const m = text.match(/\buse\s+(.+?)\s+as my current dealership\b/i);
+        const name = (m?.[1] || "Lakeland Toyota").trim();
+        const d = await this.setCurrentDealership(name);
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: `Current dealership set to ${d.name}. Inventory Walk and public inventory refresh will use this context.`,
+          sources: [{ type: "dealership", id: d.id, label: d.name }],
+          action: "dealership.current",
+          data: d,
+        };
+      }
+      if (/\brefresh\b.*\binventory\b/i.test(text)) {
+        const result = await this.refreshDealershipInventory(
+          /lakeland/i.test(text) ? { dealershipName: "Lakeland Toyota" } : {},
+        );
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: [
+            result.message,
+            `Mode: ${result.mode} · listings: ${result.listings.length}`,
+            "Source type: public dealer website. Online listing ≠ physically on lot.",
+            result.sourceUrls.slice(0, 3).map((u) => `  ${u}`).join("\n"),
+          ].join("\n"),
+          sources: result.sourceUrls.slice(0, 3).map((u, i) => ({ type: "url", id: String(i), label: u })),
+          action: "inventory.refresh",
+          data: { count: result.listings.length, mode: result.mode },
+        };
+      }
+      if (/\bdecode (this )?vin\b/i.test(text) || /\b[A-HJ-NPR-Z0-9]{17}\b/.test(text) && /\bdecode\b/i.test(text)) {
+        const cand = extractVinCandidatesFromText(text)[0] || text.match(/\b[A-HJ-NPR-Z0-9]{17}\b/)?.[0];
+        if (!cand) {
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: "Provide a 17-character VIN to decode.",
+            sources: [],
+            action: "vin.decode",
+            data: null,
+          };
+        }
+        const { validation, decode } = await this.decodeVinAction(cand);
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: validation.valid
+            ? [
+                `VIN ${validation.normalized} — ${validation.message}`,
+                decode.year || decode.make
+                  ? `Decode (${decode.source}): ${[decode.year, decode.make, decode.model, decode.trim].filter(Boolean).join(" ")}`
+                  : `Decode: ${decode.errorText || "no attributes"}`,
+                `Source: ${decode.provenance.sourceRef}`,
+              ].join("\n")
+            : `VIN invalid: ${validation.message}`,
+          sources: validation.normalized
+            ? [{ type: "vin", id: validation.normalized, label: validation.normalized }]
+            : [],
+          action: "vin.decode",
+          data: { validation, decode },
+        };
+      }
+      if (/\bdo we have this vin\b/i.test(text) || (/\bdo we have\b/i.test(text) && /\b[A-HJ-NPR-Z0-9]{17}\b/.test(text))) {
+        const cand = extractVinCandidatesFromText(text)[0];
+        if (!cand) {
+          return { intent: route.intent, confidence: "high", reply: "Paste a 17-character VIN.", sources: [], action: "vehicle.lookup", data: null };
+        }
+        const hits = await this.listVehicles({ vin: cand });
+        const v = hits[0];
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: v
+            ? `Yes — ${[v.year, v.make, v.model, v.trim].filter(Boolean).join(" ")} · stock ${v.stockNumber ?? "?"} · status ${v.presenceStatus} · last online ${v.lastOnlineAt ?? "n/a"} · last physical ${v.lastPhysicalAt ?? "n/a"}`
+            : `No stored record for VIN ${normalizeVinCandidate(cand)}. Refresh public inventory or walk-scan it.`,
+          sources: v ? [{ type: "vehicle", id: v.id, label: v.vin || v.id }] : [],
+          action: "vehicle.lookup",
+          data: v ?? null,
+        };
+      }
+      // Inventory queries: Camrys, Tacomas, used under price
+      const yearM = text.match(/\b(20\d{2})\b/);
+      const modelM = text.match(/\b(camrys?|tacomas?|highlanders?|rav4s?|corollas?|tundras?|4runners?)\b/i);
+      const used = /\bused\b/i.test(text);
+      const priceM = text.match(/(?:under|below)\s*\$?\s*([\d,]+)/i);
+      if (modelM || /\blisted right now\b/i.test(text) || /\bfind me a\b/i.test(text)) {
+        const model = modelM ? modelM[1]!.replace(/s$/i, "") : undefined;
+        const q: Parameters<typeof queryVehicles>[1] = { make: "Toyota" };
+        if (yearM) q.year = Number(yearM[1]);
+        if (model) q.model = model;
+        if (used) q.condition = "used";
+        if (priceM) q.maxPrice = Number(priceM[1]!.replace(/,/g, ""));
+        const hits = await this.listVehicles(q);
+        const lines = hits.slice(0, 12).map(
+          (v) =>
+            `  - ${[v.year, v.make, v.model, v.trim].filter(Boolean).join(" ")} · VIN ${v.vin ?? "?"} · stock ${v.stockNumber ?? "?"} · $${v.priceHistory[0]?.advertisedPrice ?? "?"} · ${v.presenceStatus}`,
+        );
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: [
+            `Vehicle query (stored inventory + public refresh history): ${hits.length} match(es).`,
+            lines.join("\n") || "  (none stored — try Refresh inventory first)",
+            "Sources: dealer public listing observations and/or physical walks. Online ≠ on lot.",
+          ].join("\n"),
+          sources: hits.slice(0, 8).map((v) => ({ type: "vehicle", id: v.id, label: v.vin || v.id })),
+          action: "vehicle.query",
+          data: { count: hits.length, vehicles: hits.slice(0, 25) },
+        };
+      }
+      if (/\bwhich cars did i verify today\b/i.test(text) || /\bverified (today|this morning)\b/i.test(text)) {
+        const hits = await this.listVehicles({ verifiedToday: true });
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: hits.length
+            ? `Physically verified today (${hits.length}):\n${hits.map((v) => `  - ${v.vin} ${[v.year, v.make, v.model].filter(Boolean).join(" ")}`).join("\n")}`
+            : "No physical verifications recorded today. Start Inventory Walk on phone.",
+          sources: hits.map((v) => ({ type: "vehicle", id: v.id, label: v.vin || v.id })),
+          action: "vehicle.verified-today",
+          data: hits,
+        };
+      }
+      if (/\bonline.*not (see|verify)|didn'?t (see|verify)\b/i.test(text)) {
+        const summary = await this.inventoryWalkSummary();
+        if (!summary) {
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: "No inventory walk on record yet.",
+            sources: [],
+            action: "inventory.walk.summary",
+            data: null,
+          };
+        }
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: [
+            "Online but not seen (this walk):",
+            ...summary.exceptionsFirst,
+            `Count: ${summary.onlineButNotSeen.length}`,
+            summary.caveat,
+          ].join("\n"),
+          sources: [],
+          action: "inventory.walk.summary",
+          data: summary,
+        };
+      }
+      if (/\bprice change\b/i.test(text)) {
+        const cand = extractVinCandidatesFromText(text)[0];
+        const hits = cand ? await this.listVehicles({ vin: cand }) : inv.vehicles.slice(0, 5);
+        const v = hits[0];
+        if (!v) {
+          return { intent: route.intent, confidence: "medium", reply: "No vehicle found for price history.", sources: [], action: "vehicle.price", data: null };
+        }
+        const hist = v.priceHistory.slice(0, 5);
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: hist.length
+            ? `Price history for ${v.vin ?? v.id}:\n${hist.map((h) => `  ${h.at}: advertised=${h.advertisedPrice ?? "?"} msrp=${h.msrp ?? "?"} (${h.sourceUrl})`).join("\n")}`
+            : "No price history stored yet.",
+          sources: [{ type: "vehicle", id: v.id, label: v.vin || v.id }],
+          action: "vehicle.price",
+          data: hist,
+        };
+      }
+      const dealer = inv.dealerships.find((d) => d.isCurrent) || inv.dealerships[0];
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: [
+          "Dealership / inventory assistant:",
+          dealer ? `Current: ${dealer.name}${dealer.ownerWorksHere ? " (Owner works here)" : ""}` : "No dealership context yet — say “I work at Lakeland Toyota”.",
+          `Vehicles stored: ${inv.vehicles.length} · walks: ${inv.walks.length} · observations: ${inv.observations.length}`,
+          "",
+          "Phone: Work → Inventory Walk (manual VIN OK).",
+          "Try: Refresh Lakeland Toyota inventory · Decode VIN · Do we have any 2025 Camrys?",
+        ].join("\n"),
+        sources: dealer ? [{ type: "dealership", id: dealer.id, label: dealer.name }] : [],
+        action: "inventory.status",
+        data: { dealer, vehicleCount: inv.vehicles.length },
       };
     }
 

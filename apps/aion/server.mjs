@@ -847,6 +847,43 @@ export async function createAionServer(options = {}) {
       case "connector.settings.update": return service.updateConnectorSettings(input.connectors ?? input);
       case "import.readiness": return service.importReadiness();
       case "connector.image.status": return imageUnderstandingStatus();
+      case "dealership.ensureLakeland": return service.ensureLakelandToyotaContext({
+        setCurrent: input.setCurrent !== false,
+        ownerWorksHere: input.ownerWorksHere === true,
+      });
+      case "dealership.setCurrent": return service.setCurrentDealership(String(input.name ?? input.dealership ?? ""));
+      case "dealership.current": return { dealership: await service.currentDealership() };
+      case "vin.validate": return service.validateVinAction(String(input.vin ?? input.raw ?? ""));
+      case "vin.decode": return service.decodeVinAction(String(input.vin ?? input.raw ?? ""), { offline: input.offline === true });
+      case "inventory.refresh": return service.refreshDealershipInventory({
+        dealershipName: input.dealershipName || input.name,
+        useFixture: input.useFixture === true,
+        fixtureVins: Array.isArray(input.fixtureVins) ? input.fixtureVins : undefined,
+      });
+      case "inventory.walk.start": return service.startInventoryWalk(String(input.note ?? ""));
+      case "inventory.walk.active": return { walk: await service.activeInventoryWalk() };
+      case "inventory.walk.observe": return service.recordWalkObservation({
+        vin: input.vin,
+        stockNumber: input.stockNumber,
+        note: input.note,
+        photoDocumentIds: input.photoDocumentIds,
+        recognitionConfidence: input.recognitionConfidence,
+        entryMethod: input.entryMethod,
+        walkId: input.walkId,
+      });
+      case "inventory.walk.end": return service.endInventoryWalk({
+        coverageDeclaredComplete: input.coverageDeclaredComplete === true,
+        walkId: input.walkId,
+      });
+      case "inventory.walk.summary": return { summary: await service.inventoryWalkSummary(input.walkId) };
+      case "vehicle.list": return { vehicles: await service.listVehicles(input.query ?? input) };
+      case "vehicle.associate": return service.associateVehicleWithCustomer({
+        vehicleId: input.vehicleId,
+        vin: input.vin,
+        relationshipId: String(input.relationshipId ?? ""),
+        opportunityId: input.opportunityId,
+      });
+      case "vin.extractText": return { candidates: await service.extractVinFromText(String(input.text ?? "")) };
       case "metricool.fixture.seed": return service.seedMetricoolFixtures(input);
       case "metricool.insight": return service.metricoolInsight(input.now);
       case "work.queue": return service.workQueue();

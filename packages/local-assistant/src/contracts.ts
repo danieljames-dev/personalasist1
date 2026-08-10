@@ -633,6 +633,11 @@ export interface AssistantStateV1 {
   importSourceQueue: import("./import-queue.js").QueuedImportSourceV1[];
   /** Ambiguous import entity classification items awaiting Owner review. */
   importReviewQueue: import("./import-classify.js").ImportReviewItemV1[];
+  /**
+   * Dealership / vehicle inventory (lot walk + public listings).
+   * Additive; defaulted forward when missing on load.
+   */
+  vehicleInventory: import("./vehicle-inventory.js").VehicleInventoryStateV1;
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */

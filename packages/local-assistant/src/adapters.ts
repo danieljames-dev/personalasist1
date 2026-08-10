@@ -108,6 +108,14 @@ export function createEmptyStateV1(): AssistantStateV1 {
     jobApplications: [],
     importSourceQueue: [],
     importReviewQueue: [],
+    vehicleInventory: {
+      dealerships: [],
+      vehicles: [],
+      walks: [],
+      observations: [],
+      lastInventoryRefresh: {},
+      onlineListings: [],
+    },
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
@@ -326,6 +334,25 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(ak.jobApplications)) ak.jobApplications = [];
   if (!Array.isArray(ak.importSourceQueue)) ak.importSourceQueue = [];
   if (!Array.isArray(ak.importReviewQueue)) ak.importReviewQueue = [];
+  if (!ak.vehicleInventory || typeof ak.vehicleInventory !== "object") {
+    ak.vehicleInventory = {
+      dealerships: [],
+      vehicles: [],
+      walks: [],
+      observations: [],
+      lastInventoryRefresh: {},
+      onlineListings: [],
+    };
+  } else {
+    if (!Array.isArray(ak.vehicleInventory.dealerships)) ak.vehicleInventory.dealerships = [];
+    if (!Array.isArray(ak.vehicleInventory.vehicles)) ak.vehicleInventory.vehicles = [];
+    if (!Array.isArray(ak.vehicleInventory.walks)) ak.vehicleInventory.walks = [];
+    if (!Array.isArray(ak.vehicleInventory.observations)) ak.vehicleInventory.observations = [];
+    if (!Array.isArray(ak.vehicleInventory.onlineListings)) ak.vehicleInventory.onlineListings = [];
+    if (!ak.vehicleInventory.lastInventoryRefresh || typeof ak.vehicleInventory.lastInventoryRefresh !== "object") {
+      ak.vehicleInventory.lastInventoryRefresh = {};
+    }
+  }
   for (const src of ak.importSourceQueue) {
     if (!src.stats || typeof src.stats !== "object") {
       src.stats = {

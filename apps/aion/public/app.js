@@ -1,8 +1,8 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
-/** Primary phone bottom bar (5 slots). More opens a sheet for Intake / Knowledge / Mobile / Settings. */
+const areas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Inventory Walk", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
+/** Primary phone bottom bar (5 slots). More opens a sheet for Intake / Knowledge / Inventory / Mobile. */
 const mobilePrimaryAreas = ["Home", "Chat", "Customers", "Tasks", "More"];
-const mobileMoreAreas = new Set(["Intake", "Knowledge", "Mobile", "Settings", "Sales", "People", "Imports"]);
+const mobileMoreAreas = new Set(["Intake", "Inventory Walk", "Knowledge", "Mobile", "Settings", "Sales", "People", "Imports"]);
 let model = null;
 let area = "Home";
 let streaming = "";
@@ -108,6 +108,7 @@ function homeArea(s) {
 <button type="button" data-area-jump="Customers">Customers</button>
 <button type="button" data-area-jump="Tasks">Tasks</button>
 <button type="button" data-area-jump="Intake">Upload photo</button>
+<button type="button" data-area-jump="Inventory Walk">Inventory Walk</button>
 <button type="button" data-area-jump="Knowledge">Knowledge</button>
 </div>
 <div class="card next"><h2>Briefing</h2>
@@ -870,6 +871,67 @@ ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <c
 <div class="actions"><button data-do="state-export">Export all local data</button></div></div>`;
 }
 
+function inventoryWalkArea(s) {
+  const inv = s.vehicleInventory || { dealerships: [], vehicles: [], walks: [], observations: [], onlineListings: [] };
+  const dealer = (inv.dealerships || []).find((d) => d.isCurrent) || inv.dealerships?.[0];
+  const walk = (inv.walks || []).find((w) => w.state === "active");
+  const lastObs = (inv.observations || []).filter((o) => !walk || o.walkId === walk.id).slice(0, 8);
+  const last = window.__aionLastWalkObs;
+  const summary = window.__aionWalkSummary;
+  return `<div class="sales inventory-walk">
+<div class="sales-head"><h1>Inventory Walk</h1>
+<p class="today"><span>Dealer <b>${esc(dealer?.name || "not set")}</b></span>
+<span>Online <b>${(inv.onlineListings || []).length || (inv.vehicles || []).filter((v) => v.presenceStatus === "ONLINE_LISTED" || v.presenceStatus === "PHYSICALLY_VERIFIED").length}</b></span>
+<span>Walk <b>${walk ? "ACTIVE" : "idle"}</b></span></p></div>
+<div class="card next">
+<p class="meta">Physical Owner observation is stronger on-lot evidence than a public web listing. Online listing ≠ on the lot.</p>
+<div class="tap-grid quick">
+<button type="button" data-do="dealership-lakeland" class="row">Use Lakeland Toyota</button>
+<button type="button" data-do="inventory-refresh" class="row">Refresh public inventory</button>
+${walk
+  ? `<button type="button" data-do="inventory-walk-end" class="row">End walk · summary</button>
+<button type="button" data-do="inventory-walk-end-complete" class="row">End · mark area complete</button>`
+  : `<button type="button" data-do="inventory-walk-start" class="row" style="min-height:3.2rem;font-size:1.05rem"><b>START WALK</b></button>`}
+</div>
+</div>
+${last ? `<div class="card next"><h2>Last scan</h2>
+<p style="font-size:1.15rem;font-weight:700;letter-spacing:.04em">${esc(last.observation?.vin || "—")}</p>
+<p class="meta">${esc([last.vehicle?.year, last.vehicle?.make, last.vehicle?.model, last.vehicle?.trim].filter(Boolean).join(" ") || "Decode/refresh for YMMT")}</p>
+<p class="meta">Stock <b>${esc(last.observation?.stockNumber || "—")}</b> · Online match <b>${esc(last.observation?.matchStatus || "—")}</b></p>
+<p class="meta">VIN check: ${esc(last.validation?.code || "—")} ${last.validation?.valid ? "✓" : "✗"}</p>
+</div>` : ""}
+<div class="card"><h2>${walk ? "Next vehicle" : "Ready when you start"}</h2>
+<form data-form="walk-observe" class="quick-form">
+<label>VIN (manual fallback — 17 chars)
+<input name="vin" maxlength="20" autocapitalize="characters" autocomplete="off" placeholder="Enter or paste VIN" style="font-size:16px;min-height:2.9rem;letter-spacing:.06em"></label>
+<label>Stock # (optional)
+<input name="stockNumber" maxlength="40" style="font-size:16px;min-height:2.75rem"></label>
+<label>Note (optional)
+<input name="note" maxlength="500" style="font-size:16px"></label>
+<label>VIN / stock photo (optional — stored; OCR when vision ready)
+<input type="file" name="file" accept="image/*" capture="environment" style="font-size:16px"></label>
+<button type="submit" style="min-height:3.2rem;width:100%;font-size:1.05rem">SAVE · NEXT VEHICLE</button>
+</form>
+<p class="hint">Photo OCR is best-effort. Manual VIN always works. Uncertain VINs are never silently verified.</p>
+</div>
+${summary ? `<div class="card warnbox"><h2>Walk summary</h2>
+<ul>${(summary.exceptionsFirst || []).map((e) => `<li>${esc(e)}</li>`).join("")}</ul>
+<p class="meta">Online ${summary.onlineInventoryCount} · Observed ${summary.physicallyObservedCount} · Matched ${summary.matchedCount}</p>
+<p class="meta">${esc(summary.caveat || "")}</p>
+</div>` : ""}
+<div class="card"><h2>This walk</h2>
+${lastObs.length ? lastObs.map((o) => `<p class="meta"><b>${esc(o.vin || "?")}</b> · ${esc(o.matchStatus)} · stock ${esc(o.stockNumber || "—")}${o.note ? ` · ${esc(o.note.slice(0, 60))}` : ""}</p>`).join("") : `<p class="meta">No observations yet.</p>`}
+</div>
+<div class="card"><h2>Ask inventory</h2>
+<form data-form="assistant-prompt" class="quick-form">
+<label>Question
+<input name="text" required maxlength="2000" placeholder="Do we have any 2025 Camrys?" style="font-size:16px"></label>
+<button type="submit">Ask</button>
+</form>
+</div>
+</div>`;
+}
+
 function intakeArea(s) {
   const people = scoped(s.relationships ?? []).filter((r) => !r.archivedAt);
   return `<h1>Intake</h1>
@@ -894,6 +956,7 @@ function page() {
   if (area === "Home") return homeArea(s);
   if (area === "Customers" || area === "People") return area === "Customers" ? salesArea(s) : peopleArea(s);
   if (area === "Intake") return intakeArea(s);
+  if (area === "Inventory Walk") return inventoryWalkArea(s);
   if (area === "Mobile") return mobileArea();
   if (area === "Brain") return brainArea(s);
   if (area === "Studio") return studioArea(s);
@@ -1257,6 +1320,35 @@ document.addEventListener("click", async (event) => {
       render();
       return;
     }
+    if (verb === "dealership-lakeland") {
+      await api("dealership.ensureLakeland", { setCurrent: true, ownerWorksHere: true });
+      toast("Lakeland Toyota set as current dealership (Owner-supplied).");
+      await load();
+      return;
+    }
+    if (verb === "inventory-refresh") {
+      toast("Refreshing public inventory…");
+      const result = await api("inventory.refresh", {});
+      toast(`${result.mode}: ${result.listings?.length ?? 0} listing(s). Online ≠ on lot.`);
+      await load();
+      return;
+    }
+    if (verb === "inventory-walk-start") {
+      await api("inventory.walk.start", {});
+      window.__aionWalkSummary = null;
+      toast("Walk started. Scan or enter VIN, then NEXT.");
+      await load();
+      return;
+    }
+    if (verb === "inventory-walk-end" || verb === "inventory-walk-end-complete") {
+      const done = await api("inventory.walk.end", {
+        coverageDeclaredComplete: verb === "inventory-walk-end-complete",
+      });
+      window.__aionWalkSummary = done.summary;
+      toast(`Walk ended · ${done.summary?.physicallyObservedCount ?? 0} observed`);
+      await load();
+      return;
+    }
     await load();
   } catch (error) { toast(error.message); }
 });
@@ -1303,6 +1395,54 @@ document.addEventListener("submit", async (event) => {
       toast(`Stored ${doc.filename} (${doc.byteLength} bytes)${doc.tags?.length ? ` · ${doc.tags.join(", ")}` : ""}`);
       form.reset();
       await load();
+      return;
+    }
+    if (kind === "walk-observe") {
+      let photoDocumentIds = [];
+      const fileInput = form.querySelector('input[type="file"]');
+      const file = fileInput?.files?.[0];
+      if (file) {
+        if (file.size > 6 * 1024 * 1024) throw new Error("Photo exceeds 6 MB limit.");
+        const buf = await file.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        const doc = await api("crm.document.upload", {
+          filename: file.name || "vin-photo.jpg",
+          mimeType: file.type || "image/jpeg",
+          contentBase64: btoa(binary),
+          tags: ["inventory-walk", "vin-photo", "phone-intake"],
+          summary: d.vin ? `Walk photo for VIN ${d.vin}` : "Walk photo (VIN pending)",
+        });
+        photoDocumentIds = [doc.id];
+      }
+      const vin = String(d.vin || "").trim();
+      if (!vin && !photoDocumentIds.length) throw new Error("Enter a VIN or take a photo.");
+      // Auto-start walk if needed
+      try { await api("inventory.walk.active", {}); } catch { /* ignore */ }
+      const active = await api("inventory.walk.active", {});
+      if (!active.walk) await api("inventory.walk.start", {});
+      const result = await api("inventory.walk.observe", {
+        vin: vin || undefined,
+        stockNumber: d.stockNumber || undefined,
+        note: d.note || undefined,
+        photoDocumentIds,
+        entryMethod: photoDocumentIds.length && vin ? "mixed" : photoDocumentIds.length ? "photo" : "manual",
+        recognitionConfidence: vin ? 100 : photoDocumentIds.length ? 40 : null,
+      });
+      window.__aionLastWalkObs = result;
+      if (!result.validation?.valid && vin) {
+        toast(`VIN uncertain: ${result.validation?.message || "invalid"} — confirm or retake.`);
+      } else {
+        toast(`${result.observation?.matchStatus || "saved"} · NEXT`);
+      }
+      form.reset();
+      await load();
+      // Keep focus on VIN for rapid re-entry
+      requestAnimationFrame(() => {
+        document.querySelector('form[data-form="walk-observe"] input[name="vin"]')?.focus();
+      });
       return;
     }
     if (kind === "import-root-add") {
