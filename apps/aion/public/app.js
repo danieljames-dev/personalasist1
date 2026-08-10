@@ -44,13 +44,21 @@ async function load() {
 
 /** The only screen an unpaired phone ever sees. It shows no owner data of any kind. */
 function renderPairing(message) {
-  document.querySelector("#onboarding").hidden = true;
-  const content = document.querySelector("#content");
-  content.hidden = false;
-  content.innerHTML = `<div class="sales"><h1>Pair this device</h1>
+  const phoneUi = isPhoneViewport() || true; // unpaired requests from non-loopback are phones
+  document.body.classList.add("aion-phone-mode");
+  const phoneShell = document.getElementById("aionPhoneShell");
+  const desktopShell = document.getElementById("aionDesktopShell");
+  if (phoneShell) phoneShell.hidden = false;
+  if (desktopShell) desktopShell.hidden = true;
+  const html = `<div class="sales"><h1>Pair this device</h1>
 <p class="lead">${esc(message)}</p>
-<p class="hint">On the computer running AION, open <b>Settings</b>, turn on private phone access, and choose <b>Create pairing code</b>. Codes last ten minutes and work once.</p>
+<p class="hint">On the computer running AION, open <b>Mobile</b> / Settings, turn on private phone access, and create a pairing code. Codes last ten minutes and work once.</p>
 <form data-form="pair" class="quick-form"><label>Pairing code<input name="code" required maxlength="20" autocomplete="one-time-code" autocapitalize="characters" placeholder="ABCDE-FGHIJ"></label><button>Pair</button></form></div>`;
+  const phoneContent = document.getElementById("aionPhoneContent");
+  if (phoneContent) phoneContent.innerHTML = html;
+  const desktopContent = document.querySelector("#content");
+  if (desktopContent) { desktopContent.hidden = false; desktopContent.innerHTML = html; }
+  void phoneUi;
 }
 function toast(message) { const node = document.querySelector("#toast"); node.textContent = message; node.classList.add("show"); setTimeout(() => node.classList.remove("show"), 4000); }
 function cards(items, renderItem, empty = "Nothing here yet. Use the form above to begin.") {
@@ -118,10 +126,10 @@ function chatArea(s) {
   const reply = window.__aionLastAssistant;
   // Phone-first: one prompt card + last reply. Conversations list is secondary (desktop).
   if (phone) {
-    return `<div class="aion-chat-phone">
+    return `<div class="aion-chat-phone" id="aionChatPanel">
 <h1>Chat</h1>
 <p class="meta">Ask about follow-ups, customers, or “What needs me?”. Answers use stored Work CRM facts when available.</p>
-<form data-form="assistant-prompt" class="quick-form aion-chat-compose">
+<form data-form="assistant-prompt" class="quick-form aion-chat-compose" id="aionChatForm">
 <label>Message<textarea name="text" id="aionChatInput" required maxlength="10000" rows="3" placeholder="What needs me?"></textarea></label>
 <div class="actions"><button type="submit">Ask AION</button><button type="button" data-do="voice-prompt">Voice</button></div>
 </form>
@@ -895,6 +903,11 @@ function page() {
   return settingsArea(s);
 }
 
+const mobileDebugEnabled = () => {
+  try { return new URLSearchParams(window.location.search).get("mobiledebug") === "1"; }
+  catch { return false; }
+};
+
 function connectionBadgeText() {
   const ra = model?.remoteAccess;
   const provider = (model?.providers ?? []).find((x) => x.id === model?.state?.settings?.providerId);
@@ -908,73 +921,170 @@ function connectionBadgeText() {
   return "● Local desktop";
 }
 
+function fillWorkspaceSwitch(el) {
+  if (!el || !model) return;
+  const active = model.state.settings.activeWorkspace ?? "personal";
+  const registry = (model.state.workspaces ?? []).filter((w) => !w.archived);
+  el.innerHTML = registry.map((w) => `<button type="button" class="${w.id === active ? "active" : ""}" data-workspace="${esc(w.id)}">${esc(w.label)}</button>`).join("");
+  el.dataset.active = active;
+}
+
+function paintPhoneNav(nav) {
+  if (!nav) return;
+  const primaryActive = mobileMoreAreas.has(area) ? "More" : area;
+  nav.innerHTML = mobilePrimaryAreas.map((x) => {
+    if (x === "More") {
+      return `<button type="button" class="${primaryActive === "More" ? "active" : ""}" data-do="more-open">More</button>`;
+    }
+    return `<button type="button" class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`;
+  }).join("");
+}
+
+function describeEl(el) {
+  if (!el) return { EXISTS: false };
+  const cs = window.getComputedStyle(el);
+  const r = el.getBoundingClientRect();
+  return {
+    EXISTS: true,
+    className: el.className || "",
+    display: cs.display,
+    visibility: cs.visibility,
+    opacity: cs.opacity,
+    position: cs.position,
+    overflow: cs.overflow,
+    zIndex: cs.zIndex,
+    width: Math.round(r.width),
+    height: Math.round(r.height),
+    top: Math.round(r.top),
+    bottom: Math.round(r.bottom),
+    parent: el.parentElement ? `${el.parentElement.tagName}.${el.parentElement.className}` : null,
+    parentW: el.parentElement ? Math.round(el.parentElement.getBoundingClientRect().width) : null,
+    parentH: el.parentElement ? Math.round(el.parentElement.getBoundingClientRect().height) : null,
+  };
+}
+
+function buildMobileDebugBanner(contentRoot) {
+  const chatPanel = contentRoot?.querySelector?.(".aion-chat-phone, #aionChatPanel");
+  const chatForm = contentRoot?.querySelector?.("form[data-form='assistant-prompt'], #aionChatForm");
+  const nav = document.getElementById("aionPhoneNav");
+  const vv = window.visualViewport;
+  const lines = [
+    "MOBILE CONTENT ROOT ALIVE",
+    `activeSection=${area}`,
+    `viewer=${model?.viewer ?? "?"}`,
+    `onboardingComplete=${model?.state?.onboardingComplete}`,
+    `inner=${window.innerWidth}x${window.innerHeight}`,
+    `visualViewport=${vv ? `${Math.round(vv.width)}x${Math.round(vv.height)}` : "n/a"}`,
+    `clientH=${document.documentElement.clientHeight} scrollH=${document.documentElement.scrollHeight} bodyScrollH=${document.body.scrollHeight}`,
+    `contentRoot=${JSON.stringify(describeEl(contentRoot))}`,
+    `chatPanel=${JSON.stringify(describeEl(chatPanel))}`,
+    `chatForm=${JSON.stringify(describeEl(chatForm))}`,
+    `mobileNav=${JSON.stringify(describeEl(nav))}`,
+  ];
+  return `<div class="aion-mobile-debug-banner" id="aionMobileDebugBanner">${esc(lines.join("\n"))}</div>
+<p class="aion-dbg-panel" id="aionChatPanelProbe" style="padding:.5rem;margin:0 0 .75rem;background:var(--panel-2)">CHAT PANEL RENDER TEST</p>`;
+}
+
+function applyMobileDebugOutlines(contentRoot) {
+  if (!mobileDebugEnabled() || !contentRoot) return;
+  contentRoot.classList.add("aion-dbg-content");
+  contentRoot.querySelector(".aion-chat-phone, #aionChatPanel")?.classList.add("aion-dbg-panel");
+  contentRoot.querySelector("form[data-form='assistant-prompt'], #aionChatForm")?.classList.add("aion-dbg-form");
+  // Log to console for remote debugging if available
+  try {
+    console.info("[AION mobiledebug]", {
+      area,
+      content: describeEl(contentRoot),
+      chat: describeEl(contentRoot.querySelector(".aion-chat-phone")),
+      form: describeEl(contentRoot.querySelector("form[data-form='assistant-prompt']")),
+      nav: describeEl(document.getElementById("aionPhoneNav")),
+    });
+  } catch { /* ignore */ }
+}
+
+function renderPageHtml() {
+  const onboarded = model?.state?.onboardingComplete === true;
+  if (!onboarded) {
+    return `<div class="empty"><h1>Welcome</h1><p>Complete onboarding on the desktop first, or tap below if you are the Owner on loopback.</p>
+<button type="button" data-action="onboarding">Start offline provider</button></div>`;
+  }
+  try {
+    const html = page();
+    if (html && String(html).trim()) return html;
+    return `<div class="empty">Panel empty for section <b>${esc(area)}</b>.</div>`;
+  } catch (err) {
+    return `<div class="empty">UI error in <b>${esc(area)}</b>: ${esc(err?.message || err)}</div>`;
+  }
+}
+
 function render() {
   if (!model) return;
   const phoneUi = usePhoneChrome();
-  document.documentElement.classList.toggle("aion-phone", phoneUi);
-  document.body.classList.toggle("aion-phone", phoneUi);
-  document.body.classList.toggle("phone-shell", phoneUi);
-
-  const badge = document.querySelector("#providerBadge");
-  if (badge) {
-    badge.textContent = connectionBadgeText();
-    badge.className = `aion-conn-badge ${model.viewer === "device" || model.remoteAccess?.privateRemoteState === "READY" ? "private connected" : "local"}`;
+  if (!window.__aionPhoneAreaInit && phoneUi) {
+    window.__aionPhoneAreaInit = true;
+    area = "Chat";
   }
 
-  const active = model.state.settings.activeWorkspace ?? "personal";
-  const registry = (model.state.workspaces ?? []).filter((w) => !w.archived);
-  const switcher = document.querySelector("#workspaceSwitch");
-  if (switcher) {
-    switcher.innerHTML = registry.map((w) => `<button type="button" class="${w.id === active ? "active" : ""}" data-workspace="${esc(w.id)}">${esc(w.label)}</button>`).join("");
-    switcher.dataset.active = active;
+  document.documentElement.classList.toggle("aion-phone-mode", phoneUi);
+  document.body.classList.toggle("aion-phone-mode", phoneUi);
+
+  const phoneShell = document.getElementById("aionPhoneShell");
+  const desktopShell = document.getElementById("aionDesktopShell");
+  if (phoneShell) phoneShell.hidden = !phoneUi;
+  if (desktopShell) desktopShell.hidden = phoneUi;
+
+  const badgeText = connectionBadgeText();
+  const badgeClass = `aion-conn-badge ${model.viewer === "device" || model.remoteAccess?.privateRemoteState === "READY" ? "private connected" : "local"}`;
+  for (const id of ["providerBadge", "phoneConnBadge"]) {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = badgeText; el.className = badgeClass; }
+  }
+  fillWorkspaceSwitch(document.getElementById("workspaceSwitch"));
+  fillWorkspaceSwitch(document.getElementById("phoneWorkspaceSwitch"));
+
+  let pageHtml = renderPageHtml();
+  if (mobileDebugEnabled()) {
+    // Banner prepended after we know the content root
   }
 
-  // Main area nav only — class aion-mobile-nav on phone (never generic bare nav).
-  const nav = document.getElementById("aionAreaNav") || document.querySelector(".aion-area-nav");
-  if (nav) {
-    nav.classList.add("aion-area-nav");
-    nav.classList.toggle("aion-mobile-nav", phoneUi);
-    nav.setAttribute("aria-label", "AION areas");
-    if (phoneUi) {
-      if (!window.__aionPhoneAreaInit) {
-        window.__aionPhoneAreaInit = true;
-        area = "Chat"; // first acceptance target
+  if (phoneUi) {
+    paintPhoneNav(document.getElementById("aionPhoneNav"));
+    const contentRoot = document.getElementById("aionPhoneContent");
+    if (contentRoot) {
+      const debugPrefix = mobileDebugEnabled() ? buildMobileDebugBanner(null) : "";
+      // Rebuild banner after paint for accurate rects — first paint includes static probe text
+      contentRoot.innerHTML = (mobileDebugEnabled()
+        ? `<div class="aion-mobile-debug-banner">MOBILE CONTENT ROOT ALIVE\nactiveSection=${esc(area)}\n(measuring…)</div>
+<p class="aion-dbg-panel" style="padding:.5rem;margin:0 0 .75rem;background:var(--panel-2)">CHAT PANEL RENDER TEST</p>`
+        : "") + pageHtml;
+      // Ensure chat panel has stable ids for measurement
+      const chatRoot = contentRoot.querySelector(".aion-chat-phone");
+      if (chatRoot) chatRoot.id = "aionChatPanel";
+      const chatForm = contentRoot.querySelector("form[data-form='assistant-prompt']");
+      if (chatForm) chatForm.id = "aionChatForm";
+      applyMobileDebugOutlines(contentRoot);
+      if (mobileDebugEnabled()) {
+        // Second pass: fill measured geometry into banner
+        requestAnimationFrame(() => {
+          const banner = contentRoot.querySelector("#aionMobileDebugBanner, .aion-mobile-debug-banner");
+          if (banner) banner.outerHTML = buildMobileDebugBanner(contentRoot);
+          applyMobileDebugOutlines(contentRoot);
+        });
       }
-      const primaryActive = mobileMoreAreas.has(area) ? "More" : area;
-      nav.innerHTML = mobilePrimaryAreas.map((x) => {
-        const isActive = x === primaryActive || (x !== "More" && x === area);
-        if (x === "More") {
-          return `<button type="button" class="${primaryActive === "More" ? "active" : ""}" data-do="more-open">More</button>`;
-        }
-        return `<button type="button" class="${isActive ? "active" : ""}" data-area="${x}">${x}</button>`;
-      }).join("");
-    } else {
+    }
+  } else {
+    const nav = document.getElementById("aionAreaNav");
+    if (nav) {
+      nav.classList.remove("aion-mobile-nav");
       nav.innerHTML = areas.map((x) => `<button type="button" class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`).join("");
     }
-  }
-
-  const onboarded = model.state.onboardingComplete === true;
-  const onboardingEl = document.querySelector("#onboarding");
-  const contentEl = document.querySelector("#content");
-  if (onboardingEl) onboardingEl.hidden = onboarded;
-  if (contentEl) {
-    contentEl.classList.add("aion-content");
-    contentEl.hidden = !onboarded;
-    if (onboarded) {
-      try {
-        const html = page();
-        contentEl.innerHTML = html && String(html).trim()
-          ? html
-          : `<div class="empty">Panel failed to render. Tap Chat.</div>`;
-      } catch (err) {
-        contentEl.innerHTML = `<div class="empty">UI error: ${esc(err?.message || err)}. Tap Chat.</div>`;
-      }
-      // Force visibility — blank white was often a hidden/zero-height panel on iPhone.
-      contentEl.hidden = false;
-      contentEl.style.display = "block";
-      contentEl.style.visibility = "visible";
-      contentEl.style.opacity = "1";
-      contentEl.style.minHeight = "40vh";
+    const onboarded = model.state.onboardingComplete === true;
+    const onboardingEl = document.querySelector("#onboarding");
+    const contentEl = document.querySelector("#content");
+    if (onboardingEl) onboardingEl.hidden = onboarded;
+    if (contentEl) {
+      contentEl.hidden = !onboarded;
+      if (onboarded) contentEl.innerHTML = pageHtml;
     }
   }
 }

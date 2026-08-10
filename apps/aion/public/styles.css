@@ -102,190 +102,162 @@ details summary { cursor: pointer; color: var(--muted); font-size: .86rem; }
 .tl-when { color: var(--muted); }
 .quick-form { background: var(--panel-2); }
 
-/* ===== PHONE LAYOUT (class-driven so iOS "desktop site" still works for paired devices) ===== */
-html.aion-phone,
-html.aion-phone body,
-body.aion-phone {
-  min-height: 100svh;
-  min-height: 100dvh;
-  overflow-x: hidden;
+/* ===== PHONE APP SHELL (independent of desktop grid) =====
+   Structure: .aion-phone-shell > header + main#aionPhoneContent + nav.aion-mobile-nav
+   Flex column: header fixed height, content scrolls, nav at bottom of flex (not under header).
+*/
+.aion-phone-shell {
+  display: none;
+  flex-direction: column;
+  height: 100svh;
+  height: 100dvh;
+  max-height: 100svh;
+  max-height: 100dvh;
+  width: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
 }
-
-body.aion-phone {
-  display: flex;
-  flex-direction: column;
-  padding-bottom: calc(4.25rem + env(safe-area-inset-bottom, 0px));
+body.aion-phone-mode .aion-desktop-shell { display: none !important; }
+body.aion-phone-mode .aion-phone-shell {
+  display: flex !important;
+}
+body.aion-phone-mode {
+  margin: 0;
+  overflow: hidden;
+  height: 100svh;
+  height: 100dvh;
+  background: var(--bg);
 }
 
-body.aion-phone .aion-header,
-body.aion-phone header.aion-header {
-  position: sticky;
-  top: 0;
-  z-index: 30;
+.aion-phone-header {
   flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: .4rem .6rem;
-  padding: .45rem .75rem;
-  padding-top: calc(.45rem + env(safe-area-inset-top, 0px));
-  min-height: 0;
+  gap: .35rem .5rem;
+  padding: .4rem .7rem;
+  padding-top: calc(.4rem + env(safe-area-inset-top, 0px));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  z-index: 5;
 }
-body.aion-phone .aion-header-sub,
-body.aion-phone header small { display: none; }
-body.aion-phone .aion-workspace-switch,
-body.aion-phone .switch {
-  order: 3;
+.aion-phone-header .aion-brand { display: flex; align-items: center; gap: .45rem; }
+.aion-phone-header .switch {
   flex: 1 1 100%;
   width: 100%;
   justify-content: stretch;
 }
-body.aion-phone .aion-workspace-switch button,
-body.aion-phone .switch button { flex: 1; min-height: 2.4rem; font-size: 16px; }
-body.aion-phone .aion-conn-badge { font-size: .75rem; padding: .2rem .45rem; }
-
-body.aion-phone .aion-layout,
-body.aion-phone .layout {
-  display: block !important;
-  grid-template-columns: none !important;
-  flex: 1 1 auto;
-  width: 100%;
-  max-width: 100%;
-  padding: .65rem .75rem 1rem;
-  margin: 0;
-  min-height: 0;
+.aion-phone-header .switch button { flex: 1; min-height: 2.35rem; font-size: 16px; }
+.aion-phone-header .aion-conn-badge {
+  font-size: .72rem;
+  padding: .15rem .4rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--accent);
 }
 
-/* Bottom bar — ONLY .aion-mobile-nav (never bare nav / .tabs) */
-body.aion-phone .aion-area-nav.aion-mobile-nav {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 40;
-  display: grid !important;
+/* SCROLLING CONTENT — takes all remaining space between header and bottom nav */
+.aion-phone-content {
+  flex: 1 1 auto;
+  min-height: 0; /* critical for flex scroll */
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  width: 100%;
+  padding: .75rem .8rem 1rem;
+  color: var(--text);
+  background: var(--bg);
+  display: block;
+  visibility: visible;
+  opacity: 1;
+  position: relative;
+  z-index: 1;
+}
+
+/* BOTTOM NAV — last flex child, always at bottom of shell */
+.aion-mobile-nav {
+  flex: 0 0 auto;
+  display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0;
   width: 100%;
-  height: auto;
-  max-height: none;
   margin: 0;
-  padding: .3rem .2rem calc(.3rem + env(safe-area-inset-bottom, 0px));
+  padding: .25rem .15rem calc(.25rem + env(safe-area-inset-bottom, 0px));
   background: var(--panel);
   border-top: 1px solid var(--line);
-  box-shadow: 0 -4px 16px rgba(0, 0, 0, .12);
-  overflow: hidden;
+  z-index: 10;
 }
-body.aion-phone .aion-area-nav.aion-mobile-nav button {
+.aion-mobile-nav button {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 2.85rem;
-  max-height: 3.25rem;
-  height: auto;
-  min-width: 0;
+  padding: .3rem .1rem;
   margin: 0;
-  padding: .35rem .15rem;
   font-size: .72rem;
   font-weight: 600;
-  line-height: 1.15;
-  text-align: center;
-  white-space: nowrap;
-  writing-mode: horizontal-tb;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-radius: .45rem;
-  background: transparent;
+  font-family: inherit;
   color: var(--muted);
+  background: transparent;
   border: 1px solid transparent;
+  border-radius: .4rem;
+  white-space: nowrap;
+  cursor: pointer;
 }
-body.aion-phone .aion-area-nav.aion-mobile-nav button.active {
+.aion-mobile-nav button.active {
   background: var(--panel-2);
   color: var(--text);
   border-color: var(--line);
 }
 
-/* Main content must always take remaining space and scroll */
-body.aion-phone .aion-main,
-body.aion-phone main.aion-main {
-  display: block !important;
-  position: relative;
-  width: 100%;
-  min-width: 0;
-  min-height: 50svh;
-  min-height: 50dvh;
-  height: auto;
-  overflow: visible;
-  z-index: 1;
-}
-body.aion-phone #content.aion-content,
-body.aion-phone .aion-content {
-  display: block !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  position: relative !important;
-  width: 100% !important;
-  min-height: 40svh;
-  min-height: 40dvh;
-  height: auto !important;
-  max-height: none !important;
-  overflow: visible !important;
-  transform: none !important;
-  left: auto !important;
-  top: auto !important;
-  z-index: 1;
-  color: var(--text);
-  background: transparent;
-}
-
-/* Nested Sales tabs — horizontal only */
-body.aion-phone nav.tabs,
-body.aion-phone .tabs {
-  position: static !important;
+/* Phone content typography / controls */
+.aion-phone-content h1 { font-size: 1.2rem; margin: 0 0 .4rem; }
+.aion-phone-content .grid { grid-template-columns: 1fr !important; }
+.aion-phone-content input,
+.aion-phone-content textarea,
+.aion-phone-content select,
+.aion-phone-content button { min-height: 2.75rem; font-size: 16px; }
+.aion-phone-content .card,
+.aion-phone-content form { max-width: 100%; }
+.aion-phone-content .home-mobile .tap-grid { grid-template-columns: 1fr 1fr; }
+.aion-phone-content nav.tabs,
+.aion-phone-content .tabs {
   display: flex !important;
   flex-direction: row !important;
-  flex-wrap: nowrap !important;
-  grid-template-columns: none !important;
-  width: 100%;
-  height: auto !important;
-  max-height: none !important;
-  overflow-x: auto !important;
-  overflow-y: hidden !important;
+  overflow-x: auto;
   gap: .35rem;
-  padding: .15rem 0 .5rem;
-  background: transparent !important;
-  border: 0 !important;
-  box-shadow: none !important;
+  height: auto !important;
 }
-body.aion-phone nav.tabs button,
-body.aion-phone .tabs button {
-  flex: 0 0 auto !important;
-  min-width: auto !important;
-  min-height: 2.5rem !important;
-  max-height: 3rem !important;
-  writing-mode: horizontal-tb !important;
-  white-space: nowrap !important;
-  padding: .45rem .85rem !important;
-  font-size: .85rem !important;
+.aion-phone-content nav.tabs button,
+.aion-phone-content .tabs button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  min-height: 2.5rem;
 }
 
-body.aion-phone .grid { grid-template-columns: 1fr !important; }
-body.aion-phone input,
-body.aion-phone textarea,
-body.aion-phone select,
-body.aion-phone button { min-height: 2.75rem; font-size: 16px; }
-body.aion-phone .facts { grid-template-columns: 1fr 1fr; }
-body.aion-phone .tl { grid-template-columns: 5.2rem 1fr; }
-body.aion-phone .home-mobile .tap-grid { grid-template-columns: 1fr 1fr; }
-body.aion-phone .card,
-body.aion-phone form { max-width: 100%; }
-body.aion-phone h1 { font-size: 1.25rem; }
-body.aion-phone #toast { bottom: calc(5rem + env(safe-area-inset-bottom, 0px)); }
+/* Chat phone compose */
+.aion-chat-phone .aion-chat-compose { margin-bottom: .75rem; }
+.aion-chat-phone .aion-chat-reply pre { white-space: pre-wrap; margin: 0; max-height: 45vh; overflow: auto; }
+
+/* Debug outlines (?mobiledebug=1) */
+.aion-mobile-debug-banner {
+  background: #1d4ed8;
+  color: #fff;
+  padding: .55rem .7rem;
+  margin: 0 0 .75rem;
+  border-radius: .5rem;
+  font-size: .78rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.aion-dbg-content { outline: 3px solid #22c55e; outline-offset: -2px; }
+.aion-dbg-panel { outline: 3px dashed #eab308; outline-offset: -2px; }
+.aion-dbg-form { outline: 3px dotted #ef4444; outline-offset: -2px; }
 
 /* More sheet */
-body.aion-phone .aion-more-sheet:not([hidden]) {
+.aion-more-sheet:not([hidden]) {
   display: block;
   position: fixed;
   inset: 0;
@@ -311,17 +283,15 @@ body.aion-phone .aion-more-sheet:not([hidden]) {
 .aion-more-panel h2 { margin: 0 0 .25rem; }
 .aion-more-panel button { width: 100%; justify-self: stretch; text-align: center; }
 
-/* Media-query fallback when body class not yet applied */
-@media (max-width: 700px) {
-  .aion-layout, .layout { display: block; grid-template-columns: none; padding: .65rem .75rem 5rem; }
-  .aion-header-sub, header small { display: none; }
-  .grid { grid-template-columns: 1fr; }
-  input, textarea, select, button { min-height: 2.75rem; font-size: 16px; }
-}
+body.aion-phone-mode #toast { bottom: calc(5rem + env(safe-area-inset-bottom, 0px)); }
+
+/* Desktop: hide phone shell */
+.aion-phone-shell[hidden],
+.aion-desktop-shell[hidden] { display: none !important; }
 
 label.inline { display: inline-flex; align-items: center; gap: .3rem; margin: 0 .7rem .3rem 0; font-size: .85rem; color: var(--muted); }
 label.inline input { width: auto; }
 @media (max-width: 860px) {
-  .aion-area-nav:not(.aion-mobile-nav) { display: flex; flex-wrap: wrap; gap: .35rem; position: static; }
-  .aion-area-nav:not(.aion-mobile-nav) button { flex: 1 1 auto; min-width: 5.5rem; text-align: center; padding: .55rem .5rem; }
+  .aion-area-nav { display: flex; flex-wrap: wrap; gap: .35rem; position: static; }
+  .aion-area-nav button { flex: 1 1 auto; min-width: 5.5rem; text-align: center; padding: .55rem .5rem; }
 }

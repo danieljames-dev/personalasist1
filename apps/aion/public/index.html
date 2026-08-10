@@ -11,37 +11,50 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="AION">
-  <!-- ASSET_V is rewritten by the server for cache-busting on real devices -->
+  <!-- ASSET_V rewritten by server for cache-busting -->
   <link rel="stylesheet" href="/styles.css?v=ASSET_V">
   <script type="module" src="/app.js?v=ASSET_V"></script>
 </head>
 <body>
-  <header class="aion-header" id="aionHeader">
-    <div class="aion-brand">
-      <span class="mark">A</span>
-      <strong>AION</strong>
-      <small class="aion-header-sub">Local Command Center</small>
-    </div>
-    <div class="switch aion-workspace-switch" id="workspaceSwitch" role="group" aria-label="Workspace"></div>
-    <span class="local aion-conn-badge" id="providerBadge">● Local</span>
-  </header>
-
-  <div class="layout aion-layout" id="aionLayout">
-    <!-- Desktop side nav / phone bottom bar — unique class, never generic "nav" alone -->
-    <nav class="aion-area-nav" id="aionAreaNav" aria-label="AION areas"></nav>
-    <main class="aion-main" id="aionMain">
-      <section id="onboarding" hidden>
-        <h1>Welcome to AION</h1>
-        <p>AION runs on this computer. Private state lives under the ignored <code>private/aion</code> directory and is excluded from source backups.</p>
-        <p>The offline deterministic provider is selected by default and performs no network call. A remote provider can receive only the conversation and context you explicitly enable, and you must accept the disclosure first. Credentials are read from an environment variable you name; AION never stores the value.</p>
-        <p>Imports always begin with a dry run over a path you choose, originals are never modified, and consequential agent actions require an exact one-shot approval. The model can only propose.</p>
-        <button data-action="onboarding">Start with the offline provider</button>
-      </section>
-      <section id="content" class="aion-content" aria-live="polite"></section>
-    </main>
+  <!-- ===== PHONE SHELL (simple vertical: header / content / bottom nav) ===== -->
+  <div id="aionPhoneShell" class="aion-phone-shell" hidden>
+    <header class="aion-phone-header">
+      <div class="aion-brand">
+        <span class="mark">A</span>
+        <strong>AION</strong>
+      </div>
+      <div class="switch aion-workspace-switch" id="phoneWorkspaceSwitch" role="group" aria-label="Workspace"></div>
+      <span class="aion-conn-badge" id="phoneConnBadge">● Private</span>
+    </header>
+    <main id="aionPhoneContent" class="aion-phone-content" aria-live="polite"></main>
+    <nav id="aionPhoneNav" class="aion-mobile-nav" aria-label="Phone primary navigation"></nav>
   </div>
 
-  <!-- Phone "More" sheet -->
+  <!-- ===== DESKTOP SHELL (unchanged structure) ===== -->
+  <div id="aionDesktopShell" class="aion-desktop-shell">
+    <header class="aion-header" id="aionHeader">
+      <div class="aion-brand">
+        <span class="mark">A</span>
+        <strong>AION</strong>
+        <small class="aion-header-sub">Local Command Center</small>
+      </div>
+      <div class="switch aion-workspace-switch" id="workspaceSwitch" role="group" aria-label="Workspace"></div>
+      <span class="local aion-conn-badge" id="providerBadge">● Local</span>
+    </header>
+    <div class="layout aion-layout" id="aionLayout">
+      <nav class="aion-area-nav" id="aionAreaNav" aria-label="AION areas"></nav>
+      <main class="aion-main" id="aionMain">
+        <section id="onboarding" hidden>
+          <h1>Welcome to AION</h1>
+          <p>AION runs on this computer. Private state lives under the ignored <code>private/aion</code> directory and is excluded from source backups.</p>
+          <p>The offline deterministic provider is selected by default and performs no network call.</p>
+          <button data-action="onboarding">Start with the offline provider</button>
+        </section>
+        <section id="content" class="aion-content" aria-live="polite"></section>
+      </main>
+    </div>
+  </div>
+
   <div id="aionMoreSheet" class="aion-more-sheet" hidden>
     <div class="aion-more-backdrop" data-do="more-close"></div>
     <div class="aion-more-panel" role="dialog" aria-label="More">
