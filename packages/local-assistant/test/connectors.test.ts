@@ -69,6 +69,25 @@ test("metricool status requires token", () => {
   assert.equal(s.code, "METRICOOL_OWNER_TOKEN_REQUIRED");
 });
 
+test("metricool is READY when token env is set", () => {
+  const s = metricoolConnectorStatus(defaultMetricoolConfig(), {
+    AION_METRICOOL_USER_TOKEN: "test-token-not-real",
+  });
+  assert.equal(s.code, "READY");
+  assert.equal(s.authorized, true);
+});
+
+test("gmail is READY when client secret and refresh token env present", () => {
+  const cfg = defaultGmailConfig();
+  cfg.clientId = "test-client.apps.googleusercontent.com";
+  const s = gmailConnectorStatus(cfg, {
+    AION_GMAIL_CLIENT_SECRET: "secret",
+    AION_GMAIL_REFRESH_TOKEN: "refresh",
+  });
+  assert.equal(s.code, "READY");
+  assert.ok(!s.capabilities.includes("send"));
+});
+
 test("metricool fixtures: active brands and quiet brands", () => {
   const brands = [
     { id: "b1", name: "Alpha", networks: ["instagram"], active: true },

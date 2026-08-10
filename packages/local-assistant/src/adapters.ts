@@ -93,6 +93,12 @@ export function createEmptyStateV1(): AssistantStateV1 {
       activeWorkspace: DEFAULT_WORKSPACE, workspaceLabels: { personal: "Personal", work: "Work" },
       remoteAccess: { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 },
       privacy: { includeMemoryByDefault: true, retainActivityDays: 365 },
+      connectors: {
+        gmailClientId: "",
+        gmailRedirectUri: "http://127.0.0.1:31415/oauth/gmail/callback",
+        metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+        metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+      },
     },
     conversations: [], memories: [], tasks: [], routines: [], plans: [], actions: [], approvals: [], activity: [], imports: [], verifications: [], migrations: [],
     workspaces: builtInWorkspaces(GENESIS), relationships: [], opportunities: [], researchJobs: [],
@@ -337,6 +343,29 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   }
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
+  {
+    const defaults = {
+      gmailClientId: "",
+      gmailRedirectUri: "http://127.0.0.1:31415/oauth/gmail/callback",
+      metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+      metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+    };
+    const raw = clone.settings.connectors && typeof clone.settings.connectors === "object"
+      ? clone.settings.connectors
+      : defaults;
+    clone.settings.connectors = {
+      gmailClientId: typeof raw.gmailClientId === "string" ? raw.gmailClientId : "",
+      gmailRedirectUri: typeof raw.gmailRedirectUri === "string" && raw.gmailRedirectUri
+        ? raw.gmailRedirectUri
+        : defaults.gmailRedirectUri,
+      metricoolTokenEnvVar: typeof raw.metricoolTokenEnvVar === "string" && raw.metricoolTokenEnvVar
+        ? raw.metricoolTokenEnvVar
+        : defaults.metricoolTokenEnvVar,
+      metricoolBlogIdEnvVar: typeof raw.metricoolBlogIdEnvVar === "string" && raw.metricoolBlogIdEnvVar
+        ? raw.metricoolBlogIdEnvVar
+        : defaults.metricoolBlogIdEnvVar,
+    };
+  }
   return clone;
 }
 

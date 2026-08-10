@@ -48,6 +48,15 @@ const SEARCH_VARIABLE = "AION_SEARCH_BASE_URL";
 function privacySafe(text) {
   return String(text ?? "").replace(/\\\\[^\s"'<>|]+/gu, "[local path]").replace(/[A-Za-z]:[\\/][^\s"'<>|]*/gu, "[local path]");
 }
+/** Escape HTML for OAuth callback pages (never inject raw OAuth payloads). */
+function escHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 function absolute(value, label) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be an explicit path.`);
   const normalized = resolve(value);
@@ -800,7 +809,8 @@ export async function createAionServer(options = {}) {
       }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
-      case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
+      case "connector.metricool.status": return service.metricoolReadinessStatus();
+      case "connector.settings.update": return service.updateConnectorSettings(input.connectors ?? input);
       case "connector.image.status": return imageUnderstandingStatus();
       case "metricool.fixture.seed": return service.seedMetricoolFixtures(input);
       case "metricool.insight": return service.metricoolInsight(input.now);
@@ -919,6 +929,70 @@ export async function createAionServer(options = {}) {
           for (;;) { const step = await turn.next(); if (step.done) { send("done", step.value); break; } send("chunk", { text: step.value }); }
         } catch (error) { send("error", { error: privacySafe(error instanceof Error ? error.message : "Chat request failed.") }); }
         return response.end();
+      }
+      // Gmail OAuth callback (loopback only). Exchanges code → refresh token once; never stores secrets in state.
+      if (request.method === "GET" && url.pathname === "/oauth/gmail/callback") {
+        if (!loopback) return json(response, 403, { error: "OAuth callback is only accepted on this computer." });
+        const code = url.searchParams.get("code") || "";
+        const err = url.searchParams.get("error") || "";
+        const gmailStatus = await service.gmailConsentStatus();
+        const clientId = gmailStatus.clientIdConfigured
+          ? (await service.snapshot()).settings.connectors?.gmailClientId || process.env.AION_GMAIL_CLIENT_ID || ""
+          : process.env.AION_GMAIL_CLIENT_ID || "";
+        const clientSecret = process.env.AION_GMAIL_CLIENT_SECRET || "";
+        const redirectUri = gmailStatus.redirectUri || "http://127.0.0.1:31415/oauth/gmail/callback";
+        let bodyHtml = "";
+        if (err) {
+          bodyHtml = `<h1>Gmail consent cancelled</h1><p class="meta">${escHtml(err)}</p><p><a href="/">Back to AION</a></p>`;
+        } else if (!code) {
+          bodyHtml = `<h1>Gmail OAuth callback</h1><p class="meta">No authorization code present. Start consent from Settings → Connectors.</p><p><a href="/">Back to AION</a></p>`;
+        } else if (!clientId || !clientSecret) {
+          bodyHtml = `<h1>Gmail almost ready</h1><p>Authorization code received, but client id/secret env is incomplete.</p>
+<p class="meta">Set <code>AION_GMAIL_CLIENT_ID</code> and <code>AION_GMAIL_CLIENT_SECRET</code>, save the client id in Settings if needed, then re-run consent.</p>
+<p class="meta">Code was not exchanged and will not be reused. <a href="/">Back to AION</a></p>`;
+        } else {
+          try {
+            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                code,
+                client_id: clientId,
+                client_secret: clientSecret,
+                redirect_uri: redirectUri,
+                grant_type: "authorization_code",
+              }).toString(),
+            });
+            const tokenJson = await tokenRes.json();
+            if (!tokenRes.ok) {
+              bodyHtml = `<h1>Gmail token exchange failed</h1><p class="meta">${escHtml(tokenJson.error || tokenRes.status)} ${escHtml(tokenJson.error_description || "")}</p><p><a href="/">Back to AION</a></p>`;
+            } else {
+              const refresh = tokenJson.refresh_token || "";
+              const envName = gmailStatus.refreshTokenEnvVar || "AION_GMAIL_REFRESH_TOKEN";
+              bodyHtml = refresh
+                ? `<h1>Gmail consent complete</h1>
+<p>Copy this refresh token into a user environment variable named <code>${escHtml(envName)}</code>, then restart AION. AION does not store the token in assistant state.</p>
+<pre style="white-space:pre-wrap;word-break:break-all;background:#111;color:#eee;padding:12px;border-radius:8px">${escHtml(refresh)}</pre>
+<p class="meta">SEND remains disabled until a separate Owner SEND policy is enabled. <a href="/">Back to AION</a></p>`
+                : `<h1>Gmail consent partial</h1>
+<p>Google did not return a refresh token (often when consent was already granted). Revoke app access in Google Account → Security, then re-run consent with prompt=consent.</p>
+<p class="meta">Access token received but not stored. <a href="/">Back to AION</a></p>`;
+            }
+          } catch (error) {
+            bodyHtml = `<h1>Gmail token exchange error</h1><p class="meta">${escHtml(error?.message || error)}</p><p><a href="/">Back to AION</a></p>`;
+          }
+        }
+        const html = `<!doctype html><html><head><meta charset="utf-8"><title>AION Gmail OAuth</title>
+<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.45}.meta{color:#555}code{background:#f2f2f2;padding:.1em .3em;border-radius:4px}</style></head>
+<body>${bodyHtml}</body></html>`;
+        response.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+          "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+        });
+        return response.end(html);
       }
       if (request.method !== "POST" || url.pathname !== "/api/action") return json(response, 404, { error: "Not found." });
       const command = await body(request);

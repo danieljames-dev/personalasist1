@@ -654,6 +654,42 @@ ${devices.some((device) => !device.revokedAt) ? `<div class="actions"><button da
 <p class="meta">Revoking a device ends its access only. No conversation, memory, task, relationship, or Career record is changed.</p></div>`;
 }
 
+function connectorsCard() {
+  const c = model.state?.settings?.connectors || {
+    gmailClientId: "",
+    gmailRedirectUri: "http://127.0.0.1:31415/oauth/gmail/callback",
+    metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+    metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+  };
+  const g = model._gmailStatus;
+  const m = model._metricoolStatus;
+  return `<div class="card"><h2>Connectors (OAuth / token ready)</h2>
+<p class="meta">Secrets never enter chat or assistant state. Store only public client ids here; tokens stay in environment variables.</p>
+<form data-form="connector-settings">
+<label>Gmail OAuth client id (public)<input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com"></label>
+<label>Gmail redirect URI (loopback)<input name="gmailRedirectUri" maxlength="500" value="${esc(c.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback")}"></label>
+<label>Metricool token env var name<input name="metricoolTokenEnvVar" maxlength="128" value="${esc(c.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN")}"></label>
+<label>Metricool blog id env var name<input name="metricoolBlogIdEnvVar" maxlength="128" value="${esc(c.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID")}"></label>
+<button>Save connector settings</button>
+</form>
+<div class="actions">
+<button data-do="connector-gmail-status" type="button">Check Gmail readiness</button>
+<button data-do="connector-metricool-status" type="button">Check Metricool readiness</button>
+</div>
+${g ? `<article class="card"><h3>Gmail · ${esc(g.code)}</h3>
+<p class="meta">${esc(g.message || "")}</p>
+${g.ownerAction ? `<p class="meta"><b>Owner action:</b> ${esc(g.ownerAction)}</p>` : ""}
+<p class="meta">clientId=${g.clientIdConfigured ? "yes" : "no"} · secret env <code>${esc(g.clientSecretEnvVar || "AION_GMAIL_CLIENT_SECRET")}</code> · refresh env <code>${esc(g.refreshTokenEnvVar || "AION_GMAIL_REFRESH_TOKEN")}</code></p>
+${g.authUrl ? `<p class="meta"><a href="${esc(g.authUrl)}" target="_blank" rel="noopener">Open Google consent</a> (loopback callback after consent)</p>` : ""}
+</article>` : `<p class="meta">Gmail status not loaded yet — press Check Gmail readiness.</p>`}
+${m ? `<article class="card"><h3>Metricool · ${esc(m.code)}</h3>
+<p class="meta">${esc(m.message || "")}</p>
+${m.ownerAction ? `<p class="meta"><b>Owner action:</b> ${esc(m.ownerAction)}</p>` : ""}
+<p class="meta">token env <code>${esc(m.userTokenEnvVar || "")}</code> · blog env <code>${esc(m.blogIdEnvVar || "")}</code> · fixtures brands=${m.fixtureBrands ?? 0} posts=${m.fixturePosts ?? 0}</p>
+</article>` : `<p class="meta">Metricool status not loaded yet — press Check Metricool readiness.</p>`}
+</div>`;
+}
+
 function importDashboardHtml(s) {
   const dash = s._importDashboard;
   if (!dash) {
@@ -700,6 +736,7 @@ function settingsArea(s) {
 <form data-form="backup"><label>Destination file inside the export root<input name="destination" required maxlength="4096"></label><label>Passphrase (12+ characters)<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Create and verify backup</button></form>
 <form data-form="backup-verify"><label>Verify an existing backup<input name="destination" required maxlength="4096"></label><label>Passphrase<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Verify restore</button></form></div>
 ${model.viewer === "console" ? privateAccessCard() : ""}
+${model.viewer === "console" ? connectorsCard() : ""}
 <div class="card"><h2>Developer-agent bridges</h2><p>AION checks only documented install locations; it never searches your computer. An installed executable is not the same thing as a usable account, so the two are reported separately. Checking account health is a local sign-in question and never a paid call, and AION never reads or stores the account address or organisation.</p>
 ${bridges.length ? `<ul>${bridges.map((b) => `<li><b>${esc(b.displayName)}</b>${b.selected ? " · selected" : ""} — ${b.available ? "installed" : "unavailable"}${b.executable ? ` (<code>${esc(b.executable)}</code>${b.version ? `, ${esc(b.version)}` : ""})` : ""}<br><span class="meta">${esc(b.detail)}</span><br><span class="meta">Account: ${esc(b.account)} — ${esc(b.accountDetail)}</span>
 ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <code>${esc(c.executable)} ${esc(c.args.join(" "))}</code> — your instruction is written to standard input, never to this list.</span>`).join("")}</li>`).join("")}</ul>` : `<p class="empty">No developer-agent bridge was found.</p>`}
@@ -845,6 +882,18 @@ document.addEventListener("click", async (event) => {
       await api("settings.update", { settings: { remoteAccess: { enabled: true, bindAddress: ip, sessionDays: model.remoteAccess?.sessionDays ?? 30 } } });
       toast(`Bind address set to ${ip}. Restart AION for the private listener to bind.`);
       await load();
+      return;
+    }
+    if (verb === "connector-gmail-status") {
+      model._gmailStatus = await api("connector.gmail.status", {});
+      toast(`Gmail: ${model._gmailStatus.code}`);
+      render();
+      return;
+    }
+    if (verb === "connector-metricool-status") {
+      model._metricoolStatus = await api("connector.metricool.status", {});
+      toast(`Metricool: ${model._metricoolStatus.code}`);
+      render();
       return;
     }
     await load();
@@ -1061,6 +1110,19 @@ document.addEventListener("submit", async (event) => {
     if (kind === "remote-access") {
       await api("settings.update", { settings: { remoteAccess: { enabled: form.enabled.checked, bindAddress: d.bindAddress, sessionDays: Number(d.sessionDays) } } });
       toast(form.enabled.checked ? "Private phone access is on. Restart AION for the bind address to take effect." : "Private phone access is off and every device session has ended.");
+    }
+    if (kind === "connector-settings") {
+      const connectors = await api("connector.settings.update", {
+        gmailClientId: d.gmailClientId || "",
+        gmailRedirectUri: d.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback",
+        metricoolTokenEnvVar: d.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN",
+        metricoolBlogIdEnvVar: d.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID",
+      });
+      toast("Connector settings saved (no secrets stored).");
+      model._gmailStatus = await api("connector.gmail.status", {});
+      model._metricoolStatus = await api("connector.metricool.status", {});
+      await load();
+      return;
     }
     if (kind === "pair-code") { pairingCode = await api("device.pair.code", { label: d.label }); toast("Code created. It works once and expires in ten minutes."); }
     if (kind === "verify") { await api("action.propose", { capabilityId: "aion.verify.run.v1", input: { operationId: d.operationId } }); toast("Verification proposed. Approve it in Approvals, then execute — AION runs it, not a model."); }

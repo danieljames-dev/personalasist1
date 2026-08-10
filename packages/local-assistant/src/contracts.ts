@@ -533,6 +533,18 @@ export interface RemoteAccessSettingsV1 {
   sessionDays: number;
 }
 
+/** Non-secret connector config (client ids only). Secrets live in env vars. */
+export interface ConnectorSettingsV1 {
+  /** Google OAuth client id (public). Secret stays in AION_GMAIL_CLIENT_SECRET env. */
+  gmailClientId: string;
+  /** Registered redirect URI for Gmail OAuth (loopback preferred). */
+  gmailRedirectUri: string;
+  /** Env var name for Metricool user token — never the token value. */
+  metricoolTokenEnvVar: string;
+  /** Env var name for Metricool blog/brand id. */
+  metricoolBlogIdEnvVar: string;
+}
+
 export interface SettingsV1 {
   providerId: string;
   model: string;
@@ -552,6 +564,8 @@ export interface SettingsV1 {
   /** Owner-supplied display names, e.g. a workplace label. Never inferred, never invented. */
   workspaceLabels: Record<WorkspaceIdV1, string>;
   privacy: { includeMemoryByDefault: boolean; retainActivityDays: number };
+  /** Connector readiness (public client ids / env var *names* only). */
+  connectors: ConnectorSettingsV1;
 }
 
 export interface AssistantStateV1 {

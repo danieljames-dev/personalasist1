@@ -396,6 +396,23 @@ export class AionAssistantV1 {
       if (target.archived) throw new Error("That workspace is archived. Reactivate it before switching to it.");
       next.remoteAccess = { ...state.settings.remoteAccess, ...(input.remoteAccess ?? {}) };
       next.remoteAccess.bindAddress = validateBindAddress(next.remoteAccess.bindAddress);
+      {
+        const base = {
+          gmailClientId: "",
+          gmailRedirectUri: "http://127.0.0.1:31415/oauth/gmail/callback",
+          metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+          metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+        };
+        next.connectors = {
+          ...base,
+          ...state.settings.connectors,
+          ...(input.connectors ?? {}),
+        };
+        if (typeof next.connectors.gmailClientId !== "string") next.connectors.gmailClientId = "";
+        if (typeof next.connectors.gmailRedirectUri !== "string" || !next.connectors.gmailRedirectUri.trim()) {
+          next.connectors.gmailRedirectUri = base.gmailRedirectUri;
+        }
+      }
       if (typeof next.remoteAccess.enabled !== "boolean") throw new Error("Private phone access must be on or off.");
       if (!Number.isSafeInteger(next.remoteAccess.sessionDays) || next.remoteAccess.sessionDays < 1 || next.remoteAccess.sessionDays > 365) throw new Error("Session length must be between 1 and 365 days.");
       // Turning private access off ends every phone session immediately rather than merely
@@ -3072,14 +3089,25 @@ export class AionAssistantV1 {
     };
   }
 
-  gmailConsentStatus() {
+  async gmailConsentStatus() {
+    const state = await this.snapshot();
     const cfg = defaultGmailConfig();
-    // Allow client id from env without embedding secrets
-    const clientId = process.env.AION_GMAIL_CLIENT_ID?.trim() || cfg.clientId;
-    const config = { ...cfg, clientId };
+    const connectors = state.settings.connectors ?? {
+      gmailClientId: "",
+      gmailRedirectUri: cfg.redirectUri,
+      metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+      metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+    };
+    // Prefer Owner-stored client id, then env (never secrets in state)
+    const clientId =
+      connectors.gmailClientId?.trim() ||
+      process.env.AION_GMAIL_CLIENT_ID?.trim() ||
+      cfg.clientId;
+    const redirectUri = connectors.gmailRedirectUri?.trim() || cfg.redirectUri;
+    const config = { ...cfg, clientId, redirectUri };
     const status = gmailConnectorStatus(config);
     let authUrl: string | null = null;
-    if (status.code === "GMAIL_OWNER_CONSENT_REQUIRED" && clientId) {
+    if ((status.code === "GMAIL_OWNER_CONSENT_REQUIRED" || status.code === "NOT_CONFIGURED") && clientId) {
       try {
         authUrl = buildGmailAuthUrl(config, `aion-${Date.now().toString(36)}`);
       } catch {
@@ -3089,13 +3117,83 @@ export class AionAssistantV1 {
     return {
       ...status,
       authUrl,
+      clientIdConfigured: Boolean(clientId),
+      clientSecretEnvVar: config.clientSecretEnvVar,
+      refreshTokenEnvVar: config.refreshTokenEnvVar,
+      redirectUri,
       ownerAction:
         status.code === "GMAIL_OWNER_CONSENT_REQUIRED"
-          ? "Complete Google OAuth consent in a browser, store the refresh token in AION_GMAIL_REFRESH_TOKEN, and set AION_GMAIL_CLIENT_SECRET. SEND remains disabled."
+          ? `Open the auth URL, complete Google consent, then store the refresh token in ${config.refreshTokenEnvVar} and the client secret in ${config.clientSecretEnvVar}. SEND remains disabled.`
           : status.code === "NOT_CONFIGURED"
-            ? "Set AION_GMAIL_CLIENT_ID (and secret env var name) to prepare OAuth. Do not paste passwords into chat."
+            ? "Save a Google OAuth client id in Settings → Connectors (or set AION_GMAIL_CLIENT_ID). Do not paste passwords into chat."
+            : status.code === "READY"
+              ? "Gmail is OAuth-ready. Live read/search/draft available under policy; SEND still Owner-gated separately."
+              : null,
+    };
+  }
+
+  async metricoolReadinessStatus() {
+    const state = await this.snapshot();
+    const connectors = state.settings.connectors ?? {
+      gmailClientId: "",
+      gmailRedirectUri: "http://127.0.0.1:31415/oauth/gmail/callback",
+      metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+      metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+    };
+    const config = {
+      ...defaultMetricoolConfig(),
+      userTokenEnvVar: connectors.metricoolTokenEnvVar || defaultMetricoolConfig().userTokenEnvVar,
+      blogIdEnvVar: connectors.metricoolBlogIdEnvVar || defaultMetricoolConfig().blogIdEnvVar,
+    };
+    const status = metricoolConnectorStatus(config);
+    return {
+      ...status,
+      userTokenEnvVar: config.userTokenEnvVar,
+      blogIdEnvVar: config.blogIdEnvVar,
+      baseUrl: config.baseUrl,
+      fixtureBrands: this.metricoolBrands.length,
+      fixturePosts: this.metricoolPosts.length,
+      ownerAction:
+        status.code === "METRICOOL_OWNER_TOKEN_REQUIRED"
+          ? `Create an official Metricool API user token and set environment variable ${config.userTokenEnvVar} (optional blog id: ${config.blogIdEnvVar}). Never paste the password into chat.`
+          : status.code === "READY"
+            ? "Metricool token present — live brand/post sync can run under connector policy."
             : null,
     };
+  }
+
+  async updateConnectorSettings(input: Record<string, unknown> = {}): Promise<SettingsV1["connectors"]> {
+    return this.mutate((draft) => {
+      if (!draft.settings.connectors) {
+        draft.settings.connectors = {
+          gmailClientId: "",
+          gmailRedirectUri: "http://127.0.0.1:31415/oauth/gmail/callback",
+          metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
+          metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
+        };
+      }
+      const c = draft.settings.connectors;
+      if (typeof input.gmailClientId === "string") c.gmailClientId = input.gmailClientId.trim().slice(0, 200);
+      if (typeof input.gmailRedirectUri === "string" && input.gmailRedirectUri.trim()) {
+        const uri = input.gmailRedirectUri.trim().slice(0, 500);
+        if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(uri)) {
+          throw new Error("Gmail redirect URI must be a loopback http(s) URL.");
+        }
+        c.gmailRedirectUri = uri;
+      }
+      if (typeof input.metricoolTokenEnvVar === "string" && input.metricoolTokenEnvVar.trim()) {
+        const name = input.metricoolTokenEnvVar.trim();
+        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) throw new Error("Metricool token env var name is invalid.");
+        c.metricoolTokenEnvVar = name;
+      }
+      if (typeof input.metricoolBlogIdEnvVar === "string" && input.metricoolBlogIdEnvVar.trim()) {
+        const name = input.metricoolBlogIdEnvVar.trim();
+        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) throw new Error("Metricool blog id env var name is invalid.");
+        c.metricoolBlogIdEnvVar = name;
+      }
+      this.activity(draft, "settings", "connectors.update", "Connector settings updated (no secrets stored).", null);
+      return structuredClone(c);
+    });
   }
 
   searchGmailFixtures(query: string) {
