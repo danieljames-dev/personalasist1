@@ -1,5 +1,5 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Sales", "People", "Chat", "Brain", "Studio", "Research", "Projects", "Learning", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"];
+const areas = ["Sales", "People", "Chat", "Knowledge", "Brain", "Studio", "Research", "Projects", "Learning", "Tasks", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Settings"];
 let model = null;
 let area = "Chat";
 let streaming = "";
@@ -82,9 +82,9 @@ async function sendStreamed(id, content) {
 }
 
 function chatArea(s) {
-  return `<h1>Assistant</h1><p class="lead">R7 production assistant: CRM lookup, notes, follow-ups, account summaries, email drafts (never auto-sent), plus offline chat. All CRM answers use stored Work-workspace records.</p>
+  return `<h1>Assistant</h1><p class="lead">Daily CRM assistant: natural language works. CRM lookup, notes, follow-ups, account summaries, email drafts (never auto-sent), plus offline chat. Answers ground in stored Work-workspace records.</p>
 <div class="card"><h2>Ask AION</h2>
-<p class="meta">Examples: What do we know about ACME? · Create a customer for … · Save this note to … · Draft a follow-up email · What needs my attention?</p>
+<p class="meta">Try: What should I follow up on? · Who do I need to call? · What should I do today? · What do we know about Jane? · What's going on with ACME? · Draft John an email · Research ACME · Remember this</p>
 <form data-form="assistant-prompt"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What do we know about …"></textarea></label><button>Ask</button></form>
 ${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>assistant · ${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p>
 ${(window.__aionLastAssistant.sources || []).length ? `<p class="meta">Sources: ${window.__aionLastAssistant.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}</div>` : ""}
@@ -506,8 +506,51 @@ function careerArea() {
 <div class="card"><h2>Output</h2><pre id="careerOutput">Run a command to see its output. Local paths are removed before display.</pre></div>`;
 }
 
+function knowledgeArea(s) {
+  const docs = (s.crmDocuments ?? []).filter((d) => d.workspace === s.settings.activeWorkspace).slice(0, 40);
+  const people = (s.relationships ?? []).filter((r) => r.workspace === s.settings.activeWorkspace && !r.archived);
+  const brands = (s.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived);
+  return `<h1>Knowledge / Import</h1>
+<p class="lead">Upload real files into AION. Originals are preserved under private intake with filename, type, size, tags, timestamp, and optional CRM association. AION never scans your drives automatically.</p>
+<div class="card"><h2>Upload file</h2>
+<form data-form="document-upload" id="docUploadForm">
+<label>File<input type="file" name="file" required accept=".txt,.csv,.json,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp,.log,text/*,image/*"></label>
+<label>Associate with customer/contact (optional)
+<select name="relationshipId"><option value="">— none yet —</option>
+${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organisation ? ` (${esc(p.organisation)})` : ""}</option>`).join("")}
+</select></label>
+<label>Tags (comma separated)<input name="tags" maxlength="500" placeholder="quote, resume, brand-doc"></label>
+<label>Summary (optional)<input name="summary" maxlength="2000" placeholder="Short note about this file"></label>
+<button>Upload into AION</button>
+</form>
+<p class="meta">Supported now: TXT, CSV, JSON, MD, PNG/JPG/WEBP (bytes stored; image understanding expands later), PDF/DOCX (bytes stored; text extraction best-effort). Max ~6 MB per file.</p>
+</div>
+<div class="card"><h2>Business / brand workspaces</h2>
+<form data-form="workspace-brand">
+<label>Brand / business name<input name="label" required maxlength="80" placeholder="e.g. Northline Media"></label>
+<label>Positioning<textarea name="positioning" maxlength="2000" placeholder="Owner-supplied only — never invented"></textarea></label>
+<label>Target audience<textarea name="audience" maxlength="2000"></textarea></label>
+<label>Channels (comma separated)<input name="channels" maxlength="500" placeholder="instagram, linkedin, website"></label>
+<button>Create brand workspace</button>
+</form>
+${brands.length ? brands.map((w) => `<p class="meta"><b>${esc(w.brand?.name || w.label)}</b> — ${esc(w.purpose || "business")}${w.brand?.channels?.length ? ` · ${esc(w.brand.channels.join(", "))}` : ""}</p>`).join("") : `<p class="meta">No brand workspaces yet. Create one only with facts you supply.</p>`}
+</div>
+<div class="card"><h2>Recent documents (${docs.length})</h2>
+${docs.length ? docs.map((d) => `<article class="card"><h3>${esc(d.filename)}</h3>
+<p class="meta">${esc(d.kind)} · ${esc(d.mimeType)} · ${d.byteLength} bytes · ${esc(d.createdAt)}${d.tags?.length ? ` · tags: ${esc(d.tags.join(", "))}` : ""}</p>
+<p>${esc(d.summary || "(no summary)")}</p>
+${d.extractedText ? `<details><summary>Extracted text</summary><pre class="meta">${esc(d.extractedText.slice(0, 2000))}</pre></details>` : ""}
+<p class="meta">Stored: <code>${esc(d.storedPath)}</code>${d.relationshipId ? ` · CRM link ${esc(d.relationshipId.slice(0, 8))}…` : " · unassociated"}</p>
+</article>`).join("") : `<p class="empty">No documents yet. Upload a file above.</p>`}
+</div>
+<div class="card"><h2>Conversation archive import</h2>
+<p class="meta">Legacy chat archive import remains on the Imports screen (dry-run first, explicit path only).</p>
+<button data-area="Imports" type="button">Open Imports</button>
+</div>`;
+}
+
 function importsArea(s) {
-  return `<h1>Import Center</h1><p class="lead">Explicit path, exact SHA-256 digests, duplicate detection, and preserved provenance. A dry run always comes first, originals are never modified, and AION never scans your drives.</p>
+  return `<h1>Import Center</h1><p class="lead">Explicit path, exact SHA-256 digests, duplicate detection, and preserved provenance. A dry run always comes first, originals are never modified, and AION never scans your drives. For CRM/file intake use <b>Knowledge</b>.</p>
 <form data-form="import"><label>Platform<select name="platform"><option>chatgpt</option><option>claude</option><option>grok</option><option>career</option></select></label>
 <label>Approved root (absolute)<input name="root" required maxlength="4096"></label><label>Selected file or folder inside that root<input name="path" required maxlength="4096"></label><button>Dry run</button></form>
 ${cards(s.imports, (r) => `<article class="card"><h2>${esc(r.platform)} · ${esc(r.state)}</h2>
@@ -587,6 +630,7 @@ function page() {
   if (area === "Memory") return memoryArea(s);
   if (area === "Planner") return plannerArea(s);
   if (area === "Sales") return salesArea(s);
+  if (area === "Knowledge") return knowledgeArea(s);
   if (area === "Approvals") return approvalsArea(s);
   if (area === "Verify") return verifyArea(s);
   if (area === "Activity") return activityArea(s);
@@ -697,6 +741,55 @@ document.addEventListener("submit", async (event) => {
       form.reset();
       await load();
       render();
+      return;
+    }
+    if (kind === "document-upload") {
+      const fileInput = form.querySelector('input[type="file"]');
+      const file = fileInput?.files?.[0];
+      if (!file) throw new Error("Choose a file to upload.");
+      if (file.size > 6 * 1024 * 1024) throw new Error("File exceeds 6 MB limit.");
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      const contentBase64 = btoa(binary);
+      const tags = String(d.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
+      const doc = await api("crm.document.upload", {
+        filename: file.name,
+        mimeType: file.type || "application/octet-stream",
+        contentBase64,
+        relationshipId: d.relationshipId || null,
+        tags,
+        summary: d.summary || undefined,
+      });
+      toast(`Stored ${doc.filename} (${doc.byteLength} bytes)${doc.tags?.length ? ` · ${doc.tags.join(", ")}` : ""}`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "workspace-brand") {
+      const channels = String(d.channels || "").split(",").map((x) => x.trim()).filter(Boolean);
+      await api("workspace.create", {
+        workspace: {
+          label: d.label,
+          kind: "business",
+          purpose: "Owner-created brand/business workspace",
+          brand: {
+            name: d.label,
+            positioning: d.positioning || "",
+            audience: d.audience || "",
+            channels,
+            valueProposition: "",
+            notes: "",
+          },
+        },
+      });
+      toast(`Brand workspace created: ${d.label}`);
+      form.reset();
+      await load();
       return;
     }
     if (kind === "message") { form.reset(); await sendStreamed(d.id, d.content); return; }

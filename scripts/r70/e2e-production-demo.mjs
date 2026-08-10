@@ -98,7 +98,20 @@ async function main() {
   const q4 = await api("assistant.prompt", { text: "Draft Jane a follow-up email." });
   rec("R7_EMAIL_DRAFT", /DRAFT|Subject|Jane|follow/i.test(q4.reply || ""), (q4.reply || "").slice(0, 160));
 
-  // Document intake (metadata path)
+  // Checkpoint A: natural-language breadth (must not dead-end)
+  const nlCases = [
+    ["What should I follow up on?", /follow|overdue|attention|Jane|ACME/i],
+    ["Who do I need to call?", /follow|call|attention|Jane|ACME|overdue/i],
+    ["What should I do today?", /follow|attention|task|overdue|Jane|ACME/i],
+    ["What's going on with ACME?", /ACME|Jane|delivery|Product/i],
+    ["How is the weather on Mars?", /ground|stored|follow|You can also ask/i],
+  ];
+  for (const [prompt, re] of nlCases) {
+    const ans = await api("assistant.prompt", { text: prompt });
+    rec(`NL:${prompt.slice(0, 28)}`, re.test(ans.reply || ""), `${ans.intent}: ${(ans.reply || "").slice(0, 120)}`);
+  }
+
+  // Document intake (metadata path) with tags retention
   const doc = await api("crm.document.attach", {
     relationshipId: company.id,
     filename: "acme-r7-quote.txt",
@@ -108,8 +121,32 @@ async function main() {
     summary: "Synthetic quote attachment for ACME R7",
     extractedText: "Product Alpha delivery estimate 6 weeks.",
     kind: "document",
+    tags: ["synthetic", "r7-e2e", "quote"],
   });
-  rec("DOCUMENT_INTAKE", !!doc.id, doc.filename);
+  rec("DOCUMENT_INTAKE", !!doc.id && Array.isArray(doc.tags) && doc.tags.includes("synthetic"), `${doc.filename} tags=${JSON.stringify(doc.tags)}`);
+
+  // Real byte upload path
+  const sample = "ACME R7 real upload: Product Alpha lead time 6 weeks. Contact Jane.";
+  const up = await api("crm.document.upload", {
+    relationshipId: company.id,
+    filename: "acme-r7-upload.txt",
+    mimeType: "text/plain",
+    contentBase64: Buffer.from(sample, "utf8").toString("base64"),
+    tags: ["synthetic", "upload-e2e"],
+    summary: "E2E real byte upload",
+  });
+  rec(
+    "DOCUMENT_UPLOAD_BYTES",
+    !!up.id && up.byteLength === sample.length && /Product Alpha/i.test(up.extractedText || ""),
+    `${up.filename} bytes=${up.byteLength} path=${(up.storedPath || "").slice(0, 60)}`,
+  );
+
+  // relationship.update routing
+  const renamed = await api("relationship.update", {
+    id: contact.id,
+    change: { role: "Buyer (E2E)" },
+  });
+  rec("RELATIONSHIP_UPDATE", /Buyer \(E2E\)/i.test(renamed.role || ""), renamed.role || "");
 
   // Capture pre-restart digests of reply content existence via state
   const mid = await state();

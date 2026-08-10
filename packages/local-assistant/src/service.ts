@@ -2529,6 +2529,11 @@ export class AionAssistantV1 {
           : mimeType.startsWith("image/")
             ? "image"
             : "document";
+      const tags = Array.isArray(input.tags)
+        ? input.tags.map((t) => String(t).slice(0, 80)).filter(Boolean).slice(0, 32)
+        : typeof input.tags === "string"
+          ? input.tags.split(",").map((t) => t.trim()).filter(Boolean).slice(0, 32)
+          : [];
       const doc = newCrmDocument({
         id: this.ports.ids.next("crm-doc"),
         workspace: workspace.id,
@@ -2542,6 +2547,7 @@ export class AionAssistantV1 {
         extractedText: String(input.extractedText ?? "").slice(0, 100_000),
         now,
       });
+      doc.tags = tags;
       if (!Array.isArray(draft.crmDocuments)) draft.crmDocuments = [];
       draft.crmDocuments.unshift(doc);
       if (draft.crmDocuments.length > 500) draft.crmDocuments.length = 500;
@@ -2813,14 +2819,50 @@ export class AionAssistantV1 {
       };
     }
 
-    // Fallback: chat path (conversation may be created by caller)
+    // GENERAL_ASSISTANT_QUERY and unmatched phrasing: useful daily briefing + capability guide.
+    // Prefer a grounded work queue over a dead-end. Never invent CRM facts.
+    const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
+    const openTasks = (state.tasks ?? []).filter(
+      (t) => t.workspace === workspaceId && t.state !== "completed" && t.state !== "cancelled",
+    );
+    const brands = (state.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived && w.brand?.name);
+    const docs = (state.crmDocuments ?? []).filter((d) => d.workspace === workspaceId).slice(0, 5);
+    const lines = [
+      "Here is what I can ground in stored AION data right now:",
+      "",
+      queue.text,
+      "",
+      openTasks.length
+        ? `Open tasks (${openTasks.length}): ${openTasks.slice(0, 8).map((t) => t.title).join("; ")}`
+        : "Open tasks: none recorded.",
+      brands.length
+        ? `Active brand workspaces: ${brands.map((b) => b.brand?.name || b.label).join(", ")}`
+        : "Brand registry: no business brand workspaces yet (create one under Knowledge / Import or workspaces).",
+      docs.length
+        ? `Recent documents: ${docs.map((d) => d.filename).join(", ")}`
+        : "Documents: none in this workspace yet — use Knowledge / Import or attach under Sales.",
+      "",
+      "You can also ask naturally, for example:",
+      "· What should I follow up on? / Who do I need to call?",
+      "· What do we know about <name>? / What's going on with <company>?",
+      "· Draft <name> an email · Research <company>",
+      "· Save this note to <name> · Create a customer for <name>",
+      "",
+      route.intent === "GENERAL_ASSISTANT_QUERY" || route.confidence === "low"
+        ? `I did not match a precise CRM command for: “${text.slice(0, 200)}”. The briefing above is from stored facts only (not model invention).`
+        : "",
+    ].filter(Boolean);
     return {
       intent: "GENERAL_ASSISTANT_QUERY",
-      confidence: route.confidence,
-      reply: "I could not match a CRM intent or stored record. Try naming a company/contact, or use Sales screens for structured entry.",
-      sources,
-      action: "crm.no_match",
-      data: { route },
+      confidence: route.confidence === "high" ? "medium" : route.confidence,
+      reply: lines.join("\n"),
+      sources: queue.overdue.slice(0, 5).map((o) => ({
+        type: "follow-up",
+        id: o.customer,
+        label: `${o.customer}: ${o.reason}`,
+      })),
+      action: "assistant.briefing",
+      data: { route, queue, openTaskCount: openTasks.length },
     };
   }
 }

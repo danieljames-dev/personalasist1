@@ -40,56 +40,168 @@ export interface CrmIntentRouteV1 {
   why: string;
 }
 
-const RULES: Array<{ intent: CrmAssistantIntentV1; triggers: string[]; confidence: "high" | "medium" }> = [
-  // More specific email/draft phrases must win over generic "follow-up" queue phrases.
-  { intent: "DRAFT_EMAIL", triggers: ["draft a follow-up email", "draft an email", "write an email", "email draft", "draft jane", "draft john", "follow-up email", "follow up email"], confidence: "high" },
-  { intent: "WORK_QUEUE", triggers: ["what needs my attention", "what should i work on today", "what should i do next", "today's priorities", "work queue"], confidence: "high" },
-  { intent: "LIST_FOLLOWUPS", triggers: ["needs follow-up", "overdue follow", "open follow-ups", "follow-ups due", "who needs follow"], confidence: "high" },
-  { intent: "RESEARCH_COMPANY", triggers: ["research ", "look up company", "prepare me for a sales call", "public research"], confidence: "high" },
-  { intent: "ADD_NOTE", triggers: ["save this note", "remember that", "add a note", "note that"], confidence: "high" },
-  { intent: "ADD_INTERACTION", triggers: ["log a call", "record interaction", "they said", "told me"], confidence: "medium" },
-  { intent: "ADD_TASK", triggers: ["follow up tomorrow", "add a task", "remind me to", "create a task"], confidence: "high" },
-  { intent: "CRM_CREATE", triggers: ["create a customer", "add a customer", "new customer", "create a company", "add a contact", "new contact"], confidence: "high" },
-  { intent: "CRM_UPDATE", triggers: ["update ", "change title", "correct ", "that's wrong", "merge these"], confidence: "medium" },
-  { intent: "INGEST_DOCUMENT", triggers: ["add this document", "ingest document", "attach document", "save this quote"], confidence: "high" },
-  { intent: "INGEST_IMAGE", triggers: ["add this image", "screenshot", "photo of", "ingest image"], confidence: "high" },
-  { intent: "ACCOUNT_SUMMARY", triggers: ["what do we know about", "account summary", "show me all interactions", "contact history", "timeline", "concerned about", "what is jane", "what did john", "what did jane"], confidence: "high" },
-  { intent: "CRM_LOOKUP", triggers: ["find customers", "who talked about", "interested in", "customers in", "show customers"], confidence: "medium" },
+/** Alias patterns: any match (word-boundary-ish includes) routes to intent. Order = priority. */
+const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidence: "high" | "medium" }> = [
+  {
+    intent: "DRAFT_EMAIL",
+    confidence: "high",
+    patterns: [
+      /\bdraft\b.*\b(email|e-mail|message|follow[- ]?up)\b/i,
+      /\bwrite\b.*\b(email|e-mail|message)\b/i,
+      /\bemail\b.*\bdraft\b/i,
+      /\bdraft\b.+\b(john|jane|him|her|them)\b/i,
+    ],
+  },
+  {
+    intent: "WORK_QUEUE",
+    confidence: "high",
+    patterns: [
+      /\bwhat (should|do) i (do|work on|focus on)\b/i,
+      /\bwhat needs (my )?attention\b/i,
+      /\bwhat can you handle\b/i,
+      /\btoday'?s (priorities|work|plan)\b/i,
+      /\bwork queue\b/i,
+      /\bprepare me for (today|my day|my calls)\b/i,
+      /\bhelp me prepare for today\b/i,
+    ],
+  },
+  {
+    intent: "LIST_FOLLOWUPS",
+    confidence: "high",
+    patterns: [
+      /\bwhat should i follow up on\b/i,
+      /\bshow (my )?(follow[- ]?ups|open tasks)\b/i,
+      /\bwhat are my open tasks\b/i,
+      /\b(open|overdue|due) (follow[- ]?ups|tasks)\b/i,
+      /\bwho (do i need to call|needs (follow|attention|a call))\b/i,
+      /\bwho needs follow[- ]?up\b/i,
+      /\bfollow[- ]?ups?\b/i,
+      /\bwho needs attention\b/i,
+    ],
+  },
+  {
+    intent: "RESEARCH_COMPANY",
+    confidence: "high",
+    patterns: [/\bresearch\b/i, /\blook up (the )?company\b/i, /\bprepare me for a (sales )?call\b/i, /\bpublic research\b/i],
+  },
+  {
+    intent: "ADD_NOTE",
+    confidence: "high",
+    patterns: [/\bsave (this )?note\b/i, /\bremember that\b/i, /\badd a note\b/i, /\bnote that\b/i, /\bremember this\b/i],
+  },
+  {
+    intent: "ADD_INTERACTION",
+    confidence: "medium",
+    patterns: [/\blog a call\b/i, /\brecord (an )?interaction\b/i, /\bthey said\b/i, /\btold me\b/i],
+  },
+  {
+    intent: "ADD_TASK",
+    confidence: "high",
+    patterns: [
+      /\bfollow up tomorrow\b/i,
+      /\badd a task\b/i,
+      /\bremind me to\b/i,
+      /\bcreate a task\b/i,
+      /\bschedule a (task|follow[- ]?up)\b/i,
+    ],
+  },
+  {
+    intent: "CRM_CREATE",
+    confidence: "high",
+    patterns: [
+      /\bcreate a (customer|company|contact|prospect)\b/i,
+      /\badd a (customer|company|contact|prospect)\b/i,
+      /\bnew (customer|company|contact|prospect)\b/i,
+    ],
+  },
+  {
+    intent: "CRM_UPDATE",
+    confidence: "medium",
+    patterns: [/\bupdate\b/i, /\bchange title\b/i, /\bcorrect\b/i, /\bthat'?s wrong\b/i, /\bmerge (these|contacts)\b/i],
+  },
+  {
+    intent: "INGEST_DOCUMENT",
+    confidence: "high",
+    patterns: [/\badd this document\b/i, /\bingest document\b/i, /\battach document\b/i, /\bsave this quote\b/i, /\bupload\b/i],
+  },
+  {
+    intent: "INGEST_IMAGE",
+    confidence: "high",
+    patterns: [/\badd this image\b/i, /\bscreenshot\b/i, /\bphoto of\b/i, /\bingest image\b/i, /\blook at this (picture|photo|image)\b/i],
+  },
+  {
+    intent: "ACCOUNT_SUMMARY",
+    confidence: "high",
+    patterns: [
+      /\bwhat do we know about\b/i,
+      /\bwhat'?s going on with\b/i,
+      /\bwhat'?s happening with\b/i,
+      /\baccount summary\b/i,
+      /\bshow me all interactions\b/i,
+      /\bcontact history\b/i,
+      /\btimeline\b/i,
+      /\bconcerned about\b/i,
+      /\bwhat (is|did) (jane|john|they|he|she)\b/i,
+      /\bwhat did .+ (say|tell)\b/i,
+    ],
+  },
+  {
+    intent: "CRM_LOOKUP",
+    confidence: "medium",
+    patterns: [
+      /\bfind customers?\b/i,
+      /\bwho talked about\b/i,
+      /\binterested in\b/i,
+      /\bcustomers? in\b/i,
+      /\bshow customers?\b/i,
+      /\bfind that customer\b/i,
+      /\bwhat do we know about them\b/i,
+    ],
+  },
 ];
 
 export function routeCrmAssistantIntent(text: string): CrmIntentRouteV1 {
-  const lower = String(text ?? "").trim().toLowerCase();
+  const raw = String(text ?? "").trim();
+  const lower = raw.toLowerCase();
   if (!lower) {
     return { intent: "GENERAL_ASSISTANT_QUERY", confidence: "low", subject: "", note: "", why: "empty" };
   }
   for (const rule of RULES) {
-    const hit = rule.triggers.find((t) => lower.includes(t));
+    const hit = rule.patterns.find((re) => re.test(raw));
     if (!hit) continue;
-    const subject = extractSubject(text, hit);
+    const subject = extractSubjectLoose(raw, hit);
     return {
       intent: rule.intent,
       confidence: rule.confidence,
       subject,
-      note: text.trim(),
-      why: `matched "${hit}"`,
+      note: raw,
+      why: `matched /${hit.source}/`,
     };
+  }
+  // Soft queue if message is only about follow-ups/tasks without "draft"
+  if (/\b(follow[- ]?up|task|todo|to-do)\b/i.test(raw) && !/\bdraft|write|email\b/i.test(raw)) {
+    return { intent: "LIST_FOLLOWUPS", confidence: "medium", subject: "", note: raw, why: "soft follow-up/task language" };
   }
   return {
     intent: "GENERAL_ASSISTANT_QUERY",
     confidence: "low",
     subject: "",
-    note: text.trim(),
+    note: raw,
     why: "no CRM trigger",
   };
 }
 
-function extractSubject(text: string, trigger: string): string {
-  const idx = text.toLowerCase().indexOf(trigger.toLowerCase());
-  if (idx < 0) return "";
-  let rest = text.slice(idx + trigger.length).trim();
+function extractSubjectLoose(text: string, pattern: RegExp): string {
+  const m = pattern.exec(text);
+  if (!m) return "";
+  let rest = text.slice(m.index + m[0].length).trim();
   rest = rest.replace(/^[:\-\s]+/, "").replace(/[?.!].*$/, "").trim();
-  // Strip leading "about " / "for "
-  rest = rest.replace(/^(about|for|to)\s+/i, "").trim();
+  rest = rest.replace(/^(about|for|to|with|on)\s+/i, "").trim();
+  // If pattern consumed the entity (e.g. "what is jane"), pull name tokens from full text.
+  if (!rest) {
+    const named = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g);
+    if (named?.length) return named[named.length - 1]!.slice(0, 200);
+  }
   return rest.slice(0, 200);
 }
 

@@ -1,8 +1,9 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import {
   AionAssistantV1, AuthorityGatedStateRepositoryV1, BoundaryModelProviderV1, DeterministicModelProviderV1, DeveloperAgentCapabilityV1,
@@ -29,7 +30,8 @@ const ASSETS = new Map([
 ]);
 /** The shell an unpaired device may fetch so it can render the pairing screen. Never any data. */
 const PUBLIC_ASSETS = new Set(["/", "/app.js", "/styles.css", "/sw.js", "/manifest.webmanifest", "/icon.svg"]);
-const MAX_BODY = 1024 * 1024;
+const MAX_BODY = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
 const ASSET_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const CAREER_COMMANDS = new Set(["init", "ingest", "profile", "job:import", "match", "draft", "export", "demo"]);
 const runFile = promisify(execFile);
@@ -295,6 +297,7 @@ export async function createAionServer(options = {}) {
       case "workspace.product": return service.addBrandProduct(input.id, input.product ?? {});
       // The general Relationship Core. Scoped to the active workspace, whichever one that is.
       case "relationship.create": return service.createRelationship(input.relationship ?? {});
+      case "relationship.update": return service.updateCustomer(input.id, input.change ?? input.relationship ?? {});
       case "relationship.find": return { relationships: await service.findRelationships(input.query ?? { kind: "all" }) };
       // Product Studio. Nothing here invents market evidence, and every claim carries its class.
       case "opportunity.create": return service.createOpportunity(input.opportunity ?? {});
@@ -427,6 +430,84 @@ export async function createAionServer(options = {}) {
         return result;
       }
       case "crm.document.attach": return service.attachCrmDocument(input.document ?? input);
+      case "crm.document.upload": {
+        // Real byte intake: base64 content written under private/aion/intake (never Git).
+        const filename = basename(String(input.filename ?? "upload.bin")).replace(/[^\w.\- ()[\]]+/g, "_").slice(0, 180) || "upload.bin";
+        const mimeType = String(input.mimeType ?? "application/octet-stream").slice(0, 120);
+        const b64 = String(input.contentBase64 ?? "");
+        if (!b64) throw new Error("contentBase64 is required for document upload.");
+        let bytes;
+        try { bytes = Buffer.from(b64, "base64"); } catch { throw new Error("contentBase64 is invalid."); }
+        if (!bytes.length) throw new Error("Upload is empty.");
+        if (bytes.length > MAX_UPLOAD_BYTES) throw new Error(`Upload exceeds ${MAX_UPLOAD_BYTES} bytes.`);
+        const intakeRoot = join(dataRoot, "intake");
+        const id = randomBytes(8).toString("hex");
+        const destDir = join(intakeRoot, id);
+        mkdirSync(destDir, { recursive: true });
+        const storedPath = join(destDir, filename);
+        writeFileSync(storedPath, bytes, { flag: "wx" });
+        let extractedText = "";
+        const lower = filename.toLowerCase();
+        if (mimeType.startsWith("text/") || /\.(txt|csv|json|md|log)$/i.test(lower)) {
+          extractedText = bytes.toString("utf8").slice(0, 100_000);
+        } else if (/\.pdf$/i.test(lower) || mimeType === "application/pdf") {
+          // Best-effort: pull printable Latin text streams from PDF bytes (no paid OCR).
+          const raw = bytes.toString("latin1");
+          const chunks = [];
+          const re = /\((?:\\.|[^\\)]){2,400}\)/g;
+          let m;
+          while ((m = re.exec(raw)) && chunks.length < 400) {
+            const inner = m[0].slice(1, -1).replace(/\\n/g, "\n").replace(/\\(.)/g, "$1");
+            if (/[A-Za-z]{3,}/.test(inner)) chunks.push(inner);
+          }
+          // Also harvest BT/ET text blocks roughly
+          const bt = raw.match(/BT[\s\S]{0,2000}?ET/g) || [];
+          for (const block of bt.slice(0, 40)) {
+            const parts = block.match(/\((?:\\.|[^\\)])+\)/g) || [];
+            for (const p of parts) {
+              const t = p.slice(1, -1).replace(/\\n/g, "\n").replace(/\\(.)/g, "$1");
+              if (/[A-Za-z]{2,}/.test(t)) chunks.push(t);
+            }
+          }
+          extractedText = chunks.join(" ").replace(/\s+/g, " ").trim().slice(0, 100_000);
+        } else if (/\.docx$/i.test(lower) || mimeType.includes("wordprocessingml")) {
+          // DOCX is a ZIP: extract word/document.xml text nodes without full unzip deps.
+          try {
+            const asLatin = bytes.toString("latin1");
+            if (asLatin.startsWith("PK")) {
+              const xmlStart = asLatin.indexOf("word/document.xml");
+              // Prefer shared strings of <w:t> if present anywhere in package bytes
+              const texts = [];
+              const tre = /<w:t[^>]*>([^<]{1,500})<\/w:t>/g;
+              let tm;
+              while ((tm = tre.exec(asLatin)) && texts.length < 2000) texts.push(tm[1]);
+              extractedText = texts.join(" ").replace(/\s+/g, " ").trim().slice(0, 100_000);
+              if (!extractedText && xmlStart >= 0) {
+                extractedText = `[docx stored; structured XML extract partial — file ${filename}]`;
+              }
+            }
+          } catch {
+            extractedText = "";
+          }
+        }
+        const kind = mimeType.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(lower)
+          ? "image"
+          : /\.(csv|xlsx?)$/i.test(lower)
+            ? "spreadsheet"
+            : "document";
+        const summary = String(input.summary ?? (extractedText ? extractedText.slice(0, 400) : `Uploaded ${filename}`)).slice(0, 4000);
+        return service.attachCrmDocument({
+          relationshipId: input.relationshipId ?? null,
+          filename,
+          storedPath,
+          mimeType,
+          byteLength: bytes.length,
+          kind,
+          summary,
+          extractedText: String(input.extractedText ?? extractedText).slice(0, 100_000),
+          tags: input.tags,
+        });
+      }
       case "crm.document.list": return { documents: await service.listCrmDocuments(input.relationshipId) };
       case "crm.email.draft": return service.createEmailDraft(input.draft ?? input);
       case "crm.email.list": return { drafts: await service.listEmailDrafts(input.relationshipId) };

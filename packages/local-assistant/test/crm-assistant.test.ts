@@ -78,6 +78,35 @@ test("routes email draft intent", () => {
   assert.equal(r.intent, "DRAFT_EMAIL");
 });
 
+const naturalPhrases: Array<{ text: string; intent: string }> = [
+  { text: "What should I follow up on?", intent: "LIST_FOLLOWUPS" },
+  { text: "Show my follow-ups.", intent: "LIST_FOLLOWUPS" },
+  { text: "What are my open tasks?", intent: "LIST_FOLLOWUPS" },
+  { text: "What should I do today?", intent: "WORK_QUEUE" },
+  { text: "Who do I need to call?", intent: "LIST_FOLLOWUPS" },
+  { text: "Who needs attention?", intent: "LIST_FOLLOWUPS" },
+  { text: "What's going on with ABC?", intent: "ACCOUNT_SUMMARY" },
+  { text: "What do we know about John?", intent: "ACCOUNT_SUMMARY" },
+  { text: "What should I work on?", intent: "WORK_QUEUE" },
+  { text: "Research ABC.", intent: "RESEARCH_COMPANY" },
+  { text: "Draft John an email.", intent: "DRAFT_EMAIL" },
+  { text: "Help me prepare for today.", intent: "WORK_QUEUE" },
+  { text: "Look at this picture.", intent: "INGEST_IMAGE" },
+  { text: "Remember this.", intent: "ADD_NOTE" },
+];
+
+for (const { text, intent } of naturalPhrases) {
+  test(`natural phrase → ${intent}: ${text}`, () => {
+    const r = routeCrmAssistantIntent(text);
+    assert.equal(r.intent, intent, `got ${r.intent} (${r.why}) for: ${text}`);
+  });
+}
+
+test("unknown phrasing falls to general assistant (not crash)", () => {
+  const r = routeCrmAssistantIntent("How is the weather on Mars?");
+  assert.equal(r.intent, "GENERAL_ASSISTANT_QUERY");
+});
+
 test("account summary uses stored objections", () => {
   const s = buildAccountSummary(sampleCustomer());
   assert.match(s.text, /delivery time/);
