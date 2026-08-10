@@ -87,24 +87,27 @@ async function sendStreamed(id, content) {
 
 function homeArea(s) {
   const brief = window.__aionLastBriefing;
+  const ws = s.settings?.activeWorkspace ?? "personal";
+  const wsLabel = s.settings?.workspaceLabels?.[ws] ?? ws;
   return `<div class="sales home-mobile"><h1>Home</h1>
-<p class="lead">Daily briefing and the actions you use from your phone.</p>
+<p class="lead">Phone-friendly AION. Workspace: <b>${esc(wsLabel)}</b>. Use the buttons below or the bottom tabs.</p>
 <div class="tap-grid quick">
 <button type="button" data-do="briefing-refresh">What needs me?</button>
 <button type="button" data-area-jump="Chat">Chat</button>
 <button type="button" data-area-jump="Customers">Customers</button>
 <button type="button" data-area-jump="Tasks">Tasks</button>
-<button type="button" data-area-jump="Intake">Intake</button>
+<button type="button" data-area-jump="Intake">Upload photo</button>
 <button type="button" data-area-jump="Knowledge">Knowledge</button>
 </div>
 <div class="card next"><h2>Briefing</h2>
-${brief ? `<pre class="msg assistant">${esc(brief)}</pre>` : `<p class="meta">Tap <b>What needs me?</b> for today's queue from stored facts only.</p>`}
+${brief ? `<pre class="msg assistant" style="white-space:pre-wrap;max-height:40vh;overflow:auto">${esc(brief)}</pre>` : `<p class="meta">Tap <b>What needs me?</b> for today's queue from stored facts only.</p>`}
 <form data-form="assistant-prompt" class="quick-form"><label>Ask AION<textarea name="text" required maxlength="10000" placeholder="What should I follow up on?" rows="3"></textarea></label>
 <div class="actions"><button type="submit">Ask</button>
-<button type="button" data-do="voice-prompt" title="Browser speech if available">🎤 Voice</button></div></form>
+<button type="button" data-do="voice-prompt" title="Browser speech if available">Voice</button></div></form>
 ${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p></div>` : ""}
 </div>
-<p class="meta"><a href="/phone">Open phone photo/file intake →</a></p></div>`;
+<p class="meta"><a href="/phone">Full-screen photo / file intake</a></p>
+<p class="hint">Tip: switch to <b>Work</b> at the top for customers/sales. Bottom tabs: Home · Chat · Customers · Tasks · Intake · Knowledge · Mobile.</p></div>`;
 }
 
 function chatArea(s) {
@@ -246,7 +249,13 @@ ${c.appointments.length ? `<div class="card"><h2>Appointments</h2>${c.appointmen
 
 function salesArea(s) {
   if (s.settings.activeWorkspace !== "work") {
-    return `<h1>Sales</h1><div class="empty">Sales lives in the Work workspace. Switch to ${esc(s.settings.workspaceLabels?.work ?? "Work")} at the top of the screen.</div>`;
+    return `<h1>Customers / Sales</h1>
+<div class="empty">Customers and sales live in the <b>Work</b> workspace.</div>
+<div class="actions" style="margin-top:1rem">
+<button type="button" data-workspace="work">Switch to Work</button>
+<button type="button" data-area-jump="Home">Back to Home</button>
+</div>
+<p class="meta">Then use Customers for prospects, follow-ups, and notes.</p>`;
   }
   if (openCustomer) return customerDetail(s);
   const label = s.settings.workspaceLabels?.work ?? "Work";
@@ -882,10 +891,19 @@ function render() {
   }
   const phoneUi = isPhoneViewport() || isDeviceViewer();
   const navAreas = phoneUi ? mobileAreas : areas;
-  const nav = document.querySelector("nav");
-  nav.classList.toggle("mobile-nav", phoneUi);
-  nav.innerHTML = navAreas.map((x) => `<button class="${x === area ? "active" : ""}" data-area="${x}">${x === "Home" ? "Home" : x}</button>`).join("");
+  // Only the main area switcher — never Sales <nav class="tabs">.
+  const nav = document.querySelector('nav[aria-label="AION areas"]') || document.querySelector(".layout > nav");
+  if (nav) {
+    nav.classList.toggle("mobile-nav", phoneUi);
+    nav.setAttribute("aria-label", "AION areas");
+    nav.innerHTML = navAreas.map((x) => `<button type="button" class="${x === area ? "active" : ""}" data-area="${x}">${x}</button>`).join("");
+  }
   document.body.classList.toggle("phone-shell", phoneUi);
+  // Phones land on Home (usable briefing/chat), not a broken full Sales canvas.
+  if (phoneUi && !window.__aionPhoneAreaInit) {
+    window.__aionPhoneAreaInit = true;
+    if (!["Home", "Chat", "Customers", "Tasks", "Intake", "Knowledge", "Mobile"].includes(area)) area = "Home";
+  }
   document.querySelector("#onboarding").hidden = model.state.onboardingComplete;
   document.querySelector("#content").hidden = !model.state.onboardingComplete;
   document.querySelector("#content").innerHTML = page();

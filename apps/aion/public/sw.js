@@ -10,7 +10,7 @@
  * If the network is unavailable the API simply fails. Showing stale customer information would be
  * worse than showing none.
  */
-const SHELL = "aion-shell-v2-mobile";
+const SHELL = "aion-shell-v3-mobile-nav-fix";
 const SHELL_FILES = ["/", "/phone", "/phone.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

@@ -96,28 +96,71 @@ details summary { cursor: pointer; color: var(--muted); font-size: .86rem; }
 .tl-when { color: var(--muted); }
 .quick-form { background: var(--panel-2); }
 
-/* Phone layout. 16px inputs stop iOS zooming on focus; 2.75rem is a comfortable thumb target. */
+/* Phone layout. 16px inputs stop iOS zooming on focus; 2.75rem is a comfortable thumb target.
+   IMPORTANT: bottom bar styles apply ONLY to the main area nav (.mobile-nav / aria-label).
+   Sales uses <nav class="tabs"> for TODAY/FOLLOW-UPS — that must stay a horizontal strip. */
 @media (max-width: 700px) {
-  .layout { padding: .7rem .7rem 5.5rem; gap: .7rem; }
+  .layout { padding: .7rem .7rem 5.5rem; gap: .7rem; display: block; }
   header { padding: .55rem .8rem; flex-wrap: wrap; }
   header small { display: none; }
-  nav.mobile-nav, body.phone-shell nav {
+  .switch { order: 3; width: 100%; justify-content: stretch; }
+  .switch button { flex: 1; }
+
+  /* Main AION area switcher — bottom tab bar only */
+  nav.mobile-nav,
+  nav[aria-label="AION areas"].mobile-nav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-    display: grid; grid-template-columns: repeat(7, 1fr); gap: 0;
+    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0;
+    height: auto; max-height: none; width: 100%;
     padding: .35rem .25rem calc(.35rem + env(safe-area-inset-bottom, 0));
     background: var(--panel); border-top: 1px solid var(--line);
     overflow: hidden;
   }
-  nav.mobile-nav button, body.phone-shell nav button {
-    white-space: nowrap; font-size: .68rem; padding: .45rem .15rem;
-    min-height: 2.9rem; text-align: center; border-radius: .4rem;
-    justify-self: stretch;
+  nav.mobile-nav button,
+  nav[aria-label="AION areas"].mobile-nav button {
+    white-space: nowrap; font-size: .65rem; padding: .4rem .1rem;
+    min-height: 2.85rem; max-height: 3.2rem; height: auto;
+    text-align: center; border-radius: .4rem; justify-self: stretch;
+    writing-mode: horizontal-tb; flex: none; min-width: 0;
   }
+
+  /* Sales / section tab strips — horizontal scroll, NEVER full-height columns */
+  nav.tabs,
+  .tabs {
+    position: static !important;
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    grid-template-columns: none !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    gap: .35rem;
+    height: auto !important;
+    max-height: none !important;
+    width: 100%;
+    padding: .2rem 0 .45rem;
+    background: transparent;
+    border: 0;
+  }
+  nav.tabs button,
+  .tabs button {
+    flex: 0 0 auto !important;
+    min-width: auto !important;
+    min-height: 2.5rem !important;
+    max-height: 3rem !important;
+    height: auto !important;
+    writing-mode: horizontal-tb !important;
+    white-space: nowrap !important;
+    padding: .45rem .85rem !important;
+    font-size: .85rem !important;
+  }
+
   .grid { grid-template-columns: 1fr; }
   input, textarea, select, button { min-height: 2.75rem; font-size: 16px; }
   .facts { grid-template-columns: 1fr 1fr; }
   .tl { grid-template-columns: 5.2rem 1fr; }
   .home-mobile .tap-grid { grid-template-columns: 1fr 1fr; }
+  main { min-width: 0; width: 100%; }
   #toast { bottom: 5.25rem; }
 }
 
@@ -125,6 +168,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: .86rem; }
 label.inline { display: inline-flex; align-items: center; gap: .3rem; margin: 0 .7rem .3rem 0; font-size: .85rem; color: var(--muted); }
 label.inline input { width: auto; }
 @media (max-width: 860px) {
-  nav { gap: .35rem; }
-  nav button { flex: 1 1 auto; min-width: 6.5rem; text-align: center; padding: .55rem .5rem; }
+  /* Only the main area list — not .tabs */
+  nav[aria-label="AION areas"]:not(.mobile-nav) { gap: .35rem; display: flex; flex-wrap: wrap; }
+  nav[aria-label="AION areas"]:not(.mobile-nav) button { flex: 1 1 auto; min-width: 6.5rem; text-align: center; padding: .55rem .5rem; }
 }
