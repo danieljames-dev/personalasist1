@@ -11,13 +11,21 @@ import type { IsoTimestamp, OpaqueId, ProvenanceV1 } from "./contracts.js";
 export type OwnerKnowledgeCategoryV1 =
   | "profile"
   | "employment"
+  | "employer"
+  | "role"
   | "skill"
   | "experience"
+  | "accomplishment"
   | "project"
   | "preference"
   | "goal"
   | "product-service"
   | "sales-experience"
+  | "business"
+  | "brand"
+  | "customer"
+  | "prospect"
+  | "collaborator"
   | "writing"
   | "business-role"
   | "process"
@@ -26,13 +34,21 @@ export type OwnerKnowledgeCategoryV1 =
 export const OWNER_KNOWLEDGE_CATEGORIES: readonly OwnerKnowledgeCategoryV1[] = [
   "profile",
   "employment",
+  "employer",
+  "role",
   "skill",
   "experience",
+  "accomplishment",
   "project",
   "preference",
   "goal",
   "product-service",
   "sales-experience",
+  "business",
+  "brand",
+  "customer",
+  "prospect",
+  "collaborator",
   "writing",
   "business-role",
   "process",

@@ -431,7 +431,14 @@ export class AionAssistantV1 {
       // A relabelled workspace keeps the registry and the label map saying the same thing.
       state.workspaces = state.workspaces.map((entry) => next.workspaceLabels[entry.id] === entry.label ? entry : { ...entry, label: next.workspaceLabels[entry.id]!, updatedAt: this.ports.clock.now() });
       if (next.developerBridgeId && !this.ports.developerAgents.get(next.developerBridgeId)) throw new Error("Selected developer-agent bridge is not registered.");
-      next.importRoots = unique(next.importRoots, "Import roots").map((root) => required(root, "Import root", 500));
+      next.importRoots = unique(next.importRoots, "Import roots").map((root) => {
+        const cleaned = required(root, "Import root", 500);
+        // Never accept whole-drive roots as approved import containers.
+        if (/^[A-Za-z]:[\\/]?$/u.test(cleaned) || cleaned === "/" || /^\\\\[^\\]+\\?$/u.test(cleaned)) {
+          throw new Error("Import roots must be a specific folder, not a whole drive.");
+        }
+        return cleaned;
+      });
       if (next.exportRoot) required(next.exportRoot, "Export root", 500);
       if (!Number.isSafeInteger(next.privacy.retainActivityDays) || next.privacy.retainActivityDays < 1 || next.privacy.retainActivityDays > 3650) throw new Error("Activity retention is invalid.");
       state.settings = next; this.activity(state, "settings", "settings.update", "Local settings updated; no credential value stored.", null); return structuredClone(next);

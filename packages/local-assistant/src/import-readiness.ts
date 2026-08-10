@@ -26,11 +26,14 @@ export interface FirstImportSourceV1 {
 export interface ImportReadinessReportV1 {
   code: "REAL_BULK_INGESTION_READY" | "REAL_BULK_INGESTION_PARTIAL" | "REAL_BULK_INGESTION_NOT_READY";
   ready: boolean;
+  /** Product gate: bulk pipeline + Knowledge Add Source UX are usable for normal Owner import. */
+  realOwnerImportReady: boolean;
   summary: string;
   capabilities: BulkCapabilityItemV1[];
   firstSources: FirstImportSourceV1[];
   blockers: string[];
   ownerActions: string[];
+  highestValueSourceTypes: string[];
   stats: {
     approvedImportRoots: number;
     documentsWithHash: number;
@@ -206,14 +209,23 @@ export function buildImportReadinessReport(input: ImportReadinessInputV1): Impor
       ? `Bulk ingestion is partial; missing: ${blockers.join(", ") || "unknown"}.`
       : "Bulk ingestion is not ready for real Owner archives.";
 
+  const highestValueSourceTypes = [
+    "Resume / career folder (employment, skills, experience)",
+    "Brand / business notes (positioning, products, collaborators)",
+    "Sales / customer notes or contacts CSV (CRM relationships)",
+  ];
+
   return {
     code,
     ready,
+    // Ready when pipeline gates pass — Owner may still need to pick their first folder.
+    realOwnerImportReady: ready,
     summary,
     capabilities,
     firstSources,
     blockers,
     ownerActions,
+    highestValueSourceTypes,
     stats: {
       approvedImportRoots: input.approvedImportRoots,
       documentsWithHash: input.documentsWithHash,

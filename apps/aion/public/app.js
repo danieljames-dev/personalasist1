@@ -577,9 +577,35 @@ function knowledgeArea(s) {
   const ok = s.ownerKnowledge ?? { profile: { displayName: "", summary: "" }, facts: [] };
   const facts = (ok.facts ?? []).filter((f) => f.enabled !== false).slice(0, 40);
   const collabs = s.brandCollaborators ?? [];
-  const cats = ["profile","employment","skill","experience","project","preference","goal","product-service","sales-experience","writing","business-role","process","other"];
+  const cats = ["profile","employment","employer","role","skill","experience","accomplishment","project","preference","goal","product-service","sales-experience","business","brand","customer","prospect","collaborator","writing","business-role","process","other"];
+  const roots = Array.isArray(s.settings?.importRoots) ? s.settings.importRoots : [];
   return `<h1>Knowledge / Import</h1>
-<p class="lead">Owner profile, brand registry, and real file intake. Originals are preserved under private intake. AION never scans your drives automatically and never invents collaborator roles.</p>
+<p class="lead">Owner profile, brand registry, and real file intake. Originals are preserved under private intake. AION never scans whole drives and never invents collaborator roles.</p>
+<div class="card next"><h2>Add source (Owner-selected once)</h2>
+<p class="meta">Highest-value first sources: <b>1) Resume / career folder</b> · <b>2) Brand / business notes</b> · <b>3) Sales / customer notes or contacts CSV</b>. Not whole drives. Not browser passwords.</p>
+<p class="meta">Approved roots (${roots.length}): ${roots.length ? roots.map((r) => `<code>${esc(r)}</code>`).join(" · ") : "none yet — add parent folder below, then import a child folder."}</p>
+<form data-form="import-root-add">
+<label>Approve import root (parent folder absolute path — not a whole drive)
+<input name="root" required maxlength="500" placeholder="C:\\Users\\…\\Documents\\Career"></label>
+<button>Save approved root</button>
+</form>
+<form data-form="folder-import">
+<label>Import folder under an approved root (recursive, bounded)
+<input name="path" required maxlength="4096" placeholder="C:\\Users\\…\\Documents\\Career\\Resume"></label>
+<label>Tags<input name="tags" maxlength="500" placeholder="resume, owner-source"></label>
+<button>Import folder now</button>
+</form>
+<form data-form="import-queue">
+<label>Or queue path for on-demand processing
+<input name="path" required maxlength="4096" placeholder="C:\\path\\owner-selected"></label>
+<label>Kind<select name="kind"><option>folder</option><option>file</option><option>csv</option><option>json</option></select></label>
+<label>Associate<select name="associateWith"><option value="none">none</option><option value="owner">owner knowledge</option><option value="business">business</option><option value="brand">brand</option><option value="customer">customer</option></select></label>
+<button>Queue source</button>
+</form>
+${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
+<p class="meta">Queue: ${(s.importSourceQueue ?? []).slice(0, 6).map((q) => `${esc(q.label)} [${esc(q.status)}]`).join("; ")}</p>` : ""}
+<p class="hint">Desktop tip: run <code>powershell -File scripts\\pick-import-folder.ps1</code> to pick a folder path, then paste it above. Browser security cannot open an arbitrary disk browser from the web UI.</p>
+</div>
 <div class="card"><h2>Owner profile</h2>
 <form data-form="owner-profile">
 <label>Display name<input name="displayName" maxlength="200" value="${esc(ok.profile?.displayName || "")}"></label>
@@ -606,27 +632,12 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 <label>Summary (optional)<input name="summary" maxlength="2000" placeholder="Short note about this file"></label>
 <button>Upload into AION</button>
 </form>
-<form data-form="folder-import">
-<label>Import folder (absolute path under approved import root or private AION data)
-<input name="path" required maxlength="4096" placeholder="C:\path\to\owner-selected-folder"></label>
-<label>Tags (comma separated)<input name="tags" maxlength="500" placeholder="resume, brand-doc"></label>
-<button>Import folder (recursive, bounded)</button>
-</form>
 <form data-form="csv-contacts">
-<label>Import contacts CSV (paste or upload later via file)
+<label>Import contacts CSV
 <textarea name="csvText" required maxlength="500000" placeholder="name,email,company&#10;Jane,jane@acme.test,Acme"></textarea></label>
 <label>Source label<input name="sourceLabel" maxlength="200" value="owner-csv"></label>
 <button>Import contacts from CSV</button>
 </form>
-<form data-form="import-queue">
-<label>Queue import source path (Owner-selected once; AION processes on demand)
-<input name="path" required maxlength="4096" placeholder="C:\path\selected-by-owner"></label>
-<label>Kind<select name="kind"><option>folder</option><option>file</option><option>csv</option><option>json</option><option>document-batch</option></select></label>
-<label>Associate<select name="associateWith"><option value="none">none</option><option>owner</option><option>business</option><option>brand</option><option>customer</option></select></label>
-<button>Add to import queue</button>
-</form>
-${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
-<p class="meta">Sources: ${(s.importSourceQueue ?? []).slice(0, 8).map((q) => `${esc(q.label)} [${esc(q.status)}] +${q.itemsImported || 0}`).join("; ")}</p>` : ""}
 <div class="card"><h2>Import dashboard</h2>
 <div class="actions">
 <button data-do="import-dashboard-refresh" type="button">Refresh import status</button>
@@ -795,9 +806,10 @@ ${m.ownerAction ? `<p class="meta"><b>Owner action:</b> ${esc(m.ownerAction)}</p
 function importReadinessHtml(s) {
   const r = s._importReadiness || model._importReadiness;
   if (!r) return "";
-  return `<article class="card"><h3>Gate · ${esc(r.code)} · ready=${r.ready ? "yes" : "no"}</h3>
+  return `<article class="card"><h3>Gate · ${esc(r.code)} · ready=${r.ready ? "yes" : "no"} · REAL_OWNER_IMPORT_READY=${r.realOwnerImportReady ? "YES" : "NO"}</h3>
 <p>${esc(r.summary)}</p>
 <p class="meta">Roots ${r.stats?.approvedImportRoots ?? 0} · hashed docs ${r.stats?.documentsWithHash ?? 0} · review ${r.stats?.reviewOpen ?? 0}</p>
+${(r.highestValueSourceTypes || []).length ? `<p class="meta"><b>First source types:</b> ${r.highestValueSourceTypes.map((t) => esc(t)).join(" · ")}</p>` : ""}
 <ul>${(r.firstSources || []).slice(0, 5).map((src) => `<li><b>${esc(src.title)}</b> — ${esc(src.how)}</li>`).join("")}</ul>
 ${(r.ownerActions || []).length ? `<p class="meta"><b>Owner:</b> ${esc(r.ownerActions.join(" · "))}</p>` : ""}
 </article>`;
@@ -1289,6 +1301,24 @@ document.addEventListener("submit", async (event) => {
         summary: d.summary || undefined,
       });
       toast(`Stored ${doc.filename} (${doc.byteLength} bytes)${doc.tags?.length ? ` · ${doc.tags.join(", ")}` : ""}`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "import-root-add") {
+      const root = String(d.root || "").trim();
+      if (!root) throw new Error("Choose an absolute folder path.");
+      // Refuse whole-drive roots (C:\ / D:\ / \\server) — Owner must pick a meaningful folder.
+      if (/^[A-Za-z]:[\\/]?$/u.test(root) || root === "/" || /^\\\\[^\\]+\\?$/u.test(root)) {
+        throw new Error("Whole drives are not allowed. Choose a specific folder (e.g. Documents\\Career), not C:\\.");
+      }
+      const current = Array.isArray(model?.state?.settings?.importRoots) ? [...model.state.settings.importRoots] : [];
+      const norm = root.replace(/\//g, "\\").replace(/[\\/]+$/u, "");
+      if (!current.some((r) => String(r).replace(/\//g, "\\").replace(/[\\/]+$/u, "").toLowerCase() === norm.toLowerCase())) {
+        current.push(norm);
+      }
+      await api("settings.update", { settings: { importRoots: current } });
+      toast(`Approved import root saved (${current.length} total). You can import a child folder next.`);
       form.reset();
       await load();
       return;

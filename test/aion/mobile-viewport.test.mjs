@@ -79,6 +79,14 @@ test("connection badge not hard-coded Local-only", () => {
   assert.doesNotMatch(js, /Local-only/);
 });
 
+test("Knowledge Add Source includes import-root-add and rejects whole drives", () => {
+  assert.match(js, /data-form="import-root-add"/);
+  assert.match(js, /kind === "import-root-add"/);
+  assert.match(js, /Whole drives are not allowed/);
+  assert.match(js, /pick-import-folder\.ps1/);
+  assert.match(js, /REAL_OWNER_IMPORT_READY/);
+});
+
 test("viewport contract for common iPhone sizes", () => {
   for (const vp of VIEWPORTS) {
     const usable = vp.h - 56 - 56 - 34;
