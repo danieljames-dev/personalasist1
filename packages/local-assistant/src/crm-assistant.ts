@@ -33,7 +33,9 @@ export type CrmAssistantIntentV1 =
   | "CORRECT"
   | "SALES_INSIGHT"
   | "JOB_WORK"
-  | "PRODUCT_BUILD";
+  | "PRODUCT_BUILD"
+  | "IMPORT_STATUS"
+  | "CONNECTOR_STATUS";
 
 export interface CrmIntentRouteV1 {
   intent: CrmAssistantIntentV1;
@@ -213,6 +215,33 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bbusiness[- ]building\b/i,
       /\bmake a plan and start\b/i,
       /\btrack the project\b/i,
+    ],
+  },
+  {
+    intent: "IMPORT_STATUS",
+    confidence: "high",
+    patterns: [
+      /\bimport readiness\b/i,
+      /\bbulk ingestion ready\b/i,
+      /\bcan (we|i) import\b/i,
+      /\bwhat (can|should) i import\b/i,
+      /\bfirst (import )?sources?\b/i,
+      /\bimport (status|dashboard|queue)\b/i,
+      /\breal bulk\b/i,
+      /\bapproved import roots?\b/i,
+    ],
+  },
+  {
+    intent: "CONNECTOR_STATUS",
+    confidence: "high",
+    patterns: [
+      /\bgmail (status|ready|oauth|consent)\b/i,
+      /\bmetricool (status|ready|token)\b/i,
+      /\bconnector status\b/i,
+      /\bis gmail connected\b/i,
+      /\bphone (url|access|lan)\b/i,
+      /\bvision (model|status|ocr)\b/i,
+      /\bimage extraction\b/i,
     ],
   },
 ];

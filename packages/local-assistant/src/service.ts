@@ -104,6 +104,8 @@ import {
   type ImportReviewStatusV1,
 } from "./import-classify.js";
 import { discoverPrivateLanAddresses, buildPhoneUrl, type LanDiscoveryResultV1 } from "./lan-discovery.js";
+import { buildImportReadinessReport, type ImportReadinessReportV1 } from "./import-readiness.js";
+import { imageUnderstandingStatus } from "./connectors/image-understanding.js";
 import {
   applyOwnerProfileSummary,
   buildBrandCollaborator,
@@ -2956,6 +2958,33 @@ export class AionAssistantV1 {
   }
 
   /**
+   * Gate for real Owner-data bulk import. Capabilities are code-backed; stats are live state.
+   */
+  async importReadiness(): Promise<ImportReadinessReportV1> {
+    const state = await this.snapshot();
+    const docs = Array.isArray(state.crmDocuments) ? state.crmDocuments : [];
+    const review = Array.isArray(state.importReviewQueue) ? state.importReviewQueue : [];
+    const queue = Array.isArray(state.importSourceQueue) ? state.importSourceQueue : [];
+    const roots = Array.isArray(state.settings.importRoots) ? state.settings.importRoots : [];
+    return buildImportReadinessReport({
+      hasRecursiveWalk: true,
+      hasRootContainment: true,
+      hasSymlinkProtection: true,
+      hasContentHashDedupe: true,
+      hasResume: true,
+      hasProvenance: true,
+      hasErrorContinuation: true,
+      hasEntityClassification: true,
+      hasReviewQueue: true,
+      hasImportDashboard: true,
+      approvedImportRoots: roots.length,
+      documentsWithHash: docs.filter((d) => d.contentHash).length,
+      reviewOpen: review.filter((r) => r.status === "needs-review").length,
+      queueSources: queue.length,
+    });
+  }
+
+  /**
    * Import contacts from CSV text (Owner-supplied). Creates CRM prospects; does not invent fields.
    */
   async importContactsFromCsv(csvText: string, opts: { sourceLabel?: string } = {}): Promise<{
@@ -3383,6 +3412,63 @@ export class AionAssistantV1 {
     const workspaceId = state.settings.activeWorkspace;
     const inWorkspace = state.relationships.filter((r) => r.workspace === workspaceId && !r.archived);
     const sources: Array<{ type: string; id: string; label: string }> = [];
+
+    if (route.intent === "IMPORT_STATUS") {
+      const readiness = await this.importReadiness();
+      const dash = await this.importDashboard();
+      const lines = [
+        readiness.summary,
+        `Gate: ${readiness.code} · ready=${readiness.ready}`,
+        `Roots approved: ${readiness.stats.approvedImportRoots} · hashed docs: ${readiness.stats.documentsWithHash} · review open: ${readiness.stats.reviewOpen} · queue: ${readiness.stats.queueSources}`,
+        "",
+        "Capabilities:",
+        ...readiness.capabilities.map((c) => `  [${c.state}] ${c.label}`),
+        "",
+        "First sources (Owner-selected paths only):",
+        ...readiness.firstSources.map((s, i) => `  ${i + 1}. ${s.title} — ${s.how}`),
+        "",
+        readiness.ownerActions.length ? `Owner actions:\n${readiness.ownerActions.map((a) => `  - ${a}`).join("\n")}` : "",
+        `Dashboard: docs=${dash.documents} reviewOpen=${dash.reviewOpen}`,
+      ].filter(Boolean);
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: lines.join("\n"),
+        sources,
+        action: "import.readiness",
+        data: { readiness, dashboard: dash },
+      };
+    }
+
+    if (route.intent === "CONNECTOR_STATUS") {
+      const gmail = await this.gmailConsentStatus();
+      const metricool = await this.metricoolReadinessStatus();
+      const image = imageUnderstandingStatus();
+      const lan = this.discoverLan();
+      const phoneUrl = lan.preferred ? this.phoneUrlFor(lan.preferred.address, 31415) : null;
+      const lines = [
+        "Connector / access status (no secrets shown):",
+        `Gmail: ${gmail.code} — ${gmail.message}`,
+        gmail.ownerAction ? `  Action: ${gmail.ownerAction}` : "",
+        gmail.authUrl ? `  Consent URL available (open from Settings → Connectors).` : "",
+        `Metricool: ${metricool.code} — ${metricool.message}`,
+        metricool.ownerAction ? `  Action: ${metricool.ownerAction}` : "",
+        `Image vision: ${image.code} — ${image.message}`,
+        image.localMultimodalRecommended?.length
+          ? `  Setup: ${image.localMultimodalRecommended.join("; ")}`
+          : "",
+        `Phone LAN: ${lan.preferred ? `${lan.preferred.address} (${lan.preferred.interfaceName})` : "no private IPv4"}`,
+        phoneUrl ? `  Phone URL: ${phoneUrl}` : "  Enable private phone access in Settings after LAN is up.",
+      ].filter(Boolean);
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: lines.join("\n"),
+        sources,
+        action: "connector.status",
+        data: { gmail, metricool, image, lan, phoneUrl },
+      };
+    }
 
     if (route.intent === "WORK_QUEUE" || route.intent === "LIST_FOLLOWUPS") {
       const useBriefing =

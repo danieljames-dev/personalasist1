@@ -564,7 +564,11 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}${p.organ
 ${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
 <p class="meta">Sources: ${(s.importSourceQueue ?? []).slice(0, 8).map((q) => `${esc(q.label)} [${esc(q.status)}] +${q.itemsImported || 0}`).join("; ")}</p>` : ""}
 <div class="card"><h2>Import dashboard</h2>
-<div class="actions"><button data-do="import-dashboard-refresh" type="button">Refresh import status</button></div>
+<div class="actions">
+<button data-do="import-dashboard-refresh" type="button">Refresh import status</button>
+<button data-do="import-readiness" type="button">Import readiness / first sources</button>
+</div>
+${importReadinessHtml(s)}
 ${importDashboardHtml(s)}
 </div>
 <p class="meta">Supported: TXT, CSV, JSON, MD, PNG/JPG/WEBP, PDF/DOCX (best-effort text). Recursive under Owner-approved roots only — content-hash dedupe, resume, per-file error continuation. Max ~6 MB/file, depth/count caps. Never scans whole drives.</p>
@@ -688,6 +692,17 @@ ${m.ownerAction ? `<p class="meta"><b>Owner action:</b> ${esc(m.ownerAction)}</p
 <p class="meta">token env <code>${esc(m.userTokenEnvVar || "")}</code> · blog env <code>${esc(m.blogIdEnvVar || "")}</code> · fixtures brands=${m.fixtureBrands ?? 0} posts=${m.fixturePosts ?? 0}</p>
 </article>` : `<p class="meta">Metricool status not loaded yet — press Check Metricool readiness.</p>`}
 </div>`;
+}
+
+function importReadinessHtml(s) {
+  const r = s._importReadiness || model._importReadiness;
+  if (!r) return "";
+  return `<article class="card"><h3>Gate · ${esc(r.code)} · ready=${r.ready ? "yes" : "no"}</h3>
+<p>${esc(r.summary)}</p>
+<p class="meta">Roots ${r.stats?.approvedImportRoots ?? 0} · hashed docs ${r.stats?.documentsWithHash ?? 0} · review ${r.stats?.reviewOpen ?? 0}</p>
+<ul>${(r.firstSources || []).slice(0, 5).map((src) => `<li><b>${esc(src.title)}</b> — ${esc(src.how)}</li>`).join("")}</ul>
+${(r.ownerActions || []).length ? `<p class="meta"><b>Owner:</b> ${esc(r.ownerActions.join(" · "))}</p>` : ""}
+</article>`;
 }
 
 function importDashboardHtml(s) {
@@ -859,6 +874,14 @@ document.addEventListener("click", async (event) => {
       const dash = await api("import.dashboard", {});
       if (model.state) model.state._importDashboard = dash;
       toast(`Import dashboard: ${dash.documents || 0} docs · review ${dash.reviewOpen || 0}`);
+      render();
+      return;
+    }
+    if (verb === "import-readiness") {
+      const readiness = await api("import.readiness", {});
+      model._importReadiness = readiness;
+      if (model.state) model.state._importReadiness = readiness;
+      toast(`${readiness.code}: ready=${readiness.ready}`);
       render();
       return;
     }

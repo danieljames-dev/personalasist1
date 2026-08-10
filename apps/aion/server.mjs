@@ -12,7 +12,7 @@ import {
   RandomIdGeneratorV1, SelectableDeveloperAgentRegistryV1, StaticCapabilityRegistryV1, SystemClockV1,
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
   defaultGmailConfig, gmailConnectorStatus, defaultMetricoolConfig, metricoolConnectorStatus,
-  imageUnderstandingStatus, extractImageMetadataOnly,
+  imageUnderstandingStatus, extractImageMetadataOnly, extractImageWithLocalVision,
   walkAuthorizedFolder, mimeForBulkExtension, hashBytes,
   discoverPrivateLanAddresses, buildPhoneUrl,
 } from "../../packages/local-assistant/dist/index.js";
@@ -511,9 +511,22 @@ export async function createAionServer(options = {}) {
             ? "spreadsheet"
             : "document";
         if (kind === "image" && !extractedText) {
-          const meta = extractImageMetadataOnly({ filename, mimeType, byteLength: bytes.length });
-          extractedText = meta.description;
-          if (!input.summary) input.summary = meta.description.slice(0, 400);
+          // Prefer local Ollama vision when configured; never invent OCR on failure.
+          const vision = await extractImageWithLocalVision({
+            filename,
+            mimeType,
+            byteLength: bytes.length,
+            bytes,
+          });
+          extractedText = vision.extractedText || vision.description;
+          if (!input.summary) input.summary = vision.description.slice(0, 400);
+          if (vision.code === "READY" && vision.extractedText) {
+            // tag so Owner can see vision path was used
+            if (!Array.isArray(input.tags)) input.tags = [];
+            if (Array.isArray(input.tags) && !input.tags.includes("vision-local")) {
+              input.tags = [...input.tags, "vision-local"];
+            }
+          }
         }
         const summary = String(input.summary ?? (extractedText ? extractedText.slice(0, 400) : `Uploaded ${filename}`)).slice(0, 4000);
         const contentHash = typeof input.contentHash === "string" && input.contentHash
@@ -811,6 +824,7 @@ export async function createAionServer(options = {}) {
       case "connector.gmail.status": return service.gmailConsentStatus();
       case "connector.metricool.status": return service.metricoolReadinessStatus();
       case "connector.settings.update": return service.updateConnectorSettings(input.connectors ?? input);
+      case "import.readiness": return service.importReadiness();
       case "connector.image.status": return imageUnderstandingStatus();
       case "metricool.fixture.seed": return service.seedMetricoolFixtures(input);
       case "metricool.insight": return service.metricoolInsight(input.now);
