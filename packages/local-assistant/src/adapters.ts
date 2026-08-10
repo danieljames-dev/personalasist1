@@ -99,6 +99,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     crmDocuments: [], emailDrafts: [],
     ownerKnowledge: { profile: { displayName: "", summary: "", updatedAt: null }, facts: [] },
     brandCollaborators: [],
+    jobApplications: [],
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
@@ -314,6 +315,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(ak.ownerKnowledge.facts)) ak.ownerKnowledge.facts = [];
   }
   if (!Array.isArray(ak.brandCollaborators)) ak.brandCollaborators = [];
+  if (!Array.isArray(ak.jobApplications)) ak.jobApplications = [];
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "127.0.0.1", sessionDays: 30 };
   return clone;

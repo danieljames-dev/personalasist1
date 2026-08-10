@@ -30,7 +30,10 @@ export type CrmAssistantIntentV1 =
   | "INGEST_IMAGE"
   | "GENERAL_ASSISTANT_QUERY"
   | "WORK_QUEUE"
-  | "CORRECT";
+  | "CORRECT"
+  | "SALES_INSIGHT"
+  | "JOB_WORK"
+  | "PRODUCT_BUILD";
 
 export interface CrmIntentRouteV1 {
   intent: CrmAssistantIntentV1;
@@ -171,6 +174,48 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bhow are the brands doing\b/i,
       /\bwhat('?s| is) caleb working on\b/i,
       /\bwhich brand\b/i,
+    ],
+  },
+  {
+    intent: "SALES_INSIGHT",
+    confidence: "high",
+    patterns: [
+      /\bwhich deals? (are )?stalled\b/i,
+      /\bstalled (deals?|opportunit)/i,
+      /\bwho mentioned pricing\b/i,
+      /\bcustomers? mentioned pricing\b/i,
+      /\bwhich customers? mentioned\b/i,
+      /\bprepare me for my calls\b/i,
+      /\bwhat should i ask (this |the )?prospect\b/i,
+      /\bdraft follow[- ]?ups\b/i,
+    ],
+  },
+  {
+    intent: "JOB_WORK",
+    confidence: "high",
+    patterns: [
+      /\bjob search\b/i,
+      /\bfind (me )?(a )?job\b/i,
+      /\bfit score\b/i,
+      /\btailor (my )?resume\b/i,
+      /\bcover letter\b/i,
+      /\bapplication tracker\b/i,
+      /\binterview prep\b/i,
+      /\btrack (this )?application\b/i,
+      /\bapply for\b/i,
+    ],
+  },
+  {
+    intent: "PRODUCT_BUILD",
+    confidence: "high",
+    patterns: [
+      /\bfind a (product|service) opportunity\b/i,
+      /\bproduct opportunity\b/i,
+      /\bbuild a prototype\b/i,
+      /\bcreate (a )?(plan|sales material|website|listing)\b/i,
+      /\bbusiness[- ]building\b/i,
+      /\bmake a plan and start\b/i,
+      /\btrack the project\b/i,
     ],
   },
 ];
@@ -328,6 +373,59 @@ export function buildWorkQueue(relationships: readonly RelationshipV1[], nowIso:
  * Checkpoint M — practical daily briefing from stored state only.
  * Distinguishes what needs the Owner vs what AION can prepare without sending.
  */
+/** Stalled deals: open lifecycle, no contact in N days, or open follow-up overdue. */
+export function findStalledDeals(
+  relationships: readonly RelationshipV1[],
+  nowIso: string,
+  quietDays = 14,
+): Array<{ customer: string; reason: string; lastContact: string }> {
+  const now = Date.parse(nowIso);
+  const closed = new Set(["sold", "lost", "inactive"]);
+  const out: Array<{ customer: string; reason: string; lastContact: string }> = [];
+  for (const r of relationships) {
+    if (r.archived || closed.has(r.lifecycle)) continue;
+    const last = r.lastContactAt ? Date.parse(r.lastContactAt) : 0;
+    const overdueFu = r.followUps.some((f) => f.status === "open" && Date.parse(f.dueAt) < now);
+    if (overdueFu) {
+      out.push({ customer: r.displayName, reason: "Overdue open follow-up", lastContact: r.lastContactAt ?? "never" });
+      continue;
+    }
+    if (!last || now - last > quietDays * 86400000) {
+      out.push({
+        customer: r.displayName,
+        reason: `No contact in ${quietDays}+ days while lifecycle is ${r.lifecycle}`,
+        lastContact: r.lastContactAt ?? "never",
+      });
+    }
+  }
+  return out;
+}
+
+/** Customers whose stored notes/interactions mention a topic (e.g. pricing). */
+export function findCustomersMentioning(
+  relationships: readonly RelationshipV1[],
+  topic: string,
+): Array<{ customer: string; excerpt: string }> {
+  const needle = topic.trim().toLowerCase();
+  if (!needle) return [];
+  const out: Array<{ customer: string; excerpt: string }> = [];
+  for (const r of relationships) {
+    if (r.archived) continue;
+    const blobs = [
+      r.notes,
+      ...r.objections,
+      ...r.interactions.map((i) => `${i.summary} ${i.detail}`),
+    ];
+    for (const b of blobs) {
+      if (b.toLowerCase().includes(needle)) {
+        out.push({ customer: r.displayName, excerpt: b.trim().slice(0, 200) });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 export function buildDailyBriefing(input: {
   relationships: readonly RelationshipV1[];
   tasks: ReadonlyArray<{ title: string; state: string; workspace: string; updatedAt?: string }>;

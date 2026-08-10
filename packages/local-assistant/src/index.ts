@@ -23,6 +23,7 @@ export * from "./sales.js";
 export * from "./sales-coach.js";
 export * from "./crm-assistant.js";
 export * from "./owner-knowledge.js";
+export * from "./job-agent.js";
 export * from "./connectors/gmail-connector.js";
 export * from "./connectors/metricool-connector.js";
 export * from "./connectors/image-understanding.js";

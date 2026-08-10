@@ -587,6 +587,9 @@ export async function createAionServer(options = {}) {
       case "owner.knowledge.enable": return service.setOwnerKnowledgeEnabled(input.id, input.enabled === true);
       case "brand.collaborator.list": return { collaborators: await service.listBrandCollaborators() };
       case "brand.collaborator.add": return service.addBrandCollaborator(input.collaborator ?? input);
+      case "job.list": return { applications: await service.listJobApplications() };
+      case "job.track": return service.addJobApplication(input.application ?? input);
+      case "job.prepare": return service.prepareJobApplication(input.id);
       case "connector.gmail.status": return gmailConnectorStatus(defaultGmailConfig());
       case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
       case "connector.image.status": return imageUnderstandingStatus();

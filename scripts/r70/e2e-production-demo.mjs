@@ -208,6 +208,18 @@ async function main() {
   const research = await api("assistant.prompt", { text: "Research ACME R7 TEST COMPANY." });
   rec("RESEARCH_PROPOSE", /research job|Proposed research|Stored research/i.test(research.reply || ""), (research.reply || "").slice(0, 120));
 
+  const stalled = await api("assistant.prompt", { text: "Which deals are stalled?" });
+  rec("STALLED_DEALS", /stalled|quiet|follow|No stalled/i.test(stalled.reply || ""), (stalled.reply || "").slice(0, 120));
+
+  const pricing = await api("assistant.prompt", { text: "Which customers mentioned pricing?" });
+  rec("PRICING_MENTIONS", /pricing|mention|No stored/i.test(pricing.reply || ""), (pricing.reply || "").slice(0, 120));
+
+  const job = await api("assistant.prompt", { text: "Track application for Account Executive at Northline Test Co." });
+  rec("JOB_TRACK", /Tracked application|Account Executive|not submitted|fit/i.test(job.reply || ""), (job.reply || "").slice(0, 140));
+
+  const product = await api("assistant.prompt", { text: "Find a product opportunity for local services." });
+  rec("PRODUCT_PROJECT", /Created project|opportunity|stage idea/i.test(product.reply || ""), (product.reply || "").slice(0, 140));
+
   // Capture pre-restart digests of reply content existence via state
   const mid = await state();
   const hasJane = (mid.state.relationships || []).some((r) => /Jane Test/i.test(r.displayName));

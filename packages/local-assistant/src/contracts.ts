@@ -601,6 +601,8 @@ export interface AssistantStateV1 {
   ownerKnowledge: import("./owner-knowledge.js").OwnerKnowledgeStateV1;
   /** Brand/business collaborators (never invent roles). Newest first; bounded. */
   brandCollaborators: import("./owner-knowledge.js").BrandCollaboratorV1[];
+  /** Job application tracker (submission always owner-gated). Newest first; bounded. */
+  jobApplications: import("./job-agent.js").JobApplicationV1[];
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */

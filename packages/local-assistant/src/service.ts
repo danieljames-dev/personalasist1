@@ -71,11 +71,20 @@ import {
   buildDailyBriefing,
   buildEmailDraftFromCustomer,
   buildWorkQueue,
+  findCustomersMentioning,
   findRelationshipsByName,
+  findStalledDeals,
   newCrmDocument,
   newEmailDraft,
   routeCrmAssistantIntent,
 } from "./crm-assistant.js";
+import {
+  buildJobApplication,
+  draftCoverLetterSkeleton,
+  interviewPrepFromKnowledge,
+  scoreJobFit,
+  type JobApplicationV1,
+} from "./job-agent.js";
 import {
   applyOwnerProfileSummary,
   buildBrandCollaborator,
@@ -2576,6 +2585,52 @@ export class AionAssistantV1 {
     return Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
   }
 
+  async listJobApplications(): Promise<JobApplicationV1[]> {
+    const state = await this.snapshot();
+    return Array.isArray(state.jobApplications) ? state.jobApplications : [];
+  }
+
+  async addJobApplication(input: Record<string, unknown> = {}): Promise<JobApplicationV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.jobApplications)) draft.jobApplications = [];
+      const now = this.ports.clock.now();
+      const app = buildJobApplication(input, { id: this.ports.ids.next("job-app"), now });
+      // Auto fit score from owner knowledge when job text available
+      if (app.fitScore === null) {
+        const fit = scoreJobFit(draft.ownerKnowledge, `${app.title} ${app.employer} ${app.fitNotes}`);
+        app.fitScore = fit.score;
+        if (!app.fitNotes) app.fitNotes = fit.notes;
+      }
+      draft.jobApplications.unshift(app);
+      if (draft.jobApplications.length > 300) draft.jobApplications.length = 300;
+      this.activity(draft, "career", "job.application", `Tracked application: ${app.title} @ ${app.employer}`, app.id);
+      return app;
+    });
+  }
+
+  async prepareJobApplication(id: string): Promise<JobApplicationV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.jobApplications)) draft.jobApplications = [];
+      const app = draft.jobApplications.find((a) => a.id === id);
+      if (!app) throw new Error("Job application not found.");
+      const now = this.ports.clock.now();
+      const knowledge = draft.ownerKnowledge ?? emptyOwnerKnowledge();
+      const facts = knowledge.facts ?? [];
+      const fit = scoreJobFit(knowledge, `${app.title} ${app.employer} ${app.url}`);
+      app.fitScore = fit.score;
+      app.fitNotes = fit.notes;
+      app.coverDraft = draftCoverLetterSkeleton(app, knowledge.profile?.displayName || "", facts);
+      app.interviewPrep = interviewPrepFromKnowledge(app, facts);
+      app.resumeNotes =
+        app.resumeNotes ||
+        `Tailor resume using owner knowledge categories: skill, employment, experience. Emphasize: ${fit.matched.slice(0, 8).join(", ") || "add more facts"}.`;
+      if (app.status === "researching") app.status = "tailoring";
+      app.updatedAt = now;
+      this.activity(draft, "career", "job.prepare", `Prepared drafts for ${app.title} @ ${app.employer} (not submitted).`, app.id);
+      return app;
+    });
+  }
+
   async addBrandCollaborator(input: Record<string, unknown> = {}): Promise<BrandCollaboratorV1> {
     return this.mutate((draft) => {
       if (!Array.isArray(draft.brandCollaborators)) draft.brandCollaborators = [];
@@ -2862,6 +2917,184 @@ export class AionAssistantV1 {
         sources,
         action: "work.queue",
         data: { queue },
+      };
+    }
+
+    if (route.intent === "SALES_INSIGHT") {
+      const now = this.ports.clock.now();
+      if (/\bpricing\b/i.test(text) || /\bmentioned\b/i.test(text)) {
+        const topic = /\bpricing\b/i.test(text) ? "pricing" : (route.subject || "pricing");
+        const hits = findCustomersMentioning(inWorkspace, topic);
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: hits.length
+            ? `Customers mentioning “${topic}” (stored notes/interactions only):\n${hits
+                .slice(0, 15)
+                .map((h) => `  - ${h.customer}: ${h.excerpt}`)
+                .join("\n")}`
+            : `No stored CRM text mentions “${topic}”. Log interactions or objections first.`,
+          sources: hits.slice(0, 10).map((h) => ({ type: "relationship", id: h.customer, label: h.customer })),
+          action: "sales.insight.mentions",
+          data: { topic, hits },
+        };
+      }
+      if (/\bstalled\b/i.test(text) || /\bdeals?\b/i.test(text)) {
+        const stalled = findStalledDeals(inWorkspace, now);
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: stalled.length
+            ? `Stalled / quiet deals (stored CRM):\n${stalled
+                .slice(0, 15)
+                .map((s) => `  - ${s.customer}: ${s.reason} (last ${s.lastContact.slice(0, 10)})`)
+                .join("\n")}`
+            : "No stalled deals flagged from stored CRM (open lifecycle + quiet/overdue rules).",
+          sources: stalled.slice(0, 10).map((s) => ({ type: "relationship", id: s.customer, label: s.customer })),
+          action: "sales.insight.stalled",
+          data: { stalled },
+        };
+      }
+      if (/\bask\b.*\bprospect\b/i.test(text) || /\bprepare me for my calls\b/i.test(text)) {
+        const due = inWorkspace
+          .flatMap((r) =>
+            r.followUps
+              .filter((f) => f.status === "open")
+              .map((f) => ({ r, f })),
+          )
+          .sort((a, b) => a.f.dueAt.localeCompare(b.f.dueAt))
+          .slice(0, 5);
+        const lines = due.length
+          ? due.map(({ r, f }) => {
+              const prep = buildAccountSummary(r);
+              return `— ${r.displayName} (due ${f.dueAt.slice(0, 10)}): ${f.reason}\n  Ask about: ${prep.concerns.slice(0, 3).join("; ") || "open goals and next step"}\n  Next: ${prep.nextAction}`;
+            })
+          : ["No open follow-ups to prepare. Pick a prospect in Sales or create a follow-up."];
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: ["Call prep from stored CRM:", ...lines].join("\n"),
+          sources: due.map(({ r }) => ({ type: "relationship", id: r.id, label: r.displayName })),
+          action: "sales.insight.prep",
+          data: { due: due.map(({ r, f }) => ({ id: r.id, name: r.displayName, due: f.dueAt })) },
+        };
+      }
+      // draft follow-ups → list queue
+      const queue = buildWorkQueue(inWorkspace, now);
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: `${queue.text}\n\nTip: name a contact to draft an email (“Draft Jane an email”). AION never sends.`,
+        sources,
+        action: "sales.insight.queue",
+        data: queue,
+      };
+    }
+
+    if (route.intent === "JOB_WORK") {
+      const apps = Array.isArray(state.jobApplications) ? state.jobApplications : [];
+      // Create/track a specific application when title + employer are present (before list branch).
+      const atMatch =
+        text.match(/\btrack(?:ing)?(?:\s+this)?(?:\s+application)?(?:\s+for)?\s+(.+?)\s+at\s+(.+?)(?:\.|$)/i) ||
+        text.match(/\bapply for\s+(.+?)\s+at\s+(.+?)(?:\.|$)/i) ||
+        text.match(/\bfor\s+(.+?)\s+at\s+(.+?)(?:\.|$)/i);
+      if (atMatch) {
+        const title = atMatch[1]!.trim().slice(0, 200);
+        const employer = atMatch[2]!.trim().replace(/\.$/, "").slice(0, 200);
+        if (title && employer && !/^application$/i.test(title)) {
+          const app = await this.addJobApplication({ title, employer, source: "assistant" });
+          const prepared = await this.prepareJobApplication(app.id);
+          sources.push({ type: "job", id: prepared.id, label: `${prepared.title}@${prepared.employer}` });
+          return {
+            intent: route.intent,
+            confidence: route.confidence,
+            reply: [
+              `Tracked application: ${prepared.title} @ ${prepared.employer} (status: ${prepared.status}).`,
+              `Fit score (heuristic from owner knowledge): ${prepared.fitScore ?? "n/a"}`,
+              prepared.fitNotes,
+              "",
+              "Cover letter draft prepared (not sent/submitted):",
+              prepared.coverDraft.slice(0, 1200),
+              "",
+              "External application SUBMISSION is owner-gated. AION will not apply for you.",
+            ].join("\n"),
+            sources,
+            action: "job.track",
+            data: prepared,
+          };
+        }
+      }
+      if (/\bapplication tracker\b|\blist (my )?applications\b|\bjob applications\b/i.test(text)) {
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: apps.length
+            ? `Application tracker (${apps.length}) — none auto-submitted:\n${apps
+                .slice(0, 15)
+                .map((a) => `  - ${a.title} @ ${a.employer} [${a.status}] fit=${a.fitScore ?? "?"}`)
+                .join("\n")}`
+            : "No applications tracked yet. Say: track application for <title> at <employer>.",
+          sources: apps.slice(0, 10).map((a) => ({ type: "job", id: a.id, label: `${a.title}@${a.employer}` })),
+          action: "job.list",
+          data: { apps },
+        };
+      }
+      const knowledge = state.ownerKnowledge ?? emptyOwnerKnowledge();
+      const skills = (knowledge.facts ?? []).filter((f) => f.category === "skill" && f.enabled).slice(0, 8);
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: [
+          "Job / work agent (submission gated):",
+          skills.length
+            ? `Stored skills for fit scoring: ${skills.map((s) => s.title).join("; ")}`
+            : "No skill facts yet — add them under Knowledge for better fit scoring.",
+          apps.length ? `Tracked applications: ${apps.length}. Ask “application tracker” to list.` : "No applications tracked.",
+          "",
+          "Try: track application for Sales Manager at Acme Corp",
+          "Or use Career screen for full Career engine commands.",
+          "AION prepares drafts and research; you submit applications yourself.",
+        ].join("\n"),
+        sources,
+        action: "job.help",
+        data: { appCount: apps.length },
+      };
+    }
+
+    if (route.intent === "PRODUCT_BUILD") {
+      const goal =
+        route.subject ||
+        text.replace(/\b(make a plan and start|find a product opportunity|build a prototype|create a plan)\b/i, "").trim() ||
+        "New product/service opportunity";
+      const project = await this.createProject({
+        title: goal.slice(0, 120),
+        summary: `Owner-requested product/business project via assistant: ${text.slice(0, 500)}`,
+      });
+      let opportunity = null as Awaited<ReturnType<typeof this.createOpportunity>> | null;
+      try {
+        opportunity = await this.createOpportunity({
+          title: goal.slice(0, 120),
+          problem: `Explore: ${goal}`.slice(0, 2000),
+          targetCustomer: "To be owner-supplied",
+        });
+      } catch {
+        opportunity = null;
+      }
+      sources.push({ type: "project", id: project.id, label: project.title });
+      if (opportunity) sources.push({ type: "opportunity", id: opportunity.id, label: opportunity.title });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: [
+          `Created project “${project.title}” at stage ${project.stage}.`,
+          opportunity ? `Also created Product Studio opportunity “${opportunity.title}” (claims must be owner-supplied; nothing invented as fact).` : "Product opportunity record could not be created (see Studio).",
+          "",
+          "Next: open Projects to specify/plan; approve implementation stages yourself.",
+          "AION will not spend money or publish paid listings without separate authority.",
+        ].join("\n"),
+        sources,
+        action: "product.project",
+        data: { project, opportunity },
       };
     }
 
