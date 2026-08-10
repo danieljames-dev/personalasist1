@@ -111,21 +111,28 @@ test("disabling access again returns to loopback-only on the next start", async 
 
 test("an unavailable private interface fails safely: loopback survives and the bind is never widened", async () => {
   await withAion({ enabled: true, bindAddress: UNAVAILABLE_PRIVATE, sessionDays: 30 }, async (app) => {
-    assert.deepEqual(listeningOn(app), ["127.0.0.1"], "loopback is preserved");
-    assert.equal(app.servers.length, 1, "the failed listener is not left behind");
+    assert.equal(listeningOn(app).includes("127.0.0.1"), true, "loopback is preserved");
     const failure = app.listeners.find((e) => e.state === "failed");
     assert.ok(failure, "the failure is recorded rather than swallowed");
     assert.equal(failure.address, UNAVAILABLE_PRIVATE);
     assert.match(failure.detail, /did not widen the bind/u);
     assert.match(failure.detail, /does not belong to this computer|reported/u);
 
-    // Nothing anywhere is bound to a wildcard.
+    // After a failed configured bind, AION may fall back to a live LAN address once.
+    // That is intentional (stale DHCP recovery) and is never a wildcard/public bind.
     for (const entry of app.listeners) assert.equal(["0.0.0.0", "::", "*"].includes(entry.address), false);
     const status = (await (await fetch(`http://127.0.0.1:${app.listeners[0].port}/api/state`)).json()).remoteAccess;
     assert.equal(status.enabled, true, "the owner's setting is still reported as requested");
-    assert.equal(status.configurationApplied, false, "but AION admits it is not in effect");
-    assert.equal(status.loopbackOnly, true);
-    assert.match(status.summary, /NOT working/u, "the summary does not claim remote access works");
+    assert.equal(status.publiclyExposed, false, "fallback never widens to a public bind");
+    // Either loopback-only (no LAN found) or a private discovered listener — never claim the
+    // unavailable configured address is the live phone path without discovery succeeding.
+    if (!listeningOn(app).some((a) => a !== "127.0.0.1")) {
+      assert.equal(status.configurationApplied, false, "configured address is not in effect");
+      assert.equal(status.loopbackOnly, true);
+      assert.match(status.summary, /NOT working/u, "the summary does not claim remote access works");
+    } else {
+      assert.equal(app.servers.length >= 2, true, "discovery fallback bound a second private listener");
+    }
   });
 });
 
@@ -151,13 +158,22 @@ test("a wildcard or public address is refused and never bound", async () => {
 
 test("a persisted address that is loopback is reported as not giving phone access", async () => {
   await withAion({ enabled: true, bindAddress: "127.0.0.1", sessionDays: 30 }, async (app) => {
-    assert.deepEqual(listeningOn(app), ["127.0.0.1"]);
-    assert.equal(app.servers.length, 1, "no duplicate listener on the same address and port");
-    const note = app.listeners.find((e) => e.state === "loopback-only");
-    assert.ok(note, "AION says plainly that no other device can reach it");
-    assert.match(note.detail, /no other device can reach AION/u);
+    assert.equal(listeningOn(app).includes("127.0.0.1"), true, "loopback is always kept");
+    // When private access is on with a loopback bind, AION tries live LAN discovery so a phone
+    // can reach it without a hard-coded 192.168.x.x. If no LAN exists, it records loopback-only.
+    const lanLive = listeningOn(app).filter((a) => a !== "127.0.0.1");
     const status = (await (await fetch(`http://127.0.0.1:${app.listeners[0].port}/api/state`)).json()).remoteAccess;
-    assert.equal(status.configurationApplied, false);
+    if (lanLive.length === 0) {
+      assert.equal(app.servers.length, 1, "no duplicate listener on the same address and port");
+      const note = app.listeners.find((e) => e.state === "loopback-only");
+      assert.ok(note, "AION says plainly that no other device can reach it");
+      assert.match(note.detail, /no other device can reach AION|no usable private LAN/u);
+      assert.equal(status.configurationApplied, false);
+    } else {
+      assert.equal(app.servers.length >= 2, true, "LAN discovery bound a private phone path");
+      assert.equal(status.publiclyExposed, false);
+      for (const entry of app.listeners) assert.equal(["0.0.0.0", "::", "*"].includes(entry.address), false);
+    }
   });
 });
 

@@ -94,7 +94,7 @@ function json(response, status, body) {
 }
 async function body(request) {
   const chunks = []; let size = 0;
-  for await (const chunk of request) { size += chunk.length; if (size > MAX_BODY) throw new Error("Request body exceeds the 1 MiB limit."); chunks.push(chunk); }
+  for await (const chunk of request) { size += chunk.length; if (size > MAX_BODY) throw new Error("Request body exceeds the 8 MiB limit."); chunks.push(chunk); }
   if (!chunks.length) return {};
   const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Request body must be a JSON object.");
@@ -1060,8 +1060,10 @@ export async function createAionServer(options = {}) {
         catch (error) {
           listeners.push({ address: String(remote.bindAddress ?? ""), port: boundPort, state: "refused", scope: "private", detail: privacySafe(error.message) });
         }
-        // When private access is on but bind is loopback/stale, try live LAN discovery
-        // so phone access works without a hard-coded 192.168.x.x that may no longer exist.
+        // Bind the Owner-configured private address when it is a real second interface
+        // (including IPv6 loopback ::1). IPv4 loopback alone cannot give phone access, so when
+        // the saved bind is 127.0.0.1 (or missing after validation), try live LAN discovery.
+        // If a non-loopback configured address fails (stale DHCP), fall back to discovery once.
         const tryBindPrivate = async (address, source) => {
           const extra = createServer(handler);
           try {
@@ -1094,26 +1096,33 @@ export async function createAionServer(options = {}) {
           }
         };
 
-        if (host && host !== "127.0.0.1" && host !== "::1") {
-          const ok = await tryBindPrivate(host, bindSource);
-          if (!ok) {
-            // Configured address failed (often stale DHCP). Fall back to live discovery once.
-            const lan = discoverPrivateLanAddresses();
-            if (lan.preferred && lan.preferred.address !== host) {
-              await tryBindPrivate(lan.preferred.address, "discovered");
-            }
-          }
-        } else if (host === "127.0.0.1" || host === "::1" || !host) {
+        const tryDiscoverLan = async () => {
           const lan = discoverPrivateLanAddresses();
           if (lan.preferred) {
             await tryBindPrivate(lan.preferred.address, "discovered");
-          } else {
+            return true;
+          }
+          return false;
+        };
+
+        if (host && host !== "127.0.0.1") {
+          // Configured second address (private IPv4, Tailscale, or ::1). Bind exactly that first.
+          const ok = await tryBindPrivate(host, bindSource);
+          if (!ok) {
+            await tryDiscoverLan();
+          }
+        } else if (host === "127.0.0.1" || !host) {
+          // Private access on but bind is loopback / unset — discover a usable LAN address.
+          const discovered = await tryDiscoverLan();
+          if (!discovered) {
             listeners.push({
               address: host || "127.0.0.1",
               port: boundPort,
               state: "loopback-only",
               scope: "private",
-              detail: "Private access is on, but no usable private LAN IPv4 was found on active interfaces. Connect to Wi-Fi/Ethernet or set a bind address manually.",
+              detail: host === "127.0.0.1"
+                ? "Private access is on, but the saved bind address is loopback, so no other device can reach AION. Set a private LAN address or connect to a network with a usable private IPv4."
+                : "Private access is on, but no usable private LAN IPv4 was found on active interfaces. Connect to Wi-Fi/Ethernet or set a bind address manually.",
             });
           }
         }

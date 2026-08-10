@@ -42,9 +42,10 @@ test("Command Center binds loopback, serves same-origin assets, bounds requests,
     assert.equal((await fetch(`${base}/api/state`)).status, 200);
     assert.equal((await fetch(`${base}/nope`)).status, 404);
     assert.equal((await fetch(`${base}/api/action`, { method: "POST", headers: { "content-type": "application/json", origin: "https://example.invalid" }, body: "{}" })).status, 403);
-    const oversized = await fetch(`${base}/api/action`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "conversation.create", title: "x".repeat(1024 * 1024 + 64) }) });
+    // Body ceiling is 8 MiB (uploads). A JSON action past that limit must fail closed.
+    const oversized = await fetch(`${base}/api/action`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "conversation.create", title: "x".repeat(8 * 1024 * 1024 + 64) }) });
     assert.equal(oversized.status, 400);
-    assert.match((await oversized.json()).error, /1 MiB limit/u);
+    assert.match((await oversized.json()).error, /8 MiB limit/u);
   });
 });
 
@@ -328,7 +329,10 @@ test("UI exposes every required owner-facing area and needs no hosted dependency
      */
     const origins = [...text.matchAll(/https?:\/\/([^\s"'`)<>]+)/gu)]
       .map((match) => match[1])
-      .filter((host) => !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:[/?#]|$)/u.test(host));
+      // Loopback is exempt. Template interpolations (e.g. phone URL from live LAN discovery)
+      // are runtime construction, not a committed remote host dependency.
+      .filter((host) => !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:[/?#]|$)/u.test(host))
+      .filter((host) => !/\$\{/u.test(host));
     assert.deepEqual(origins, [], `${name} must not reference a remote origin`);
     assert.doesNotMatch(text, /@import\s+url\(|\b(?:cdn|googleapis|gstatic|unpkg|jsdelivr|googletagmanager)\b|gtag\s*\(|\banalytics\.(?:js|track)\b/i, `${name} must not load a hosted dependency`);
   }

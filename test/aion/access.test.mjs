@@ -169,7 +169,14 @@ test("a foreign origin is refused and bearer material is never accepted from a U
     const server = await readFile(join(repositoryRoot, "apps/aion/server.mjs"), "utf8");
     assert.match(server, /function bearerToken/u);
     assert.match(server, /headers\.authorization/u, "the token is read from a header");
-    assert.doesNotMatch(server, /searchParams\.get\(\s*["'](?:token|session|code|auth)/u, "no bearer material is read from a URL");
+    // Session/API bearer material must never be taken from query strings (logs/history leak).
+    // OAuth2 authorization `code` on /oauth/gmail/callback is not bearer auth — it is exchanged once.
+    assert.doesNotMatch(server, /searchParams\.get\(\s*["'](?:token|session|auth)/u, "no bearer material is read from a URL");
+    assert.match(
+      server,
+      /pathname === ["']\/oauth\/gmail\/callback["'][\s\S]{0,200}searchParams\.get\(["']code["']\)/u,
+      "OAuth authorization code may only be read on the Gmail callback path",
+    );
   });
 });
 
