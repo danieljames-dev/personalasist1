@@ -103,9 +103,21 @@ import {
 } from "./owner-knowledge.js";
 import {
   extractCommitmentsFromBody,
+  gmailConnectorStatus,
+  defaultGmailConfig,
+  buildGmailAuthUrl,
   searchGmailFixtures as searchGmailFixtureMessages,
   type GmailMessageFixtureV1,
 } from "./connectors/gmail-connector.js";
+import {
+  bestPerformingPosts,
+  brandsNeedingAttention,
+  listMetricoolBrandFixtures,
+  metricoolConnectorStatus,
+  defaultMetricoolConfig,
+  type MetricoolBrandFixtureV1,
+  type MetricoolPostFixtureV1,
+} from "./connectors/metricool-connector.js";
 import type { CrmDocumentV1, EmailDraftV1 } from "./contracts.js";
 
 type AssistantPorts = {
@@ -2754,10 +2766,64 @@ export class AionAssistantV1 {
    * Live Gmail waits for Owner OAuth; until then assistant/search use fixtures when seeded.
    */
   private gmailFixtures: GmailMessageFixtureV1[] = [];
+  private metricoolBrands: MetricoolBrandFixtureV1[] = [];
+  private metricoolPosts: MetricoolPostFixtureV1[] = [];
 
   seedGmailFixtures(messages: GmailMessageFixtureV1[]): number {
     this.gmailFixtures = messages.slice(0, 200);
     return this.gmailFixtures.length;
+  }
+
+  seedMetricoolFixtures(input: {
+    brands?: MetricoolBrandFixtureV1[];
+    posts?: MetricoolPostFixtureV1[];
+  } = {}): { brands: number; posts: number } {
+    if (Array.isArray(input.brands)) this.metricoolBrands = input.brands.slice(0, 100);
+    if (Array.isArray(input.posts)) this.metricoolPosts = input.posts.slice(0, 500);
+    return { brands: this.metricoolBrands.length, posts: this.metricoolPosts.length };
+  }
+
+  metricoolInsight(nowIso?: string) {
+    const now = nowIso || this.ports.clock.now();
+    const active = listMetricoolBrandFixtures(this.metricoolBrands);
+    const best = bestPerformingPosts(this.metricoolPosts, 5);
+    const needs = brandsNeedingAttention(this.metricoolBrands, this.metricoolPosts, now, 14);
+    const scheduled = this.metricoolPosts.filter((p) => p.scheduledAt && !p.publishedAt);
+    const status = metricoolConnectorStatus(defaultMetricoolConfig());
+    return {
+      status,
+      mode: status.authorized ? "live-ready" : "fixture",
+      activeBrands: active,
+      bestPosts: best,
+      needsAttention: needs,
+      scheduled,
+    };
+  }
+
+  gmailConsentStatus() {
+    const cfg = defaultGmailConfig();
+    // Allow client id from env without embedding secrets
+    const clientId = process.env.AION_GMAIL_CLIENT_ID?.trim() || cfg.clientId;
+    const config = { ...cfg, clientId };
+    const status = gmailConnectorStatus(config);
+    let authUrl: string | null = null;
+    if (status.code === "GMAIL_OWNER_CONSENT_REQUIRED" && clientId) {
+      try {
+        authUrl = buildGmailAuthUrl(config, `aion-${Date.now().toString(36)}`);
+      } catch {
+        authUrl = null;
+      }
+    }
+    return {
+      ...status,
+      authUrl,
+      ownerAction:
+        status.code === "GMAIL_OWNER_CONSENT_REQUIRED"
+          ? "Complete Google OAuth consent in a browser, store the refresh token in AION_GMAIL_REFRESH_TOKEN, and set AION_GMAIL_CLIENT_SECRET. SEND remains disabled."
+          : status.code === "NOT_CONFIGURED"
+            ? "Set AION_GMAIL_CLIENT_ID (and secret env var name) to prepare OAuth. Do not paste passwords into chat."
+            : null,
+    };
   }
 
   searchGmailFixtures(query: string) {
@@ -2952,8 +3018,9 @@ export class AionAssistantV1 {
           nowIso: this.ports.clock.now(),
         });
         let brandExtra = "";
-        if (/\bbrand|caleb|collaborator\b/i.test(text)) {
+        if (/\bbrand|caleb|collaborator|scheduled|posted|metricool|performed\b/i.test(text)) {
           const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
+          const m = this.metricoolInsight();
           brandExtra = [
             "",
             brands.length
@@ -2965,7 +3032,20 @@ export class AionAssistantV1 {
                   .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
                   .join("\n")}`
               : "Collaborators: none recorded. AION does not invent who manages a brand.",
-          ].join("\n");
+            "",
+            m.activeBrands.length
+              ? `Metricool fixtures — active brands: ${m.activeBrands.map((b) => b.name).join(", ")}`
+              : `Metricool: ${m.status.message}`,
+            m.scheduled.length
+              ? `Scheduled posts (fixture): ${m.scheduled.slice(0, 5).map((p) => `${p.network}@${p.scheduledAt?.slice(0, 10)}`).join("; ")}`
+              : "",
+            m.bestPosts.length
+              ? `Best performing (fixture): ${m.bestPosts.slice(0, 3).map((p) => `"${p.text.slice(0, 40)}" likes=${p.metrics.likes ?? 0}`).join("; ")}`
+              : "",
+            m.needsAttention.length
+              ? `Brand attention (fixture): ${m.needsAttention.map((n) => `${n.brand}: ${n.reason}`).join("; ")}`
+              : "",
+          ].filter(Boolean).join("\n");
         }
         return {
           intent: route.intent,

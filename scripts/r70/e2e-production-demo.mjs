@@ -237,6 +237,46 @@ async function main() {
   });
   rec("IMPORT_QUEUE", !!queued.id && queued.status === "queued", queued.id || "");
 
+  await api("metricool.fixture.seed", {
+    brands: [
+      { id: "mb1", name: "E2E Brand Alpha", networks: ["instagram"], active: true },
+      { id: "mb2", name: "E2E Brand Quiet", networks: ["linkedin"], active: true },
+    ],
+    posts: [
+      {
+        id: "mp1",
+        brandId: "mb1",
+        network: "instagram",
+        text: "Top performing e2e post",
+        publishedAt: new Date().toISOString(),
+        scheduledAt: null,
+        metrics: { likes: 120, comments: 8, reach: 5000 },
+      },
+      {
+        id: "mp2",
+        brandId: "mb2",
+        network: "linkedin",
+        text: "Old quiet post",
+        publishedAt: "2020-01-01T00:00:00.000Z",
+        scheduledAt: null,
+        metrics: { likes: 2, comments: 0, reach: 50 },
+      },
+      {
+        id: "mp3",
+        brandId: "mb1",
+        network: "instagram",
+        text: "Scheduled e2e",
+        publishedAt: null,
+        scheduledAt: new Date(Date.now() + 86400000).toISOString(),
+        metrics: {},
+      },
+    ],
+  });
+  const brandsQ = await api("assistant.prompt", { text: "What brands are active?" });
+  rec("METRICOOL_BRANDS_NL", /E2E Brand Alpha|active brand|Metricool/i.test(brandsQ.reply || ""), (brandsQ.reply || "").slice(0, 140));
+  const gmailStatus = await api("connector.gmail.status", {});
+  rec("GMAIL_STATUS", !!gmailStatus.code && gmailStatus.authorized === false, gmailStatus.code || "");
+
   // Capture pre-restart digests of reply content existence via state
   const mid = await state();
   const hasJane = (mid.state.relationships || []).some((r) => /Jane Test/i.test(r.displayName));

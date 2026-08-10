@@ -593,9 +593,11 @@ export async function createAionServer(options = {}) {
       case "import.queue.list": return { sources: await service.listImportSourceQueue() };
       case "import.queue.add": return service.queueImportSource(input.source ?? input);
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
-      case "connector.gmail.status": return gmailConnectorStatus(defaultGmailConfig());
+      case "connector.gmail.status": return service.gmailConsentStatus();
       case "connector.metricool.status": return metricoolConnectorStatus(defaultMetricoolConfig());
       case "connector.image.status": return imageUnderstandingStatus();
+      case "metricool.fixture.seed": return service.seedMetricoolFixtures(input);
+      case "metricool.insight": return service.metricoolInsight(input.now);
       case "work.queue": return service.workQueue();
       case "work.briefing": return service.dailyBriefing();
       case "gmail.fixture.seed": return { count: service.seedGmailFixtures(input.messages ?? []) };
