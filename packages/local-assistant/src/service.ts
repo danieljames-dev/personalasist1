@@ -7554,14 +7554,19 @@ export class AionAssistantV1 {
     const ownerSteps: string[] = [];
     if (status.code === "NOT_CONFIGURED") {
       ownerSteps.push(
+        "In Google Cloud: OAuth client type Web application; Authorized redirect URI must be EXACTLY:",
+        redirectUri,
+        "Do NOT use http://localhost:8080/oauth2callback (Google tutorial default — AION never uses it).",
         "Open Settings → Connectors → Gmail",
         "Paste Google OAuth Client ID + Client Secret (secret stays on this PC only)",
+        "Confirm redirect URI field is " + redirectUri,
         "Click Save connector settings",
-        "Click Connect / check Gmail → Google Allow",
+        "Click Connect / check Gmail → Google Allow (must open from AION, not a Google sample/quickstart)",
       );
     } else if (status.code === "GMAIL_OWNER_CONSENT_REQUIRED") {
       ownerSteps.push(
-        "Click Connect / check Gmail (or Open Google consent)",
+        "Click Connect / check Gmail (or Open Google consent) — only from AION",
+        "Browser callback must land on " + redirectUri + " (not localhost:8080)",
         "Select Google account → Allow",
         "Callback stores refresh token on this PC automatically — no env/PowerShell",
       );

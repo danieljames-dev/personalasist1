@@ -838,8 +838,9 @@ function connectorsCard() {
 <input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com" autocomplete="off"></label>
 <label>Gmail — OAuth client secret (stays on this PC only; never chat)
 <input name="gmailClientSecret" type="password" maxlength="200" value="" placeholder="${g?.clientSecretConfigured ? "•••• saved locally — leave blank to keep" : "paste once from Google Cloud console"}" autocomplete="new-password"></label>
-<label>Gmail redirect URI (loopback)
+<label>Gmail redirect URI (loopback — must match Google Cloud Authorized redirect URI exactly)
 <input name="gmailRedirectUri" maxlength="500" value="${esc(c.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback")}"></label>
+<p class="meta">Required value: <code>http://127.0.0.1:31415/oauth/gmail/callback</code> — never <code>http://localhost:8080/oauth2callback</code>.</p>
 <label>Metricool — env var <i>name</i> for user token (not the token value)
 <input name="metricoolTokenEnvVar" maxlength="128" value="${esc(c.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN")}"></label>
 <label>Metricool blog id env var name

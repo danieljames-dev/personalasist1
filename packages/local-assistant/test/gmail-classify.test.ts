@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyGmailMessage, extractCommitmentsFromBody } from "../src/connectors/gmail-connector.js";
+import {
+  buildGmailAuthUrl,
+  classifyGmailMessage,
+  defaultGmailConfig,
+  extractCommitmentsFromBody,
+} from "../src/connectors/gmail-connector.js";
 import { mapMetricoolBrandsToWorkspaces } from "../src/connectors/metricool-connector.js";
+
+test("Gmail OAuth auth URL uses AION loopback callback only (never Google tutorial 8080)", () => {
+  const cfg = {
+    ...defaultGmailConfig(),
+    clientId: "000000000000-placeholder.apps.googleusercontent.com",
+  };
+  const url = buildGmailAuthUrl(cfg, "aion-proof-state");
+  const u = new URL(url);
+  const redirect = u.searchParams.get("redirect_uri");
+  assert.equal(redirect, "http://127.0.0.1:31415/oauth/gmail/callback");
+  assert.equal(cfg.redirectUri, "http://127.0.0.1:31415/oauth/gmail/callback");
+  assert.equal(url.includes("8080"), false);
+  assert.equal(url.includes("oauth2callback"), false);
+  assert.equal(url.includes("localhost"), false);
+});
 
 test("Gmail classify: noise vs career vs business", () => {
   assert.equal(
