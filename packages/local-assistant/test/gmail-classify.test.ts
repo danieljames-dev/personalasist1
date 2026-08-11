@@ -139,6 +139,17 @@ test("F: legitimate direct prospect correspondence may propose CRM", () => {
   assert.equal(cls.contactClass, "PROSPECT");
 });
 
+test("F2: internal @lakelandtoyota.com is never auto-prospect", () => {
+  const cls = classifyGmailMessage({
+    from: "Michele Drake <micheled@lakelandtoyota.com>",
+    subject: "directions",
+    bodyText: "Here are the directions for the Toyota appointment lot.",
+  });
+  assert.equal(cls.shouldProposeContact, false);
+  assert.equal(cls.contactClass, "UNKNOWN");
+  assert.equal(cls.workspaceHint, "work");
+});
+
 test("G: cancelled/invalidated commitment does not create Attention OWNER_MUST_DO", () => {
   const now = "2026-08-11T18:00:00.000Z";
   const open = buildCommitment(

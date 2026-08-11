@@ -392,26 +392,41 @@ export function classifyGmailMessage(input: {
     };
   }
 
+  // Internal dealership coworkers (same employer domain) are never auto-prospects
+  if (/@lakelandtoyota\.com\b/i.test(from)) {
+    return {
+      relevance: "commitment_or_admin",
+      workspaceHint: "work",
+      shouldExtractCommitments: true,
+      shouldProposeContact: false,
+      contactClass: "UNKNOWN",
+      reason: "Internal Lakeland Toyota domain — coworker/admin, never auto-prospect.",
+      marketingOrBulk: false,
+    };
+  }
+
   // Dealership / sales — require vehicle or dealership context, not generic "course/sales" promo
   const dealershipSignal =
     /\b(toyota|dealership|tacoma|highlander|camry|rav4|trade[- ]?in|test drive|inventory|stock #|vin\b|lakeland toyota)\b/i.test(
       blob,
     );
   if (dealershipSignal) {
-    // Auto-CRM only when message looks like direct person-to-person (not free course / series)
+    // Auto-CRM only when message looks like direct external person-to-person (not free course / series)
+    const externalPerson = /@gmail\.com|@yahoo\.|@outlook\.|@hotmail\.|@icloud\./i.test(from);
     const direct =
       !/free series|sacred geometry|course enrollment|webinar/i.test(blob) &&
       (/\b(you|your|appointment|quote|come by|see you|spoke|talked|call me|email me)\b/i.test(blob) ||
-        /@gmail\.com|@yahoo\.|@outlook\./i.test(from));
+        externalPerson);
     return {
       relevance: "customer_or_prospect",
       workspaceHint: "work",
-      shouldExtractCommitments: direct,
-      shouldProposeContact: direct,
-      contactClass: direct ? (/invoice|vendor|supplier/i.test(blob) ? "VENDOR" : "PROSPECT") : "UNKNOWN",
-      reason: direct
-        ? "Dealership interpersonal correspondence — prospect candidate."
-        : "Dealership keyword without interpersonal proof — no auto CRM.",
+      shouldExtractCommitments: direct && externalPerson,
+      shouldProposeContact: direct && externalPerson,
+      contactClass: direct && externalPerson ? (/invoice|vendor|supplier/i.test(blob) ? "VENDOR" : "PROSPECT") : "UNKNOWN",
+      reason:
+        direct && externalPerson
+          ? "Dealership interpersonal external correspondence — prospect candidate."
+          : "Dealership context without external interpersonal proof — no auto CRM prospect.",
       marketingOrBulk: false,
     };
   }
