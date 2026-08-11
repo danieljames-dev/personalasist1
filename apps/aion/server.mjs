@@ -923,6 +923,10 @@ export async function createAionServer(options = {}) {
       });
       case "owner.knowledge.seedCareer": return service.seedCareerKnowledgeFromResumeEvidence();
       case "brand.seedCompassionateChoice": return service.seedCompassionateChoiceBrandFromEvidence();
+      case "knowledge.reinforceWorld": return service.reinforceOwnerWorldKnowledge();
+      case "metricool.brandMapping": return service.metricoolBrandMappingCandidates({
+        brands: Array.isArray(input.brands) ? input.brands : undefined,
+      });
       case "owner.dataCompleteness": return service.ownerDataCompletenessReport();
       case "capability.statusCenter": return service.capabilityStatusCenter();
       /** Owner broad-data discovery inventory (no mutate beyond activity log). */

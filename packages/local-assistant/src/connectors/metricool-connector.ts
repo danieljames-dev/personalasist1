@@ -78,6 +78,75 @@ export function listMetricoolBrandFixtures(brands: readonly MetricoolBrandFixtur
   return brands.filter((b) => b.active);
 }
 
+/**
+ * Map Metricool brand names → AION brand workspaces.
+ * Auto-map only high-confidence exact/normalized name matches; otherwise review.
+ */
+export function mapMetricoolBrandsToWorkspaces(
+  metricoolBrands: readonly { id: string; name: string }[],
+  aionWorkspaces: readonly { id: string; label: string; brandName?: string; archived?: boolean }[],
+): Array<{
+  metricoolId: string;
+  metricoolName: string;
+  workspaceId: string | null;
+  workspaceLabel: string | null;
+  confidence: "high" | "medium" | "low";
+  action: "auto_map" | "review";
+  reason: string;
+}> {
+  const norm = (s: string) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const live = aionWorkspaces.filter((w) => !w.archived);
+  return metricoolBrands.map((mb) => {
+    const n = norm(mb.name);
+    let best: { id: string; label: string; score: number } | null = null;
+    for (const w of live) {
+      const labels = [w.label, w.brandName || ""].map(norm).filter(Boolean);
+      for (const L of labels) {
+        let score = 0;
+        if (L === n) score = 100;
+        else if (L.includes(n) || n.includes(L)) score = 80;
+        else if (n.split(" ").some((t) => t.length > 3 && L.includes(t))) score = 50;
+        if (!best || score > best.score) best = { id: w.id, label: w.label, score };
+      }
+    }
+    if (best && best.score >= 90) {
+      return {
+        metricoolId: mb.id,
+        metricoolName: mb.name,
+        workspaceId: best.id,
+        workspaceLabel: best.label,
+        confidence: "high" as const,
+        action: "auto_map" as const,
+        reason: "Exact or near-exact brand/workspace name match.",
+      };
+    }
+    if (best && best.score >= 70) {
+      return {
+        metricoolId: mb.id,
+        metricoolName: mb.name,
+        workspaceId: best.id,
+        workspaceLabel: best.label,
+        confidence: "medium" as const,
+        action: "review" as const,
+        reason: "Partial name overlap — Owner should confirm mapping.",
+      };
+    }
+    return {
+      metricoolId: mb.id,
+      metricoolName: mb.name,
+      workspaceId: null,
+      workspaceLabel: null,
+      confidence: "low" as const,
+      action: "review" as const,
+      reason: "No confident AION brand workspace match.",
+    };
+  });
+}
+
 export function bestPerformingPosts(
   posts: readonly MetricoolPostFixtureV1[],
   limit = 5,

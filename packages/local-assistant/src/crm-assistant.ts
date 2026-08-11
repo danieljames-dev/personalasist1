@@ -369,6 +369,9 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat failed (to import)?\b/i,
       /\bwhat needs review\b/i,
       /\bdata completeness\b/i,
+      /\bwhat (are )?(my )?current goals\b/i,
+      /\bwhat (are )?my goals\b/i,
+      /\bshow (me )?(my )?goals\b/i,
     ],
   },
   {

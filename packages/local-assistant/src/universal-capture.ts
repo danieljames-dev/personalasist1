@@ -39,10 +39,47 @@ export function classifyCaptureText(
 ): CaptureClassificationV1 {
   const raw = String(text ?? "").trim();
   const lower = raw.toLowerCase();
-  const person =
-    raw.match(/\b(?:talked to|spoke with|met with|call(?:ed)?|follow up with|customer)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)?.[1] ||
-    raw.match(/\b([A-Z][a-z]+)\s+(?:wants|likes|needs|said|is interested)/i)?.[1] ||
+  const PRONOUNS = new Set([
+    "he",
+    "she",
+    "they",
+    "him",
+    "her",
+    "them",
+    "his",
+    "hers",
+    "their",
+    "it",
+    "we",
+    "you",
+    "i",
+    "me",
+    "my",
+    "our",
+    "this",
+    "that",
+    "someone",
+    "anyone",
+  ]);
+  const cleanPerson = (p: string | null | undefined): string | null => {
+    if (!p) return null;
+    const t = p.trim();
+    if (!t) return null;
+    if (PRONOUNS.has(t.toLowerCase())) return null;
+    if (t.length < 2) return null;
+    return t;
+  };
+  // Prefer explicit add/create prospect/customer names
+  const addProspect =
+    raw.match(/\b(?:add|create)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+as\s+(?:a\s+)?(?:prospect|customer|lead|contact)\b/i)?.[1] ||
+    raw.match(/\b(?:add|create)\s+(?:prospect|customer|lead|contact)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i)?.[1] ||
     null;
+  const person = cleanPerson(
+    addProspect ||
+      raw.match(/\b(?:talked to|spoke with|met with|call(?:ed)?|follow up with|promised|customer)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)?.[1] ||
+      raw.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:wants|likes|needs|said|is interested)/i)?.[1] ||
+      null,
+  );
   const vehicle =
     raw.match(
       /\b(white|black|red|blue|silver|gray|grey)?\s*(camry|tacoma|highlander|rav4|corolla|tundra|4runner|sienna|limited|xle|sr5|trd)\b/i,

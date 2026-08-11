@@ -3533,6 +3533,217 @@ export class AionAssistantV1 {
     return { created, skipped, reply };
   }
 
+  /**
+   * Seed evidence-grounded career goals + Owner world graph edges (idempotent by type+ids).
+   */
+  async reinforceOwnerWorldKnowledge(): Promise<{
+    goalsAdded: number;
+    edgesAdded: number;
+    edgesDeactivated: number;
+    reply: string;
+  }> {
+    const { buildGraphEdge } = await import("./executive-context.js");
+    return this.mutate((draft) => {
+      const now = this.ports.clock.now();
+      if (!draft.executive) draft.executive = emptyExecutiveState(now);
+      if (!draft.ownerKnowledge) {
+        draft.ownerKnowledge = {
+          profile: { displayName: "Daniel Coffman", summary: "", updatedAt: now },
+          facts: [],
+        };
+      }
+      let goalsAdded = 0;
+      const titles = new Set(
+        draft.ownerKnowledge.facts.filter((f) => f.enabled !== false).map((f) => f.title.toLowerCase()),
+      );
+      const goalSeeds = [
+        {
+          title: "Goal — remote logistics / dispatch / support role",
+          content:
+            "Seek remote dispatcher, logistics coordinator, or customer support/chat work using maritime ops + Army discipline. Evidenced by resume/cover letter job-search materials.",
+        },
+        {
+          title: "Goal — support Compassionate Choice operations",
+          content:
+            "Help build trusted local non-medical companion/homemaker presence (Compassionate Choice) with AHCA-aware ops. Evidenced by imported business structure/ops docs.",
+        },
+      ];
+      for (const g of goalSeeds) {
+        if (titles.has(g.title.toLowerCase())) continue;
+        draft.ownerKnowledge.facts.unshift({
+          id: this.ports.ids.next("okf"),
+          category: "goal",
+          title: g.title,
+          content: g.content,
+          confidence: 82,
+          enabled: true,
+          corrections: [],
+          createdAt: now,
+          updatedAt: now,
+          provenance: {
+            sourceType: "import",
+            sourceRef: "import:career-and-business-evidence",
+            recordedAt: now,
+          },
+        });
+        goalsAdded += 1;
+      }
+
+      let edgesAdded = 0;
+      let edgesDeactivated = 0;
+      const edges = draft.executive.graphEdges;
+      const hasEdge = (type: string, fromId: string, toId: string) =>
+        edges.some((e) => e.active && e.type === type && e.fromId === fromId && e.toId === toId);
+      const add = (input: Record<string, unknown>, workspace: string) => {
+        const fromId = String(input.fromId);
+        const toId = String(input.toId);
+        const type = String(input.type);
+        if (hasEdge(type, fromId, toId)) return;
+        edges.unshift(
+          buildGraphEdge(
+            { ...input, sourceRef: String(input.sourceRef ?? "import:world-graph"), visibility: "WORKSPACE_ONLY" },
+            { id: this.ports.ids.next("edge"), now, workspace },
+          ),
+        );
+        edgesAdded += 1;
+      };
+
+      // Owner career / dealership
+      add(
+        {
+          type: "works_at",
+          fromKind: "owner",
+          fromId: "owner:daniel-coffman",
+          fromLabel: "Daniel Coffman",
+          toKind: "dealership",
+          toId: "work",
+          toLabel: "Lakeland Toyota (Work)",
+          note: "Owner sales/dealership work context (workspace Work).",
+          confidence: 80,
+          sourceRef: "import:owner-dealership-context",
+        },
+        "work",
+      );
+      // Business
+      if (draft.workspaces.some((w) => w.id === "compassionate-choice" && !w.archived)) {
+        add(
+          {
+            type: "owns",
+            fromKind: "owner",
+            fromId: "owner:daniel-coffman",
+            fromLabel: "Daniel Coffman",
+            toKind: "business",
+            toId: "compassionate-choice",
+            toLabel: "Compassionate Choice",
+            note: "Owner-related business workspace from imported LLC/ops evidence (supporting role materials).",
+            confidence: 75,
+            sourceRef: "import:BUSINESS_STRUCTURE.md",
+          },
+          "compassionate-choice",
+        );
+        add(
+          {
+            type: "sells",
+            fromKind: "brand",
+            fromId: "compassionate-choice",
+            fromLabel: "Compassionate Choice Home Services",
+            toKind: "product-service",
+            toId: "non-medical-companion-services",
+            toLabel: "Non-medical companion/homemaker services",
+            note: "Services list from BUSINESS_STRUCTURE.md",
+            confidence: 88,
+            sourceRef: "import:BUSINESS_STRUCTURE.md",
+          },
+          "compassionate-choice",
+        );
+        const kristina = draft.relationships.find(
+          (r) => !r.archived && /kristina/i.test(r.displayName) && /leach/i.test(r.displayName),
+        );
+        if (kristina) {
+          add(
+            {
+              type: "collaborates_on",
+              fromKind: "person",
+              fromId: kristina.id,
+              fromLabel: kristina.displayName,
+              toKind: "business",
+              toId: "compassionate-choice",
+              toLabel: "Compassionate Choice",
+              note: "Founder/owner per business structure documents.",
+              confidence: 90,
+              sourceRef: "import:EXTERNAL-DRIVE-README.txt",
+            },
+            "compassionate-choice",
+          );
+        }
+      }
+
+      // Deactivate edges for archived people
+      const archivedIds = new Set(draft.relationships.filter((r) => r.archived).map((r) => r.id));
+      for (const e of edges) {
+        if (e.active && (archivedIds.has(e.fromId) || archivedIds.has(e.toId))) {
+          e.active = false;
+          e.supersededAt = now;
+          edgesDeactivated += 1;
+        }
+      }
+      draft.executive.graphEdges = edges.slice(0, 500);
+      this.activity(
+        draft,
+        "import",
+        "knowledge.world-graph",
+        `World graph reinforce: goals+${goalsAdded} edges+${edgesAdded} deactivated=${edgesDeactivated}`,
+        null,
+      );
+      const reply = [
+        "OWNER WORLD KNOWLEDGE REINFORCED",
+        `Goals added: ${goalsAdded}`,
+        `Graph edges added: ${edgesAdded}`,
+        `Graph edges deactivated (archived people): ${edgesDeactivated}`,
+        "Active edges are evidence-grounded; synthetic Mike fixture edges deactivated when person archived.",
+      ].join("\n");
+      return { goalsAdded, edgesAdded, edgesDeactivated, reply };
+    });
+  }
+
+  /** Metricool brand → AION workspace mapping candidates (no live API required). */
+  async metricoolBrandMappingCandidates(input: {
+    brands?: Array<{ id: string; name: string }>;
+  } = {}): Promise<{
+    mappings: ReturnType<typeof import("./connectors/metricool-connector.js").mapMetricoolBrandsToWorkspaces>;
+    reply: string;
+  }> {
+    const { mapMetricoolBrandsToWorkspaces } = await import("./connectors/metricool-connector.js");
+    const state = await this.snapshot();
+    const brands =
+      input.brands?.length
+        ? input.brands
+        : this.metricoolBrands.map((b) => ({ id: b.id, name: b.name }));
+    // Always include Compassionate Choice as a synthetic mapping probe when no fixtures
+    const probe =
+      brands.length > 0
+        ? brands
+        : [{ id: "probe-cc", name: "Compassionate Choice Home Services" }];
+    const workspaces = state.workspaces.map((w) => {
+      const row: { id: string; label: string; brandName?: string; archived?: boolean } = {
+        id: w.id,
+        label: w.label,
+        archived: w.archived,
+      };
+      if (w.brand?.name) row.brandName = w.brand.name;
+      return row;
+    });
+    const mappings = mapMetricoolBrandsToWorkspaces(probe, workspaces);
+    const reply = [
+      "METRICOOL → AION BRAND MAPPING CANDIDATES",
+      ...mappings.map(
+        (m) =>
+          `  • ${m.metricoolName} → ${m.workspaceLabel || "(none)"} [${m.action}/${m.confidence}] ${m.reason}`,
+      ),
+    ].join("\n");
+    return { mappings, reply };
+  }
+
   async compressImportReviewQueue(): Promise<{
     before: number;
     afterOpen: number;
@@ -5122,6 +5333,18 @@ export class AionAssistantV1 {
       }
       if (draft.executive?.commitments) {
         draft.executive.commitments = draft.executive.commitments.filter((c) => !isSyntheticCommitment(c));
+      }
+      // Deactivate graph edges pointing at archived / synthetic people
+      if (draft.executive?.graphEdges) {
+        const archivedIds = new Set(
+          draft.relationships.filter((r) => r.archived || isSyntheticRelationship(r)).map((r) => r.id),
+        );
+        for (const e of draft.executive.graphEdges) {
+          if (archivedIds.has(e.fromId) || archivedIds.has(e.toId) || isSyntheticOwnerFacingText(e.fromLabel, e.toLabel, e.note)) {
+            e.active = false;
+            e.supersededAt = e.supersededAt || now;
+          }
+        }
       }
       let noiseFactsDisabled = 0;
       if (draft.ownerKnowledge?.facts) {
@@ -7593,6 +7816,27 @@ export class AionAssistantV1 {
           sources,
           action: "owner.dataCompleteness",
           data: completeness,
+        };
+      }
+      if (/\bwhat (are )?(my )?(current )?goals\b|\bshow (me )?(my )?goals\b/i.test(text)) {
+        const ok = await this.getOwnerKnowledge();
+        const goals = (ok.facts || []).filter((f) => f.enabled !== false && f.category === "goal");
+        const reply = goals.length
+          ? [
+              "CURRENT GOALS (evidence-grounded)",
+              ...goals.map(
+                (g, i) =>
+                  `  ${i + 1}. ${g.title}\n     ${g.content.slice(0, 240)}\n     source=${g.provenance?.sourceRef || "unknown"} conf=${g.confidence}`,
+              ),
+            ].join("\n")
+          : "No structured GOAL facts yet. Capture with “Remember my goal is …” or import strong plan documents.";
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply,
+          sources,
+          action: "owner.goals.list",
+          data: { goals },
         };
       }
       const registry = await this.realDataSourceRegistry();

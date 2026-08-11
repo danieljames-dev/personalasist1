@@ -138,6 +138,126 @@ export function extractCommitmentsFromBody(body: string): string[] {
   return hits.slice(0, 20);
 }
 
+export type GmailRelevanceV1 =
+  | "customer_or_prospect"
+  | "business_or_brand"
+  | "career_or_job"
+  | "commitment_or_admin"
+  | "personal"
+  | "noise"
+  | "unknown";
+
+export type GmailWorkspaceHintV1 = "work" | "personal" | "compassionate-choice" | "unknown";
+
+/**
+ * Pre-live staged classification for Gmail messages.
+ * Does not create CRM rows — only proposes classes + whether to extract facts.
+ * Trust for live mail remains live_connector at service layer.
+ */
+export function classifyGmailMessage(input: {
+  from: string;
+  to?: string;
+  subject: string;
+  snippet?: string;
+  bodyText?: string;
+  labelIds?: string[];
+}): {
+  relevance: GmailRelevanceV1;
+  workspaceHint: GmailWorkspaceHintV1;
+  shouldExtractCommitments: boolean;
+  shouldProposeContact: boolean;
+  contactClass: "CUSTOMER" | "PROSPECT" | "COLLABORATOR" | "VENDOR" | "UNKNOWN";
+  reason: string;
+} {
+  const from = String(input.from ?? "").toLowerCase();
+  const subject = String(input.subject ?? "");
+  const body = `${input.snippet ?? ""} ${input.bodyText ?? ""}`.slice(0, 4000);
+  const blob = `${from} ${subject} ${body}`.toLowerCase();
+  const labels = (input.labelIds ?? []).map((l) => l.toLowerCase());
+
+  if (
+    /noreply|no-reply|newsletter|unsubscribe|marketing@|promo|notification@|mailer-daemon/i.test(from) ||
+    labels.includes("spam") ||
+    labels.includes("category_promotions")
+  ) {
+    return {
+      relevance: "noise",
+      workspaceHint: "unknown",
+      shouldExtractCommitments: false,
+      shouldProposeContact: false,
+      contactClass: "UNKNOWN",
+      reason: "Automated/promotional noise — metadata only.",
+    };
+  }
+
+  if (/job|resume|interview|hiring|application|linkedin|indeed|greenhouse|lever\.co/i.test(blob)) {
+    return {
+      relevance: "career_or_job",
+      workspaceHint: "personal",
+      shouldExtractCommitments: true,
+      shouldProposeContact: false,
+      contactClass: "UNKNOWN",
+      reason: "Career/job thread — extract commitments, not auto-CRM customer.",
+    };
+  }
+
+  if (/compassionate choice|kristina|kris\.leach|home services|ahca|grant/i.test(blob)) {
+    return {
+      relevance: "business_or_brand",
+      workspaceHint: "compassionate-choice",
+      shouldExtractCommitments: true,
+      shouldProposeContact: true,
+      contactClass: "COLLABORATOR",
+      reason: "Business/brand context — propose collaborator only with strong evidence.",
+    };
+  }
+
+  if (
+    /toyota|dealership|tacoma|highlander|trade[- ]?in|finance|appointment|test drive|inventory/i.test(blob) ||
+    labels.includes("category_personal") === false && /customer|prospect|lead/i.test(blob)
+  ) {
+    return {
+      relevance: "customer_or_prospect",
+      workspaceHint: "work",
+      shouldExtractCommitments: true,
+      shouldProposeContact: true,
+      contactClass: /invoice|vendor|supplier/i.test(blob) ? "VENDOR" : "PROSPECT",
+      reason: "Dealership/sales language — prospect candidate only after human-grade signals.",
+    };
+  }
+
+  if (/\b(i will|we will|follow up|deadline|promise|due by|by friday|next week)\b/i.test(blob)) {
+    return {
+      relevance: "commitment_or_admin",
+      workspaceHint: "unknown",
+      shouldExtractCommitments: true,
+      shouldProposeContact: false,
+      contactClass: "UNKNOWN",
+      reason: "Commitment language — extract text, do not invent customer.",
+    };
+  }
+
+  if (labels.includes("category_personal") || /family|personal|birthday/i.test(blob)) {
+    return {
+      relevance: "personal",
+      workspaceHint: "personal",
+      shouldExtractCommitments: false,
+      shouldProposeContact: false,
+      contactClass: "UNKNOWN",
+      reason: "Personal category — no CRM auto-create.",
+    };
+  }
+
+  return {
+    relevance: "unknown",
+    workspaceHint: "unknown",
+    shouldExtractCommitments: false,
+    shouldProposeContact: false,
+    contactClass: "UNKNOWN",
+    reason: "Insufficient signals — retain searchable metadata only.",
+  };
+}
+
 export function createGmailDraftFromFixture(input: {
   to: string;
   subject: string;
