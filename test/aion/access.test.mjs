@@ -181,6 +181,27 @@ test("a foreign origin is refused and bearer material is never accepted from a U
   });
 });
 
+test("Gmail OAuth callback uses runLiveGmailSync host path — never a missing service.syncGmailRecent", async () => {
+  const server = await readFile(join(repositoryRoot, "apps/aion/server.mjs"), "utf8");
+  assert.doesNotMatch(
+    server,
+    /service\.syncGmailRecent\s*\(/u,
+    "callback must not call service.syncGmailRecent (that method does not exist)",
+  );
+  assert.match(server, /async function runLiveGmailSync\s*\(/u, "host-layer live sync helper must exist");
+  assert.match(
+    server,
+    /runLiveGmailSync\s*\(\s*service\s*,\s*\{\s*maxMessages:\s*20\s*\}\s*\)/u,
+    "OAuth success path must call runLiveGmailSync for bounded initial sync",
+  );
+  assert.match(
+    server,
+    /case\s+["']connector\.gmail\.sync["'][\s\S]{0,80}runLiveGmailSync/u,
+    "connector.gmail.sync must use the same runLiveGmailSync path",
+  );
+  assert.match(server, /ingestGmailMessages/u, "domain ingest remains the knowledge write path");
+});
+
 test("remote-access status is truthful about what is actually installed", async () => {
   const { detectPrivateNetwork, remoteAccessStatus, tailscaleCandidates } = await import("../../apps/aion/private-network.mjs");
   const candidates = tailscaleCandidates({ ProgramFiles: "C:\\Program Files" }, "win32");

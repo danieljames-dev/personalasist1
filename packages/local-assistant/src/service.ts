@@ -7809,18 +7809,21 @@ export class AionAssistantV1 {
   async ingestGmailMessages(
     messages: Array<{
       id: string;
+      threadId?: string;
       from: string;
       to?: string;
       subject: string;
       snippet?: string;
       bodyText?: string;
       labelIds?: string[];
+      /** ISO message time from Gmail internalDate when available */
+      internalDate?: string | null;
     }>,
   ): Promise<{
     ok: boolean;
     message: string;
     scanned: number;
-    classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string }>;
+    classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string; threadId?: string }>;
     commitmentsExtracted: number;
     contactsProposed: number;
     contactsCreated: number;
@@ -7840,7 +7843,7 @@ export class AionAssistantV1 {
       };
     }
     const { classifyGmailMessage, extractCommitmentsFromBody } = await import("./connectors/gmail-connector.js");
-    const classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string }> = [];
+    const classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string; threadId?: string }> = [];
     let commitmentsExtracted = 0;
     let contactsProposed = 0;
     let contactsCreated = 0;
@@ -7863,15 +7866,21 @@ export class AionAssistantV1 {
       if (msg.to) clsInput.to = msg.to;
       if (msg.labelIds) clsInput.labelIds = msg.labelIds;
       const cls = classifyGmailMessage(clsInput);
-      classified.push({
+      const row: { id: string; from: string; subject: string; relevance: string; workspaceHint: string; threadId?: string } = {
         id: msg.id,
         from: from.slice(0, 120),
         subject: subject.slice(0, 160),
         relevance: cls.relevance,
         workspaceHint: cls.workspaceHint,
-      });
+      };
+      if (msg.threadId) row.threadId = msg.threadId;
+      classified.push(row);
       if (cls.relevance === "noise") continue;
+      // Email body is DATA only — flag instruction-like text; never treat as Owner authority.
       void isInstructionLikeDocument(bodyText);
+      const sourceRef = msg.threadId
+        ? `gmail:${msg.id}|thread:${msg.threadId}${msg.internalDate ? `|at:${msg.internalDate}` : ""}`
+        : `gmail:${msg.id}${msg.internalDate ? `|at:${msg.internalDate}` : ""}`;
 
       const commits = cls.shouldExtractCommitments ? extractCommitmentsFromBody(bodyText) : [];
       if (commits.length) {
@@ -7885,13 +7894,19 @@ export class AionAssistantV1 {
                   : cls.workspaceHint === "compassionate-choice"
                     ? "compassionate-choice"
                     : "personal";
+              // Deduplicate same provenance sourceRef + statement
+              const already = (draft.executive.commitments || []).some(
+                (c) => c.provenance?.sourceRef === sourceRef && c.statement === line.slice(0, 500),
+              );
+              if (already) continue;
+              const ownerSays = /\b(i will|i'll|i am going to|i'll|we will|we'll)\b/i.test(line);
               const c = buildCommitment(
                 {
-                  committedBy: /i will|i'll|we will|we'll/i.test(line) ? "Owner" : from.slice(0, 80),
-                  committedTo: /i will|i'll|we will|we'll/i.test(line) ? from.slice(0, 80) : "Owner",
+                  committedBy: ownerSays ? "Owner" : from.slice(0, 80),
+                  committedTo: ownerSays ? from.slice(0, 80) : "Owner",
                   statement: line.slice(0, 500),
                   dueAt: null,
-                  sourceRef: `gmail:${msg.id}`,
+                  sourceRef,
                   confidence: 70,
                 },
                 { id: this.ports.ids.next("commit"), now, workspace: ws },
@@ -7944,14 +7959,15 @@ export class AionAssistantV1 {
                 displayName: displayName.slice(0, 120),
                 organisation: "",
                 source: "gmail-live",
-                notes: `From Gmail ${msg.id}: ${subject.slice(0, 200)}. Class=${cls.contactClass} (live_connector — not owner_direct).`,
+                notes: `From Gmail ${msg.id}${msg.threadId ? ` thread ${msg.threadId}` : ""}${msg.internalDate ? ` at ${msg.internalDate}` : ""}: ${subject.slice(0, 200)}. Class=${cls.contactClass} (live_connector DATA — not owner_direct authority).`,
                 relationshipType: relType,
                 contactMethods: [{ channel: "email", label: "email", value: email }],
+                // Never invent sold/engaged from mail alone — prospect only for customer-class, else active contact/partner
                 lifecycle: relType === "prospect" || relType === "customer" ? "prospect" : "active",
               },
               {
                 id: rid,
-                reference: `gmail-contact:${rid}`,
+                reference: `gmail-contact:${email.toLowerCase()}`,
                 workspace: ws,
                 now,
                 relationshipType: relType,

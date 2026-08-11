@@ -46,6 +46,118 @@ const runFile = promisify(execFile);
 /** The environment variable naming an owner-controlled search instance. Optional. */
 const SEARCH_VARIABLE = "AION_SEARCH_BASE_URL";
 
+/**
+ * Bounded live Gmail fetch + domain ingest.
+ * HTTP stays in the host layer; domain only receives already-fetched message payloads.
+ * Used by connector.gmail.sync and post-OAuth initial sync (never invent service.syncGmailRecent).
+ */
+async function runLiveGmailSync(service, input = {}) {
+  const creds = await service.gmailLiveCredentials();
+  if (!creds.ready) {
+    return {
+      ok: false,
+      mode: "not_ready",
+      message: creds.message || "Gmail not READY",
+      scanned: 0,
+      classified: [],
+      commitmentsExtracted: 0,
+      contactsProposed: 0,
+      contactsCreated: 0,
+      backupOk: false,
+    };
+  }
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: creds.clientId,
+      client_secret: creds.clientSecret,
+      refresh_token: creds.refreshToken,
+      grant_type: "refresh_token",
+    }).toString(),
+  });
+  const tokenJson = await tokenRes.json();
+  if (!tokenRes.ok || !tokenJson.access_token) {
+    return {
+      ok: false,
+      mode: "live",
+      message: `Token refresh failed: ${tokenJson.error || tokenRes.status}`.slice(0, 300),
+      scanned: 0,
+      classified: [],
+      commitmentsExtracted: 0,
+      contactsProposed: 0,
+      contactsCreated: 0,
+      backupOk: true,
+    };
+  }
+  const access = tokenJson.access_token;
+  const max = Math.min(40, Math.max(5, Number(input.maxMessages) || 25));
+  const q = String(input.query || "newer_than:30d -category:promotions -category:social");
+  const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+  listUrl.searchParams.set("maxResults", String(max));
+  listUrl.searchParams.set("q", q);
+  const listRes = await fetch(listUrl.toString(), { headers: { authorization: `Bearer ${access}` } });
+  const listJson = await listRes.json();
+  if (!listRes.ok) {
+    return {
+      ok: false,
+      mode: "live",
+      message: `Gmail list failed: ${listJson.error?.message || listRes.status}`.slice(0, 300),
+      scanned: 0,
+      classified: [],
+      commitmentsExtracted: 0,
+      contactsProposed: 0,
+      contactsCreated: 0,
+      backupOk: true,
+    };
+  }
+  const ids = (listJson.messages || []).map((m) => m.id).slice(0, max);
+  const decodePart = (data) => {
+    if (!data) return "";
+    try {
+      return Buffer.from(String(data).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    } catch {
+      return "";
+    }
+  };
+  const walkBody = (part) => {
+    if (!part) return "";
+    if (part.mimeType?.startsWith("text/plain") && part.body?.data) return decodePart(part.body.data);
+    if (Array.isArray(part.parts)) {
+      for (const p of part.parts) {
+        const t = walkBody(p);
+        if (t) return t;
+      }
+    }
+    return part.body?.data ? decodePart(part.body.data) : "";
+  };
+  const messages = [];
+  for (const id of ids) {
+    const fullRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+      { headers: { authorization: `Bearer ${access}` } },
+    );
+    if (!fullRes.ok) continue;
+    const msg = await fullRes.json();
+    const headers = msg.payload?.headers || [];
+    const getH = (n) => headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value || "";
+    const internalMs = msg.internalDate ? Number(msg.internalDate) : NaN;
+    messages.push({
+      id: msg.id || id,
+      threadId: msg.threadId || "",
+      from: getH("From"),
+      to: getH("To"),
+      subject: getH("Subject"),
+      snippet: msg.snippet || "",
+      bodyText: (walkBody(msg.payload) || msg.snippet || "").slice(0, 20000),
+      labelIds: msg.labelIds || [],
+      internalDate: Number.isFinite(internalMs) ? new Date(internalMs).toISOString() : null,
+    });
+  }
+  const result = await service.ingestGmailMessages(messages);
+  return { mode: "live", ...result };
+}
+
 /** Removes absolute local paths from any text that reaches the browser, logs, or activity. */
 function privacySafe(text) {
   return String(text ?? "").replace(/\\\\[^\s"'<>|]+/gu, "[local path]").replace(/[A-Za-z]:[\\/][^\s"'<>|]*/gu, "[local path]");
@@ -845,108 +957,9 @@ export async function createAionServer(options = {}) {
       }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
-      case "connector.gmail.sync": {
-        // HTTP stays in host layer (domain package forbids fetch)
-        const creds = await service.gmailLiveCredentials();
-        if (!creds.ready) {
-          return {
-            ok: false,
-            mode: "not_ready",
-            message: creds.message || "Gmail not READY",
-            scanned: 0,
-            classified: [],
-            commitmentsExtracted: 0,
-            contactsProposed: 0,
-            contactsCreated: 0,
-            backupOk: false,
-          };
-        }
-        const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            client_id: creds.clientId,
-            client_secret: creds.clientSecret,
-            refresh_token: creds.refreshToken,
-            grant_type: "refresh_token",
-          }).toString(),
-        });
-        const tokenJson = await tokenRes.json();
-        if (!tokenRes.ok || !tokenJson.access_token) {
-          return {
-            ok: false,
-            mode: "live",
-            message: `Token refresh failed: ${tokenJson.error || tokenRes.status}`.slice(0, 300),
-            scanned: 0,
-            classified: [],
-            commitmentsExtracted: 0,
-            contactsProposed: 0,
-            contactsCreated: 0,
-            backupOk: true,
-          };
-        }
-        const access = tokenJson.access_token;
-        const max = Math.min(40, Math.max(5, Number(input.maxMessages) || 25));
-        const q = String(input.query || "newer_than:30d -category:promotions -category:social");
-        const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
-        listUrl.searchParams.set("maxResults", String(max));
-        listUrl.searchParams.set("q", q);
-        const listRes = await fetch(listUrl.toString(), { headers: { authorization: `Bearer ${access}` } });
-        const listJson = await listRes.json();
-        if (!listRes.ok) {
-          return {
-            ok: false,
-            mode: "live",
-            message: `Gmail list failed: ${listJson.error?.message || listRes.status}`.slice(0, 300),
-            scanned: 0,
-            classified: [],
-            commitmentsExtracted: 0,
-            contactsProposed: 0,
-            contactsCreated: 0,
-            backupOk: true,
-          };
-        }
-        const ids = (listJson.messages || []).map((m) => m.id).slice(0, max);
-        const decodePart = (data) => {
-          if (!data) return "";
-          try {
-            return Buffer.from(String(data).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-          } catch { return ""; }
-        };
-        const walkBody = (part) => {
-          if (!part) return "";
-          if (part.mimeType?.startsWith("text/plain") && part.body?.data) return decodePart(part.body.data);
-          if (Array.isArray(part.parts)) {
-            for (const p of part.parts) {
-              const t = walkBody(p);
-              if (t) return t;
-            }
-          }
-          return part.body?.data ? decodePart(part.body.data) : "";
-        };
-        const messages = [];
-        for (const id of ids) {
-          const fullRes = await fetch(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
-            { headers: { authorization: `Bearer ${access}` } },
-          );
-          if (!fullRes.ok) continue;
-          const msg = await fullRes.json();
-          const headers = msg.payload?.headers || [];
-          const getH = (n) => headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value || "";
-          messages.push({
-            id: msg.id || id,
-            from: getH("From"),
-            to: getH("To"),
-            subject: getH("Subject"),
-            snippet: msg.snippet || "",
-            bodyText: (walkBody(msg.payload) || msg.snippet || "").slice(0, 20000),
-            labelIds: msg.labelIds || [],
-          });
-        }
-        const result = await service.ingestGmailMessages(messages);
-        return { mode: "live", ...result };
-      }
+      case "connector.gmail.sync":
+        // HTTP fetch in host helper; domain ingest only (see runLiveGmailSync).
+        return runLiveGmailSync(service, input);
       case "connector.gmail.disconnect": return service.disconnectGmail();
       case "connector.gmail.oauthComplete": return service.completeGmailOAuth({
         refreshToken: String(input.refreshToken ?? ""),
@@ -1524,10 +1537,10 @@ export async function createAionServer(options = {}) {
                     clientId: effectiveClientId,
                     scopes: String(tokenJson.scope || "").split(/\s+/).filter(Boolean),
                   });
-                  // Auto first sync (bounded) after connect
+                  // Auto first sync (bounded) after connect — same host path as connector.gmail.sync
                   let syncNote = "";
                   try {
-                    const sync = await service.syncGmailRecent({ maxMessages: 20 });
+                    const sync = await runLiveGmailSync(service, { maxMessages: 20 });
                     syncNote = sync.ok
                       ? `<p class="meta">Initial sync: scanned ${sync.scanned}, commitments ${sync.commitmentsExtracted}, contacts +${sync.contactsCreated}.</p>`
                       : `<p class="meta">Connected; initial sync deferred: ${escHtml(sync.message || "")}</p>`;
