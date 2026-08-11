@@ -257,6 +257,14 @@ import {
   type WalkReconciliationV1,
 } from "./vehicle-inventory.js";
 import {
+  answerVehicleQuery,
+  formatCustomerMatches,
+  isFixtureVehicle,
+  matchCustomerToVehicles,
+  type CustomerVehicleMatchV1,
+  type VehicleQueryAnswerV1,
+} from "./vehicle-intelligence.js";
+import {
   buildWalkAcceptanceReport,
   buildWalkObservationMetrics,
   deriveOnlineMatch,
@@ -1047,6 +1055,37 @@ export class AionAssistantV1 {
     const board = opts.board ?? (await this.attentionBoard());
     const { loadGmailLocalSecrets } = await import("./connector-secrets.js");
     const gmailLocal = loadGmailLocalSecrets(this.repositoryDataRoot());
+    const inv = this.vehicleInv(state);
+    // Top grounded inventory matches for work customers (soft signals → scored vehicles)
+    const vehicleMatchLines: string[] = [];
+    for (const r of state.relationships) {
+      if (r.archived || r.workspace !== "work") continue;
+      if (r.relationshipType !== "customer" && r.relationshipType !== "prospect") continue;
+      const matches = matchCustomerToVehicles({
+        relationship: r,
+        vehicles: inv.vehicles,
+        nowIso: now,
+        maxResults: 2,
+      });
+      for (const m of matches) {
+        if (m.score < 50) continue;
+        vehicleMatchLines.push(
+          `${m.customerName} ↔ ${m.label} [${m.sourceClass}] · ${m.whyMatches[0] ?? "match"}`,
+        );
+      }
+      if (vehicleMatchLines.length >= 6) break;
+    }
+    const nonFixture = inv.vehicles.filter((v) => !isFixtureVehicle(v));
+    const liveVehicles = nonFixture.filter(
+      (v) =>
+        v.presenceStatus === "ONLINE_LISTED" || v.presenceStatus === "PHYSICALLY_VERIFIED",
+    );
+    const inventorySummary = {
+      liveCount: liveVehicles.length,
+      fixtureCount: inv.vehicles.filter((v) => isFixtureVehicle(v)).length,
+      lastRefresh: inv.lastInventoryRefresh?.["lakeland-toyota"] ?? null,
+      withPrice: liveVehicles.filter((v) => (v.priceHistory?.[0]?.advertisedPrice ?? 0) > 0).length,
+    };
     return buildDailyOperatingReport({
       nowIso: now,
       board,
@@ -1056,6 +1095,8 @@ export class AionAssistantV1 {
       activity: state.activity ?? [],
       workspaceLabels: state.settings.workspaceLabels,
       lastGmailSyncAt: gmailLocal?.lastSyncAt ?? null,
+      vehicleMatchLines,
+      inventorySummary,
     });
   }
 
@@ -5126,6 +5167,43 @@ export class AionAssistantV1 {
   async listVehicles(query: Parameters<typeof queryVehicles>[1] = {}): Promise<VehicleRecordV1[]> {
     const inv = this.vehicleInv(await this.snapshot());
     return queryVehicles(inv.vehicles, { ...query, nowIso: this.ports.clock.now() });
+  }
+
+  /** Natural-language vehicle answer with explicit knowledge class (live vs fixture vs model knowledge). */
+  async answerVehicleIntelligence(query: string): Promise<VehicleQueryAnswerV1> {
+    const inv = this.vehicleInv(await this.snapshot());
+    return answerVehicleQuery({
+      query,
+      vehicles: inv.vehicles,
+      nowIso: this.ports.clock.now(),
+      lastInventoryRefresh: inv.lastInventoryRefresh,
+    });
+  }
+
+  async matchCustomerVehicles(relationshipId: string, maxResults = 5): Promise<{
+    matches: CustomerVehicleMatchV1[];
+    reply: string;
+  }> {
+    const state = await this.snapshot();
+    const rel = state.relationships.find((r) => r.id === relationshipId);
+    if (!rel) throw new Error("Customer/relationship not found.");
+    const inv = this.vehicleInv(state);
+    const matches = matchCustomerToVehicles({
+      relationship: rel,
+      vehicles: inv.vehicles,
+      nowIso: this.ports.clock.now(),
+      maxResults,
+    });
+    return {
+      matches,
+      reply: [
+        `CUSTOMER → VEHICLE MATCH: ${rel.displayName}`,
+        formatCustomerMatches(matches),
+        "",
+        "Do not claim payment/affordability without grounded price + stated budget.",
+        "Do not invent incentives or on-lot presence without PHYSICALLY_VERIFIED.",
+      ].join("\n"),
+    };
   }
 
   async associateVehicleWithCustomer(input: {
@@ -9332,34 +9410,66 @@ export class AionAssistantV1 {
           data: v ?? null,
         };
       }
-      // Inventory queries: Camrys, Tacomas, used under price
-      const yearM = text.match(/\b(20\d{2})\b/);
+      // Inventory queries: Camrys, hybrids, SUVs under price, trim differences, VIN facts
       const modelM = text.match(/\b(camrys?|tacomas?|highlanders?|rav4s?|corollas?|tundras?|4runners?)\b/i);
-      const used = /\bused\b/i.test(text);
-      const priceM = text.match(/(?:under|below)\s*\$?\s*([\d,]+)/i);
-      if (modelM || /\blisted right now\b/i.test(text) || /\bfind me a\b/i.test(text)) {
-        const model = modelM ? modelM[1]!.replace(/s$/i, "") : undefined;
-        const q: Parameters<typeof queryVehicles>[1] = { make: "Toyota" };
-        if (yearM) q.year = Number(yearM[1]);
-        if (model) q.model = model;
-        if (used) q.condition = "used";
-        if (priceM) q.maxPrice = Number(priceM[1]!.replace(/,/g, ""));
-        const hits = await this.listVehicles(q);
-        const lines = hits.slice(0, 12).map(
-          (v) =>
-            `  - ${[v.year, v.make, v.model, v.trim].filter(Boolean).join(" ")} · VIN ${v.vin ?? "?"} · stock ${v.stockNumber ?? "?"} · $${v.priceHistory[0]?.advertisedPrice ?? "?"} · ${v.presenceStatus}`,
-        );
+      const vehicleQn =
+        modelM ||
+        /\blisted right now\b/i.test(text) ||
+        /\bfind me a\b/i.test(text) ||
+        /\bwhat (cars?|vehicles?|suvs?|trucks?|hybrids?)\b/i.test(text) ||
+        /\bdo we have\b/i.test(text) ||
+        /\bdifference between\b/i.test(text) && /\b(le|se|xle|xse)\b/i.test(text) ||
+        /\bno longer available\b/i.test(text) ||
+        /\bcame in recently\b/i.test(text);
+      if (vehicleQn) {
+        const answer = await this.answerVehicleIntelligence(text);
         return {
           intent: route.intent,
           confidence: "high",
-          reply: [
-            `Vehicle query (stored inventory + public refresh history): ${hits.length} match(es).`,
-            lines.join("\n") || "  (none stored — try Refresh inventory first)",
-            "Sources: dealer public listing observations and/or physical walks. Online ≠ on lot.",
-          ].join("\n"),
-          sources: hits.slice(0, 8).map((v) => ({ type: "vehicle", id: v.id, label: v.vin || v.id })),
+          reply: answer.reply,
+          sources: answer.vehicles.slice(0, 8).map((v) => ({
+            type: "vehicle",
+            id: v.vin || "unknown",
+            label: [v.year, v.make, v.model, v.trim].filter(Boolean).join(" ") || v.vin || "vehicle",
+          })),
           action: "vehicle.query",
-          data: { count: hits.length, vehicles: hits.slice(0, 25) },
+          data: answer,
+        };
+      }
+      // Customer match: "what should I show Sarah" / "match vehicles for ..."
+      const showFor = text.match(/\b(?:show|match|recommend).{0,40}\bfor\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i)
+        || text.match(/\bvehicles?\s+match\s+([A-Z][a-z]+)/i)
+        || text.match(/\b([A-Z][a-z]+)'s\s+needs\b/i);
+      if (showFor || (/\bwhat (vehicle|car) should i show\b/i.test(text) && /\b(sarah|mike|john|customer)\b/i.test(text))) {
+        const nameHint = (showFor?.[1] || text.match(/\b(Sarah|Mike|John)\b/i)?.[1] || "").trim();
+        const state = await this.snapshot();
+        const rel = state.relationships.find(
+          (r) =>
+            !r.archived &&
+            r.workspace === "work" &&
+            nameHint &&
+            r.displayName.toLowerCase().includes(nameHint.toLowerCase()),
+        );
+        if (!rel) {
+          return {
+            intent: route.intent,
+            confidence: "medium",
+            reply: nameHint
+              ? `No work customer/prospect matching "${nameHint}". Add interests on the customer card first.`
+              : "Name the customer (e.g. Sarah) to match inventory.",
+            sources: [],
+            action: "vehicle.customer_match",
+            data: null,
+          };
+        }
+        const matched = await this.matchCustomerVehicles(rel.id);
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: matched.reply,
+          sources: matched.matches.map((m) => ({ type: "vehicle", id: m.vehicleId, label: m.label })),
+          action: "vehicle.customer_match",
+          data: matched,
         };
       }
       if (

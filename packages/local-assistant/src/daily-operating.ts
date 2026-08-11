@@ -37,12 +37,20 @@ export interface DailyOperatingReportV1 {
   importantFollowUps: string[];
   career: string[];
   lakelandToyota: string[];
+  vehiclesToKnow: string[];
   compassionateChoice: string[];
   personal: string[];
   opportunities: string[];
   risksDeadlines: string[];
   highPriorityCount: number;
   reply: string;
+}
+
+export interface InventoryBriefSummaryV1 {
+  liveCount: number;
+  fixtureCount: number;
+  lastRefresh: string | null;
+  withPrice: number;
 }
 
 function liveRels(relationships: readonly RelationshipV1[]): RelationshipV1[] {
@@ -298,6 +306,11 @@ export function buildWhatChangedSince(input: {
   return { lines: deduped, reply };
 }
 
+function section(title: string, lines: string[]): string[] {
+  if (!lines.length) return [];
+  return ["", title, ...lines.map((x) => `  • ${x}`)];
+}
+
 export function buildDailyOperatingReport(input: {
   nowIso: string;
   board: AttentionBoardV1;
@@ -307,12 +320,20 @@ export function buildDailyOperatingReport(input: {
   activity?: readonly { at: string; action: string; summary: string }[];
   workspaceLabels?: Record<string, string>;
   lastGmailSyncAt?: string | null;
+  /** Grounded customer↔vehicle match lines for the brief. */
+  vehicleMatchLines?: string[];
+  inventorySummary?: InventoryBriefSummaryV1 | null;
 }): DailyOperatingReportV1 {
   const labels = input.workspaceLabels ?? {};
+  const workLabel = labels.work || "Lakeland Toyota";
   const ownerMustDo = input.board.ownerMustDo.slice(0, 5).map(
     (i) => `[${i.horizon}] [${i.contextLabel}] ${i.title} — ${i.why}`,
   );
-  const aionCanDo = input.board.aionCanDo.slice(0, 8).map((i) => `[${i.contextLabel}] ${i.title}`);
+  // Suppress always-on engineering filler already filtered in attention engine when empty evidence
+  const aionCanDo = input.board.aionCanDo
+    .filter((i) => i.sourceType !== "autonomy" || (input.opportunities?.length ?? 0) > 0 || ownerMustDo.length > 0)
+    .slice(0, 8)
+    .map((i) => `[${i.contextLabel}] ${i.title}`);
   const waitingOnOthers = buildWaitingOnOthers(input.commitments, input.relationships);
   const importantFollowUps = buildImportantFollowUps(input.relationships, input.nowIso);
 
@@ -320,23 +341,43 @@ export function buildDailyOperatingReport(input: {
   const ccRels = liveRels(input.relationships).filter((r) => r.workspace === "compassionate-choice");
   const personalRels = liveRels(input.relationships).filter((r) => r.workspace === "personal");
 
+  // Career: only grounded commitments / career provenance — not a forced Gmail status line
   const career = [
     ...openCommits(input.commitments)
-      .filter((c) => /job|interview|recruit|application|career/i.test(c.statement + (c.provenance?.sourceRef || "")))
+      .filter((c) =>
+        /job|interview|recruit|career/i.test(c.statement + (c.provenance?.sourceRef || "")) ||
+        /career/i.test(c.provenance?.sourceRef || ""),
+      )
       .map((c) => c.statement.slice(0, 100)),
-    ...(input.lastGmailSyncAt ? [`Last Gmail sync: ${input.lastGmailSyncAt.slice(0, 16)} (career signals only when interpersonal)`] : []),
   ].slice(0, 6);
-  if (!career.length) career.push("No grounded career action items (unknown status preserved).");
 
+  // Customers/dealership: prefer action-ranked (open due follow-up + type)
   const lakeland = [
     ...workRels
       .filter((r) => r.relationshipType === "customer" || r.relationshipType === "prospect")
-      .map((r) => `${r.displayName} · ${r.relationshipType}/${r.lifecycle || "?"}`),
+      .filter((r) => (r.followUps ?? []).some((f) => f.status === "open") || r.nextAction || (r.appointments ?? []).length)
+      .map((r) => `${r.displayName} · ${r.relationshipType}/${r.lifecycle || "?"}${r.nextAction ? ` · next: ${r.nextAction.slice(0, 60)}` : ""}`),
     ...workRels.flatMap((r) =>
-      (r.followUps ?? []).filter((f) => f.status === "open").map((f) => `Follow-up ${r.displayName}: ${f.reason || f.channel}`),
+      (r.followUps ?? [])
+        .filter((f) => f.status === "open")
+        .filter((f) => !/\bunsubscribe|newsletter|promo\b/i.test(f.reason || ""))
+        .map((f) => `Follow-up ${r.displayName}: ${f.reason || f.channel}`),
     ),
   ].slice(0, 8);
-  if (!lakeland.length) lakeland.push("No live external customers/prospects requiring action (coworkers excluded).");
+
+  const inv = input.inventorySummary;
+  const vehiclesToKnow: string[] = [
+    ...(input.vehicleMatchLines ?? []).slice(0, 6),
+  ];
+  if (inv && inv.liveCount > 0) {
+    vehiclesToKnow.push(
+      `Public inventory: ${inv.liveCount} live unit record(s)${inv.withPrice ? ` · ${inv.withPrice} with price` : ""}${inv.lastRefresh ? ` · refreshed ${inv.lastRefresh.slice(0, 16)}` : " · refresh time unknown"}`,
+    );
+  } else if (inv && inv.fixtureCount > 0 && inv.liveCount === 0) {
+    vehiclesToKnow.push(
+      `Only fixture/demo inventory on file (${inv.fixtureCount}) — not live lot. Refresh public inventory.`,
+    );
+  }
 
   const compassionate = [
     ...ccRels.map((r) => `${r.displayName} · ${r.relationshipType}`),
@@ -344,66 +385,51 @@ export function buildDailyOperatingReport(input: {
       .filter((c) => c.workspace === "compassionate-choice")
       .map((c) => c.statement.slice(0, 100)),
   ].slice(0, 6);
-  if (!compassionate.length) compassionate.push("Compassionate Choice: grounded partner data present if imported; no new forced opportunities.");
 
   const personal = [
-    ...personalRels.slice(0, 4).map((r) => r.displayName),
     ...openCommits(input.commitments)
       .filter((c) => c.workspace === "personal" && /^owner$/i.test(c.committedBy))
       .map((c) => `Owner owes: ${c.statement.slice(0, 80)}`),
+    ...personalRels
+      .filter((r) => (r.followUps ?? []).some((f) => f.status === "open"))
+      .slice(0, 3)
+      .map((r) => r.displayName),
   ].slice(0, 6);
-  if (!personal.length) personal.push("No high-priority personal Owner obligations surfaced.");
 
   const opportunities = (input.opportunities ?? [])
     .filter((o) => (o.score ?? 0) >= 70 || (o.value ?? 0) >= 60)
     .filter((o) => !isTestOrE2eWorkspace({ id: o.workspace, label: o.workspace }))
+    .filter((o) => !/fixture|e2e|synthetic/i.test(o.title + o.detail))
     .slice(0, 5)
     .map((o) => `[${labels[o.workspace] || o.workspace}] ${o.title}`);
-  if (!opportunities.length) opportunities.push("None above confidence threshold.");
 
   const risksDeadlines = openCommits(input.commitments)
-    .filter((c) => c.status === "overdue" || c.status === "due_soon" || c.dueAt)
+    .filter((c) => c.status === "overdue" || c.status === "due_soon" || (c.dueAt && c.dueAt.slice(0, 10) <= input.nowIso.slice(0, 10)))
     .slice(0, 6)
     .map((c) => `[${c.status}] ${c.dueAt || "no date"} · ${c.statement.slice(0, 80)}`);
-  if (!risksDeadlines.length) risksDeadlines.push("No grounded deadline risk.");
 
   const reply = [
-    "DAILY OPERATING BRIEF",
+    "WHAT ACTUALLY MATTERS TODAY",
     `Generated ${input.nowIso.slice(0, 16)} · high-confidence only · max ${ownerMustDo.length || 0}/5 Owner interruptions`,
     "",
     "OWNER MUST DO",
     ...(ownerMustDo.length ? ownerMustDo.map((x, i) => `  ${i + 1}. ${x}`) : ["  (none)"]),
+    ...section("AION CAN HANDLE", aionCanDo),
+    ...section(
+      "WAITING ON SOMEONE",
+      waitingOnOthers.map((w) => `[${w.workspace}] ${w.person}: ${w.expected.slice(0, 90)}`),
+    ),
+    ...section("IMPORTANT FOLLOW-UPS", importantFollowUps),
+    ...section(`CUSTOMERS / ${workLabel.toUpperCase()}`, lakeland),
+    ...section("VEHICLES TO KNOW ABOUT", vehiclesToKnow),
+    ...section("CAREER", career),
+    ...section("COMPASSIONATE CHOICE", compassionate),
+    ...section("PERSONAL", personal),
+    ...section("OPPORTUNITIES", opportunities),
+    ...section("RISKS / DEADLINES", risksDeadlines),
     "",
-    "AION CAN DO",
-    ...(aionCanDo.length ? aionCanDo.map((x) => `  • ${x}`) : ["  (quiet)"]),
-    "",
-    "WAITING ON OTHERS",
-    ...(waitingOnOthers.length
-      ? waitingOnOthers.map((w) => `  • [${w.workspace}] ${w.person}: ${w.expected.slice(0, 90)}`)
-      : ["  (none)"]),
-    "",
-    "IMPORTANT FOLLOW-UPS",
-    ...(importantFollowUps.length ? importantFollowUps.map((x) => `  • ${x}`) : ["  (none)"]),
-    "",
-    "CAREER",
-    ...career.map((x) => `  • ${x}`),
-    "",
-    "LAKELAND TOYOTA",
-    ...lakeland.map((x) => `  • ${x}`),
-    "",
-    "COMPASSIONATE CHOICE",
-    ...compassionate.map((x) => `  • ${x}`),
-    "",
-    "PERSONAL",
-    ...personal.map((x) => `  • ${x}`),
-    "",
-    "OPPORTUNITIES",
-    ...opportunities.map((x) => `  • ${x}`),
-    "",
-    "RISKS / DEADLINES",
-    ...risksDeadlines.map((x) => `  • ${x}`),
-    "",
-    "No email send · no social post · no job apply · no spend.",
+    "Empty sections omitted. No email send · no social post · no job apply · no spend.",
+    "Engineering/project status is not listed unless it requires Owner action.",
   ].join("\n");
 
   return {
@@ -414,6 +440,7 @@ export function buildDailyOperatingReport(input: {
     importantFollowUps,
     career,
     lakelandToyota: lakeland,
+    vehiclesToKnow,
     compassionateChoice: compassionate,
     personal,
     opportunities,

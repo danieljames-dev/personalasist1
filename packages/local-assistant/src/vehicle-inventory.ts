@@ -467,6 +467,13 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Prices of 0 from dealer markup are not real asks — treat as unknown. */
+function priceOrNull(v: unknown): number | null {
+  const n = numOrNull(v);
+  if (n == null || n <= 0) return null;
+  return n;
+}
+
 function strOrNull(v: unknown, max = 200): string | null {
   if (v === undefined || v === null) return null;
   const s = String(v).trim().slice(0, max);
@@ -497,9 +504,9 @@ export function listingFromPartial(
     exteriorColor: strOrNull(input.exteriorColor, 80),
     interiorColor: strOrNull(input.interiorColor, 80),
     mileage: numOrNull(input.mileage),
-    advertisedPrice: numOrNull(input.advertisedPrice ?? input.price),
-    msrp: numOrNull(input.msrp),
-    dealerPrice: numOrNull(input.dealerPrice),
+    advertisedPrice: priceOrNull(input.advertisedPrice ?? input.price),
+    msrp: priceOrNull(input.msrp),
+    dealerPrice: priceOrNull(input.dealerPrice),
     listingUrl: strOrNull(input.listingUrl, 1000),
     detailUrl: strOrNull(input.detailUrl ?? input.listingUrl, 1000),
     availability: strOrNull(input.availability ?? input.status, 120),

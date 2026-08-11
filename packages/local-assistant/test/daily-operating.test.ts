@@ -89,11 +89,34 @@ test("daily operating brief is dense and capped", () => {
     commitments: [],
     opportunities: [],
   });
-  assert.match(rep.reply, /DAILY OPERATING BRIEF/);
+  assert.match(rep.reply, /WHAT ACTUALLY MATTERS TODAY/);
   assert.match(rep.reply, /OWNER MUST DO/);
-  assert.match(rep.reply, /WAITING ON OTHERS/);
-  assert.match(rep.reply, /LAKELAND TOYOTA/);
+  // Empty sections omitted — no forced LAKELAND/CAREER placeholders
+  assert.doesNotMatch(rep.reply, /No grounded career action items/);
+  assert.doesNotMatch(rep.reply, /Refresh work queue/);
   assert.ok(rep.highPriorityCount <= 5);
+});
+
+test("daily brief surfaces vehicles when grounded matches provided", () => {
+  const board = buildAttentionBoard({
+    nowIso: now,
+    relationships: [],
+    tasks: [],
+    commitments: [],
+  });
+  const rep = buildDailyOperatingReport({
+    nowIso: now,
+    board,
+    relationships: [],
+    commitments: [],
+    opportunities: [],
+    vehicleMatchLines: ["Sarah ↔ 2024 Toyota Camry XLE [LIVE_DEALER_INVENTORY] · interest Camry"],
+    inventorySummary: { liveCount: 12, fixtureCount: 0, lastRefresh: "2026-08-12T10:00:00.000Z", withPrice: 10 },
+  });
+  assert.match(rep.reply, /VEHICLES TO KNOW ABOUT/);
+  assert.match(rep.reply, /Sarah ↔ 2024 Toyota Camry/);
+  assert.match(rep.reply, /12 live unit/);
+  assert.doesNotMatch(rep.reply, /brand gap_scan|engineering backlog/i);
 });
 
 test("context daily view isolates work from personal labels", () => {

@@ -65,17 +65,24 @@
   </div>
 
   <script>
-    const TOKEN_KEY = "aion.sessionToken";
-    // Prefer shared Command Center key if already paired from full app
-    const token = () => localStorage.getItem(TOKEN_KEY) || localStorage.getItem("aion.session") || "";
+    // Shared with full Command Center — single trusted-device lifetime storage
+    const TOKEN_KEY = "aion.session";
+    const TOKEN_LEGACY = "aion.sessionToken";
+    const token = () => localStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_LEGACY) || "";
     const setToken = (t) => {
       localStorage.setItem(TOKEN_KEY, t);
-      try { localStorage.setItem("aion.session", t); } catch {}
+      localStorage.setItem(TOKEN_LEGACY, t);
     };
     const clearToken = () => {
       localStorage.removeItem(TOKEN_KEY);
-      try { localStorage.removeItem("aion.session"); } catch {}
+      localStorage.removeItem(TOKEN_LEGACY);
     };
+    function isUnpairedError(status, msg) {
+      const m = String(msg || "").toLowerCase();
+      if (status === 401) return /not paired|pair it|invalid|expired|revoked|unauthor/i.test(m) || !m;
+      if (status === 403) return /access is turned off|private phone access|revoked/i.test(m);
+      return false;
+    }
     const pairCard = document.getElementById("pairCard");
     const upCard = document.getElementById("upCard");
     const pairMsg = document.getElementById("pairMsg");
@@ -162,7 +169,8 @@
       try {
         let payload;
         if (selectedFile) {
-          if (selectedFile.size > 6 * 1024 * 1024) throw new Error("Max 6 MB.");
+          // Decoded bytes capped server-side at 6 MB; base64 expands ~4/3 so keep client under 4.5 MB raw
+          if (selectedFile.size > 4.5 * 1024 * 1024) throw new Error("Max ~4.5 MB per photo (base64 envelope limit). Use a smaller photo.");
           payload = {
             type: "crm.document.upload",
             filename: selectedFile.name || "phone-photo.jpg",
@@ -209,7 +217,9 @@
         upMsg.hidden = false;
         upMsg.className = "err";
         upMsg.textContent = e.message || String(e);
-        if (/not paired|401|403/i.test(String(e.message))) {
+        // Only wipe session on true unpair — not origin glitches or size errors
+        const msg = String(e.message || e);
+        if (isUnpairedError(401, msg) || /this device is not paired/i.test(msg)) {
           clearToken();
           pairCard.hidden = false;
           upCard.hidden = true;

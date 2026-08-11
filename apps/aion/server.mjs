@@ -38,7 +38,8 @@ const ASSETS = new Map([
 ]);
 /** The shell an unpaired device may fetch so it can render the pairing screen. Never any data. */
 const PUBLIC_ASSETS = new Set(["/", "/phone", "/phone.html", "/app.js", "/styles.css", "/sw.js", "/manifest.webmanifest", "/icon.svg"]);
-const MAX_BODY = 8 * 1024 * 1024;
+// Base64 expands ~4/3; allow room for 6 MiB decoded photo + JSON envelope without false 400s.
+const MAX_BODY = 12 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
 const ASSET_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const CAREER_COMMANDS = new Set(["init", "ingest", "profile", "job:import", "match", "draft", "export", "demo"]);
@@ -252,7 +253,11 @@ function json(response, status, body) {
 }
 async function body(request) {
   const chunks = []; let size = 0;
-  for await (const chunk of request) { size += chunk.length; if (size > MAX_BODY) throw new Error("Request body exceeds the 8 MiB limit."); chunks.push(chunk); }
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > MAX_BODY) throw new Error(`Request body exceeds the ${Math.round(MAX_BODY / (1024 * 1024))} MiB limit.`);
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Request body must be a JSON object.");
@@ -1048,6 +1053,11 @@ export async function createAionServer(options = {}) {
       });
       case "inventory.walk.summary": return { summary: await service.inventoryWalkSummary(input.walkId) };
       case "vehicle.list": return { vehicles: await service.listVehicles(input.query ?? input) };
+      case "vehicle.query":
+      case "vehicle.intelligence":
+        return service.answerVehicleIntelligence(String(input.query ?? input.text ?? input.q ?? ""));
+      case "vehicle.customer_match":
+        return service.matchCustomerVehicles(String(input.relationshipId ?? ""), Number(input.maxResults) || 5);
       case "vehicle.associate": return service.associateVehicleWithCustomer({
         vehicleId: input.vehicleId,
         vin: input.vin,

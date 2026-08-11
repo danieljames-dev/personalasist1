@@ -21,12 +21,36 @@ const scoped = (items) => (items ?? []).filter((item) => (item.workspace ?? "per
 const localToIso = (value) => value ? new Date(value).toISOString() : "";
 const short = (value, length = 16) => `${String(value ?? "").slice(0, length)}…`;
 
+/** Canonical session key (shared with /phone). Legacy aion.sessionToken still read. */
 const SESSION_KEY = "aion.session";
+const SESSION_KEY_LEGACY = "aion.sessionToken";
 /** A paired phone keeps its token here. The console never has one and never needs one. */
-const sessionToken = () => { try { return localStorage.getItem(SESSION_KEY) ?? ""; } catch { return ""; } };
-const setSessionToken = (value) => { try { value ? localStorage.setItem(SESSION_KEY, value) : localStorage.removeItem(SESSION_KEY); } catch { /* private mode */ } };
+const sessionToken = () => {
+  try {
+    return localStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY_LEGACY) || "";
+  } catch { return ""; }
+};
+const setSessionToken = (value) => {
+  try {
+    if (value) {
+      localStorage.setItem(SESSION_KEY, value);
+      localStorage.setItem(SESSION_KEY_LEGACY, value);
+    } else {
+      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem(SESSION_KEY_LEGACY);
+    }
+  } catch { /* private mode */ }
+};
 /** Bearer material travels in a header, never in a URL where it would reach logs and history. */
 function authHeaders() { const token = sessionToken(); return token ? { authorization: `Bearer ${token}` } : {}; }
+
+/** Only true "not paired / revoked / access off" should wipe the token — not origin/host glitches. */
+function isUnpairedAuthError(status, message) {
+  const m = String(message || "").toLowerCase();
+  if (status === 401) return /not paired|pair it|invalid|expired|revoked|unauthor/i.test(m) || !m;
+  if (status === 403) return /access is turned off|private phone access|revoked/i.test(m);
+  return false;
+}
 
 async function api(type, payload = {}) {
   // `type` is written last on purpose: a payload field can never displace the action being called.
@@ -37,7 +61,19 @@ async function api(type, payload = {}) {
 }
 async function load() {
   const response = await fetch("/api/state", { headers: authHeaders() });
-  if (response.status === 401 || response.status === 403) { setSessionToken(""); renderPairing(await response.json().then((d) => d.error).catch(() => "This device is not paired.")); return; }
+  if (response.status === 401 || response.status === 403) {
+    const errBody = await response.json().catch(() => ({}));
+    const errMsg = errBody.error || "This device is not paired.";
+    // Origin/host mismatch must NOT destroy a still-valid token (re-pair friction on photo upload).
+    if (isUnpairedAuthError(response.status, errMsg)) {
+      setSessionToken("");
+      renderPairing(errMsg);
+      return;
+    }
+    // Keep token; show a recoverable error shell instead of pairing
+    document.body.innerHTML = `<main class="shell" style="padding:1.5rem;max-width:28rem;margin:auto"><h1>AION</h1><p class="err">${esc(errMsg)}</p><p class="meta">Session kept. Open the Tailscale or LAN URL you paired on (same origin), then reload.</p><button onclick="location.reload()">Reload</button></main>`;
+    return;
+  }
   model = await response.json();
   render();
 }

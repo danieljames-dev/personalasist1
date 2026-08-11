@@ -56,6 +56,103 @@ export function dealershipProfileFor(slugOrName: string): DealershipConnectorPro
   );
 }
 
+/** Split marketingName like "Corolla LE" / "Camry Hybrid SE" into model + trim when possible. */
+function splitMarketingName(marketingName: string | null, series: string | null): { model: string | null; trim: string | null } {
+  const name = String(marketingName ?? "").trim();
+  const ser = String(series ?? "").trim();
+  if (!name && !ser) return { model: null, trim: null };
+  if (ser && name.toLowerCase().startsWith(ser.toLowerCase())) {
+    const rest = name.slice(ser.length).trim();
+    return { model: ser, trim: rest || null };
+  }
+  // "GR Corolla MT" style — keep full name as model when no series
+  if (ser) return { model: ser, trim: name && name !== ser ? name : null };
+  const parts = name.split(/\s+/);
+  if (parts.length >= 2) {
+    const last = parts[parts.length - 1]!;
+    if (/^(LE|SE|XLE|XSE|SR|SR5|TRD|Limited|Platinum|Nightshade|Hybrid|MT|AT)$/i.test(last)) {
+      return { model: parts.slice(0, -1).join(" "), trim: last };
+    }
+  }
+  return { model: name || ser || null, trim: null };
+}
+
+/**
+ * Dealer.com / Toyota SRP embeds inventorySaveItemsObj with rich per-VIN fields.
+ * Prefer this over bare VIN scraping so model/trim/price are grounded.
+ */
+export function parseInventorySaveItems(
+  html: string,
+  sourceUrl: string,
+  now: string,
+  nextId: (kind: string) => string,
+  conditionHint: "new" | "used" | "unknown" = "unknown",
+): InventoryListingObservationV1[] {
+  const text = String(html ?? "");
+  const listings: InventoryListingObservationV1[] = [];
+  const seen = new Set<string>();
+  // Each block: "dg-inline-save-inv-VIN": { ... "vin": "..." ... }
+  const blockRe =
+    /"dg-inline-save-inv-([A-HJ-NPR-Z0-9]{17})(?:-mobile)?"\s*:\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/gi;
+  for (const m of text.matchAll(blockRe)) {
+    const vin = m[1]!.toUpperCase();
+    if (seen.has(vin)) continue;
+    const body = m[2] ?? "";
+    const pick = (key: string): string | null => {
+      const r = new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`, "i");
+      const n = new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`, "i");
+      const sm = body.match(r);
+      if (sm) return sm[1] ?? null;
+      const nm = body.match(n);
+      return nm ? nm[1]! : null;
+    };
+    const year = pick("year");
+    const brand = pick("brand");
+    const series = pick("marketingSeries");
+    const marketingName = pick("marketingName");
+    const { model, trim } = splitMarketingName(marketingName, series);
+    const advertised = pick("advertisedPrice");
+    const price = pick("price");
+    const ePrice = pick("ePrice");
+    const vdp = pick("vdpHref");
+    const salesClass = (pick("salesClass") || pick("vehicleType") || conditionHint || "").toLowerCase();
+    const condition: "new" | "used" | "unknown" =
+      /used|cpo|certified/i.test(salesClass) ? "used" : /new/i.test(salesClass) ? "new" : conditionHint;
+    const advNum = advertised != null ? Number(advertised) : NaN;
+    const priceNum = price != null ? Number(price) : NaN;
+    const eNum = ePrice != null ? Number(ePrice) : NaN;
+    // Prefer advertisedPrice when > 0; never invent zeros as real prices
+    const advertisedPrice =
+      Number.isFinite(advNum) && advNum > 0
+        ? Math.round(advNum)
+        : Number.isFinite(priceNum) && priceNum > 0
+          ? Math.round(priceNum)
+          : Number.isFinite(eNum) && eNum > 0
+            ? Math.round(eNum)
+            : null;
+    seen.add(vin);
+    listings.push(
+      listingFromPartial(
+        {
+          vin,
+          year,
+          make: brand || "Toyota",
+          model,
+          trim,
+          condition,
+          advertisedPrice,
+          listingUrl: vdp || sourceUrl,
+          detailUrl: vdp || sourceUrl,
+          availability: "available",
+        },
+        { id: nextId("listing"), now, sourceUrl, sourceType: "public-dealer-site" },
+      ),
+    );
+    if (listings.length >= 500) break;
+  }
+  return listings;
+}
+
 /** Extract VIN-like and stock fields from HTML/JSON-ish public markup. */
 export function parsePublicInventoryHtml(
   html: string,
@@ -68,38 +165,87 @@ export function parsePublicInventoryHtml(
   const listings: InventoryListingObservationV1[] = [];
   const seen = new Set<string>();
 
-  // JSON-LD Vehicle blocks
+  // Prefer dealer.com inventorySaveItemsObj (rich YMMT + price)
+  for (const row of parseInventorySaveItems(text, sourceUrl, now, nextId, conditionHint)) {
+    if (row.vin && seen.has(row.vin)) continue;
+    if (row.vin) seen.add(row.vin);
+    listings.push(row);
+  }
+
+  // JSON-LD Vehicle / ListItem blocks
   const ldBlocks = text.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi) ?? [];
   for (const block of ldBlocks) {
     const body = block.replace(/^[\s\S]*?>/u, "").replace(/<\/script>/iu, "");
     try {
       const data = JSON.parse(body);
-      const items = Array.isArray(data) ? data : data["@graph"] ? data["@graph"] : [data];
-      for (const item of items) {
-        if (!item || typeof item !== "object") continue;
+      let items: unknown[] = Array.isArray(data) ? data : data["@graph"] ? data["@graph"] : [data];
+      // Expand schema.org ItemList → itemListElement
+      const expanded: unknown[] = [];
+      for (const it of items) {
+        if (it && typeof it === "object" && Array.isArray((it as { itemListElement?: unknown }).itemListElement)) {
+          expanded.push(...((it as { itemListElement: unknown[] }).itemListElement));
+        } else {
+          expanded.push(it);
+        }
+      }
+      items = expanded;
+      for (const rawItem of items) {
+        if (!rawItem || typeof rawItem !== "object") continue;
+        const item = rawItem as Record<string, unknown>;
         const type = String(item["@type"] ?? "");
-        if (!/Vehicle|Car|Product/i.test(type) && !item.vehicleIdentificationNumber) continue;
-        const vin = item.vehicleIdentificationNumber || item.vin || null;
+        // ListItem with identifier VIN (Toyota SRP breadcrumb/list)
+        const listVin =
+          type === "ListItem" && typeof item.identifier === "string" && /^[A-HJ-NPR-Z0-9]{17}$/i.test(item.identifier)
+            ? String(item.identifier).toUpperCase()
+            : null;
+        if (!/Vehicle|Car|Product/i.test(type) && !item.vehicleIdentificationNumber && !listVin) continue;
+        const vin = (item.vehicleIdentificationNumber || item.vin || listVin || null) as string | null;
         const key = String(vin || item.sku || item.name || Math.random());
         if (seen.has(key)) continue;
         seen.add(key);
+        let model = (item.model as string | null) || null;
+        let trim: string | null = (item.vehicleConfiguration as string | null) || (item.trim as string | null) || null;
+        let year: string | number | null = (item.vehicleModelDate as string | null) || (item.modelDate as string | null) || null;
+        const brand = item.brand as { name?: string } | string | undefined;
+        let make: string | null =
+          (typeof brand === "object" && brand?.name) ||
+          (item.manufacturer as string | null) ||
+          (item.make as string | null) ||
+          null;
+        // "2026 Toyota Corolla LE" in ListItem name
+        if (typeof item.name === "string") {
+          const nm = item.name.replace(/\\u002B/g, "+");
+          const ymm = nm.match(/\b(20\d{2})\s+(Toyota|Lexus|Honda|Ford|Chevrolet|Nissan|Kia|Hyundai)\s+(.+)/i);
+          if (ymm) {
+            year = year || ymm[1]!;
+            make = make || ymm[2]!;
+            const rest = ymm[3]!.trim();
+            const split = splitMarketingName(rest, null);
+            model = model || split.model;
+            trim = trim || split.trim;
+          } else if (!model) {
+            model = nm;
+          }
+        }
+        const offers = item.offers as { price?: unknown; availability?: unknown } | undefined;
+        const odo = item.mileageFromOdometer as { value?: unknown } | undefined;
         listings.push(
           listingFromPartial(
             {
               vin,
               stockNumber: item.sku || item.stockNumber || null,
-              year: item.vehicleModelDate || item.modelDate || null,
-              make: item.brand?.name || item.manufacturer || item.make || null,
-              model: item.model || item.name || null,
-              trim: item.vehicleConfiguration || item.trim || null,
+              year,
+              make,
+              model,
+              trim,
               condition: conditionHint,
               exteriorColor: item.color || item.vehicleInteriorColor || null,
-              mileage: item.mileageFromOdometer?.value || item.mileage || null,
-              advertisedPrice: item.offers?.price || item.price || null,
+              mileage: odo?.value || item.mileage || null,
+              advertisedPrice: offers?.price || item.price || null,
               msrp: item.msrp || null,
               listingUrl: item.url || sourceUrl,
               detailUrl: item.url || sourceUrl,
-              availability: item.offers?.availability || null,
+              availability: offers?.availability || null,
             },
             { id: nextId("listing"), now, sourceUrl, sourceType: "public-dealer-site" },
           ),
@@ -110,23 +256,40 @@ export function parsePublicInventoryHtml(
     }
   }
 
-  // Embedded window.__INITIAL_STATE__ / inventory JSON blobs with "vin"
+  // Embedded inventory JSON blobs with "vin" (fallback when save-items missing)
   const vinJson = text.matchAll(/"vin"\s*:\s*"([A-HJ-NPR-Z0-9]{17})"/gi);
   for (const m of vinJson) {
     const vin = m[1]!.toUpperCase();
     if (seen.has(vin)) continue;
     seen.add(vin);
-    // Try to grab nearby stock/price within a window
-    const start = Math.max(0, (m.index ?? 0) - 400);
-    const window = text.slice(start, start + 900);
+    // Wider window for dealer.com objects
+    const start = Math.max(0, (m.index ?? 0) - 600);
+    const window = text.slice(start, start + 1400);
     const stock = window.match(/"stock(?:Number|No)?"\s*:\s*"([^"]{1,40})"/i)?.[1] ?? null;
     const year = window.match(/"year"\s*:\s*(\d{4})/i)?.[1] ?? null;
-    const make = window.match(/"make"\s*:\s*"([^"]{1,40})"/i)?.[1] ?? null;
-    const model = window.match(/"model"\s*:\s*"([^"]{1,60})"/i)?.[1] ?? null;
-    const trim = window.match(/"trim"\s*:\s*"([^"]{1,80})"/i)?.[1] ?? null;
-    const price = window.match(/"(?:internetPrice|sellingPrice|price|finalPrice)"\s*:\s*(\d+)/i)?.[1] ?? null;
-    const msrp = window.match(/"msrp"\s*:\s*(\d+)/i)?.[1] ?? null;
+    const make =
+      window.match(/"brand"\s*:\s*"([^"]{1,40})"/i)?.[1] ??
+      window.match(/"make"\s*:\s*"([^"]{1,40})"/i)?.[1] ??
+      null;
+    const series = window.match(/"marketingSeries"\s*:\s*"([^"]{1,60})"/i)?.[1] ?? null;
+    const marketingName = window.match(/"marketingName"\s*:\s*"([^"]{1,80})"/i)?.[1] ?? null;
+    const split = splitMarketingName(marketingName, series);
+    const model =
+      split.model ??
+      window.match(/"model"\s*:\s*"([^"]{1,60})"/i)?.[1] ??
+      null;
+    const trim =
+      split.trim ??
+      window.match(/"trim"\s*:\s*"([^"]{1,80})"/i)?.[1] ??
+      null;
+    const price =
+      window.match(/"advertisedPrice"\s*:\s*(\d+(?:\.\d+)?)/i)?.[1] ??
+      window.match(/"(?:internetPrice|sellingPrice|finalPrice)"\s*:\s*(\d+(?:\.\d+)?)/i)?.[1] ??
+      null;
+    const msrp = window.match(/"msrp"\s*:\s*(\d+(?:\.\d+)?)/i)?.[1] ?? null;
     const miles = window.match(/"(?:miles|mileage|odometer)"\s*:\s*(\d+)/i)?.[1] ?? null;
+    const vdp = window.match(/"vdpHref"\s*:\s*"([^"]+)"/i)?.[1] ?? null;
+    const priceNum = price != null ? Number(price) : NaN;
     listings.push(
       listingFromPartial(
         {
@@ -137,11 +300,11 @@ export function parsePublicInventoryHtml(
           model,
           trim,
           condition: conditionHint,
-          advertisedPrice: price,
+          advertisedPrice: Number.isFinite(priceNum) && priceNum > 0 ? Math.round(priceNum) : null,
           msrp,
           mileage: miles,
-          listingUrl: sourceUrl,
-          detailUrl: sourceUrl,
+          listingUrl: vdp || sourceUrl,
+          detailUrl: vdp || sourceUrl,
         },
         { id: nextId("listing"), now, sourceUrl, sourceType: "public-dealer-site" },
       ),

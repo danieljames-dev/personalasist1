@@ -42,10 +42,10 @@ test("Command Center binds loopback, serves same-origin assets, bounds requests,
     assert.equal((await fetch(`${base}/api/state`)).status, 200);
     assert.equal((await fetch(`${base}/nope`)).status, 404);
     assert.equal((await fetch(`${base}/api/action`, { method: "POST", headers: { "content-type": "application/json", origin: "https://example.invalid" }, body: "{}" })).status, 403);
-    // Body ceiling is 8 MiB (uploads). A JSON action past that limit must fail closed.
-    const oversized = await fetch(`${base}/api/action`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "conversation.create", title: "x".repeat(8 * 1024 * 1024 + 64) }) });
+    // Body ceiling is 12 MiB (base64 photo envelope). A JSON action past that limit must fail closed.
+    const oversized = await fetch(`${base}/api/action`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "conversation.create", title: "x".repeat(12 * 1024 * 1024 + 64) }) });
     assert.equal(oversized.status, 400);
-    assert.match((await oversized.json()).error, /8 MiB limit/u);
+    assert.match((await oversized.json()).error, /12 MiB limit/u);
   });
 });
 

@@ -115,9 +115,14 @@ export function buildAttentionBoard(input: {
   const items: Omit<AttentionItemV1, "score">[] = [];
 
   for (const c of input.commitments ?? []) {
-    if (c.status === "kept" || c.status === "cancelled") continue;
+    if (c.status === "kept" || c.status === "cancelled" || c.status === "broken") continue;
+    // Noise: newsletter / marketing commitments never interrupt Owner
+    if (/\bunsubscribe|newsletter|promo|marketing blast\b/i.test(c.statement || "")) continue;
     const overdue = c.status === "overdue";
     const dueSoon = c.status === "due_soon";
+    const hasDue = Boolean(c.dueAt);
+    // Undated open commitments are real but must not monopolize the top-5
+    const urgency = overdue ? 98 : dueSoon ? 88 : hasDue ? 70 : 42;
     items.push(
       withHorizon(
         {
@@ -127,9 +132,9 @@ export function buildAttentionBoard(input: {
           contextLabel: input.workspaceLabels?.[c.workspace] ?? c.workspace,
           title: `Commitment: ${c.committedBy} → ${c.committedTo}`,
           why: c.statement,
-          urgency: overdue ? 98 : dueSoon ? 88 : 70,
-          value: 80,
-          risk: overdue ? 50 : 25,
+          urgency,
+          value: hasDue || overdue ? 80 : 55,
+          risk: overdue ? 50 : hasDue ? 25 : 10,
           timeMinutes: 15,
           interruptionCost: 20,
           sourceType: "commitment",
@@ -145,11 +150,23 @@ export function buildAttentionBoard(input: {
 
   for (const r of input.relationships) {
     if (r.archived) continue;
+    // Coworkers / internal staff are not default sales interruptions
+    if (
+      /\bcoworker|colleague|manager|co-worker\b/i.test(`${r.role ?? ""} ${r.organisation ?? ""} ${r.notes ?? ""}`) &&
+      r.relationshipType !== "customer" &&
+      r.relationshipType !== "prospect" &&
+      r.relationshipType !== "lead"
+    ) {
+      continue;
+    }
     for (const f of r.followUps ?? []) {
       if (f.status !== "open") continue;
-      const due = f.dueAt?.slice(0, 10) ?? day;
-      const overdue = due < day;
-      const dueSoon = due === day;
+      if (/\bunsubscribe|newsletter|promo|marketing\b/i.test(f.reason || "")) continue;
+      const due = f.dueAt?.slice(0, 10) ?? null;
+      const overdue = due != null && due < day;
+      const dueSoon = due != null && due === day;
+      // Undated "check in someday" follow-ups stay BACKGROUND-ish
+      const urgency = overdue ? 95 : dueSoon ? 80 : due ? 55 : 35;
       items.push(
         withHorizon(
           {
@@ -159,8 +176,8 @@ export function buildAttentionBoard(input: {
             contextLabel: input.workspaceLabels?.[r.workspace] ?? r.workspace,
             title: `Follow up: ${r.displayName}`,
             why: f.reason || `${f.channel} follow-up`,
-            urgency: overdue ? 95 : dueSoon ? 80 : 50,
-            value: 70,
+            urgency,
+            value: r.relationshipType === "customer" || r.relationshipType === "prospect" ? 70 : 40,
             risk: overdue ? 40 : 15,
             timeMinutes: 10,
             interruptionCost: 25,
@@ -306,52 +323,35 @@ export function buildAttentionBoard(input: {
     );
   }
 
-  items.push(
-    withHorizon(
-      {
-        id: "aion-refresh-briefing",
-        bucket: "AION_CAN_DO",
-        workspace: "personal",
-        contextLabel: "AION",
-        title: "Refresh work queue & account summaries",
-        why: "Stored CRM only; no external send",
-        urgency: 20,
-        value: 30,
-        risk: 0,
-        timeMinutes: 1,
-        interruptionCost: 5,
-        sourceType: "autonomy",
-        dueAt: null,
-        aionCanComplete: true,
-        requiresHuman: false,
-      },
-      input.nowIso,
-      90,
-    ),
+  // Only inject AION Can Do rows when there is grounded work (no always-on filler)
+  const hasOpenFollowUps = input.relationships.some(
+    (r) => !r.archived && (r.followUps ?? []).some((f) => f.status === "open"),
   );
-  items.push(
-    withHorizon(
-      {
-        id: "aion-draft-followups",
-        bucket: "AION_CAN_DO",
-        workspace: "work",
-        contextLabel: "Lakeland Toyota",
-        title: "Draft follow-up messages for named contacts",
-        why: "Draft only — never send without authority",
-        urgency: 35,
-        value: 50,
-        risk: 5,
-        timeMinutes: 5,
-        interruptionCost: 10,
-        sourceType: "autonomy",
-        dueAt: null,
-        aionCanComplete: true,
-        requiresHuman: false,
-      },
-      input.nowIso,
-      85,
-    ),
-  );
+  if (hasOpenFollowUps) {
+    items.push(
+      withHorizon(
+        {
+          id: "aion-draft-followups",
+          bucket: "AION_CAN_DO",
+          workspace: "work",
+          contextLabel: input.workspaceLabels?.work ?? "Lakeland Toyota",
+          title: "Draft follow-up messages for named contacts",
+          why: "Open follow-ups exist — draft only, never send without authority",
+          urgency: 35,
+          value: 50,
+          risk: 5,
+          timeMinutes: 5,
+          interruptionCost: 10,
+          sourceType: "autonomy",
+          dueAt: null,
+          aionCanComplete: true,
+          requiresHuman: false,
+        },
+        input.nowIso,
+        85,
+      ),
+    );
+  }
   if ((input.opportunityCount ?? 0) > 0) {
     items.push(
       withHorizon(

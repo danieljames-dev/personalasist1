@@ -45,7 +45,11 @@ export function detectInventoryMatches(input: {
 }): OpportunitySignalV1[] {
   const signals: OpportunitySignalV1[] = [];
   const online = input.vehicles.filter(
-    (v) => v.presenceStatus === "ONLINE_LISTED" || v.presenceStatus === "PHYSICALLY_VERIFIED",
+    (v) =>
+      (v.presenceStatus === "ONLINE_LISTED" || v.presenceStatus === "PHYSICALLY_VERIFIED") &&
+      // Never recommend fixture/demo inventory as a live match
+      !(v.listingObservations ?? []).some((o) => o.sourceType === "fixture") &&
+      !/^1HGCM(RW|PHY)/i.test(v.vin || ""),
   );
 
   for (const r of input.relationships) {
