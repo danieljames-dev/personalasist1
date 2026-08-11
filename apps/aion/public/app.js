@@ -830,13 +830,13 @@ function connectorsCard() {
   };
   const g = model._gmailStatus;
   const m = model._metricoolStatus;
-  return `<div class="card"><h2>Connection status center</h2>
-<p class="meta">GMAIL · METRICOOL · OWNER DATA · DEALERSHIP WEB · NHTSA · VISION — secrets never enter chat. Prefer: Connect → Sign in → Allow.</p>
-<p class="meta"><b>Owner data:</b> Knowledge → Direct select &amp; import (desktop picker auto-registers; no path paste into chat).</p>
+  return `<div class="card" id="gmail-connectors"><h2>Connectors → Gmail</h2>
+<p class="meta"><b>Client Secret is entered here</b> (masked). It is saved only to this PC’s encrypted private secret store under <code>private/aion/secrets/</code> — not Git, not chat, not ordinary assistant state. Optional fallback env name: <code>AION_GMAIL_CLIENT_SECRET</code> (not required if you use this field).</p>
+<p class="meta">GMAIL · METRICOOL — secrets never enter chat. Prefer: Save → Connect → Google Allow.</p>
 <form data-form="connector-settings">
 <label>Gmail — OAuth client id (public)
 <input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com" autocomplete="off"></label>
-<label>Gmail — OAuth client secret (stays on this PC only; never chat)
+<label>Gmail — OAuth client secret (local encrypted store only — never chat / never Git)
 <input name="gmailClientSecret" type="password" maxlength="200" value="" placeholder="${g?.clientSecretConfigured ? "•••• saved locally — leave blank to keep" : "paste once from Google Cloud console"}" autocomplete="new-password"></label>
 <label>Gmail redirect URI (loopback — must match Google Cloud Authorized redirect URI exactly)
 <input name="gmailRedirectUri" maxlength="500" value="${esc(c.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback")}"></label>
@@ -845,7 +845,7 @@ function connectorsCard() {
 <input name="metricoolTokenEnvVar" maxlength="128" value="${esc(c.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN")}"></label>
 <label>Metricool blog id env var name
 <input name="metricoolBlogIdEnvVar" maxlength="128" value="${esc(c.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID")}"></label>
-<button>Save connector settings</button>
+<button type="submit">Save connector settings</button>
 </form>
 <div class="actions">
 <button data-do="connector-gmail-status" type="button">Connect / check Gmail</button>
@@ -907,7 +907,17 @@ ${reviews.length ? `<h3>Needs review (${reviews.length})</h3>${reviews.map((r) =
 function settingsArea(s) {
   const p = model.providers ?? [];
   const bridges = model.developerBridges ?? [];
-  return `<h1>Settings</h1><p class="lead">Local privacy, provider, and data controls. AION stores the <em>name</em> of a credential environment variable, never its value.</p>
+  // Load Gmail status when Settings is shown so secret placeholder / Connect work without an extra click.
+  if (!model._gmailStatus && !model._gmailStatusLoading) {
+    model._gmailStatusLoading = true;
+    api("connector.gmail.status", {}).then((st) => {
+      model._gmailStatus = st;
+      model._gmailStatusLoading = false;
+      render();
+    }).catch(() => { model._gmailStatusLoading = false; });
+  }
+  return `<h1>Settings</h1><p class="lead">Local privacy, provider, and data controls. <b>Gmail Client Secret</b> is entered in <a href="#gmail-connectors">Connectors → Gmail</a> below (local encrypted store) — not in the provider “credential environment-variable name” field.</p>
+${connectorsCard()}
 <form data-form="settings">
 <label>Provider<select name="providerId">${p.map((x) => `<option value="${esc(x.id)}" ${x.id === s.settings.providerId ? "selected" : ""}>${esc(x.id)} — ${esc(x.location)}${x.available ? ", ready" : ", unavailable"}</option>`).join("")}</select></label>
 <label>Model identifier<input name="model" value="${esc(s.settings.model)}" maxlength="200"></label>
@@ -917,7 +927,7 @@ function settingsArea(s) {
 <label><input type="checkbox" name="schedulerEnabled" ${s.settings.schedulerEnabled ? "checked" : ""}> Routine scheduler enabled while AION is open</label>
 <label><input type="checkbox" name="externalActionsRequireApproval" ${s.settings.externalActionsRequireApproval ? "checked" : ""}> Require an approval for every proposed action (capabilities marked always or external always require one regardless)</label>
 <label>Activity retention (days)<input name="retainActivityDays" type="number" min="1" max="3650" value="${s.settings.privacy.retainActivityDays}"></label>
-<label>Credential environment-variable name<input name="credentialEnvironmentVariable" value="${esc(s.settings.credentialEnvironmentVariable)}" maxlength="128" placeholder="AION_PROVIDER_TOKEN"></label>
+<label>Provider credential environment-variable <em>name</em> (not Gmail secret; never the token value)<input name="credentialEnvironmentVariable" value="${esc(s.settings.credentialEnvironmentVariable)}" maxlength="128" placeholder="AION_PROVIDER_TOKEN"></label>
 <label>Developer-agent bridge<select name="developerBridgeId"><option value="" ${s.settings.developerBridgeId ? "" : "selected"}>AION default — ${esc(model.developerBridge.displayName)}</option>${bridges.map((b) => `<option value="${esc(b.bridgeId)}" ${b.bridgeId === s.settings.developerBridgeId ? "selected" : ""}>${esc(b.displayName)}${b.available ? "" : " — unavailable"}</option>`).join("")}</select></label>
 <label>Approved import roots (one per line)<textarea name="importRoots" maxlength="8000">${esc(s.settings.importRoots.join("\n"))}</textarea></label>
 <label>Export root<input name="exportRoot" value="${esc(s.settings.exportRoot)}" maxlength="500"></label>
@@ -926,7 +936,6 @@ function settingsArea(s) {
 <form data-form="backup"><label>Destination file inside the export root<input name="destination" required maxlength="4096"></label><label>Passphrase (12+ characters)<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Create and verify backup</button></form>
 <form data-form="backup-verify"><label>Verify an existing backup<input name="destination" required maxlength="4096"></label><label>Passphrase<input name="passphrase" type="password" required minlength="12" maxlength="256"></label><button>Verify restore</button></form></div>
 ${model.viewer === "console" ? privateAccessCard() : ""}
-${model.viewer === "console" ? connectorsCard() : ""}
 <div class="card"><h2>Developer-agent bridges</h2><p>AION checks only documented install locations; it never searches your computer. An installed executable is not the same thing as a usable account, so the two are reported separately. Checking account health is a local sign-in question and never a paid call, and AION never reads or stores the account address or organisation.</p>
 ${bridges.length ? `<ul>${bridges.map((b) => `<li><b>${esc(b.displayName)}</b>${b.selected ? " · selected" : ""} — ${b.available ? "installed" : "unavailable"}${b.executable ? ` (<code>${esc(b.executable)}</code>${b.version ? `, ${esc(b.version)}` : ""})` : ""}<br><span class="meta">${esc(b.detail)}</span><br><span class="meta">Account: ${esc(b.account)} — ${esc(b.accountDetail)}</span>
 ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <code>${esc(c.executable)} ${esc(c.args.join(" "))}</code> — your instruction is written to standard input, never to this list.</span>`).join("")}</li>`).join("")}</ul>` : `<p class="empty">No developer-agent bridge was found.</p>`}
@@ -1959,13 +1968,18 @@ document.addEventListener("submit", async (event) => {
         metricoolBlogIdEnvVar: d.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID",
       };
       // Optional secret — only if Owner typed a new value (masked field empty means keep)
-      if (d.gmailClientSecret && String(d.gmailClientSecret).trim()) {
+      const secretTyped = Boolean(d.gmailClientSecret && String(d.gmailClientSecret).trim());
+      if (secretTyped) {
         payload.gmailClientSecret = String(d.gmailClientSecret).trim();
       }
-      await api("connector.settings.update", payload);
-      toast("Connector settings saved. Secrets stay on this PC only (not Git, not chat).");
+      const saved = await api("connector.settings.update", payload);
       model._gmailStatus = await api("connector.gmail.status", {});
       model._metricoolStatus = await api("connector.metricool.status", {});
+      const idOk = model._gmailStatus?.clientIdConfigured || saved?.clientIdConfigured;
+      const secOk = model._gmailStatus?.clientSecretConfigured || saved?.clientSecretStored;
+      toast(
+        `Gmail connectors saved. Client ID: ${idOk ? "yes" : "missing"}. Client Secret: ${secOk ? "stored on this PC only" : secretTyped ? "save failed" : "not provided this save"}. Not Git / not chat.`,
+      );
       await load();
       return;
     }

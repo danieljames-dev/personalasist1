@@ -7574,8 +7574,10 @@ export class AionAssistantV1 {
     let authUrl: string | null = null;
     if ((status.code === "GMAIL_OWNER_CONSENT_REQUIRED" || status.code === "NOT_CONFIGURED") && clientId) {
       try {
+        // Always request readonly + compose + send at consent time (Google Cloud scopes match).
+        // Actual SEND still requires envelope + per-message safety — scope ≠ permission to send.
         authUrl = buildGmailAuthUrl(config, `aion-${Date.now().toString(36)}`, {
-          includeSend: sendGate.allowed,
+          includeSend: true,
         });
       } catch {
         authUrl = null;
@@ -7655,10 +7657,16 @@ export class AionAssistantV1 {
     return null;
   }
 
-  async updateConnectorSettings(input: Record<string, unknown> = {}): Promise<SettingsV1["connectors"]> {
+  async updateConnectorSettings(input: Record<string, unknown> = {}): Promise<{
+    connectors: SettingsV1["connectors"];
+    clientSecretStored: boolean;
+    clientSecretSource: "local_file" | "env" | "none";
+    clientIdConfigured: boolean;
+  }> {
     const dataRoot = this.repositoryDataRoot();
+    let clientSecretStored = false;
     // Secrets never enter assistant state JSON — only local encrypted secret files.
-    if (dataRoot && (typeof input.gmailClientSecret === "string" || typeof input.gmailRefreshToken === "string")) {
+    if (dataRoot && (typeof input.gmailClientSecret === "string" || typeof input.gmailRefreshToken === "string" || typeof input.gmailClientId === "string")) {
       const { saveGmailLocalSecrets } = await import("./connector-secrets.js");
       const patch: {
         clientId?: string;
@@ -7670,13 +7678,17 @@ export class AionAssistantV1 {
       }
       if (typeof input.gmailClientSecret === "string" && input.gmailClientSecret.trim()) {
         patch.clientSecretPlain = input.gmailClientSecret.trim();
+        clientSecretStored = true;
       }
       if (typeof input.gmailRefreshToken === "string" && input.gmailRefreshToken.trim()) {
         patch.refreshTokenPlain = input.gmailRefreshToken.trim();
       }
-      saveGmailLocalSecrets(dataRoot, patch);
+      // Only write secret file when there is something secret-store-related to persist.
+      if (patch.clientSecretPlain || patch.refreshTokenPlain || patch.clientId) {
+        saveGmailLocalSecrets(dataRoot, patch);
+      }
     }
-    return this.mutate((draft) => {
+    const connectors = await this.mutate((draft) => {
       if (!draft.settings.connectors) {
         draft.settings.connectors = {
           gmailClientId: "",
@@ -7708,11 +7720,24 @@ export class AionAssistantV1 {
         draft,
         "settings",
         "connectors.update",
-        "Connector settings updated (secrets only in private local store if provided).",
+        clientSecretStored
+          ? "Connector settings updated; Gmail client secret written to private local encrypted store only."
+          : "Connector settings updated (no new client secret in this save).",
         null,
       );
       return structuredClone(c);
     });
+    const status = await this.gmailConsentStatus();
+    return {
+      connectors,
+      clientSecretStored,
+      clientSecretSource: status.credentialSources?.clientSecret === "local_file" || status.credentialSources?.clientSecret === "env"
+        ? status.credentialSources.clientSecret
+        : clientSecretStored
+          ? "local_file"
+          : "none",
+      clientIdConfigured: Boolean(connectors.gmailClientId?.trim()),
+    };
   }
 
   /**

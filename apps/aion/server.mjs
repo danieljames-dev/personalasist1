@@ -25,7 +25,7 @@ import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
 
 /** Bump when shipping mobile UI fixes so phones load new CSS/JS without manual cache clear. */
-const ASSET_VERSION = "20260810m8";
+const ASSET_VERSION = "20260811g1";
 const ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/phone", ["phone.html", "text/html; charset=utf-8"]],

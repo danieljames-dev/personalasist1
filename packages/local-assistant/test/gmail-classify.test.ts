@@ -13,14 +13,18 @@ test("Gmail OAuth auth URL uses AION loopback callback only (never Google tutori
     ...defaultGmailConfig(),
     clientId: "000000000000-placeholder.apps.googleusercontent.com",
   };
-  const url = buildGmailAuthUrl(cfg, "aion-proof-state");
+  const url = buildGmailAuthUrl(cfg, "aion-proof-state", { includeSend: true });
   const u = new URL(url);
   const redirect = u.searchParams.get("redirect_uri");
+  const scope = u.searchParams.get("scope") || "";
   assert.equal(redirect, "http://127.0.0.1:31415/oauth/gmail/callback");
   assert.equal(cfg.redirectUri, "http://127.0.0.1:31415/oauth/gmail/callback");
   assert.equal(url.includes("8080"), false);
   assert.equal(url.includes("oauth2callback"), false);
   assert.equal(url.includes("localhost"), false);
+  assert.ok(scope.includes("gmail.readonly"));
+  assert.ok(scope.includes("gmail.compose"));
+  assert.ok(scope.includes("gmail.send"));
 });
 
 test("Gmail classify: noise vs career vs business", () => {

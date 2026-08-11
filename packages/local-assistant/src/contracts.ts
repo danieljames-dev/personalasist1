@@ -533,9 +533,13 @@ export interface RemoteAccessSettingsV1 {
   sessionDays: number;
 }
 
-/** Non-secret connector config (client ids only). Secrets live in env vars. */
+/**
+ * Non-secret connector config only (public client ids + env *names*).
+ * Gmail client secret + refresh token live in private/aion/secrets (encrypted local file),
+ * or optionally AION_GMAIL_CLIENT_SECRET / AION_GMAIL_REFRESH_TOKEN env — never assistant state JSON.
+ */
 export interface ConnectorSettingsV1 {
-  /** Google OAuth client id (public). Secret stays in AION_GMAIL_CLIENT_SECRET env. */
+  /** Google OAuth client id (public). */
   gmailClientId: string;
   /** Registered redirect URI for Gmail OAuth (loopback preferred). */
   gmailRedirectUri: string;
