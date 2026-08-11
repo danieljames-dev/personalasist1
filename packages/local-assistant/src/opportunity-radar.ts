@@ -50,6 +50,15 @@ export function detectInventoryMatches(input: {
 
   for (const r of input.relationships) {
     if (r.archived || r.workspace !== "work") continue;
+    // Never emit inventory-match opportunities for synthetic/fixture customers
+    const nameBlob = `${r.displayName} ${r.organisation} ${r.notes}`.toLowerCase();
+    if (
+      /\be2e\b|\bsynthetic\b|\bfixture\b|\bjane test\b|\bacme r7\b|\bcsv e2e\b|\bfirst source contact\b|\btest company\b/.test(
+        nameBlob,
+      )
+    ) {
+      continue;
+    }
     const blob = [
       r.displayName,
       r.notes,

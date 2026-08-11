@@ -248,6 +248,71 @@ export function isTestOrE2eWorkspace(input: {
   );
 }
 
+/**
+ * Synthetic / fixture people, orgs, and free-text that must not surface in Owner operational views.
+ * Conservative: only strong test markers — never hide ambiguous real names solely for being common.
+ */
+export function isSyntheticOwnerFacingText(...parts: Array<string | null | undefined>): boolean {
+  const blob = parts.map((p) => String(p ?? "")).join(" ").toLowerCase();
+  if (!blob.trim()) return false;
+  return (
+    /\be2e\b/.test(blob) ||
+    /\bsynthetic\b/.test(blob) ||
+    /\bfixture\b/.test(blob) ||
+    /\bsmoke\b/.test(blob) ||
+    /\btest company\b/.test(blob) ||
+    /\bcsv e2e\b/.test(blob) ||
+    /\bjane test\b/.test(blob) ||
+    /\bacme r7\b/.test(blob) ||
+    /\bfirst source contact\b/.test(blob) ||
+    /\brunway first-source\b/.test(blob) ||
+    /\baion-smoke\b/.test(blob) ||
+    /\bexample\.test\b/.test(blob) ||
+    /\btest (customer|contact|lead|prospect|person)\b/.test(blob)
+  );
+}
+
+export function isSyntheticRelationship(r: {
+  id?: string;
+  displayName?: string;
+  notes?: string;
+  tags?: readonly string[];
+  company?: string;
+  email?: string;
+}): boolean {
+  return isSyntheticOwnerFacingText(
+    r.id,
+    r.displayName,
+    r.notes,
+    r.company,
+    r.email,
+    ...(r.tags ?? []),
+  );
+}
+
+/** Low-value technical import content mis-tagged as career/employment knowledge. */
+export function isTechnicalNoiseKnowledgeFact(input: {
+  title?: string;
+  content?: string;
+  category?: string;
+  sourceRef?: string;
+}): boolean {
+  const blob = `${input.title ?? ""} ${input.content ?? ""} ${input.sourceRef ?? ""}`.toLowerCase();
+  if (/mozilla\/\d|applewebkit|user-agent|text\/html|<!doctype/i.test(blob)) return true;
+  if (/\b(threat model|architecture proposal|specification\.md|adr-\d|sprint \d|phase \d)\b/i.test(blob)) return true;
+  if (/\b(r6\.|r7\.|control plane|object model|deterministic parsing)\b/i.test(blob)) return true;
+  if (/manifest\.csv|path,name,ext,size_kb/i.test(blob)) return true;
+  // Pure code/doc paths as "employment" from AION repo docs
+  if (
+    (input.category === "employment" || input.category === "skill") &&
+    /\b(career-evidence|career-data|career-input|local-identity-bootstrap|handoff|runway)\b/i.test(blob) &&
+    !/\b(merchant|seafarer|army|bosun|able seaman|resume|cover letter)\b/i.test(blob)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function ownerOperationalWorkspaces<T extends { id: string; label: string; archived?: boolean; purpose?: string }>(
   workspaces: readonly T[],
   opts: { includeArchived?: boolean } = {},

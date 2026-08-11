@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isTestOrE2eWorkspace,
+  isSyntheticRelationship,
+  isSyntheticOwnerFacingText,
+  isTechnicalNoiseKnowledgeFact,
   ownerOperationalWorkspaces,
   validateImportRootCandidate,
 } from "../src/import-path-policy.js";
@@ -37,4 +40,28 @@ test("e2e workspaces filtered from owner operational list", () => {
   assert.equal(list.some((w) => w.id === "e2e-brand-x"), false);
   assert.equal(list.some((w) => w.id === "real-brand"), true);
   assert.equal(isTestOrE2eWorkspace({ id: "e2e-brand-x", label: "E2E Brand" }), true);
+});
+
+test("synthetic people and technical noise knowledge filtered", () => {
+  assert.equal(isSyntheticRelationship({ displayName: "Jane Test" }), true);
+  assert.equal(isSyntheticRelationship({ displayName: "ACME R7 TEST COMPANY" }), true);
+  assert.equal(isSyntheticRelationship({ displayName: "CSV E2E Contact" }), true);
+  assert.equal(isSyntheticRelationship({ displayName: "Daniel Coffman" }), false);
+  assert.equal(isSyntheticOwnerFacingText("Match for Mike: 2025 Toyota", "e2e fixture"), true);
+  assert.equal(
+    isTechnicalNoiseKnowledgeFact({
+      category: "employment",
+      title: "owner: MANIFEST.csv",
+      content: 'path,name,ext,size_kb,modified,folder\n"C:\\Users\\nearm\\Documents',
+    }),
+    true,
+  );
+  assert.equal(
+    isTechnicalNoiseKnowledgeFact({
+      category: "employment",
+      title: "Career summary — maritime + Army",
+      content: "U.S. Army airborne combat engineer and merchant fleet Able Seaman",
+    }),
+    false,
+  );
 });

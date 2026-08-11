@@ -172,6 +172,9 @@ import {
 } from "./authority-envelope.js";
 import {
   isTestOrE2eWorkspace,
+  isSyntheticOwnerFacingText,
+  isSyntheticRelationship,
+  isTechnicalNoiseKnowledgeFact,
   ownerOperationalWorkspaces,
   validateImportRootCandidate,
 } from "./import-path-policy.js";
@@ -4745,6 +4748,375 @@ export class AionAssistantV1 {
   }
 
   /**
+   * Archive synthetic/fixture relationships and prune synthetic opportunities from Owner views.
+   * Does not delete — preserves fixtures for tests when unarchived in test tools.
+   */
+  async separateSyntheticPeopleFromOwnerView(): Promise<{
+    relationshipsArchived: string[];
+    opportunitiesDisabled: number;
+    noiseFactsDisabled: number;
+  }> {
+    return this.mutate((draft) => {
+      const relationshipsArchived: string[] = [];
+      const now = this.ports.clock.now();
+      for (const r of draft.relationships) {
+        if (r.archived) continue;
+        if (!isSyntheticRelationship(r)) continue;
+        r.archived = true;
+        r.updatedAt = now;
+        relationshipsArchived.push(r.displayName || r.id);
+      }
+      let opportunitiesDisabled = 0;
+      if (draft.executive?.opportunities) {
+        const before = draft.executive.opportunities.length;
+        draft.executive.opportunities = draft.executive.opportunities.filter(
+          (o) => !isSyntheticOwnerFacingText(o.title, o.workspace, o.detail, o.source),
+        );
+        opportunitiesDisabled = before - draft.executive.opportunities.length;
+      }
+      let noiseFactsDisabled = 0;
+      if (draft.ownerKnowledge?.facts) {
+        for (const f of draft.ownerKnowledge.facts) {
+          if (f.enabled === false) continue;
+          if (
+            isTechnicalNoiseKnowledgeFact({
+              title: f.title,
+              content: f.content,
+              category: f.category,
+              sourceRef: f.provenance?.sourceRef,
+            }) ||
+            isSyntheticOwnerFacingText(f.title, f.content, f.provenance?.sourceRef)
+          ) {
+            f.enabled = false;
+            noiseFactsDisabled += 1;
+          }
+        }
+      }
+      this.activity(
+        draft,
+        "settings",
+        "synthetic.archive.owner-view",
+        `Archived ${relationshipsArchived.length} synthetic relationship(s); removed ${opportunitiesDisabled} synthetic opp(s); disabled ${noiseFactsDisabled} noise fact(s)`,
+        null,
+      );
+      return { relationshipsArchived, opportunitiesDisabled, noiseFactsDisabled };
+    });
+  }
+
+  /**
+   * Seed grounded career profile facts from Owner resume evidence (imported_document trust).
+   * Idempotent by title key.
+   */
+  async seedCareerKnowledgeFromResumeEvidence(): Promise<{ added: number; profileUpdated: boolean; reply: string }> {
+    return this.mutate((draft) => {
+      if (!draft.ownerKnowledge) {
+        draft.ownerKnowledge = {
+          profile: { displayName: "", summary: "", updatedAt: this.ports.clock.now() },
+          facts: [],
+          updatedAt: this.ports.clock.now(),
+        } as typeof draft.ownerKnowledge;
+      }
+      const now = this.ports.clock.now();
+      const existingTitles = new Set(
+        (draft.ownerKnowledge.facts ?? []).filter((f) => f.enabled !== false).map((f) => f.title.toLowerCase()),
+      );
+      const seeds: Array<{ category: string; title: string; content: string }> = [
+        {
+          category: "profile",
+          title: "Owner full name",
+          content: "Daniel Coffman — Clermont, FL. Seeking remote logistics, dispatch, or customer support roles.",
+        },
+        {
+          category: "employment",
+          title: "Career summary — maritime + Army",
+          content:
+            "U.S. Army airborne combat engineer (1992–1997, E-4 12B) then 15+ years U.S. merchant fleet (Able Seaman / Bosun / Dayman / Watchstander, 2008–2025). Stepped away from sailing in 2025 due to medical limitations; seeking remote ops roles.",
+        },
+        {
+          category: "employer",
+          title: "Employer — U.S. Merchant Fleet / SIU",
+          content:
+            "Seafarers International Union assignments; representative lines include Maersk, Liberty, TOTE, MSC and commercial vessels.",
+        },
+        {
+          category: "role",
+          title: "Roles held — deck / bosun / watch",
+          content: "Able Seaman, Bosun, Dayman, Watchstander; bridge/watch and emergency-response team experience.",
+        },
+        {
+          category: "employer",
+          title: "Employer — U.S. Army",
+          content: "U.S. Army 12B Combat Engineer / Airborne, E-4, 1992–1997. Army Commendation Medal.",
+        },
+        {
+          category: "skill",
+          title: "Core strengths — ops and support",
+          content:
+            "Remote customer support; dispatch/scheduling/coordination; maritime logistics; safety/security/emergency response; team leadership under pressure; documentation and shift handoffs; AI-assisted workflows.",
+        },
+        {
+          category: "accomplishment",
+          title: "Credential set — mariner",
+          content: "Merchant Mariner Credential (active), STCW (active), Able Seaman endorsement (active), TWIC (active).",
+        },
+        {
+          category: "preference",
+          title: "Job search target roles",
+          content: "Remote dispatcher, logistics coordinator, or customer support/chat roles requiring calm communication and operational discipline.",
+        },
+        {
+          category: "business",
+          title: "Business — Compassionate Choice (Kristina)",
+          content:
+            "Owner-related business materials for Compassionate Choice (Kristina) exist under Owner data roots (LLC/grants/ops docs). Brand DNA fields beyond evidence remain unknown.",
+        },
+      ];
+      let added = 0;
+      for (const s of seeds) {
+        if (existingTitles.has(s.title.toLowerCase())) continue;
+        const id = this.ports.ids.next("okf");
+        draft.ownerKnowledge.facts.unshift({
+          id,
+          category: s.category as import("./owner-knowledge.js").OwnerKnowledgeCategoryV1,
+          title: s.title,
+          content: s.content,
+          confidence: 88,
+          enabled: true,
+          corrections: [],
+          createdAt: now,
+          updatedAt: now,
+          provenance: {
+            sourceRef: "import:Daniel_Coffman_Remote_Logistics_Customer_Support_Resume.md",
+            sourceType: "import",
+            recordedAt: now,
+          },
+        });
+        added += 1;
+        existingTitles.add(s.title.toLowerCase());
+      }
+      let profileUpdated = false;
+      const p = draft.ownerKnowledge.profile;
+      if (!p.displayName || /e2e|synthetic|test/i.test(p.displayName)) {
+        p.displayName = "Daniel Coffman";
+        profileUpdated = true;
+      }
+      if (!p.summary || /synthetic|e2e|runway/i.test(p.summary)) {
+        p.summary =
+          "Operations professional: U.S. Army airborne combat engineer + 15+ years merchant fleet; seeking remote logistics/dispatch/customer support. Clermont, FL.";
+        profileUpdated = true;
+      }
+      p.updatedAt = now;
+      this.activity(draft, "import", "knowledge.seed.career", `Seeded ${added} career fact(s); profileUpdated=${profileUpdated}`, null);
+      const reply = [
+        "CAREER KNOWLEDGE SEED",
+        `Added: ${added}`,
+        `Profile: ${p.displayName}`,
+        `Summary: ${p.summary.slice(0, 160)}`,
+        "Trust: all seeded facts remain imported_document channel (not owner_direct escalation by filename).",
+      ].join("\n");
+      return { added, profileUpdated, reply };
+    });
+  }
+
+  /** Owner-facing completeness: what data AION has, imported, missing, real vs synthetic. */
+  async ownerDataCompletenessReport(): Promise<{
+    reply: string;
+    profile: string;
+    realDocuments: number;
+    syntheticDocuments: number;
+    enabledFacts: number;
+    noiseFactsDisabled: number;
+    liveRelationships: number;
+    syntheticRelationshipsArchived: number;
+    approvedRoots: string[];
+    coverage: Record<string, { status: string; count: number }>;
+    reviewOpen: number;
+    gaps: string[];
+  }> {
+    const state = await this.snapshot();
+    const synthRe =
+      /synthetic|e2e|fixture|smoke|example\.test|runway first-source|aion-smoke|temp\\|acme-r7|owner-first-sources/i;
+    let realDocuments = 0;
+    let syntheticDocuments = 0;
+    for (const d of state.crmDocuments ?? []) {
+      const blob = `${d.filename} ${d.summary} ${d.sourceRootPath || ""} ${(d.tags || []).join(" ")}`;
+      if (synthRe.test(blob)) syntheticDocuments += 1;
+      else realDocuments += 1;
+    }
+    const facts = state.ownerKnowledge?.facts ?? [];
+    const enabledFacts = facts.filter((f) => f.enabled !== false).length;
+    const noiseFactsDisabled = facts.filter(
+      (f) =>
+        f.enabled === false &&
+        isTechnicalNoiseKnowledgeFact({
+          title: f.title,
+          content: f.content,
+          category: f.category,
+          sourceRef: f.provenance?.sourceRef,
+        }),
+    ).length;
+    const liveRelationships = state.relationships.filter((r) => !r.archived && !isSyntheticRelationship(r)).length;
+    const syntheticRelationshipsArchived = state.relationships.filter(
+      (r) => r.archived && isSyntheticRelationship(r),
+    ).length;
+    const cats = [
+      "profile",
+      "employment",
+      "employer",
+      "role",
+      "skill",
+      "accomplishment",
+      "business",
+      "brand",
+      "project",
+      "customer",
+      "preference",
+      "goal",
+      "product-service",
+      "collaborator",
+    ];
+    const coverage: Record<string, { status: string; count: number }> = {};
+    for (const c of cats) {
+      const n = facts.filter((f) => f.enabled !== false && f.category === c).length;
+      coverage[c] = {
+        count: n,
+        status: n >= 3 ? "KNOWN" : n >= 1 ? "PARTIAL" : "UNKNOWN",
+      };
+    }
+    const gaps: string[] = [];
+    if (coverage.customer?.status === "UNKNOWN") gaps.push("No grounded customer facts from real CRM exports.");
+    if (coverage.brand?.status === "UNKNOWN") gaps.push("Brand DNA not yet populated from real brand evidence.");
+    if (coverage.goal?.status === "UNKNOWN") gaps.push("No Owner goals captured as structured facts.");
+    if (!(state.settings.importRoots ?? []).some((r) => /compassionate/i.test(r))) {
+      gaps.push("Compassionate Choice root may need re-scan if new files appear.");
+    }
+    gaps.push("Gmail live mailbox not connected (OAuth Owner action).");
+    gaps.push("Metricool live token not connected.");
+    gaps.push("Physical dealership inventory walk still OWNER_TEST_PENDING until Owner runs one.");
+    gaps.push("Cold archives (full D:\\ backups / conversation dumps) deferred by design.");
+    const profile = state.ownerKnowledge?.profile?.displayName || "UNKNOWN";
+    const reviewOpen = (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length;
+    const roots = Array.isArray(state.settings.importRoots) ? state.settings.importRoots : [];
+    const reply = [
+      "WHAT DATA DOES AION HAVE ABOUT THE OWNER?",
+      `Profile: ${profile}`,
+      state.ownerKnowledge?.profile?.summary
+        ? `Summary: ${state.ownerKnowledge.profile.summary.slice(0, 240)}`
+        : "Summary: UNKNOWN",
+      "",
+      "IMPORTS",
+      `  Real Owner documents (heuristic): ${realDocuments}`,
+      `  Synthetic/test documents: ${syntheticDocuments}`,
+      `  Approved roots: ${roots.length}`,
+      ...roots.slice(0, 14).map((r, i) => `    ${i + 1}. ${r}`),
+      "",
+      "KNOWLEDGE",
+      `  Enabled facts: ${enabledFacts} (noise/synthetic disabled count tracked: ${noiseFactsDisabled})`,
+      ...Object.entries(coverage).map(([k, v]) => `  ${k}: ${v.status} (n=${v.count})`),
+      "",
+      "PEOPLE / CRM",
+      `  Live non-synthetic relationships: ${liveRelationships}`,
+      `  Synthetic relationships archived: ${syntheticRelationshipsArchived}`,
+      "",
+      "REVIEW",
+      `  Open import review items: ${reviewOpen} (grouped; not all need Owner tonight)`,
+      "",
+      "GAPS / MISSING",
+      ...gaps.map((g) => `  • ${g}`),
+      "",
+      "REAL vs SYNTHETIC: production Owner views filter synthetic relationships/workspaces/facts where markers are strong.",
+      "Does NOT claim all life data imported.",
+    ].join("\n");
+    return {
+      reply,
+      profile,
+      realDocuments,
+      syntheticDocuments,
+      enabledFacts,
+      noiseFactsDisabled,
+      liveRelationships,
+      syntheticRelationshipsArchived,
+      approvedRoots: roots,
+      coverage,
+      reviewOpen,
+      gaps,
+    };
+  }
+
+  /** Settings-facing connector/capability status center. */
+  async capabilityStatusCenter(): Promise<{
+    reply: string;
+    items: Array<{ id: string; status: string; detail: string }>;
+  }> {
+    const state = await this.snapshot();
+    const gmail = await this.gmailConsentStatus();
+    const metricool = await this.metricoolReadinessStatus();
+    const roots = state.settings.importRoots ?? [];
+    const docs = state.crmDocuments ?? [];
+    const realDocs = docs.filter((d) => !/owner-first|e2e|synthetic|fixture/i.test(`${d.sourceRootPath} ${d.filename}`)).length;
+    const env = await this.ensureAuthorityEnvelope();
+    const items = [
+      {
+        id: "OWNER_DATA_SOURCES",
+        status: roots.length && realDocs > 0 ? "CONNECTED" : roots.length ? "READY" : "OWNER_ACTION_REQUIRED",
+        detail: `${roots.length} root(s), ~${realDocs} real docs indexed`,
+      },
+      {
+        id: "GMAIL",
+        status:
+          gmail.code === "READY"
+            ? "CONNECTED"
+            : gmail.code === "GMAIL_OWNER_CONSENT_REQUIRED"
+              ? "OWNER_ACTION_REQUIRED"
+              : gmail.code === "FIXTURE_MODE"
+                ? "READY"
+                : "NOT_CONFIGURED",
+        detail: String(gmail.message || gmail.code || "status unknown").slice(0, 160),
+      },
+      {
+        id: "METRICOOL",
+        status:
+          metricool.code === "READY" || metricool.authorized === true
+            ? "CONNECTED"
+            : metricool.code === "METRICOOL_OWNER_TOKEN_REQUIRED" || metricool.code === "NOT_CONFIGURED"
+              ? "OWNER_ACTION_REQUIRED"
+              : String(metricool.code || "DISABLED"),
+        detail: String(metricool.message || metricool.code || "").slice(0, 160),
+      },
+      {
+        id: "DEALER_WEB_INVENTORY",
+        status: "READY",
+        detail: "Public inventory refresh capability available; live scrape depends on dealer site.",
+      },
+      {
+        id: "NHTSA",
+        status: "READY",
+        detail: "Recall/vPIC lookups available (network when used).",
+      },
+      {
+        id: "LOCAL_OCR_VISION",
+        status: "READY",
+        detail: "VIN/sticker/image paths instrumented; prefer local/free extraction.",
+      },
+      {
+        id: "AUTONOMY",
+        status: env.kill?.pauseAutonomy ? "DISABLED" : "READY",
+        detail: env.kill?.pauseAutonomy ? "pauseAutonomy kill switch ON" : "Executive cycle + queue operational",
+      },
+      {
+        id: "EXTERNAL_ACTION_AUTHORITY",
+        status: env.kill?.pauseAllExternal ? "DISABLED" : "READY",
+        detail: `email/social/job/business authorized in envelope; spend USD ${env.spend?.totalAutonomousSpendCapUsd ?? 0}`,
+      },
+    ];
+    const reply = [
+      "CAPABILITY STATUS CENTER",
+      ...items.map((i) => `  ${i.id}: ${i.status} — ${i.detail}`),
+    ].join("\n");
+    return { reply, items };
+  }
+
+  /**
    * Owner-authorized broad discovery inventory (no content mutation).
    * Supersedes per-folder manual pick for ordinary useful Owner data.
    */
@@ -5272,19 +5644,31 @@ export class AionAssistantV1 {
         score: o.score,
       }),
     );
+    const ownerRels = state.relationships.filter(
+      (r) => !r.archived && !isSyntheticRelationship(r),
+    );
+    const ownerCommitments = commitments.filter(
+      (c) =>
+        !isSyntheticOwnerFacingText(c.committedBy, c.committedTo, c.statement, c.workspace) &&
+        String(c.committedBy || c.committedTo || c.statement || "").trim().length > 0,
+    );
+    const ownerOpps = opps.filter(
+      (o) => !isSyntheticOwnerFacingText(o.title, o.workspace, o.detail, o.source),
+    );
     const board = buildAttentionBoard({
       nowIso: now,
-      relationships: state.relationships,
-      tasks: state.tasks,
-      commitments,
+      relationships: ownerRels,
+      tasks: state.tasks.filter((t) => !isSyntheticOwnerFacingText(t.title, t.description, t.workspace)),
+      commitments: ownerCommitments,
       workspaceLabels: state.settings.workspaceLabels,
       inventoryExceptions: exceptions,
       brandWorkspaceCount: state.workspaces.filter(
         (w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w),
       ).length,
-      openImportReview: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
+      // Grouped: do not surface hundreds of low-value technical import reviews as Owner NOW items
+      openImportReview: 0,
       openApprovals: (state.approvals ?? []).filter((a) => a.state === "pending").length,
-      opportunityCount: opps.length,
+      opportunityCount: ownerOpps.length,
     });
     if (filter?.workspace || filter?.onlyOwner || filter?.onlyAion) {
       return filterAttentionBoard(board, filter);
@@ -5482,7 +5866,9 @@ export class AionAssistantV1 {
         (w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w),
       ).length,
       captureCount: (exec.captures ?? []).length,
-      relationshipWorkCount: state.relationships.filter((r) => r.workspace === "work" && !r.archived).length,
+      relationshipWorkCount: state.relationships.filter(
+        (r) => r.workspace === "work" && !r.archived && !isSyntheticRelationship(r),
+      ).length,
     });
     const changes = detectChanges(exec.lastSnapshotSig, sig);
     result.changesDetected = changes.length;
@@ -6351,7 +6737,9 @@ export class AionAssistantV1 {
       draft.executive.lastWeeklyReviewAt = this.ports.clock.now();
       return null;
     });
-    const workRels = state.relationships.filter((r) => r.workspace === "work" && !r.archived);
+    const workRels = state.relationships.filter(
+      (r) => r.workspace === "work" && !r.archived && !isSyntheticRelationship(r),
+    );
     const stalled = findStalledDeals(workRels, this.ports.clock.now(), 14);
     const reply = [
       "WEEKLY CEO REVIEW (stored evidence only — no invented revenue)",
@@ -6786,7 +7174,9 @@ export class AionAssistantV1 {
     const route = routeCrmAssistantIntent(text);
     const state = await this.snapshot();
     const workspaceId = state.settings.activeWorkspace;
-    const inWorkspace = state.relationships.filter((r) => r.workspace === workspaceId && !r.archived);
+    const inWorkspace = state.relationships.filter(
+      (r) => r.workspace === workspaceId && !r.archived && !isSyntheticRelationship(r),
+    );
     const sources: Array<{ type: string; id: string; label: string }> = [];
 
     if (route.intent === "IMPORT_STATUS") {
@@ -6802,10 +7192,29 @@ export class AionAssistantV1 {
           data: m,
         };
       }
+      if (
+        /\bwhat do you know about me\b|\bwhat data do you have\b|\bdata completeness\b|\bwhat did you import\b|\bwhat needs review\b/i.test(
+          text,
+        )
+      ) {
+        const completeness = await this.ownerDataCompletenessReport();
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: completeness.reply,
+          sources,
+          action: "owner.dataCompleteness",
+          data: completeness,
+        };
+      }
       const registry = await this.realDataSourceRegistry();
       const readiness = await this.importReadiness();
       const dash = await this.importDashboard();
+      const completeness = await this.ownerDataCompletenessReport();
       const lines = [
+        completeness.reply,
+        "",
+        "---",
         registry.reply,
         "",
         "---",
@@ -6822,17 +7231,20 @@ export class AionAssistantV1 {
         reply: lines.join("\n"),
         sources,
         action: "import.registry",
-        data: { registry, readiness, dashboard: dash },
+        data: { registry, readiness, dashboard: dash, completeness },
       };
     }
 
     if (route.intent === "CONNECTOR_STATUS") {
+      const center = await this.capabilityStatusCenter();
       const gmail = await this.gmailConsentStatus();
       const metricool = await this.metricoolReadinessStatus();
       const image = imageUnderstandingStatus();
       const lan = this.discoverLan();
       const phoneUrl = lan.preferred ? this.phoneUrlFor(lan.preferred.address, 31415) : null;
       const lines = [
+        center.reply,
+        "",
         "Connector / access status (no secrets shown):",
         `Gmail: ${gmail.code} — ${gmail.message}`,
         gmail.ownerAction ? `  Action: ${gmail.ownerAction}` : "",
@@ -6852,7 +7264,7 @@ export class AionAssistantV1 {
         reply: lines.join("\n"),
         sources,
         action: "connector.status",
-        data: { gmail, metricool, image, lan, phoneUrl },
+        data: { center, gmail, metricool, image, lan, phoneUrl },
       };
     }
 
@@ -7133,7 +7545,7 @@ export class AionAssistantV1 {
       }
       if (/\bstale\b/i.test(text)) {
         const stalled = findStalledDeals(
-          state.relationships.filter((r) => r.workspace === "work" && !r.archived),
+          state.relationships.filter((r) => r.workspace === "work" && !r.archived && !isSyntheticRelationship(r)),
           this.ports.clock.now(),
           14,
         );

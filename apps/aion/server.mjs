@@ -915,6 +915,10 @@ export async function createAionServer(options = {}) {
       case "import.preBackup": return service.preImportPrivateStateBackup();
       case "import.knowledgeCoverage": return service.knowledgeCoverageView();
       case "import.separateTestWorkspaces": return service.separateTestWorkspacesFromOwnerView();
+      case "import.separateSyntheticPeople": return service.separateSyntheticPeopleFromOwnerView();
+      case "owner.knowledge.seedCareer": return service.seedCareerKnowledgeFromResumeEvidence();
+      case "owner.dataCompleteness": return service.ownerDataCompletenessReport();
+      case "capability.statusCenter": return service.capabilityStatusCenter();
       /** Owner broad-data discovery inventory (no mutate beyond activity log). */
       case "import.discover": return service.discoverOwnerDataInventory({
         inventory: input.inventory !== false,
