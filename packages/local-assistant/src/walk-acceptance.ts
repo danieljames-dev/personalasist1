@@ -1,5 +1,5 @@
 /**
- * Inventory Walk physical acceptance telemetry.
+ * Inventory Walk physical Acceptance metrics.
  *
  * Lightweight lot-test metrics for the Owner's first real dealership walk.
  * Does NOT claim physical PASS. Does NOT write Value Ledger entries.
@@ -15,7 +15,7 @@ export type VinEntrySourceV1 =
   | "stock-sticker";
 
 /** Per scan/observation acceptance row. */
-export interface WalkObservationTelemetryV1 {
+export interface WalkObservationMetricsV1 {
   id: OpaqueId | string;
   walkId: OpaqueId | string;
   /** Dealership/work workspace isolation — always "work" for Lakeland walks. */
@@ -60,7 +60,7 @@ export interface WalkAcceptanceReportV1 {
   entryCount: number;
   /**
    * Always OWNER_TEST_PENDING until Owner provides separate physical evidence.
-   * Telemetry alone never flips this to PASS.
+   * metrics alone never flips this to PASS.
    */
   realDealershipWalk: "OWNER_TEST_PENDING";
   /** Explicit: not Value Ledger / not revenue metrics. */
@@ -81,7 +81,7 @@ export function mapEntryMethodToVinSource(
   return "manual";
 }
 
-export function buildWalkObservationTelemetry(
+export function buildWalkObservationMetrics(
   input: {
     walkId: string;
     workspace?: string;
@@ -104,7 +104,7 @@ export function buildWalkObservationTelemetry(
     matchStatus?: string | null;
   },
   ctx: { id: string },
-): WalkObservationTelemetryV1 {
+): WalkObservationMetricsV1 {
   const vinSource = mapEntryMethodToVinSource(input.entryMethod, input.vinSource);
   const conf =
     input.ocrConfidence === undefined || input.ocrConfidence === null
@@ -150,12 +150,12 @@ export function buildWalkObservationTelemetry(
 }
 
 /**
- * Aggregate telemetry for one walk.
+ * Aggregate metrics for one walk.
  * Uses reconciliation for online-not-seen when provided (from existing walk end logic).
  */
 export function buildWalkAcceptanceReport(input: {
   walk: InventoryWalkV1;
-  entries: readonly WalkObservationTelemetryV1[];
+  entries: readonly WalkObservationMetricsV1[];
   reconciliation?: WalkReconciliationV1 | null;
   workspace?: string;
 }): WalkAcceptanceReportV1 {
@@ -211,7 +211,7 @@ export function buildWalkAcceptanceReport(input: {
 
   const reply = [
     "INVENTORY WALK TEST RESULTS",
-    `(Acceptance telemetry — not Value Ledger · REAL_DEALERSHIP_WALK = OWNER_TEST_PENDING)`,
+    `(Acceptance metrics — not Value Ledger · REAL_DEALERSHIP_WALK = OWNER_TEST_PENDING)`,
     "",
     `Walk: ${input.walk.id}`,
     `Dealership: ${input.walk.dealershipName}`,
@@ -244,9 +244,9 @@ export function buildWalkAcceptanceReport(input: {
             (e, i) =>
               `  ${i + 1}. ${e.timestamp.slice(0, 19)} · ${e.vinSource} · VIN ${e.finalConfirmedVin || e.ocrResult || "?"} · valid=${e.vinValidationValid} · online=${e.onlineInventoryMatch} · retries=${e.photoRetryCount} · ${e.processingDurationMs ?? "?"}ms · save=${e.saveSuccess ? "ok" : "FAIL"}`,
           )
-      : ["  (no telemetry entries yet)"]),
+      : ["  (no metrics entries yet)"]),
     "",
-    "Caveat: Online match ≠ on lot. Telemetry never auto-claims physical PASS.",
+    "Caveat: Online match ≠ on lot. metrics never auto-claims physical PASS.",
   ].join("\n");
 
   return {

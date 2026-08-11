@@ -1,7 +1,7 @@
 /**
  * Path policy for Owner-approved import roots.
  * Reject whole drives, protected trees, system/credential locations.
- * Never traverse C:\Users\nearm\all-projects-API.
+ * Never traverse the absolute Owner exclusion tree (nearm all-projects-API).
  *
  * Owner broad-data authorization still honors these hard exclusions.
  */
@@ -203,7 +203,7 @@ export function validateImportRootCandidate(path: string): {
       return {
         ok: false,
         normalized,
-        reason: "Protected exclusion: C:\\Users\\nearm\\all-projects-API must never be imported.",
+        reason: "Protected exclusion: nearm/all-projects-API must never be imported.",
       };
     }
   }

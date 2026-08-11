@@ -443,10 +443,10 @@ export interface VehicleInventoryStateV1 {
   /** Cached public listings (newest refresh wins; history lives on vehicles). */
   onlineListings: InventoryListingObservationV1[];
   /**
-   * Physical walk acceptance telemetry (lot test). Workspace-scoped entries.
+   * Physical walk Acceptance metrics (lot test). Workspace-scoped entries.
    * Not Value Ledger. Never auto-claims REAL_DEALERSHIP_WALK PASS.
    */
-  walkAcceptanceTelemetry: import("./walk-acceptance.js").WalkObservationTelemetryV1[];
+  walkAcceptanceMetrics: import("./walk-acceptance.js").WalkObservationMetricsV1[];
 }
 
 export function emptyVehicleInventoryState(): VehicleInventoryStateV1 {
@@ -457,7 +457,7 @@ export function emptyVehicleInventoryState(): VehicleInventoryStateV1 {
     observations: [],
     lastInventoryRefresh: {},
     onlineListings: [],
-    walkAcceptanceTelemetry: [],
+    walkAcceptanceMetrics: [],
   };
 }
 

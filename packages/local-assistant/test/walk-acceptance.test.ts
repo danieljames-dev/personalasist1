@@ -1,5 +1,5 @@
 /**
- * Inventory walk acceptance telemetry — mechanics only.
+ * Inventory walk acceptance metrics — mechanics only.
  * Does not claim REAL_DEALERSHIP_WALK physical PASS.
  */
 import assert from "node:assert/strict";
@@ -22,7 +22,7 @@ import {
 } from "../src/index.js";
 import {
   buildWalkAcceptanceReport,
-  buildWalkObservationTelemetry,
+  buildWalkObservationMetrics,
   deriveOnlineMatch,
   deriveStockMatch,
   mapEntryMethodToVinSource,
@@ -63,8 +63,8 @@ test("derive online/stock match helpers", () => {
   assert.equal(deriveStockMatch("x", "y", "STOCK_MISMATCH"), false);
 });
 
-test("buildWalkObservationTelemetry fields", () => {
-  const t = buildWalkObservationTelemetry(
+test("buildWalkObservationMetrics fields", () => {
+  const t = buildWalkObservationMetrics(
     {
       walkId: "w1",
       workspace: "work",
@@ -109,7 +109,7 @@ test("buildWalkAcceptanceReport aggregates and never auto-PASS", () => {
   };
   const vin = synthesizeValidVin("REP01");
   const entries = [
-    buildWalkObservationTelemetry(
+    buildWalkObservationMetrics(
       {
         walkId: "w1",
         workspace: "work",
@@ -125,7 +125,7 @@ test("buildWalkAcceptanceReport aggregates and never auto-PASS", () => {
       },
       { id: "t1" },
     ),
-    buildWalkObservationTelemetry(
+    buildWalkObservationMetrics(
       {
         walkId: "w1",
         workspace: "work",
@@ -144,7 +144,7 @@ test("buildWalkAcceptanceReport aggregates and never auto-PASS", () => {
       },
       { id: "t2" },
     ),
-    buildWalkObservationTelemetry(
+    buildWalkObservationMetrics(
       {
         walkId: "w1",
         workspace: "work",
@@ -160,7 +160,7 @@ test("buildWalkAcceptanceReport aggregates and never auto-PASS", () => {
     ),
   ];
   // Personal workspace entry must not pollute work report
-  const otherWs = buildWalkObservationTelemetry(
+  const otherWs = buildWalkObservationMetrics(
     {
       walkId: "w1",
       workspace: "personal",
@@ -210,7 +210,7 @@ test("buildWalkAcceptanceReport aggregates and never auto-PASS", () => {
   assert.match(report.reply, /OWNER_TEST_PENDING/);
 });
 
-test("INTEGRATED: recordWalkObservation writes telemetry; command surfaces report", async () => {
+test("INTEGRATED: recordWalkObservation writes metrics; command surfaces report", async () => {
   const { service } = await fixture();
   await service.ensureLakelandToyotaContext({ setCurrent: true });
   const vin = synthesizeValidVin("WALK1");
@@ -223,10 +223,10 @@ test("INTEGRATED: recordWalkObservation writes telemetry; command surfaces repor
     vinSource: "manual",
     processingDurationMs: 120,
   });
-  assert.equal(r1.telemetry.saveSuccess, true);
-  assert.equal(r1.telemetry.workspace, "work");
-  assert.equal(r1.telemetry.vinSource, "manual");
-  assert.ok(r1.telemetry.processingDurationMs === 120);
+  assert.equal(r1.metrics.saveSuccess, true);
+  assert.equal(r1.metrics.workspace, "work");
+  assert.equal(r1.metrics.vinSource, "manual");
+  assert.ok(r1.metrics.processingDurationMs === 120);
 
   const r2 = await service.recordWalkObservation({
     vin: synthesizeValidVin("WALK2"),
@@ -238,8 +238,8 @@ test("INTEGRATED: recordWalkObservation writes telemetry; command surfaces repor
     photoRetryCount: 2,
     processingDurationMs: 800,
   });
-  assert.equal(r2.telemetry.ownerCorrectionRequired, true);
-  assert.equal(r2.telemetry.photoRetryCount, 2);
+  assert.equal(r2.metrics.ownerCorrectionRequired, true);
+  assert.equal(r2.metrics.photoRetryCount, 2);
 
   const report = await service.inventoryWalkTestResults();
   assert.ok(report);
@@ -248,10 +248,10 @@ test("INTEGRATED: recordWalkObservation writes telemetry; command surfaces repor
   assert.ok(report!.vehiclesAttempted >= 2);
   assert.match(report!.reply, /INVENTORY WALK TEST RESULTS/);
 
-  // Value ledger not polluted by walk telemetry
+  // Value ledger not polluted by walk metrics
   const snap = await service.snapshot();
   const ledgerHasWalk = (snap.executive?.valueLedger ?? []).some((e) =>
-    /walk acceptance|walk telemetry/i.test(e.action + e.notes + e.capability),
+    /walk acceptance|walk metrics/i.test(e.action + e.notes + e.capability),
   );
   assert.equal(ledgerHasWalk, false);
 

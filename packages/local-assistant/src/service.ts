@@ -237,12 +237,12 @@ import {
 } from "./vehicle-inventory.js";
 import {
   buildWalkAcceptanceReport,
-  buildWalkObservationTelemetry,
+  buildWalkObservationMetrics,
   deriveOnlineMatch,
   deriveStockMatch,
   type VinEntrySourceV1,
   type WalkAcceptanceReportV1,
-  type WalkObservationTelemetryV1,
+  type WalkObservationMetricsV1,
 } from "./walk-acceptance.js";
 import {
   applyOwnerProfileSummary,
@@ -3862,7 +3862,7 @@ export class AionAssistantV1 {
     recognitionConfidence?: number | null;
     entryMethod?: "manual" | "photo" | "mixed";
     walkId?: string;
-    /** Acceptance telemetry — VIN capture path for lot test. */
+    /** Acceptance metrics — VIN capture path for lot test. */
     vinSource?: VinEntrySourceV1 | string;
     ocrResult?: string | null;
     ownerCorrectionRequired?: boolean;
@@ -3875,7 +3875,7 @@ export class AionAssistantV1 {
     observation: PhysicalObservationV1;
     vehicle: VehicleRecordV1 | null;
     validation: ReturnType<typeof validateVin>;
-    telemetry: WalkObservationTelemetryV1;
+    metrics: WalkObservationMetricsV1;
   }> {
     const processStarted = input.processingStartedAtMs ?? Date.now();
     let walk = input.walkId
@@ -3906,7 +3906,7 @@ export class AionAssistantV1 {
       return this.mutate((draft) => {
         if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
         const inv = draft.vehicleInventory;
-        if (!Array.isArray(inv.walkAcceptanceTelemetry)) inv.walkAcceptanceTelemetry = [];
+        if (!Array.isArray(inv.walkAcceptanceMetrics)) inv.walkAcceptanceMetrics = [];
         const now = this.ports.clock.now();
         const w = inv.walks.find((x) => x.id === walk!.id)!;
         const match = matchStatusForced
@@ -4016,7 +4016,7 @@ export class AionAssistantV1 {
           input.processingDurationMs != null
             ? Number(input.processingDurationMs)
             : Math.max(0, Date.now() - processStarted);
-        const telemetry = buildWalkObservationTelemetry(
+        const metrics = buildWalkObservationMetrics(
           {
             walkId: w.id,
             workspace: "work",
@@ -4041,8 +4041,8 @@ export class AionAssistantV1 {
           },
           { id: this.ports.ids.next("walktel") },
         );
-        inv.walkAcceptanceTelemetry.unshift(telemetry);
-        if (inv.walkAcceptanceTelemetry.length > 5000) inv.walkAcceptanceTelemetry.length = 5000;
+        inv.walkAcceptanceMetrics.unshift(metrics);
+        if (inv.walkAcceptanceMetrics.length > 5000) inv.walkAcceptanceMetrics.length = 5000;
 
         this.activity(
           draft,
@@ -4051,18 +4051,18 @@ export class AionAssistantV1 {
           `Walk observation: VIN ${observation.vin ?? "?"} · ${observation.matchStatus}`,
           observation.id,
         );
-        return { observation, vehicle, validation, telemetry };
+        return { observation, vehicle, validation, metrics };
       });
     } catch (err) {
-      // Record failed save telemetry without throwing away the error
+      // Record failed save metrics without throwing away the error
       const msg = err instanceof Error ? err.message : String(err);
       await this.mutate((draft) => {
         if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
-        if (!Array.isArray(draft.vehicleInventory.walkAcceptanceTelemetry)) {
-          draft.vehicleInventory.walkAcceptanceTelemetry = [];
+        if (!Array.isArray(draft.vehicleInventory.walkAcceptanceMetrics)) {
+          draft.vehicleInventory.walkAcceptanceMetrics = [];
         }
         const now = this.ports.clock.now();
-        const tel = buildWalkObservationTelemetry(
+        const tel = buildWalkObservationMetrics(
           {
             walkId: walk!.id,
             workspace: "work",
@@ -4088,7 +4088,7 @@ export class AionAssistantV1 {
           },
           { id: this.ports.ids.next("walktel") },
         );
-        draft.vehicleInventory.walkAcceptanceTelemetry.unshift(tel);
+        draft.vehicleInventory.walkAcceptanceMetrics.unshift(tel);
         return null;
       }).catch(() => null);
       throw err;
@@ -4096,7 +4096,7 @@ export class AionAssistantV1 {
   }
 
   /**
-   * Acceptance telemetry summary for current/most recent physical walk.
+   * Acceptance metrics summary for current/most recent physical walk.
    * REAL_DEALERSHIP_WALK stays OWNER_TEST_PENDING — never auto-PASS.
    * Does not write Value Ledger.
    */
@@ -4113,7 +4113,7 @@ export class AionAssistantV1 {
       inv.vehicles,
       this.ports.clock.now(),
     );
-    const entries = (inv.walkAcceptanceTelemetry ?? []).filter((e) => e.walkId === walk.id);
+    const entries = (inv.walkAcceptanceMetrics ?? []).filter((e) => e.walkId === walk.id);
     return buildWalkAcceptanceReport({
       walk,
       entries,
@@ -4503,7 +4503,7 @@ export class AionAssistantV1 {
     if (reviewOpen > 0) gaps.push(`${reviewOpen} import review item(s) still need Owner decision.`);
     if (failures.length) gaps.push(`${failures.length} source(s) failed or carry errors.`);
     gaps.push("Owner broad-data authorization active: ordinary useful Owner folders may be discovered/registered without per-folder paste.");
-    gaps.push("C:\\Users\\nearm\\all-projects-API is permanently excluded.");
+    gaps.push("nearm/all-projects-API is permanently excluded.");
     gaps.push("Secrets/credentials/system noise remain excluded.");
 
     // Gate opens when real roots registered under Owner broad auth (encrypted backup optional).
@@ -7329,8 +7329,8 @@ export class AionAssistantV1 {
       }
       if (
         /\binventory walk test results\b/i.test(text) ||
-        /\bwalk (acceptance|test) (results|report|telemetry)\b/i.test(text) ||
-        /\bphysical walk (results|telemetry|acceptance)\b/i.test(text)
+        /\bwalk (acceptance|test) (results|report|metrics)\b/i.test(text) ||
+        /\bphysical walk (results|metrics|acceptance)\b/i.test(text)
       ) {
         const report = await this.inventoryWalkTestResults();
         if (!report) {

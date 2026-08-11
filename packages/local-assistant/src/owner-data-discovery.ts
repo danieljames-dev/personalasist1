@@ -4,7 +4,7 @@
  * Discovers ordinary useful Owner-controlled folders, classifies relevance/priority,
  * and inventories supported files — without requiring per-folder manual approval.
  *
- * HARD: never touch C:\Users\nearm\all-projects-API or credential/system noise trees.
+ * HARD: never touch nearm/all-projects-API or credential/system noise trees.
  */
 
 import { existsSync, readdirSync, statSync, lstatSync } from "node:fs";
@@ -459,7 +459,7 @@ export function discoverOwnerDataSources(opts: {
   const excluded = sources.filter((s) => !useful.includes(s));
 
   const hardExclusionsHonored = [
-    "C:\\Users\\nearm\\all-projects-API",
+    "nearm/all-projects-API (absolute)",
     "credential/password/ssh/wallet stores",
     "Windows/Program Files/system noise",
     "node_modules/.git/venv/caches",

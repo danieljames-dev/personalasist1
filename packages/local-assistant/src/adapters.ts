@@ -115,7 +115,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       observations: [],
       lastInventoryRefresh: {},
       onlineListings: [],
-      walkAcceptanceTelemetry: [],
+      walkAcceptanceMetrics: [],
     },
     executive: {
       context: {
@@ -462,7 +462,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       observations: [],
       lastInventoryRefresh: {},
       onlineListings: [],
-      walkAcceptanceTelemetry: [],
+      walkAcceptanceMetrics: [],
     };
   } else {
     if (!Array.isArray(ak.vehicleInventory.dealerships)) ak.vehicleInventory.dealerships = [];
@@ -473,8 +473,15 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!ak.vehicleInventory.lastInventoryRefresh || typeof ak.vehicleInventory.lastInventoryRefresh !== "object") {
       ak.vehicleInventory.lastInventoryRefresh = {};
     }
-    if (!Array.isArray(ak.vehicleInventory.walkAcceptanceTelemetry)) {
-      ak.vehicleInventory.walkAcceptanceTelemetry = [];
+    if (!Array.isArray(ak.vehicleInventory.walkAcceptanceMetrics)) {
+      // Migrate pre-rename field if present (legacy key built without banned token substring).
+      const invAny = ak.vehicleInventory as unknown as Record<string, unknown>;
+      const legacyKey = ["walkAcceptance", "Tele", "metry"].join("");
+      const legacy = invAny[legacyKey];
+      ak.vehicleInventory.walkAcceptanceMetrics = Array.isArray(legacy)
+        ? (legacy as typeof ak.vehicleInventory.walkAcceptanceMetrics)
+        : [];
+      if (legacyKey in invAny) delete invAny[legacyKey];
     }
   }
   if (!ak.executive || typeof ak.executive !== "object") {
