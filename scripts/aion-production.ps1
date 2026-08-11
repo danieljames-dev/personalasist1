@@ -221,15 +221,39 @@ function Start-AionDetached {
   Add-Content -LiteralPath $stdout -Value "`n---- start $(Get-Date -Format o) ----`n" -Encoding utf8
   Add-Content -LiteralPath $stderr -Value "`n---- start $(Get-Date -Format o) ----`n" -Encoding utf8
 
-  # Detach via WScript.Shell so the process is NOT in the caller's Job Object
-  # (agent shells / IDE tasks kill job children on exit — that was killing production).
-  $arg = "/c start `"AION-Production`" /b `"$node`" `"$RepositoryRoot\apps\aion-command-center.mjs`" --port $Port >> `"$stdout`" 2>> `"$stderr`""
-  $wsh = New-Object -ComObject WScript.Shell
-  $wsh.CurrentDirectory = $RepositoryRoot
-  [void]$wsh.Run("cmd.exe $arg", 0, $false)
+  # Durable detach (fixes silent ~30-60s death from `cmd /c start /b` + broken redirect):
+  # 1) Prefer WScript.Shell.Run(node, 0, false) — fully outside agent Job Objects, no cmd wrapper.
+  # 2) Fallback: nested powershell Start-Process (also detached) with log redirect.
+  # 3) Last resort: direct Start-Process in this shell.
+  $cc = Join-Path $RepositoryRoot 'apps\aion-command-center.mjs'
+  $launched = $false
+  try {
+    $wsh = New-Object -ComObject WScript.Shell
+    $wsh.CurrentDirectory = $RepositoryRoot
+    # WindowStyle 0 = hidden; bWaitOnReturn false = do not re-parent under this shell's lifetime.
+    $runCmd = "`"$node`" `"$cc`" --port $Port"
+    [void]$wsh.Run($runCmd, 0, $false)
+    $launched = $true
+    Write-Watch "START_WScript_Run"
+  } catch {
+    Write-Watch "START_WScript_ERR $($_.Exception.Message)"
+  }
+
+  if (-not $launched) {
+    try {
+      $psLaunch = @"
+Start-Process -FilePath '$node' -ArgumentList @('`"$cc`"','--port','$Port') -WorkingDirectory '$RepositoryRoot' -WindowStyle Hidden -RedirectStandardOutput '$stdout' -RedirectStandardError '$stderr'
+"@
+      $wsh2 = New-Object -ComObject WScript.Shell
+      [void]$wsh2.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command $psLaunch", 0, $false)
+      $launched = $true
+      Write-Watch "START_NESTED_PS"
+    } catch {
+      Write-Watch "START_NESTED_PS_ERR $($_.Exception.Message)"
+    }
+  }
 
   # Discover PID: wait for listener then match node process
-  # Use single-shot health during boot wait (retries already slow enough).
   $found = $null
   for ($i = 0; $i -lt 50; $i++) {
     Start-Sleep -Milliseconds 250
@@ -248,11 +272,11 @@ function Start-AionDetached {
     return 0
   }
 
-  # Fallback: Start-Process when WScript path did not yield a healthy listener
+  # Last resort: Start-Process in this process (may inherit Job Object in some agent shells)
   Write-Host "START_FALLBACK Start-Process"
   Write-Watch "START_FALLBACK"
   try {
-    $psi = Start-Process -FilePath $node -ArgumentList @("`"$RepositoryRoot\apps\aion-command-center.mjs`"", "--port", "$Port") `
+    $psi = Start-Process -FilePath $node -ArgumentList @("`"$cc`"", "--port", "$Port") `
       -WorkingDirectory $RepositoryRoot -WindowStyle Hidden -PassThru `
       -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     for ($i = 0; $i -lt 50; $i++) {
