@@ -4396,6 +4396,156 @@ export class AionAssistantV1 {
     };
   }
 
+  /**
+   * Durable source registry view: approved roots, queue sources, real vs synthetic docs,
+   * last process times, failures, review. Never claims "all data imported."
+   */
+  async realDataSourceRegistry(): Promise<{
+    reply: string;
+    approvedRoots: Array<{ path: string; approvalState: "approved" }>;
+    sources: Array<{
+      id: string;
+      label: string;
+      path: string;
+      status: string;
+      kind: string;
+      realVsSynthetic: "synthetic_or_test" | "unknown_or_mixed" | "likely_real";
+      itemsImported: number;
+      itemsSkipped: number;
+      stats: ImportSourceStatsV1;
+      lastError: string;
+      createdAt: string;
+      updatedAt: string;
+      completedAt: string | null;
+    }>;
+    documents: {
+      total: number;
+      withHash: number;
+      realOwner: number;
+      syntheticOrTest: number;
+      distinctRoots: string[];
+    };
+    reviewOpen: number;
+    failures: Array<{ label: string; path: string; error: string }>;
+    gaps: string[];
+    realOwnerImportGate: "OPEN" | "CLOSED";
+    allAuthorizedDataImported: boolean;
+  }> {
+    const state = await this.snapshot();
+    const roots = Array.isArray(state.settings.importRoots) ? state.settings.importRoots : [];
+    const queue = state.importSourceQueue ?? [];
+    const docs = state.crmDocuments ?? [];
+    const reviewOpen = (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length;
+    const synthRe =
+      /synthetic|e2e|fixture|smoke|example\.test|runway first-source|aion-smoke|temp\\|acme-r7|owner-first-sources/i;
+
+    let realOwner = 0;
+    let syntheticOrTest = 0;
+    const distinctRoots = new Set<string>();
+    for (const d of docs) {
+      if (d.sourceRootPath) distinctRoots.add(d.sourceRootPath);
+      const blob = `${d.filename} ${d.summary} ${d.extractedText} ${d.sourceRootPath || ""} ${(d.tags || []).join(" ")}`;
+      if (synthRe.test(blob)) syntheticOrTest += 1;
+      else realOwner += 1;
+    }
+
+    const classifyPath = (p: string): "synthetic_or_test" | "unknown_or_mixed" | "likely_real" => {
+      if (synthRe.test(p) || /owner-first-sources|\\intake\\/i.test(p)) return "synthetic_or_test";
+      if (!p) return "unknown_or_mixed";
+      return "likely_real";
+    };
+
+    const sources = queue.map((s) => ({
+      id: s.id,
+      label: s.label,
+      path: s.path,
+      status: s.status,
+      kind: s.kind,
+      realVsSynthetic: classifyPath(s.path),
+      itemsImported: s.itemsImported,
+      itemsSkipped: s.itemsSkipped,
+      stats: s.stats ?? emptyImportStats(),
+      lastError: s.lastError || "",
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+      completedAt: s.completedAt,
+    }));
+
+    const failures = sources
+      .filter((s) => s.status === "failed" || s.lastError)
+      .map((s) => ({ label: s.label, path: s.path, error: s.lastError || s.status }));
+
+    const gaps: string[] = [];
+    if (roots.length === 0) gaps.push("No approved import roots configured.");
+    if (realOwner === 0) gaps.push("No documents classified as non-synthetic real Owner data.");
+    if (reviewOpen > 0) gaps.push(`${reviewOpen} import review item(s) still need Owner decision.`);
+    if (failures.length) gaps.push(`${failures.length} source(s) failed or carry errors.`);
+    gaps.push("Unapproved real folders (career, brand, CRM exports, etc.) are not scanned until Owner authorizes each root.");
+    gaps.push("C:\\Users\\nearm\\all-projects-API is permanently excluded.");
+
+    // Gate remains closed without current encrypted private backup + real roots — code cannot invent passphrase.
+    const realOwnerImportGate: "OPEN" | "CLOSED" = "CLOSED";
+    const allAuthorizedDataImported =
+      roots.length > 0 &&
+      sources
+        .filter((s) => roots.some((r) => s.path.toLowerCase().includes(String(r).toLowerCase().replace(/\\\\/g, "\\"))))
+        .every((s) => s.status === "completed" || s.status === "needs-review");
+
+    const reply = [
+      "REAL DATA SOURCE REGISTRY",
+      `(Does NOT claim all Owner life data is imported.)`,
+      "",
+      "APPROVED ROOTS",
+      ...(roots.length
+        ? roots.map((r, i) => `  ${i + 1}. [approved] ${r}`)
+        : ["  (none — Owner must add specific folders in Settings)"]),
+      "",
+      "SOURCE QUEUE",
+      ...sources.slice(0, 12).map(
+        (s) =>
+          `  • ${s.label} [${s.status}] ${s.realVsSynthetic} · imported=${s.itemsImported} skip=${s.itemsSkipped} · ${s.path}`,
+      ),
+      sources.length === 0 ? "  (empty queue)" : "",
+      "",
+      "DOCUMENTS",
+      `  Total: ${docs.length} · hashed: ${docs.filter((d) => d.contentHash).length}`,
+      `  Real Owner (heuristic): ${realOwner} · Synthetic/test: ${syntheticOrTest}`,
+      `  Distinct source roots seen: ${[...distinctRoots].slice(0, 8).join("; ") || "(none)"}`,
+      "",
+      "REVIEW / FAILURES",
+      `  Review open: ${reviewOpen}`,
+      ...(failures.length
+        ? failures.slice(0, 5).map((f) => `  • FAIL ${f.label}: ${f.error.slice(0, 120)}`)
+        : ["  • No active failure messages"]),
+      "",
+      "GAPS",
+      ...gaps.map((g) => `  • ${g}`),
+      "",
+      `REAL_OWNER_IMPORT_GATE = ${realOwnerImportGate}`,
+      `ALL_CURRENTLY_AUTHORIZED_DATA_IMPORTED = ${allAuthorizedDataImported ? "YES" : "NO"}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    return {
+      reply,
+      approvedRoots: roots.map((path) => ({ path, approvalState: "approved" as const })),
+      sources,
+      documents: {
+        total: docs.length,
+        withHash: docs.filter((d) => d.contentHash).length,
+        realOwner,
+        syntheticOrTest,
+        distinctRoots: [...distinctRoots],
+      },
+      reviewOpen,
+      failures,
+      gaps,
+      realOwnerImportGate,
+      allAuthorizedDataImported,
+    };
+  }
+
   // ─── Executive multi-context OS ───────────────────────────────────────────
 
   private executiveOf(state: AssistantStateV1): ExecutiveStateV1 {
@@ -5981,29 +6131,39 @@ export class AionAssistantV1 {
     const sources: Array<{ type: string; id: string; label: string }> = [];
 
     if (route.intent === "IMPORT_STATUS") {
+      // Usage metrics is routed here for phrase discovery but served by metrics path
+      if (/\busage metrics\b|\bfriction metrics\b|\bhow am i using aion\b/i.test(text)) {
+        const m = await this.realUsageMetrics();
+        return {
+          intent: "USAGE_METRICS",
+          confidence: "high",
+          reply: formatUsageMetrics(m),
+          sources: [],
+          action: "metrics.usage",
+          data: m,
+        };
+      }
+      const registry = await this.realDataSourceRegistry();
       const readiness = await this.importReadiness();
       const dash = await this.importDashboard();
       const lines = [
+        registry.reply,
+        "",
+        "---",
         readiness.summary,
-        `Gate: ${readiness.code} · ready=${readiness.ready}`,
-        `Roots approved: ${readiness.stats.approvedImportRoots} · hashed docs: ${readiness.stats.documentsWithHash} · review open: ${readiness.stats.reviewOpen} · queue: ${readiness.stats.queueSources}`,
-        "",
-        "Capabilities:",
-        ...readiness.capabilities.map((c) => `  [${c.state}] ${c.label}`),
-        "",
-        "First sources (Owner-selected paths only):",
-        ...readiness.firstSources.map((s, i) => `  ${i + 1}. ${s.title} — ${s.how}`),
-        "",
-        readiness.ownerActions.length ? `Owner actions:\n${readiness.ownerActions.map((a) => `  - ${a}`).join("\n")}` : "",
+        `Capability gate: ${readiness.code} · ready=${readiness.ready}`,
         `Dashboard: docs=${dash.documents} reviewOpen=${dash.reviewOpen}`,
+        readiness.ownerActions.length
+          ? `Owner actions:\n${readiness.ownerActions.map((a) => `  - ${a}`).join("\n")}`
+          : "",
       ].filter(Boolean);
       return {
         intent: route.intent,
         confidence: route.confidence,
         reply: lines.join("\n"),
         sources,
-        action: "import.readiness",
-        data: { readiness, dashboard: dash },
+        action: "import.registry",
+        data: { registry, readiness, dashboard: dash },
       };
     }
 

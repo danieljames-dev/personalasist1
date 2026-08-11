@@ -910,6 +910,7 @@ export async function createAionServer(options = {}) {
       case "vehicle.forCustomer": return { vehicles: await service.vehiclesForCustomer(String(input.relationshipId ?? "")) };
       case "vehicle.customers": return service.customersForVehicle({ vehicleId: input.vehicleId, vin: input.vin });
       case "import.lastSummary": return service.lastImportSummary();
+      case "import.registry": return service.realDataSourceRegistry();
       case "context.switch": return service.switchContext(String(input.name ?? input.text ?? ""));
       case "attention.board": return service.attentionBoard({
         workspace: input.workspace,

@@ -84,9 +84,11 @@ test("TRUST: low-trust import cannot override owner_direct", () => {
 
 test("NL_ROUTING: distinct intents stay distinct", () => {
   assert.equal(routeCrmAssistantIntent("What needs me?").intent, "WORK_QUEUE");
+  assert.equal(routeCrmAssistantIntent("Start my day.").intent, "WORK_QUEUE");
   assert.equal(routeCrmAssistantIntent("What can you handle?").intent, "ATTENTION_BOARD");
   assert.equal(routeCrmAssistantIntent("Who should I follow up with?").intent, "LIST_FOLLOWUPS");
   assert.equal(routeCrmAssistantIntent("Show me my customers.").intent, "CRM_LOOKUP");
+  assert.equal(routeCrmAssistantIntent("Wrap up my day.").intent, "END_OF_DAY");
   // Prepare me for John — may be GENERAL or CUSTOMER path; at least not AUTONOMY_AUDIT
   const prep = routeCrmAssistantIntent("Prepare me for John.");
   assert.notEqual(prep.intent, "AUTONOMY_AUDIT");
@@ -94,8 +96,9 @@ test("NL_ROUTING: distinct intents stay distinct", () => {
   assert.equal(routeCrmAssistantIntent("What changed since yesterday?").intent, "WORK_QUEUE");
   // Bare "what changed" is briefing delta, not autonomy audit
   assert.equal(routeCrmAssistantIntent("What changed?").intent, "WORK_QUEUE");
-  // Usage metrics handled in service NL layer; must not be stolen by autonomy audit
-  assert.notEqual(routeCrmAssistantIntent("Usage metrics.").intent, "AUTONOMY_AUDIT");
+  assert.equal(routeCrmAssistantIntent("Usage metrics.").intent, "IMPORT_STATUS");
+  assert.equal(routeCrmAssistantIntent("What data have I imported?").intent, "IMPORT_STATUS");
+  assert.equal(routeCrmAssistantIntent("What sources are approved?").intent, "IMPORT_STATUS");
 });
 
 // ─── Value ledger presentation ──────────────────────────────────────────────
