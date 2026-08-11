@@ -3384,6 +3384,155 @@ export class AionAssistantV1 {
    * Deterministic review compression — auto-accept career/business evidence paths,
    * auto-reject technical/synthetic/training noise. Groups remaining for Owner.
    */
+  /**
+   * Discover grounded contact candidates from already-imported high-value documents.
+   * Does not invent people; requires email/role context.
+   */
+  async discoverContactCandidatesFromImports(): Promise<{
+    candidates: import("./contact-discovery.js").ContactCandidateV1[];
+    reply: string;
+  }> {
+    const { discoverContactsInDocument, mergeContactCandidates } = await import("./contact-discovery.js");
+    const state = await this.snapshot();
+    const docs = state.crmDocuments ?? [];
+    const raw = [];
+    for (const d of docs) {
+      raw.push(
+        ...discoverContactsInDocument({
+          documentId: d.id,
+          filename: d.filename,
+          sourceRootPath: d.sourceRootPath || "",
+          extractedText: d.extractedText || "",
+          summary: d.summary || "",
+        }),
+      );
+    }
+    const candidates = mergeContactCandidates(raw);
+    const reply = [
+      "CONTACT CANDIDATES (from authorized imported docs only)",
+      `Found: ${candidates.length}`,
+      ...candidates.slice(0, 20).map(
+        (c, i) =>
+          `  ${i + 1}. [${c.class}] ${c.displayName}${c.organisation ? ` @ ${c.organisation}` : ""} conf=${c.confidence} email=${c.email || "—"} · ${c.workspaceHint}`,
+      ),
+      candidates.length === 0
+        ? "No strong contact evidence (email/role-labeled) in high-value imports. Capture or Gmail will create real CRM records."
+        : "Use import.contactCandidates.apply to create relationships for conf≥80 non-Owner candidates.",
+    ].join("\n");
+    return { candidates, reply };
+  }
+
+  /**
+   * Import high-confidence contact candidates as relationships (not customers by default).
+   * Skips PERSONAL_CONTACT Owner self; never merges on name alone.
+   */
+  async applyContactCandidates(opts: { minConfidence?: number } = {}): Promise<{
+    created: string[];
+    skipped: string[];
+    reply: string;
+  }> {
+    const min = opts.minConfidence ?? 80;
+    const { candidates } = await this.discoverContactCandidatesFromImports();
+    const created: string[] = [];
+    const skipped: string[] = [];
+    await this.mutate((draft) => {
+      const now = this.ports.clock.now();
+      for (const c of candidates) {
+        if (c.confidence < min) {
+          skipped.push(`${c.displayName} (low conf ${c.confidence})`);
+          continue;
+        }
+        if (c.class === "PERSONAL_CONTACT" && /daniel coffman/i.test(c.displayName)) {
+          skipped.push(`${c.displayName} (Owner self — keep as profile, not CRM row)`);
+          continue;
+        }
+        // Strong match: exact email already present
+        const email = c.email.toLowerCase();
+        const existing = draft.relationships.find(
+          (r) =>
+            !r.archived &&
+            email &&
+            (r.contactMethods || []).some((m) => m.channel === "email" && m.value.toLowerCase() === email),
+        );
+        if (existing) {
+          skipped.push(`${c.displayName} (email already on ${existing.displayName})`);
+          continue;
+        }
+        const nameHit = draft.relationships.find(
+          (r) => !r.archived && r.displayName.toLowerCase() === c.displayName.toLowerCase() && c.email === "",
+        );
+        if (nameHit && !c.email) {
+          skipped.push(`${c.displayName} (name exists, no email to confirm — no auto-merge)`);
+          continue;
+        }
+        const rid = this.ports.ids.next("relationship");
+        const ws =
+          c.workspaceHint === "compassionate-choice" &&
+          draft.workspaces.some((w) => w.id === "compassionate-choice" && !w.archived)
+            ? "compassionate-choice"
+            : c.workspaceHint === "work"
+              ? "work"
+              : c.class === "COLLABORATOR"
+                ? draft.workspaces.some((w) => w.id === "compassionate-choice")
+                  ? "compassionate-choice"
+                  : "personal"
+                : "work";
+        // Map discovery class → RelationshipTypeV1 (no "collaborator" type — use partner)
+        const relType =
+          c.class === "COLLABORATOR"
+            ? "partner"
+            : c.class === "PROSPECT"
+              ? "prospect"
+              : c.class === "CUSTOMER"
+                ? "customer"
+                : c.class === "VENDOR"
+                  ? "vendor"
+                  : "contact";
+        const contactMethods = [];
+        if (c.email) contactMethods.push({ channel: "email" as const, label: "email", value: c.email });
+        if (c.phone) contactMethods.push({ channel: "phone" as const, label: "phone", value: c.phone });
+        const person = buildCustomer(
+          {
+            displayName: c.displayName,
+            organisation: c.organisation,
+            role: c.role,
+            source: "import-contact-discovery",
+            notes: `Discovered from import evidence: ${c.evidence.join("; ").slice(0, 500)}`,
+            relationshipType: relType,
+            contactMethods,
+            lifecycle: c.class === "PROSPECT" || c.class === "CUSTOMER" ? "prospect" : "active",
+          },
+          {
+            id: rid,
+            reference: `import-contact:${rid}`,
+            workspace: ws,
+            now,
+            relationshipType: relType,
+            defaultOrigin: "owner-created",
+          },
+        );
+        draft.relationships.unshift(person);
+        created.push(`${person.displayName} (${relType}/${ws})`);
+      }
+      this.activity(
+        draft,
+        "import",
+        "contact.discover.apply",
+        `Applied contact candidates: created=${created.length} skipped=${skipped.length}`,
+        null,
+      );
+      return null;
+    });
+    const reply = [
+      "CONTACT CANDIDATES APPLIED",
+      `Created: ${created.length}`,
+      ...created.map((c) => `  + ${c}`),
+      `Skipped: ${skipped.length}`,
+      ...skipped.slice(0, 12).map((s) => `  · ${s}`),
+    ].join("\n");
+    return { created, skipped, reply };
+  }
+
   async compressImportReviewQueue(): Promise<{
     before: number;
     afterOpen: number;

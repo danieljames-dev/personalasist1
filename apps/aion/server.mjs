@@ -917,6 +917,10 @@ export async function createAionServer(options = {}) {
       case "import.separateTestWorkspaces": return service.separateTestWorkspacesFromOwnerView();
       case "import.separateSyntheticPeople": return service.separateSyntheticPeopleFromOwnerView();
       case "import.reviewCompress": return service.compressImportReviewQueue();
+      case "import.contactCandidates": return service.discoverContactCandidatesFromImports();
+      case "import.contactCandidates.apply": return service.applyContactCandidates({
+        minConfidence: input.minConfidence != null ? Number(input.minConfidence) : 80,
+      });
       case "owner.knowledge.seedCareer": return service.seedCareerKnowledgeFromResumeEvidence();
       case "brand.seedCompassionateChoice": return service.seedCompassionateChoiceBrandFromEvidence();
       case "owner.dataCompleteness": return service.ownerDataCompletenessReport();
