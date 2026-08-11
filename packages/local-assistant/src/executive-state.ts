@@ -22,6 +22,8 @@ import { DEFAULT_RESOURCE_BUDGET } from "./executive-cycle.js";
 import type { AttentionBudgetConfigV1, AttentionBudgetStateV1 } from "./attention-budget.js";
 import { DEFAULT_ATTENTION_BUDGET, emptyAttentionBudgetState } from "./attention-budget.js";
 import type { EntityMergeProposalV1, EntityUnmergeRecordV1 } from "./entity-resolution.js";
+import type { AuthorityEnvelopeV1, ExternalActionRecordV1 } from "./authority-envelope.js";
+import { defaultAuthorityEnvelope, emptyExternalActionLog } from "./authority-envelope.js";
 
 export type CorrectionKindV1 =
   | "person"
@@ -116,6 +118,10 @@ export interface ExecutiveStateV1 {
   entityUnmerges: EntityUnmergeRecordV1[];
   /** Local correction patterns — never auto-apply from a single hit. */
   correctionPatterns: CorrectionPatternV1[];
+  /** Owner authority envelope (R9 expansion + kill switches). */
+  authorityEnvelope: AuthorityEnvelopeV1;
+  /** Audit log for newly-authorized external actions. */
+  externalActions: ExternalActionRecordV1[];
   lastBriefingAt: IsoTimestamp | null;
   lastDailyMaintenanceAt: IsoTimestamp | null;
   lastEndOfDayAt: IsoTimestamp | null;
@@ -156,6 +162,8 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     entityMergeProposals: [],
     entityUnmerges: [],
     correctionPatterns: [],
+    authorityEnvelope: defaultAuthorityEnvelope(now),
+    externalActions: emptyExternalActionLog(),
     lastBriefingAt: null,
     lastDailyMaintenanceAt: null,
     lastEndOfDayAt: null,

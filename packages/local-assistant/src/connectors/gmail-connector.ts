@@ -1,13 +1,13 @@
 /**
  * Gmail connector (Checkpoint I) — official OAuth/API shapes only.
  *
- * Implementation is fixture-first: no browser password scrape, no autonomous SEND.
- * Owner Google OAuth consent is required before live calls; until then operations
- * use injected fixtures or report GMAIL_OWNER_CONSENT_REQUIRED.
+ * Implementation is fixture-first until Owner OAuth. No browser password scrape.
+ * Owner Google OAuth consent is required before live calls.
  *
- * Initial policy after OAuth:
- *   READ, SEARCH, THREAD_INGEST, CREATE_DRAFT = permitted
- *   SEND = requires separate Owner review policy (not enabled here)
+ * After Owner authority envelope expansion (R9):
+ *   READ, SEARCH, THREAD_INGEST, CREATE_DRAFT = permitted when authorized
+ *   SEND = permitted only when authority envelope emailSend is true AND kill switches clear
+ *          AND per-message safety checks pass (enforced in service layer).
  */
 
 export type GmailCapabilityV1 =
@@ -75,16 +75,19 @@ export function defaultGmailConfig(): GmailConnectorConfigV1 {
 export function gmailConnectorStatus(
   config: GmailConnectorConfigV1 = defaultGmailConfig(),
   env: NodeJS.ProcessEnv = process.env,
+  opts: { sendAuthorized?: boolean } = {},
 ): GmailConnectorStatusV1 {
   const hasClient = Boolean(config.clientId?.trim());
   const hasSecret = Boolean(env[config.clientSecretEnvVar]?.trim());
   const hasRefresh = Boolean(env[config.refreshTokenEnvVar]?.trim());
+  const caps = [...config.capabilities];
+  if (opts.sendAuthorized === true && !caps.includes("send")) caps.push("send");
   if (!hasClient) {
     return {
       configured: false,
       authorized: false,
       consentRequired: false,
-      capabilities: config.capabilities,
+      capabilities: caps.filter((c) => c !== "send" || opts.sendAuthorized === true),
       message: "Gmail connector code is ready. Configure Google OAuth client id, then complete Owner consent.",
       code: "NOT_CONFIGURED",
     };
@@ -94,9 +97,9 @@ export function gmailConnectorStatus(
       configured: true,
       authorized: false,
       consentRequired: true,
-      capabilities: config.capabilities,
+      capabilities: caps.filter((c) => c !== "send" || opts.sendAuthorized === true),
       message:
-        "Gmail OAuth client is partially configured. Owner must complete Google consent and store the refresh token in the named environment variable. SEND remains disabled.",
+        "Gmail OAuth client is partially configured. Owner must complete Google consent via official flow (tokens in env vars only — never paste into chat).",
       code: "GMAIL_OWNER_CONSENT_REQUIRED",
     };
   }
@@ -104,8 +107,10 @@ export function gmailConnectorStatus(
     configured: true,
     authorized: true,
     consentRequired: false,
-    capabilities: config.capabilities.filter((c) => c !== "send"),
-    message: "Gmail credentials present. SEND still requires separate Owner approval policy.",
+    capabilities: opts.sendAuthorized === true ? caps : caps.filter((c) => c !== "send"),
+    message: opts.sendAuthorized
+      ? "Gmail credentials present. SEND authorized by Owner envelope with per-message safety checks."
+      : "Gmail credentials present. SEND not enabled in current envelope/kill switches.",
     code: "READY",
   };
 }
@@ -153,12 +158,19 @@ export function createGmailDraftFromFixture(input: {
  * Google OAuth authorization URL builder (offline access, gmail.readonly + gmail.compose).
  * Does not open a browser; Owner completes consent when ready.
  */
-export function buildGmailAuthUrl(config: GmailConnectorConfigV1, state: string): string {
+export function buildGmailAuthUrl(
+  config: GmailConnectorConfigV1,
+  state: string,
+  opts: { includeSend?: boolean } = {},
+): string {
   if (!config.clientId) throw new Error("Gmail clientId is required to build auth URL.");
-  const scopes = [
+  const scopeList = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
-  ].join(" ");
+  ];
+  // Minimum practical scope for Owner-authorized send (gmail.send)
+  if (opts.includeSend) scopeList.push("https://www.googleapis.com/auth/gmail.send");
+  const scopes = scopeList.join(" ");
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: config.redirectUri,

@@ -911,6 +911,13 @@ export async function createAionServer(options = {}) {
       case "vehicle.customers": return service.customersForVehicle({ vehicleId: input.vehicleId, vin: input.vin });
       case "import.lastSummary": return service.lastImportSummary();
       case "import.registry": return service.realDataSourceRegistry();
+      case "authority.ensure": return service.ensureAuthorityEnvelope();
+      case "authority.report": return service.authorityReport();
+      case "authority.kill": return service.setAuthorityKillSwitches(input.patch ?? input);
+      case "authority.spendBudget": return service.setSpendBudget(input);
+      case "authority.externalActions": return service.listExternalActions({ day: input.day, limit: input.limit });
+      case "email.sendAuthorized": return service.sendEmailAuthorized(input);
+      case "job.submitAuthorized": return service.submitJobApplicationAuthorized(String(input.id ?? ""));
       case "context.switch": return service.switchContext(String(input.name ?? input.text ?? ""));
       case "attention.board": return service.attentionBoard({
         workspace: input.workspace,

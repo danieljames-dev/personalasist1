@@ -161,6 +161,16 @@ import {
 } from "./source-trust.js";
 import { isInstructionLikeDocument } from "./entity-resolution.js";
 import {
+  defaultAuthorityEnvelope,
+  emailSendSafetyCheck,
+  evaluateExternalGate,
+  formatAuthorityEnvelopeReport,
+  formatExternalActionsReport,
+  jobApplySafetyCheck,
+  type AuthorityEnvelopeV1,
+  type ExternalActionRecordV1,
+} from "./authority-envelope.js";
+import {
   buildSnapshotSig,
   canRetry,
   classifyFailure,
@@ -4546,6 +4556,368 @@ export class AionAssistantV1 {
     };
   }
 
+  // ─── Owner authority envelope + external action audit ─────────────────────
+
+  /** Record/refresh Owner expansion envelope (idempotent). */
+  async ensureAuthorityEnvelope(): Promise<AuthorityEnvelopeV1> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      if (!draft.executive.authorityEnvelope) {
+        draft.executive.authorityEnvelope = defaultAuthorityEnvelope(now);
+      } else {
+        // Re-apply Owner expansion flags without clearing kill switches Owner may have set
+        const e = draft.executive.authorityEnvelope;
+        e.realDataImport = true;
+        e.realDealershipWalk = true;
+        e.gmailOauth = true;
+        e.metricoolConnect = true;
+        e.emailSend = true;
+        e.socialPublish = true;
+        e.jobApplicationSubmit = true;
+        e.businessExternal = true;
+        e.spend.authority = e.spend.totalAutonomousSpendCapUsd > 0 ? "ACTIVE" : "APPROVED_IN_PRINCIPLE";
+        if (e.spend.totalAutonomousSpendCapUsd <= 0) {
+          e.spend.totalAutonomousSpendCapUsd = 0;
+          e.spend.perTransactionCapUsd = 0;
+        }
+        e.notes =
+          "Owner expansion 2026-08-11: real data, walk, Gmail, Metricool, send/post/apply/business external. Spend USD 0 until numeric budget.";
+        if (!e.expandedAt || e.expandedAt === "1970-01-01T00:00:00.000Z") e.expandedAt = now;
+      }
+      if (!Array.isArray(draft.executive.externalActions)) draft.executive.externalActions = [];
+      this.activity(draft, "settings", "authority.envelope", "Owner authority envelope ensured/refreshed", null);
+      return draft.executive.authorityEnvelope;
+    });
+  }
+
+  async getAuthorityEnvelope(): Promise<AuthorityEnvelopeV1> {
+    const state = await this.snapshot();
+    const env = state.executive?.authorityEnvelope;
+    if (!env) return this.ensureAuthorityEnvelope();
+    return env;
+  }
+
+  async setAuthorityKillSwitches(
+    patch: Partial<AuthorityEnvelopeV1["kill"]>,
+  ): Promise<AuthorityEnvelopeV1> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      if (!draft.executive.authorityEnvelope) {
+        draft.executive.authorityEnvelope = defaultAuthorityEnvelope(this.ports.clock.now());
+      }
+      draft.executive.authorityEnvelope.kill = {
+        ...draft.executive.authorityEnvelope.kill,
+        ...patch,
+      };
+      this.activity(
+        draft,
+        "settings",
+        "authority.kill",
+        `Kill switches updated: ${JSON.stringify(patch)}`,
+        null,
+      );
+      return draft.executive.authorityEnvelope;
+    });
+  }
+
+  async setSpendBudget(input: {
+    totalAutonomousSpendCapUsd: number;
+    perTransactionCapUsd: number;
+    allowedPurposes?: string[];
+    timeWindow?: string;
+  }): Promise<AuthorityEnvelopeV1> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      if (!draft.executive.authorityEnvelope) {
+        draft.executive.authorityEnvelope = defaultAuthorityEnvelope(this.ports.clock.now());
+      }
+      const total = Math.max(0, Number(input.totalAutonomousSpendCapUsd) || 0);
+      const per = Math.max(0, Number(input.perTransactionCapUsd) || 0);
+      draft.executive.authorityEnvelope.spend = {
+        ...draft.executive.authorityEnvelope.spend,
+        totalAutonomousSpendCapUsd: total,
+        perTransactionCapUsd: per,
+        allowedPurposes: (input.allowedPurposes ?? []).map(String).slice(0, 40),
+        timeWindow: String(input.timeWindow ?? "owner-set").slice(0, 120),
+        authority: total > 0 && per > 0 ? "ACTIVE" : "APPROVED_IN_PRINCIPLE",
+      };
+      this.activity(
+        draft,
+        "settings",
+        "authority.spend",
+        `Spend budget set: total=${total} perTx=${per}`,
+        null,
+      );
+      return draft.executive.authorityEnvelope;
+    });
+  }
+
+  private recordExternalAction(
+    draft: AssistantStateV1,
+    action: Omit<ExternalActionRecordV1, "id"> & { id?: string },
+  ): ExternalActionRecordV1 {
+    if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+    if (!Array.isArray(draft.executive.externalActions)) draft.executive.externalActions = [];
+    const rec: ExternalActionRecordV1 = {
+      id: action.id || this.ports.ids.next("extact"),
+      kind: action.kind,
+      workspace: action.workspace,
+      reason: action.reason.slice(0, 1000),
+      evidence: (action.evidence ?? []).slice(0, 20),
+      destination: action.destination.slice(0, 500),
+      result: action.result,
+      detail: action.detail.slice(0, 2000),
+      at: action.at,
+      dryRun: action.dryRun === true,
+    };
+    draft.executive.externalActions.unshift(rec);
+    if (draft.executive.externalActions.length > 1000) draft.executive.externalActions.length = 1000;
+    return rec;
+  }
+
+  async listExternalActions(opts: { day?: string; limit?: number } = {}): Promise<{
+    reply: string;
+    actions: ExternalActionRecordV1[];
+  }> {
+    const state = await this.snapshot();
+    const actions = state.executive?.externalActions ?? [];
+    const day = opts.day;
+    const filtered = day ? actions.filter((a) => a.at.startsWith(day)) : actions;
+    const limit = opts.limit ?? 50;
+    return {
+      reply: formatExternalActionsReport(filtered.slice(0, limit), day),
+      actions: filtered.slice(0, limit),
+    };
+  }
+
+  async authorityReport(): Promise<{ reply: string; envelope: AuthorityEnvelopeV1 }> {
+    const env = await this.getAuthorityEnvelope();
+    return { reply: formatAuthorityEnvelopeReport(env), envelope: env };
+  }
+
+  /**
+   * Attempt outbound email under Owner envelope + safety checks.
+   * Live Gmail transport requires OAuth credentials; otherwise records owner_required.
+   */
+  async sendEmailAuthorized(input: {
+    draftId?: string;
+    toAddress?: string;
+    toName?: string;
+    subject?: string;
+    body?: string;
+    relationshipId?: string | null;
+    reason: string;
+    evidence?: string[];
+  }): Promise<{
+    result: "success" | "failed" | "blocked" | "owner_required" | "simulated";
+    record: ExternalActionRecordV1;
+    message: string;
+  }> {
+    const env = await this.getAuthorityEnvelope();
+    const gate = evaluateExternalGate(env, "email_send");
+    const now = this.ports.clock.now();
+    const state = await this.snapshot();
+    let toAddress = String(input.toAddress ?? "").trim();
+    let toName = String(input.toName ?? "").trim();
+    let subject = String(input.subject ?? "").trim();
+    let body = String(input.body ?? "").trim();
+    let workspace = state.settings.activeWorkspace;
+    let relationshipId = input.relationshipId ?? null;
+
+    if (input.draftId) {
+      const d = (state.emailDrafts ?? []).find((x) => x.id === input.draftId);
+      if (d) {
+        toAddress = toAddress || d.toAddress;
+        toName = toName || d.toName;
+        subject = subject || d.subject;
+        body = body || d.body;
+        workspace = d.workspace;
+        relationshipId = d.relationshipId;
+      }
+    }
+
+    if (!gate.allowed) {
+      return this.mutate((draft) => {
+        const record = this.recordExternalAction(draft, {
+          kind: "EXTERNAL_BLOCKED",
+          workspace,
+          reason: input.reason,
+          evidence: input.evidence ?? [],
+          destination: toAddress || toName || "(none)",
+          result: "blocked",
+          detail: gate.reason,
+          at: now,
+          dryRun: true,
+        });
+        return { result: "blocked" as const, record, message: gate.reason };
+      });
+    }
+
+    const safety = emailSendSafetyCheck({
+      toAddress,
+      toName,
+      subject,
+      body,
+      workspace,
+      relationshipId,
+      reason: input.reason,
+    });
+    if (!safety.allowed) {
+      return this.mutate((draft) => {
+        const record = this.recordExternalAction(draft, {
+          kind: "EXTERNAL_BLOCKED",
+          workspace,
+          reason: input.reason,
+          evidence: input.evidence ?? [],
+          destination: toAddress || toName,
+          result: "blocked",
+          detail: safety.reason,
+          at: now,
+          dryRun: true,
+        });
+        return { result: "blocked" as const, record, message: safety.reason };
+      });
+    }
+
+    // Live transport: only if Gmail fully authorized via env (no chat secrets)
+    const gmailStatus = await this.gmailConsentStatus();
+    if (gmailStatus.code !== "READY") {
+      return this.mutate((draft) => {
+        const record = this.recordExternalAction(draft, {
+          kind: "EMAIL_SENT",
+          workspace,
+          reason: input.reason,
+          evidence: input.evidence ?? [`subject:${subject}`],
+          destination: toAddress,
+          result: "owner_required",
+          detail: `Send approved by envelope but Gmail transport not ready: ${gmailStatus.code}. ${gmailStatus.message}`,
+          at: now,
+          dryRun: true,
+        });
+        return {
+          result: "owner_required" as const,
+          record,
+          message: `Email ready to send under policy, but Gmail OAuth/transport requires physical consent: ${gmailStatus.code}`,
+        };
+      });
+    }
+
+    // Transport stub: record simulated success until live Gmail send API wired with refresh token
+    // (credentials must come from env — never chat). Marks dryRun when no live send performed.
+    return this.mutate((draft) => {
+      if (input.draftId) {
+        const d = (draft.emailDrafts ?? []).find((x) => x.id === input.draftId);
+        if (d) {
+          // Extend status without breaking type — use reviewed as "released to send pipeline"
+          d.status = "reviewed";
+          d.updatedAt = now;
+        }
+      }
+      const record = this.recordExternalAction(draft, {
+        kind: "EMAIL_SENT",
+        workspace,
+        reason: input.reason,
+        evidence: input.evidence ?? [`subject:${subject}`, `to:${toAddress}`],
+        destination: toAddress,
+        result: "simulated",
+        detail:
+          "Envelope+safety OK; live Gmail API send transport pending secure token use (credential present). Message recorded for audit. Not network-sent until transport hook confirms.",
+        at: now,
+        dryRun: true,
+      });
+      this.activity(draft, "export", "crm.email.send.attempt", `Email send pipeline: ${subject} → ${toAddress}`, record.id);
+      return {
+        result: "simulated" as const,
+        record,
+        message:
+          "Email cleared authority+safety. Live SMTP/Gmail send executes only via secure token env (not simulated as completed network send).",
+      };
+    });
+  }
+
+  /** Job application submit under envelope + fit/truth checks. */
+  async submitJobApplicationAuthorized(id: string): Promise<{
+    result: "success" | "blocked" | "owner_required" | "simulated";
+    message: string;
+    applicationId: string;
+  }> {
+    const env = await this.getAuthorityEnvelope();
+    const gate = evaluateExternalGate(env, "job_apply");
+    const now = this.ports.clock.now();
+    const state = await this.snapshot();
+    const app = (state.jobApplications ?? []).find((a) => a.id === id);
+    if (!app) throw new Error("Job application not found.");
+    if (!gate.allowed) {
+      await this.mutate((draft) => {
+        this.recordExternalAction(draft, {
+          kind: "EXTERNAL_BLOCKED",
+          workspace: "personal",
+          reason: `Job apply blocked: ${app.title} @ ${app.employer}`,
+          evidence: [app.id],
+          destination: app.url || app.employer,
+          result: "blocked",
+          detail: gate.reason,
+          at: now,
+          dryRun: true,
+        });
+        return null;
+      });
+      return { result: "blocked", message: gate.reason, applicationId: id };
+    }
+    const safety = jobApplySafetyCheck({
+      employer: app.employer,
+      title: app.title,
+      fitScore: app.fitScore,
+      coverDraft: app.coverDraft,
+      resumeNotes: app.resumeNotes,
+    });
+    if (!safety.allowed) {
+      await this.mutate((draft) => {
+        this.recordExternalAction(draft, {
+          kind: "EXTERNAL_BLOCKED",
+          workspace: "personal",
+          reason: `Job apply safety: ${app.title}`,
+          evidence: [app.id],
+          destination: app.employer,
+          result: "blocked",
+          detail: safety.reason,
+          at: now,
+          dryRun: true,
+        });
+        return null;
+      });
+      return { result: "blocked", message: safety.reason, applicationId: id };
+    }
+    // External board submission is connector-dependent; mark applied only when policy clear
+    return this.mutate((draft) => {
+      const a = (draft.jobApplications ?? []).find((x) => x.id === id);
+      if (!a) throw new Error("Job application not found.");
+      a.submissionAuthorized = true;
+      a.status = "applied";
+      a.updatedAt = now;
+      this.recordExternalAction(draft, {
+        kind: "JOB_APPLICATION_SUBMITTED",
+        workspace: "personal",
+        reason: `Submit application: ${a.title} @ ${a.employer}`,
+        evidence: [`fit=${a.fitScore}`, a.url || ""].filter(Boolean),
+        destination: a.url || a.employer,
+        result: "simulated",
+        detail:
+          "Policy cleared. Live board submission requires site connector/automation path; status marked applied for tracking when Owner confirms transport.",
+        at: now,
+        dryRun: true,
+      });
+      this.activity(draft, "career", "job.submit", `Job submit authorized: ${a.title} @ ${a.employer}`, a.id);
+      return {
+        result: "simulated" as const,
+        message:
+          "Job application cleared authority+fit checks. Live ATS submit requires site-specific transport; tracked as applied/simulated.",
+        applicationId: id,
+      };
+    });
+  }
+
   // ─── Executive multi-context OS ───────────────────────────────────────────
 
   private executiveOf(state: AssistantStateV1): ExecutiveStateV1 {
@@ -5837,6 +6209,8 @@ export class AionAssistantV1 {
 
   async gmailConsentStatus() {
     const state = await this.snapshot();
+    const envEnvelope = state.executive?.authorityEnvelope;
+    const sendGate = evaluateExternalGate(envEnvelope, "email_send");
     const cfg = defaultGmailConfig();
     const connectors = state.settings.connectors ?? {
       gmailClientId: "",
@@ -5851,11 +6225,13 @@ export class AionAssistantV1 {
       cfg.clientId;
     const redirectUri = connectors.gmailRedirectUri?.trim() || cfg.redirectUri;
     const config = { ...cfg, clientId, redirectUri };
-    const status = gmailConnectorStatus(config);
+    const status = gmailConnectorStatus(config, process.env, { sendAuthorized: sendGate.allowed });
     let authUrl: string | null = null;
     if ((status.code === "GMAIL_OWNER_CONSENT_REQUIRED" || status.code === "NOT_CONFIGURED") && clientId) {
       try {
-        authUrl = buildGmailAuthUrl(config, `aion-${Date.now().toString(36)}`);
+        authUrl = buildGmailAuthUrl(config, `aion-${Date.now().toString(36)}`, {
+          includeSend: sendGate.allowed,
+        });
       } catch {
         authUrl = null;
       }
@@ -5869,7 +6245,7 @@ export class AionAssistantV1 {
       redirectUri,
       ownerAction:
         status.code === "GMAIL_OWNER_CONSENT_REQUIRED"
-          ? `Open the auth URL, complete Google consent, then store the refresh token in ${config.refreshTokenEnvVar} and the client secret in ${config.clientSecretEnvVar}. SEND remains disabled.`
+          ? `Open the auth URL, complete Google consent, then store the refresh token in ${config.refreshTokenEnvVar} and the client secret in ${config.clientSecretEnvVar} (never paste into chat). SEND scopes requested when envelope allows.`
           : status.code === "NOT_CONFIGURED"
             ? "Save a Google OAuth client id in Settings → Connectors (or set AION_GMAIL_CLIENT_ID). Do not paste passwords into chat."
             : status.code === "READY"

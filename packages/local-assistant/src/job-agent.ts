@@ -28,8 +28,11 @@ export interface JobApplicationV1 {
   resumeNotes: string;
   coverDraft: string;
   interviewPrep: string;
-  /** Submission is always owner-gated; never auto-submitted. */
-  submissionAuthorized: false;
+  /**
+   * Whether this application may be submitted under current Owner envelope.
+   * Still requires fit/truth safety checks at submit time.
+   */
+  submissionAuthorized: boolean;
   provenance: ProvenanceV1;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
@@ -68,7 +71,7 @@ export function buildJobApplication(
     resumeNotes: String(input.resumeNotes ?? "").trim().slice(0, 8000),
     coverDraft: String(input.coverDraft ?? "").trim().slice(0, 20_000),
     interviewPrep: String(input.interviewPrep ?? "").trim().slice(0, 20_000),
-    submissionAuthorized: false,
+    submissionAuthorized: input.submissionAuthorized === true,
     provenance: {
       sourceType: "owner",
       sourceRef: String(input.sourceRef ?? "job.agent").slice(0, 500),
