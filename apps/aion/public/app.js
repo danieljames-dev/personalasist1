@@ -255,6 +255,8 @@ function customerDetail(s) {
   if (!c) { openCustomer = null; return ""; }
   const interest = c.interests.map((i) => i.description).join("; ") || "not recorded";
   const timeline = [...c.interactions].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
+  const inv = s.vehicleInventory || { vehicles: [] };
+  const interestedVehicles = (inv.vehicles || []).filter((v) => (v.relationshipIds || []).includes(c.id));
   return `<div class="sheet"><div class="sheet-head"><button class="back" data-do="customer-close">‹ Back</button><h2>${esc(c.displayName)}</h2></div>
 <dl class="facts"><div><dt>Stage</dt><dd>${esc(c.lifecycle)}</dd></div><div><dt>Interest</dt><dd>${esc(interest)}</dd></div>
 <div><dt>Last contact</dt><dd>${esc(c.lastContactAt ? ago(c.lastContactAt) : "none")}</dd></div>
@@ -265,6 +267,15 @@ function customerDetail(s) {
 <button data-do="sheet" data-sheet="appointment" data-id="${esc(c.id)}">Appointment</button>
 <button data-do="sheet" data-sheet="stage" data-id="${esc(c.id)}">Change Stage</button>
 <button data-do="sheet" data-sheet="followup" data-id="${esc(c.id)}">Follow-up</button></div>
+<div class="card"><h2>Interested vehicles</h2>
+${interestedVehicles.length ? interestedVehicles.map((v) => `<p class="meta"><b>${esc([v.year, v.make, v.model, v.trim].filter(Boolean).join(" ") || v.vin || v.id)}</b> · ${esc(v.vin || "no VIN")} · ${esc(v.presenceStatus)}</p>`).join("") : `<p class="meta">None linked yet. Owner must assert interest — AION will not invent it.</p>`}
+<form data-form="vehicle-associate" class="quick-form">
+<input type="hidden" name="relationshipId" value="${esc(c.id)}">
+<label>Link VIN (must already be in inventory)
+<input name="vin" required maxlength="20" placeholder="17-char VIN" style="font-size:16px"></label>
+<button type="submit">Add interested vehicle</button>
+</form>
+</div>
 ${coachPanel && coachPanel.for === c.id ? `<div class="card coach"><h2>${esc(coachPanel.output.title)}</h2>${coachPanel.output.draft ? `<p class="warn">Draft only — AION never sends anything.</p>` : ""}<pre>${esc(coachPanel.output.lines.join("\n"))}</pre><div class="actions"><button data-do="coach-close">Close</button></div></div>` : ""}
 ${openFollowUps(c).length ? `<div class="card"><h2>Open follow-ups</h2>${openFollowUps(c).map((f) => `<p class="meta">${esc(ago(f.dueAt))} · ${esc(f.channel)} · ${esc(f.reason)} <button data-do="followup-done" data-id="${esc(c.id)}" data-followup="${esc(f.id)}">Done</button></p>`).join("")}</div>` : ""}
 ${c.appointments.length ? `<div class="card"><h2>Appointments</h2>${c.appointments.map((a) => `<p class="meta">${esc(a.at.slice(0, 16).replace("T", " "))} · ${esc(a.kind)} · ${esc(a.status)}${a.location ? ` · ${esc(a.location)}` : ""} ${["scheduled", "confirmed"].includes(a.status) ? `<button data-do="appt-status" data-id="${esc(c.id)}" data-appt="${esc(a.id)}" data-status="shown">Shown</button><button data-do="appt-status" data-id="${esc(c.id)}" data-appt="${esc(a.id)}" data-status="no-show">No-show</button>` : ""}</p>`).join("")}</div>` : ""}
@@ -605,6 +616,34 @@ function knowledgeArea(s) {
 </form>
 ${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
 <p class="meta">Queue: ${(s.importSourceQueue ?? []).slice(0, 6).map((q) => `${esc(q.label)} [${esc(q.status)}]`).join("; ")}</p>` : ""}
+${window.__aionImportSummary ? (() => {
+  const sum = window.__aionImportSummary;
+  const st = sum.lastSource?.stats || {};
+  return `<div class="card next"><h2>Last import summary</h2>
+<p class="meta">${esc(sum.lastSource?.label || "—")} · ${esc(sum.lastSource?.status || "")}</p>
+<ul>
+<li>Files discovered: <b>${st.filesDiscovered ?? "—"}</b></li>
+<li>Files processed: <b>${st.filesProcessed ?? "—"}</b></li>
+<li>Duplicates skipped: <b>${st.duplicatesSkipped ?? "—"}</b></li>
+<li>Facts extracted: <b>${st.factsExtracted ?? "—"}</b></li>
+<li>Entities associated: <b>${st.entitiesAssociated ?? "—"}</b></li>
+<li>Needs review: <b>${sum.reviewOpen ?? st.reviewItems ?? 0}</b></li>
+<li>Failures: <b>${st.errors ?? 0}</b>${sum.lastSource?.lastError ? ` — ${esc(sum.lastSource.lastError.slice(0, 120))}` : ""}</li>
+</ul></div>`;
+})() : ""}
+${(() => {
+  const review = (s.importReviewQueue ?? []).filter((r) => r.status === "needs-review").slice(0, 8);
+  if (!review.length) return "";
+  return `<div class="card warnbox"><h2>Review queue</h2>
+${review.map((r) => `<article class="card"><p class="meta"><b>${esc(r.reason || "Ambiguous import")}</b></p>
+<p class="meta">${esc(r.relativePath || r.sourcePath || "")}</p>
+<p class="meta">${(r.candidates || []).slice(0, 4).map((c) => `${esc(c.kind)}: ${esc(c.label)} (${c.confidence}%)`).join(" · ")}</p>
+<div class="actions">
+<button data-do="import-review-accept" data-id="${esc(r.id)}">Accept</button>
+<button data-do="import-review-reject" data-id="${esc(r.id)}" class="danger">Reject</button>
+</div></article>`).join("")}
+</div>`;
+})()}
 <p class="hint">Desktop tip: run <code>powershell -File scripts\\pick-import-folder.ps1</code> to pick a folder path, then paste it above. Browser security cannot open an arbitrary disk browser from the web UI.</p>
 </div>
 <div class="card"><h2>Owner profile</h2>
@@ -900,19 +939,31 @@ ${last ? `<div class="card next"><h2>Last scan</h2>
 <p class="meta">Stock <b>${esc(last.observation?.stockNumber || "—")}</b> · Online match <b>${esc(last.observation?.matchStatus || "—")}</b></p>
 <p class="meta">VIN check: ${esc(last.validation?.code || "—")} ${last.validation?.valid ? "✓" : "✗"}</p>
 </div>` : ""}
+${window.__aionVinOcr ? `<div class="card ${window.__aionVinOcr.status === "VIN_OCR_HIGH_CONFIDENCE" ? "next" : "warnbox"}"><h2>VIN OCR · ${esc(window.__aionVinOcr.status)}</h2>
+<p class="meta">${esc(window.__aionVinOcr.message || "")}</p>
+${(window.__aionVinOcr.qualityFeedback || []).map((t) => `<p class="meta">• ${esc(t)}</p>`).join("")}
+${window.__aionVinOcr.sticker?.stockNumber ? `<p class="meta">Stock from sticker: <b>${esc(window.__aionVinOcr.sticker.stockNumber)}</b></p>` : ""}
+<p class="meta">Provider: ${esc(window.__aionVinOcr.provider || "?")}</p>
+<div class="actions">
+<button type="button" data-do="vin-ocr-confirm" style="min-height:3rem">Confirm VIN · SAVE</button>
+<button type="button" data-do="vin-ocr-clear">Clear proposal</button>
+</div></div>` : ""}
 <div class="card"><h2>${walk ? "Next vehicle" : "Ready when you start"}</h2>
-<form data-form="walk-observe" class="quick-form">
-<label>VIN (manual fallback — 17 chars)
-<input name="vin" maxlength="20" autocapitalize="characters" autocomplete="off" placeholder="Enter or paste VIN" style="font-size:16px;min-height:2.9rem;letter-spacing:.06em"></label>
+<form data-form="walk-observe" class="quick-form" id="walkObserveForm">
+<label>VIN (large field — edit OCR proposal or type)
+<input name="vin" id="walkVinInput" maxlength="20" autocapitalize="characters" autocomplete="off" value="${esc(window.__aionVinOcr?.best?.vin || "")}" placeholder="Enter or paste VIN" style="font-size:1.25rem;min-height:3.1rem;letter-spacing:.08em;font-weight:700"></label>
 <label>Stock # (optional)
-<input name="stockNumber" maxlength="40" style="font-size:16px;min-height:2.75rem"></label>
+<input name="stockNumber" id="walkStockInput" maxlength="40" value="${esc(window.__aionVinOcr?.sticker?.stockNumber || "")}" style="font-size:16px;min-height:2.75rem"></label>
 <label>Note (optional)
 <input name="note" maxlength="500" style="font-size:16px"></label>
-<label>VIN / stock photo (optional — stored; OCR when vision ready)
+<label>VIN / stock photo — OCR then confirm
 <input type="file" name="file" accept="image/*" capture="environment" style="font-size:16px"></label>
+<div class="tap-grid" style="margin:.4rem 0">
+<button type="button" data-do="vin-ocr-scan" style="min-height:2.9rem">Read photo (OCR)</button>
+</div>
 <button type="submit" style="min-height:3.2rem;width:100%;font-size:1.05rem">SAVE · NEXT VEHICLE</button>
 </form>
-<p class="hint">Photo OCR is best-effort. Manual VIN always works. Uncertain VINs are never silently verified.</p>
+<p class="hint">Uncertain VINs are never silently verified. High-confidence OCR still shows Confirm. Manual entry always works.</p>
 </div>
 ${summary ? `<div class="card warnbox"><h2>Walk summary</h2>
 <ul>${(summary.exceptionsFirst || []).map((e) => `<li>${esc(e)}</li>`).join("")}</ul>
@@ -1246,6 +1297,7 @@ document.addEventListener("click", async (event) => {
     if (verb === "import-queue-process") {
       const done = await api("import.queue.process", {});
       toast(done.status === "completed" ? `Import done: +${done.itemsImported || 0} (skip ${done.itemsSkipped || 0})` : `Import ${done.status}: ${done.lastError || ""}`);
+      try { window.__aionImportSummary = await api("import.lastSummary", {}); } catch { /* ignore */ }
     }
     if (action === "onboarding") await api("onboarding.complete");
     if (verb === "task") await api("task.transition", { id, state, reason: "Command Center" });
@@ -1349,6 +1401,55 @@ document.addEventListener("click", async (event) => {
       await load();
       return;
     }
+    if (verb === "vin-ocr-scan") {
+      const form = document.getElementById("walkObserveForm") || document.querySelector('form[data-form="walk-observe"]');
+      const fileInput = form?.querySelector('input[type="file"]');
+      const file = fileInput?.files?.[0];
+      if (!file) throw new Error("Choose a VIN / stock photo first.");
+      if (file.size > 6 * 1024 * 1024) throw new Error("Photo exceeds 6 MB.");
+      toast("Reading photo…");
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      const ocr = await api("vin.ocr", {
+        filename: file.name || "vin.jpg",
+        mimeType: file.type || "image/jpeg",
+        contentBase64: btoa(binary),
+      });
+      window.__aionVinOcr = ocr;
+      const vinInput = document.getElementById("walkVinInput");
+      const stockInput = document.getElementById("walkStockInput");
+      if (ocr.best?.vin && vinInput) vinInput.value = ocr.best.vin;
+      if (ocr.sticker?.stockNumber && stockInput) stockInput.value = ocr.sticker.stockNumber;
+      toast(ocr.message || ocr.status);
+      render();
+      return;
+    }
+    if (verb === "vin-ocr-confirm") {
+      const ocr = window.__aionVinOcr;
+      if (!ocr?.best?.vin) throw new Error("No VIN proposal to confirm.");
+      const active = await api("inventory.walk.active", {});
+      if (!active.walk) await api("inventory.walk.start", {});
+      const result = await api("inventory.walk.observe", {
+        vin: ocr.best.vin,
+        stockNumber: ocr.sticker?.stockNumber || undefined,
+        entryMethod: "photo",
+        recognitionConfidence: ocr.best.confidence,
+        note: `OCR ${ocr.status} via ${ocr.provider}`,
+      });
+      window.__aionLastWalkObs = result;
+      window.__aionVinOcr = null;
+      toast(`Confirmed · ${result.observation?.matchStatus || "saved"}`);
+      await load();
+      return;
+    }
+    if (verb === "vin-ocr-clear") {
+      window.__aionVinOcr = null;
+      render();
+      return;
+    }
     await load();
   } catch (error) { toast(error.message); }
 });
@@ -1397,10 +1498,23 @@ document.addEventListener("submit", async (event) => {
       await load();
       return;
     }
+    if (kind === "vehicle-associate") {
+      const linked = await api("vehicle.associate", {
+        relationshipId: d.relationshipId,
+        vin: d.vin,
+      });
+      toast(`Linked ${linked.vin || linked.id} to customer (Owner-asserted).`);
+      form.reset();
+      await load();
+      return;
+    }
     if (kind === "walk-observe") {
       let photoDocumentIds = [];
+      let ocrMeta = null;
       const fileInput = form.querySelector('input[type="file"]');
       const file = fileInput?.files?.[0];
+      let vin = String(d.vin || "").trim();
+      let stockNumber = String(d.stockNumber || "").trim();
       if (file) {
         if (file.size > 6 * 1024 * 1024) throw new Error("Photo exceeds 6 MB limit.");
         const buf = await file.arrayBuffer();
@@ -1408,38 +1522,60 @@ document.addEventListener("submit", async (event) => {
         let binary = "";
         const chunk = 0x8000;
         for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        const contentBase64 = btoa(binary);
         const doc = await api("crm.document.upload", {
           filename: file.name || "vin-photo.jpg",
           mimeType: file.type || "image/jpeg",
-          contentBase64: btoa(binary),
+          contentBase64,
           tags: ["inventory-walk", "vin-photo", "phone-intake"],
-          summary: d.vin ? `Walk photo for VIN ${d.vin}` : "Walk photo (VIN pending)",
+          summary: vin ? `Walk photo for VIN ${vin}` : "Walk photo (VIN pending)",
         });
         photoDocumentIds = [doc.id];
+        // If VIN empty, run OCR and require confirm rather than silent save
+        if (!vin) {
+          ocrMeta = await api("vin.ocr", {
+            filename: file.name || "vin.jpg",
+            mimeType: file.type || "image/jpeg",
+            contentBase64,
+          });
+          window.__aionVinOcr = ocrMeta;
+          if (ocrMeta.best?.vin) {
+            vin = ocrMeta.best.vin;
+            if (!stockNumber && ocrMeta.sticker?.stockNumber) stockNumber = ocrMeta.sticker.stockNumber;
+          }
+          if (ocrMeta.status !== "VIN_OCR_HIGH_CONFIDENCE" || !ocrMeta.best?.valid) {
+            toast(ocrMeta.message || "VIN uncertain — confirm or edit, then SAVE.");
+            render();
+            return;
+          }
+        }
       }
-      const vin = String(d.vin || "").trim();
       if (!vin && !photoDocumentIds.length) throw new Error("Enter a VIN or take a photo.");
-      // Auto-start walk if needed
-      try { await api("inventory.walk.active", {}); } catch { /* ignore */ }
+      if (!vin) {
+        toast("VIN uncertain — confirm or retake photo.");
+        render();
+        return;
+      }
       const active = await api("inventory.walk.active", {});
       if (!active.walk) await api("inventory.walk.start", {});
+      const conf = ocrMeta?.best?.confidence ?? (photoDocumentIds.length ? 90 : 100);
       const result = await api("inventory.walk.observe", {
-        vin: vin || undefined,
-        stockNumber: d.stockNumber || undefined,
+        vin,
+        stockNumber: stockNumber || undefined,
         note: d.note || undefined,
         photoDocumentIds,
-        entryMethod: photoDocumentIds.length && vin ? "mixed" : photoDocumentIds.length ? "photo" : "manual",
-        recognitionConfidence: vin ? 100 : photoDocumentIds.length ? 40 : null,
+        entryMethod: photoDocumentIds.length && d.vin ? "mixed" : photoDocumentIds.length ? "photo" : "manual",
+        recognitionConfidence: conf,
       });
       window.__aionLastWalkObs = result;
-      if (!result.validation?.valid && vin) {
+      window.__aionVinOcr = null;
+      if (!result.validation?.valid) {
         toast(`VIN uncertain: ${result.validation?.message || "invalid"} — confirm or retake.`);
       } else {
         toast(`${result.observation?.matchStatus || "saved"} · NEXT`);
       }
       form.reset();
       await load();
-      // Keep focus on VIN for rapid re-entry
       requestAnimationFrame(() => {
         document.querySelector('form[data-form="walk-observe"] input[name="vin"]')?.focus();
       });
@@ -1468,6 +1604,7 @@ document.addEventListener("submit", async (event) => {
       const result = await api("crm.document.importFolder", { path: d.path, tags });
       const st = result.stats || {};
       toast(`Recursive import: ${result.imported?.length ?? 0} stored · ${st.duplicatesSkipped || 0} dup · ${st.reviewItems || 0} review · ${st.errors || 0} err${result.truncated ? " (truncated)" : ""}`);
+      try { window.__aionImportSummary = await api("import.lastSummary", {}); } catch { /* ignore */ }
       form.reset();
       await load();
       return;

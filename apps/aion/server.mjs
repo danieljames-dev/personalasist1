@@ -884,6 +884,30 @@ export async function createAionServer(options = {}) {
         opportunityId: input.opportunityId,
       });
       case "vin.extractText": return { candidates: await service.extractVinFromText(String(input.text ?? "")) };
+      case "vin.ocr": return service.ocrVinFromImage({
+        contentBase64: input.contentBase64,
+        mimeType: input.mimeType,
+        filename: input.filename,
+        extractedText: input.extractedText,
+        offline: input.offline === true,
+      });
+      case "vehicle.recalls": {
+        const recallArgs = {};
+        if (input.vin) recallArgs.vin = String(input.vin);
+        if (input.make) recallArgs.make = String(input.make);
+        if (input.model) recallArgs.model = String(input.model);
+        if (input.year != null && input.year !== "") recallArgs.year = Number(input.year);
+        return service.vehicleRecallLookup(recallArgs);
+      }
+      case "vehicle.compare": return service.vehicleCompare(String(input.vinA ?? ""), String(input.vinB ?? ""));
+      case "vehicle.talkingPoints": return service.vehicleTalkingPoints({
+        vin: input.vin,
+        vehicleId: input.vehicleId,
+        customerName: input.customerName,
+      });
+      case "vehicle.forCustomer": return { vehicles: await service.vehiclesForCustomer(String(input.relationshipId ?? "")) };
+      case "vehicle.customers": return service.customersForVehicle({ vehicleId: input.vehicleId, vin: input.vin });
+      case "import.lastSummary": return service.lastImportSummary();
       case "metricool.fixture.seed": return service.seedMetricoolFixtures(input);
       case "metricool.insight": return service.metricoolInsight(input.now);
       case "work.queue": return service.workQueue();

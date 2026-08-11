@@ -105,8 +105,20 @@ import {
 } from "./import-classify.js";
 import { discoverPrivateLanAddresses, buildPhoneUrl, type LanDiscoveryResultV1 } from "./lan-discovery.js";
 import { buildImportReadinessReport, type ImportReadinessReportV1 } from "./import-readiness.js";
-import { imageUnderstandingStatus } from "./connectors/image-understanding.js";
+import { extractImageWithLocalVision, imageUnderstandingStatus } from "./connectors/image-understanding.js";
 import { refreshDealershipPublicInventory } from "./connectors/dealership-inventory.js";
+import {
+  buildVinOcrResult,
+  VIN_VISION_PROMPT,
+  type VinOcrResultV1,
+} from "./vin-ocr.js";
+import {
+  buildVehicleTalkingPoints,
+  compareTwoVehicles,
+  formatResearchReply,
+  lookupRecallsNhtsa,
+  type RecallLookupResultV1,
+} from "./vehicle-research.js";
 import {
   applyOnlineListings,
   buildDealershipContext,
@@ -3532,6 +3544,219 @@ export class AionAssistantV1 {
     return candidates.map((c) => validateVin(c));
   }
 
+  /**
+   * VIN/sticker OCR from image bytes or pre-extracted text.
+   * Tries: (1) supplied text, (2) Ollama vision if configured, (3) optional tesseract.js.
+   * Never invents a VIN when OCR yields nothing.
+   */
+  async ocrVinFromImage(input: {
+    contentBase64?: string;
+    mimeType?: string;
+    filename?: string;
+    /** When client or prior step already has OCR text */
+    extractedText?: string;
+    /** Skip network vision (tests). */
+    offline?: boolean;
+  }): Promise<VinOcrResultV1 & { documentHint: string }> {
+    let text = String(input.extractedText ?? "").trim();
+    let provider = "text-input";
+    let byteLength = 0;
+    let bytes: Buffer | null = null;
+
+    if (input.contentBase64) {
+      bytes = Buffer.from(String(input.contentBase64), "base64");
+      byteLength = bytes.byteLength;
+    }
+
+    if (!text && bytes && !input.offline) {
+      const vision = await extractImageWithLocalVision({
+        filename: input.filename || "vin.jpg",
+        mimeType: input.mimeType || "image/jpeg",
+        byteLength,
+        bytes,
+        prompt: VIN_VISION_PROMPT,
+        timeoutMs: 60_000,
+      });
+      if (vision.extractedText?.trim()) {
+        text = vision.extractedText;
+        provider = vision.provider || "ollama-vision";
+      } else if (vision.code === "IMAGE_EXTRACTION_PROVIDER_REQUIRED") {
+        provider = "no-vision-provider";
+      } else {
+        provider = vision.provider || "vision-empty";
+      }
+    }
+
+    // Optional tesseract.js (installed at monorepo root when available)
+    if (!text && bytes) {
+      try {
+        const tessPath = "tesseract.js";
+        const tess = await import(tessPath) as {
+          createWorker?: (lang?: string) => Promise<{
+            recognize: (img: Buffer) => Promise<{ data: { text: string } }>;
+            terminate: () => Promise<void>;
+          }>;
+        };
+        if (typeof tess.createWorker === "function") {
+          const worker = await tess.createWorker("eng");
+          try {
+            const result = await worker.recognize(bytes);
+            text = String(result?.data?.text ?? "").trim();
+            if (text) provider = "tesseract.js";
+          } finally {
+            await worker.terminate();
+          }
+        }
+      } catch {
+        /* tesseract optional */
+      }
+    }
+
+    const ocr = buildVinOcrResult({
+      extractedText: text,
+      provider,
+      ...(byteLength ? { byteLength } : {}),
+    });
+    return {
+      ...ocr,
+      documentHint: bytes
+        ? `Image ${input.filename || "upload"} (${byteLength} bytes) preserved; OCR via ${provider}.`
+        : `Text-only OCR via ${provider}.`,
+    };
+  }
+
+  async vehicleRecallLookup(input: {
+    vin?: string;
+    make?: string;
+    model?: string;
+    year?: number;
+  } = {}): Promise<RecallLookupResultV1> {
+    let make: string | null = input.make ?? null;
+    let model: string | null = input.model ?? null;
+    let year: number | null = input.year ?? null;
+    if (input.vin) {
+      const { decode } = await this.decodeVinAction(input.vin);
+      make = make || decode.make;
+      model = model || decode.model;
+      year = year || (decode.year ? Number(decode.year) : null);
+    }
+    if ((!make || !model || !year) && input.vin) {
+      const hits = await this.listVehicles({ vin: input.vin });
+      const v = hits[0];
+      if (v) {
+        make = make || v.make;
+        model = model || v.model;
+        year = year || v.year;
+      }
+    }
+    return lookupRecallsNhtsa({
+      make,
+      model,
+      year,
+      now: this.ports.clock.now(),
+    });
+  }
+
+  async vehicleCompare(vinA: string, vinB: string) {
+    const a = (await this.listVehicles({ vin: vinA }))[0];
+    const b = (await this.listVehicles({ vin: vinB }))[0];
+    if (!a || !b) throw new Error("Both VINs must exist in stored inventory to compare.");
+    const findings = compareTwoVehicles(a, b);
+    return {
+      findings,
+      reply: formatResearchReply(findings, "Vehicle comparison (stored data only)"),
+      vehicles: [a, b],
+    };
+  }
+
+  async vehicleTalkingPoints(input: { vin?: string; vehicleId?: string; customerName?: string }) {
+    const vehicles = await this.listVehicles(
+      input.vin ? { vin: input.vin } : {},
+    );
+    const vehicle =
+      (input.vehicleId ? vehicles.find((v) => v.id === input.vehicleId) : null) ||
+      (input.vin ? vehicles[0] : null) ||
+      vehicles[0];
+    if (!vehicle) throw new Error("No vehicle found for talking points.");
+    let decode = null;
+    if (vehicle.vin) {
+      try {
+        decode = (await this.decodeVinAction(vehicle.vin)).decode;
+      } catch {
+        decode = null;
+      }
+    }
+    let recalls: RecallLookupResultV1 | null = null;
+    try {
+      const recallInput: { vin?: string; make?: string; model?: string; year?: number } = {};
+      if (vehicle.vin) recallInput.vin = vehicle.vin;
+      if (vehicle.make) recallInput.make = vehicle.make;
+      if (vehicle.model) recallInput.model = vehicle.model;
+      if (vehicle.year != null) recallInput.year = vehicle.year;
+      recalls = await this.vehicleRecallLookup(recallInput);
+    } catch {
+      recalls = null;
+    }
+    const pack = buildVehicleTalkingPoints({
+      vehicle,
+      decode,
+      recalls,
+      customerName: input.customerName ?? null,
+    });
+    return {
+      ...pack,
+      vehicle,
+      reply: [
+        formatResearchReply(pack.facts, "Vehicle facts (grounded)"),
+        "",
+        "Sales draft tips (not facts):",
+        ...pack.draftTips.map((t) => `• ${t}`),
+      ].join("\n"),
+    };
+  }
+
+  async vehiclesForCustomer(relationshipId: string) {
+    const inv = this.vehicleInv(await this.snapshot());
+    return inv.vehicles.filter((v) => v.relationshipIds.includes(relationshipId));
+  }
+
+  async customersForVehicle(input: { vehicleId?: string; vin?: string }) {
+    const state = await this.snapshot();
+    const inv = this.vehicleInv(state);
+    const vehicle = input.vehicleId
+      ? inv.vehicles.find((v) => v.id === input.vehicleId)
+      : inv.vehicles.find((v) => v.vin === normalizeVinCandidate(String(input.vin ?? "")));
+    if (!vehicle) return { vehicle: null, customers: [] };
+    const customers = state.relationships.filter((r) => vehicle.relationshipIds.includes(r.id));
+    return { vehicle, customers };
+  }
+
+  async lastImportSummary() {
+    const state = await this.snapshot();
+    const queue = state.importSourceQueue ?? [];
+    const last = queue.find((q) => q.status === "completed" || q.status === "failed") || queue[0];
+    const dash = await this.importDashboard();
+    const review = (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review");
+    return {
+      lastSource: last
+        ? {
+            label: last.label,
+            status: last.status,
+            stats: last.stats,
+            lastError: last.lastError,
+          }
+        : null,
+      dashboard: dash,
+      reviewOpen: review.length,
+      reviewPreview: review.slice(0, 8).map((r) => ({
+        id: r.id,
+        reason: r.reason,
+        path: r.relativePath || r.sourcePath,
+        candidates: r.candidates.map((c) => `${c.kind}:${c.label}(${c.confidence})`),
+      })),
+    };
+  }
+
   async workQueue() {
     const state = await this.snapshot();
     return buildWorkQueue(state.relationships, this.ports.clock.now());
@@ -4139,6 +4364,153 @@ export class AionAssistantV1 {
           sources: [{ type: "vehicle", id: v.id, label: v.vin || v.id }],
           action: "vehicle.price",
           data: hist,
+        };
+      }
+      if (/\brecall\b/i.test(text)) {
+        const cand = extractVinCandidatesFromText(text)[0];
+        const recalls = await this.vehicleRecallLookup(cand ? { vin: cand } : {});
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: [
+            recalls.message,
+            ...recalls.recalls.slice(0, 5).map((r) => `  - ${r.campaignNumber}: ${r.component} — ${r.summary.slice(0, 160)}`),
+            `Source: [nhtsa-recall] ${recalls.provenance.sourceRef}`,
+          ].join("\n"),
+          sources: [],
+          action: "vehicle.recalls",
+          data: recalls,
+        };
+      }
+      if (/\btalking points\b|\bprepare me to show\b|\bwhat should i mention\b/i.test(text)) {
+        const cand = extractVinCandidatesFromText(text)[0];
+        try {
+          const pack = await this.vehicleTalkingPoints(cand ? { vin: cand } : {});
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: pack.reply,
+            sources: [{ type: "vehicle", id: pack.vehicle.id, label: pack.vehicle.vin || pack.vehicle.id }],
+            action: "vehicle.talking-points",
+            data: pack,
+          };
+        } catch (e) {
+          return {
+            intent: route.intent,
+            confidence: "medium",
+            reply: e instanceof Error ? e.message : String(e),
+            sources: [],
+            action: "vehicle.talking-points",
+            data: null,
+          };
+        }
+      }
+      if (/\bcompare\b/i.test(text)) {
+        const vins = extractVinCandidatesFromText(text);
+        if (vins.length >= 2) {
+          try {
+            const cmp = await this.vehicleCompare(vins[0]!, vins[1]!);
+            return {
+              intent: route.intent,
+              confidence: "high",
+              reply: cmp.reply,
+              sources: cmp.vehicles.map((v) => ({ type: "vehicle", id: v.id, label: v.vin || v.id })),
+              action: "vehicle.compare",
+              data: cmp,
+            };
+          } catch (e) {
+            return {
+              intent: route.intent,
+              confidence: "medium",
+              reply: e instanceof Error ? e.message : String(e),
+              sources: [],
+              action: "vehicle.compare",
+              data: null,
+            };
+          }
+        }
+      }
+      if (/\binterested in\b/i.test(text) || /\badd this .{0,40} to .{0,40} options\b/i.test(text)) {
+        const nameMatch = text.match(/\b([A-Z][a-z]+)\s+is interested in\b/i) || text.match(/\bto\s+([A-Z][a-z]+)'?s options\b/i);
+        const modelM = text.match(/\b(camry|tacoma|highlander|rav4|corolla|tundra|4runner)\b/i);
+        const vinCand = extractVinCandidatesFromText(text)[0];
+        if (nameMatch) {
+          const people = findRelationshipsByName(inWorkspace, nameMatch[1]!);
+          const person = people[0];
+          if (!person) {
+            return {
+              intent: route.intent,
+              confidence: "high",
+              reply: `No customer named ${nameMatch[1]} in this workspace. Create the prospect first.`,
+              sources: [],
+              action: "vehicle.associate",
+              data: null,
+            };
+          }
+          let vehicle = vinCand ? (await this.listVehicles({ vin: vinCand }))[0] : null;
+          if (!vehicle && modelM) {
+            vehicle = (await this.listVehicles({ model: modelM[1]!, make: "Toyota" }))[0] ?? null;
+          }
+          if (!vehicle) {
+            return {
+              intent: route.intent,
+              confidence: "high",
+              reply: `Found ${person.displayName}, but no matching vehicle in inventory. Scan/import the VIN first or name it precisely.`,
+              sources: [{ type: "customer", id: person.id, label: person.displayName }],
+              action: "vehicle.associate",
+              data: null,
+            };
+          }
+          const linked = await this.associateVehicleWithCustomer({
+            vehicleId: vehicle.id,
+            relationshipId: person.id,
+          });
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: `Owner-asserted interest: ${person.displayName} ↔ ${linked.vin || linked.id} (${[linked.year, linked.make, linked.model].filter(Boolean).join(" ")}). Not inferred.`,
+            sources: [
+              { type: "customer", id: person.id, label: person.displayName },
+              { type: "vehicle", id: linked.id, label: linked.vin || linked.id },
+            ],
+            action: "vehicle.associate",
+            data: linked,
+          };
+        }
+      }
+      if (/\bwhen did i last verify\b|\bwas this vin here\b|\bseen multiple times\b|\bdisappeared from online\b/i.test(text)) {
+        const cand = extractVinCandidatesFromText(text)[0];
+        if (cand) {
+          const v = (await this.listVehicles({ vin: cand }))[0];
+          const obs = inv.observations.filter((o) => o.vin === normalizeVinCandidate(cand));
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: v
+              ? [
+                  `VIN ${v.vin}: presence ${v.presenceStatus}`,
+                  `Last physical: ${v.lastPhysicalAt ?? "never in AION"}`,
+                  `Last online: ${v.lastOnlineAt ?? "n/a"}`,
+                  `Walk observations: ${obs.length}`,
+                  ...obs.slice(0, 5).map((o) => `  - ${o.observedAt} · ${o.matchStatus} · walk ${o.walkId}`),
+                  `Price points stored: ${v.priceHistory.length}`,
+                ].join("\n")
+              : `No stored vehicle for ${cand}.`,
+            sources: v ? [{ type: "vehicle", id: v.id, label: v.vin || v.id }] : [],
+            action: "vehicle.history",
+            data: { vehicle: v, observations: obs },
+          };
+        }
+        const gone = inv.vehicles.filter((v) => v.presenceStatus === "NO_LONGER_FOUND_ONLINE").slice(0, 15);
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: gone.length
+            ? `No longer found online (${gone.length}):\n${gone.map((v) => `  - ${v.vin} ${[v.year, v.make, v.model].filter(Boolean).join(" ")}`).join("\n")}`
+            : "No vehicles marked NO_LONGER_FOUND_ONLINE yet. Refresh public inventory after a walk.",
+          sources: [],
+          action: "vehicle.disappeared",
+          data: gone,
         };
       }
       const dealer = inv.dealerships.find((d) => d.isCurrent) || inv.dealerships[0];

@@ -103,6 +103,8 @@ export async function extractImageWithLocalVision(input: {
   /** Abort / timeout ms */
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /** Override prompt (e.g. VIN-focused OCR). */
+  prompt?: string;
 }): Promise<ImageExtractionResultV1> {
   const env = input.env ?? process.env;
   const status = imageUnderstandingStatus(env);
@@ -131,6 +133,7 @@ export async function extractImageWithLocalVision(input: {
         model: status.visionModel,
         stream: false,
         prompt:
+          input.prompt ||
           "Describe this image for a personal CRM assistant. List any readable text (OCR) and concrete objects. Do not invent names, phone numbers, or facts that are not visible. Be concise.",
         images: [b64],
       }),

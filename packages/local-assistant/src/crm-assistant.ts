@@ -66,6 +66,11 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwas this vehicle here\b/i,
       /\binventory (summary|walk|refresh)\b/i,
       /\b[A-HJ-NPR-Z0-9]{17}\b/,
+      /\brecall\b/i,
+      /\btalking points\b|\bprepare me to show\b|\bwhat should i mention\b/i,
+      /\bcompare\b.*\b(vin|camry|tacoma|vehicle|these)\b/i,
+      /\bis interested in\b/i,
+      /\bwhen did i last verify\b|\bseen multiple times\b|\bdisappeared from online\b/i,
     ],
   },
   {

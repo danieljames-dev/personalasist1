@@ -112,5 +112,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "tesseract.js": "^5.1.1"
   }
 }

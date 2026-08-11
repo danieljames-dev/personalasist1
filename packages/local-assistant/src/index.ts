@@ -34,6 +34,8 @@ export * from "./connectors/metricool-connector.js";
 export * from "./connectors/image-understanding.js";
 export * from "./connectors/dealership-inventory.js";
 export * from "./vehicle-inventory.js";
+export * from "./vin-ocr.js";
+export * from "./vehicle-research.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
 export * from "./owner-authority-v2.js";

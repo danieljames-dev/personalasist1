@@ -95,6 +95,15 @@ test("Inventory Walk phone workflow is present", () => {
   assert.match(js, /SAVE · NEXT VEHICLE|NEXT VEHICLE/);
   assert.match(js, /inventory\.walk\.observe/);
   assert.match(js, /dealership-lakeland/);
+  assert.match(js, /vin\.ocr|vin-ocr-scan/);
+  assert.match(js, /VIN_OCR_HIGH_CONFIDENCE|vin-ocr-confirm/);
+});
+
+test("customer interested vehicles and import review UX present", () => {
+  assert.match(js, /Interested vehicles/);
+  assert.match(js, /data-form="vehicle-associate"/);
+  assert.match(js, /Last import summary|import\.lastSummary/);
+  assert.match(js, /Review queue/);
 });
 
 test("viewport contract for common iPhone sizes", () => {
