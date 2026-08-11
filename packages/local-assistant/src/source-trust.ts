@@ -44,16 +44,110 @@ export function factTrustRank(fact: TemporalFactV1): number {
   return rankSourceTrust(factTrustTier(fact));
 }
 
+/**
+ * Channel-first trust classification.
+ *
+ * Attacker-controlled filename/path text must NEVER upgrade trust.
+ * Example: import:owner.notes.txt and import:nhtsa-recall.pdf are still
+ * imported_document — not owner_direct / government_official.
+ *
+ * Order: import channel → explicit sourceType → structured sourceRef prefixes → weak fallbacks.
+ */
 export function classifySourceRef(sourceRef: string, sourceType?: string): SourceTrustTierV1 {
-  const r = `${sourceRef} ${sourceType ?? ""}`.toLowerCase();
-  if (/owner\.|owner-entry|capture\.universal|owner\.knowledge/.test(r)) return "owner_direct";
-  if (/physical|inventory\.walk|vin-photo|PHYSICAL/.test(r)) return "physical_observation";
-  if (/nhtsa|vpic|api\.nhtsa|epa\.gov/.test(r)) return "government_official";
-  if (/toyota\.com|manufacturer|oem/.test(r)) return "manufacturer";
-  if (/metricool|gmail|oauth/.test(r)) return "live_connector";
-  if (/dealer|lakelandtoyota|listing|public-dealer/.test(r)) return "dealer_listing";
-  if (/import:|import\./.test(r)) return "imported_document";
-  if (/inference|provider-proposal|hypothesis/.test(r)) return "inference";
+  const type = String(sourceType ?? "").toLowerCase().trim();
+  const ref = String(sourceRef ?? "").toLowerCase().trim();
+
+  // ── 1. Import channel dominates (filename may contain owner/nhtsa/physical words) ──
+  if (
+    type === "import" ||
+    type === "imported" ||
+    type === "imported_document" ||
+    type === "bulk-import" ||
+    type === "folder-import" ||
+    ref.startsWith("import:") ||
+    ref.startsWith("import.") ||
+    ref.startsWith("import/") ||
+    ref.startsWith("queue-import") ||
+    ref.includes("folder-import") ||
+    ref.includes("bulk-import") ||
+    ref.includes("recursive-bulk")
+  ) {
+    return "imported_document";
+  }
+
+  // ── 2. Explicit typed channel (set at creation by code, not free text) ──
+  if (type === "inference" || type === "model" || type === "provider-proposal" || type === "system") {
+    return "inference";
+  }
+  if (type === "physical" || type === "physical_observation" || type === "physical_owner_walk") {
+    return "physical_observation";
+  }
+  if (type === "government" || type === "government_official" || type === "nhtsa") {
+    return "government_official";
+  }
+  if (type === "manufacturer" || type === "oem") return "manufacturer";
+  if (type === "live_connector" || type === "connector" || type === "gmail" || type === "metricool") {
+    return "live_connector";
+  }
+  if (type === "dealer" || type === "dealer_listing" || type === "listing") return "dealer_listing";
+  if (type === "third_party" || type === "research" || type === "public") return "third_party";
+  if (type === "owner" || type === "owner_direct" || type === "owner-entry") {
+    // Typed owner channel — refuse import and other non-owner structured channels.
+    // buildTemporalFact historically defaults sourceType to "owner"; sourceRef is the real channel.
+    if (ref.startsWith("import:") || ref.startsWith("import.")) return "imported_document";
+    if (
+      ref.includes("inventory.walk") ||
+      ref.startsWith("physical.") ||
+      ref.startsWith("physical_owner") ||
+      ref.includes("vin-photo")
+    ) {
+      return "physical_observation";
+    }
+    if (/^(third_party|inference\.|provider-proposal|hypothesis|autonomy\.|dealer\.|listing\.|nhtsa\.|manufacturer\.|metricool|gmail\.)/.test(ref)) {
+      // Fall through to structured prefix / weak fallbacks below (do not trust default type=owner)
+    } else if (
+      !ref ||
+      /^(owner\.|owner-entry|capture\.universal|owner\.knowledge|owner\.dealership|assistant\.remember)/.test(ref) ||
+      ref === "owner" ||
+      ref === "owner-entry"
+    ) {
+      return "owner_direct";
+    }
+    // Unknown ref with default type=owner: continue to structured/weak classification
+  }
+
+  // ── 3. Structured sourceRef channel prefixes only (not free-text path basenames) ──
+  if (
+    /^(owner\.|owner-entry|capture\.universal|owner\.knowledge|owner\.dealership|assistant\.remember)/.test(
+      ref,
+    )
+  ) {
+    return "owner_direct";
+  }
+  if (
+    /^(inventory\.walk|physical\.|vin-photo|physical_owner)/.test(ref) ||
+    ref.includes("inventory.walk") ||
+    ref === "physical_owner_walk"
+  ) {
+    return "physical_observation";
+  }
+  if (/^(nhtsa\.|connector\.nhtsa|api\.nhtsa|government\.|vpic\.)/.test(ref)) {
+    return "government_official";
+  }
+  if (/^(manufacturer\.|oem\.|connector\.manufacturer)/.test(ref)) return "manufacturer";
+  if (/^(metricool|gmail\.|connector\.gmail|connector\.metricool|oauth\.gmail)/.test(ref)) {
+    return "live_connector";
+  }
+  if (/^(dealer\.|listing\.|public-dealer|lakelandtoyota\.listing)/.test(ref)) {
+    return "dealer_listing";
+  }
+  if (/^(inference\.|provider-proposal|hypothesis|autonomy\.)/.test(ref)) return "inference";
+
+  // ── 4. Weak fallbacks (still never upgrade import filenames — already handled) ──
+  if (/provider-proposal|hypothesis|autonomy\./.test(ref)) return "inference";
+  if (/public-dealer|dealer_listing|\.listing/.test(ref)) return "dealer_listing";
+  if (/metricool|gmail\.|oauth/.test(ref)) return "live_connector";
+
   return "third_party";
 }
 

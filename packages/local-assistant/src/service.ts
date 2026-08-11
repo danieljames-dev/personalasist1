@@ -159,6 +159,7 @@ import {
   isStaleFact,
   opportunityShouldSurface,
 } from "./source-trust.js";
+import { isInstructionLikeDocument } from "./entity-resolution.js";
 import {
   buildSnapshotSig,
   canRetry,
@@ -3466,10 +3467,14 @@ export class AionAssistantV1 {
     const auto = shouldAutoAssociate(candidates);
     const review = needsReview(candidates, input.extractionError);
     const needsWorkspaceReview = workspaceInference.needsReview;
+    // Instruction-like body is DATA only — never auto-authority, never owner_direct channel
+    const instructionLike = isInstructionLikeDocument(
+      `${input.filename}\n${input.relativePath || ""}\n${input.extractedText || ""}`,
+    );
     let factId: string | null = null;
     let reviewItem: ImportReviewItemV1 | null = null;
 
-    if (auto && !review.needs && !needsWorkspaceReview) {
+    if (auto && !review.needs && !needsWorkspaceReview && !instructionLike) {
       const draft = factDraftFromCandidate(auto, input.extractedText || "", input.relativePath || input.filename);
       if (draft) {
         const fact = await this.addOwnerKnowledgeFact({
@@ -3477,6 +3482,7 @@ export class AionAssistantV1 {
           title: draft.title,
           content: draft.content,
           confidence: draft.confidence,
+          // Channel is import — filename must not upgrade trust (source-trust channel-first)
           sourceType: "import",
           sourceRef: `import:${input.relativePath || input.filename}`.slice(0, 500),
         });
@@ -3495,16 +3501,21 @@ export class AionAssistantV1 {
       }
     }
 
-    if (review.needs || needsWorkspaceReview) {
+    if (review.needs || needsWorkspaceReview || instructionLike) {
       const wsReason = needsWorkspaceReview
         ? `Workspace: ${workspaceInference.role} (${workspaceInference.reason})`
+        : "";
+      const poisonReason = instructionLike
+        ? "Instruction-like text treated as DATA only — not authority, not owner_direct, no external action."
         : "";
       reviewItem = await this.addImportReviewItem({
         documentId: input.documentId ?? null,
         sourcePath: input.sourcePath || input.relativePath || input.filename,
         relativePath: input.relativePath || input.filename,
         candidates,
-        reason: [review.reason, wsReason].filter(Boolean).join(" · ") || workspaceInference.reason,
+        reason:
+          [review.reason, wsReason, poisonReason].filter(Boolean).join(" · ") ||
+          workspaceInference.reason,
         errors: input.extractionError ? [input.extractionError] : [],
         status: "needs-review",
       });
@@ -5520,6 +5531,15 @@ export class AionAssistantV1 {
     const estMinutes = ledger
       .filter((v) => v.estimateKind === "estimated" && v.timeSavedMinutes != null)
       .reduce((s, v) => s + (v.timeSavedMinutes || 0), 0);
+    const measuredMinutes = ledger
+      .filter(
+        (v) =>
+          v.estimateKind === "measured" &&
+          v.timeSavedMinutes != null &&
+          Array.isArray(v.evidenceIds) &&
+          v.evidenceIds.length > 0,
+      )
+      .reduce((s, v) => s + (v.timeSavedMinutes || 0), 0);
     const fr = state.executive?.captureFriction;
     await this.mutate((draft) => {
       if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
@@ -5535,9 +5555,10 @@ export class AionAssistantV1 {
       `  Open Owner-must-do: ${board.ownerMustDo.length} · AION-can-do: ${board.aionCanDo.length}`,
       `  Captures: ${fr?.total ?? 0} (confirm ${fr?.withConfirm ?? 0}, auto ${fr?.autoApplied ?? 0})`,
       "",
-      "VALUE (estimated, not measured $)",
-      `  Est. minutes saved (ledger): ${estMinutes} · entries: ${ledger.length}`,
-      "  Dollar revenue is UNKNOWN unless separately measured.",
+      "VALUE (MEASURED / ESTIMATED kept separate — never summed as one fact)",
+      `  MEASURED minutes saved: ${measuredMinutes > 0 ? measuredMinutes : "UNKNOWN"}`,
+      `  ESTIMATED minutes saved: ${estMinutes > 0 ? estMinutes : "UNKNOWN"} · ledger entries: ${ledger.length}`,
+      "  Dollar revenue is UNKNOWN unless separately measured with evidence.",
       "",
       "COMMITMENTS",
       overdueC.length

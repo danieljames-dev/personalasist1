@@ -81,15 +81,18 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     patterns: [/\brun (an? )?executive cycle\b/i, /\bproactive cycle\b/i, /\brun autonomy\b/i],
   },
   {
+    // Audit of AION autonomy — must NOT steal "what needs me" / "what changed since" briefing phrases
     intent: "AUTONOMY_AUDIT",
     confidence: "high",
     patterns: [
-      /\bwhat did you do today\b/i,
-      /\bwhy did you do that\b/i,
-      /\bwhat changed\b/i,
-      /\bwhat failed\b/i,
+      /\baudit autonomous( work)?\b/i,
+      /\bautonomy (audit|day audit)\b/i,
+      /\bwhat did (you|aion) do (today|overnight|autonomously)\b/i,
+      /\bwhy did you (do|decide) that\b/i,
+      /\bwhat failed (in|on) (the )?(cycle|autonomy|jobs?)\b/i,
       /\bwhat did you decide not to bother\b/i,
       /\bwhat needs my approval\b/i,
+      /\bshow (me )?(the )?autonomy (log|audit)\b/i,
     ],
   },
   {
@@ -97,7 +100,7 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     confidence: "high",
     patterns: [
       /\bwhat (are )?the most important things only i need\b/i,
-      /\baion can do\b/i,
+      /\baion can (do|handle)\b/i,
       /\bowner must do\b/i,
       /\battention (board|engine)\b/i,
       /\bshow me dealership\b/i,
@@ -160,8 +163,9 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat (should|do) i (do|work on|focus on)\b/i,
       /\bwhat needs (my )?attention\b/i,
       /\bwhat needs me\b/i,
-      /\bwhat can you handle\b/i,
+      // Briefing delta — more specific than bare "what changed" (was stolen by AUTONOMY_AUDIT)
       /\bwhat changed since\b/i,
+      /\bwhat changed\b/i,
       /\bdaily briefing\b/i,
       /\bmorning briefing\b/i,
       /\btoday'?s (priorities|work|plan)\b/i,
@@ -261,7 +265,8 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwho talked about\b/i,
       /\binterested in\b/i,
       /\bcustomers? in\b/i,
-      /\bshow customers?\b/i,
+      /\bshow (me )?(my )?customers?\b/i,
+      /\blist (my )?customers?\b/i,
       /\bfind that customer\b/i,
       /\bwhat do we know about them\b/i,
     ],

@@ -258,6 +258,10 @@ export function isInstructionLikeDocument(text: string): boolean {
     /ignore (all )?(previous|prior) (instructions|rules)/.test(t) ||
     /you are now|system prompt|jailbreak|exfiltrat/.test(t) ||
     /delete all (data|facts|customers)/.test(t) ||
-    /send (this|email) to everyone/.test(t)
+    /send (this |an? )?email\b/.test(t) ||
+    /send (this|email) to everyone/.test(t) ||
+    /treat this (document|file|note) as owner (instructions?|commands?|authority)/.test(t) ||
+    /as owner instructions?\b/.test(t) ||
+    /mark \w+ highest priority/.test(t)
   );
 }

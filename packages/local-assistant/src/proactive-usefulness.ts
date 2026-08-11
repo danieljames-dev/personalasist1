@@ -1042,7 +1042,12 @@ export interface RealUsageMetricsV1 {
   autonomousJobsCompleted: number;
   autonomousJobsFailed: number;
   ownerInterventions: number;
+  /** ESTIMATED time saved only — never mixed with measured. */
   estimatedTimeSavedMinutes: number | null;
+  /** MEASURED time saved only (requires evidenceIds on ledger entries). */
+  measuredTimeSavedMinutes: number | null;
+  /** True when no estimated and no measured values are present. */
+  timeSavedUnknown: boolean;
   notes: string[];
 }
 
@@ -1064,7 +1069,13 @@ export function aggregateUsageMetrics(input: {
     .filter((v) => v.estimateKind === "estimated" && v.timeSavedMinutes != null)
     .reduce((s, v) => s + (v.timeSavedMinutes || 0), 0);
   const measured = input.ledger
-    .filter((v) => v.estimateKind === "measured" && v.timeSavedMinutes != null)
+    .filter(
+      (v) =>
+        v.estimateKind === "measured" &&
+        v.timeSavedMinutes != null &&
+        Array.isArray(v.evidenceIds) &&
+        v.evidenceIds.length > 0,
+    )
     .reduce((s, v) => s + (v.timeSavedMinutes || 0), 0);
 
   return {
@@ -1077,15 +1088,27 @@ export function aggregateUsageMetrics(input: {
     autonomousJobsCompleted: completed,
     autonomousJobsFailed: failed,
     ownerInterventions: ownerReq + (input.cycle?.jobsOwnerRequired ?? 0),
-    estimatedTimeSavedMinutes: est + measured > 0 ? est + measured : null,
+    // Never sum MEASURED + ESTIMATED into one undifferentiated total
+    estimatedTimeSavedMinutes: est > 0 ? est : null,
+    measuredTimeSavedMinutes: measured > 0 ? measured : null,
+    timeSavedUnknown: est <= 0 && measured <= 0,
     notes: [
-      "Time saved is estimated unless evidence-backed measured entries exist.",
+      "MEASURED and ESTIMATED are reported separately — never summed as one fact.",
+      "UNKNOWN is valid when neither measured nor estimated time exists.",
       "Metrics track friction/value — not vanity activity scores.",
     ],
   };
 }
 
 export function formatUsageMetrics(m: RealUsageMetricsV1): string {
+  const measuredLine =
+    m.measuredTimeSavedMinutes != null
+      ? `  MEASURED time saved (min): ${m.measuredTimeSavedMinutes}`
+      : "  MEASURED time saved (min): UNKNOWN";
+  const estimatedLine =
+    m.estimatedTimeSavedMinutes != null
+      ? `  ESTIMATED time saved (min): ${m.estimatedTimeSavedMinutes}`
+      : "  ESTIMATED time saved (min): UNKNOWN";
   return [
     "REAL USAGE METRICS (friction / value)",
     `  Captures: ${m.captureCount} · confirmations: ${m.ownerConfirmations} · corrections: ${m.captureCorrections}`,
@@ -1093,7 +1116,9 @@ export function formatUsageMetrics(m: RealUsageMetricsV1): string {
     `  Opportunities acted on: ${m.opportunitiesActedUpon}`,
     `  Autonomy jobs: completed=${m.autonomousJobsCompleted} failed=${m.autonomousJobsFailed}`,
     `  Owner interventions: ${m.ownerInterventions}`,
-    `  Est. time saved (min): ${m.estimatedTimeSavedMinutes ?? "UNKNOWN"}`,
+    measuredLine,
+    estimatedLine,
+    m.timeSavedUnknown ? "  Combined total: UNKNOWN (no measured or estimated entries)." : "  Combined total: not shown (kinds stay separate).",
     ...m.notes.map((n) => `  · ${n}`),
   ].join("\n");
 }
