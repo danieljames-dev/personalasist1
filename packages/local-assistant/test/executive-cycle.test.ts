@@ -181,3 +181,17 @@ test("TASK_DECOMPOSITION bounded", async () => {
   assert.ok(plan.steps.length > 0);
   assert.ok(plan.steps.length <= 6);
 });
+
+test("SCHEDULED_CYCLE rate limit + proactive brief delta", async () => {
+  const { service } = await fixture();
+  const first = await service.maybeRunScheduledExecutiveCycle(60 * 60_000);
+  assert.ok(first);
+  const second = await service.maybeRunScheduledExecutiveCycle(60 * 60_000);
+  assert.equal(second, null, "second cycle within interval should be skipped");
+  const brief1 = await service.prepareProactiveBrief();
+  assert.match(brief1.reply, /PROACTIVE EXECUTIVE BRIEF|WHAT DO I NEED/i);
+  const brief2 = await service.prepareProactiveBrief();
+  assert.match(brief2.reply, /Since last briefing|First briefing/i);
+  const eod = await service.endOfDayWrap();
+  assert.match(eod.reply, /WHAT AION COMPLETED|END OF DAY/i);
+});

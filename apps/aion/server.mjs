@@ -937,6 +937,10 @@ export async function createAionServer(options = {}) {
       case "executive.cycle": return service.runExecutiveCycle({ dryRun: input.dryRun === true });
       case "executive.audit": return service.autonomyDayAudit();
       case "executive.decompose": return service.decomposeGoal(String(input.goal ?? input.text ?? ""));
+      case "executive.brief": return service.prepareProactiveBrief();
+      case "executive.maybeCycle": return service.maybeRunScheduledExecutiveCycle(
+        input.minIntervalMs != null ? Number(input.minIntervalMs) : undefined,
+      );
       case "opportunity.radar": return { opportunities: await service.refreshOpportunityRadar() };
       case "sales.copilot": return service.salesCopilotForCustomer(String(input.relationshipId ?? input.id ?? ""));
       case "executive.eod": return service.endOfDayWrap();

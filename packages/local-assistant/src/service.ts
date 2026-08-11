@@ -757,7 +757,88 @@ export class AionAssistantV1 {
         await this.pollGpuReadiness(session.id).catch(() => {});
       }
     }
-    const state = await this.snapshot(); if (!state.settings.schedulerEnabled) return 0; const now = Date.parse(this.ports.clock.now()); const due = state.routines.filter((item) => item.enabled && item.nextRunAt && Date.parse(item.nextRunAt) <= now); for (const routine of due) await this.runRoutine(routine.id, "scheduled"); return due.length;
+    // Bounded proactive executive cycle — at most once per hour; never blocks routines.
+    await this.maybeRunScheduledExecutiveCycle().catch(() => {});
+    const state = await this.snapshot();
+    if (!state.settings.schedulerEnabled) return 0;
+    const now = Date.parse(this.ports.clock.now());
+    const due = state.routines.filter((item) => item.enabled && item.nextRunAt && Date.parse(item.nextRunAt) <= now);
+    for (const routine of due) await this.runRoutine(routine.id, "scheduled");
+    return due.length;
+  }
+
+  /**
+   * Rate-limited executive cycle for the existing tick/startup path.
+   * Min interval 60 minutes. Safe capabilities only (already enforced inside the cycle).
+   */
+  async maybeRunScheduledExecutiveCycle(minIntervalMs = 60 * 60_000): Promise<ExecutiveCycleResultV1 | null> {
+    const state = await this.snapshot();
+    const last = state.executive?.lastCycleResult?.completedAt;
+    const now = Date.parse(this.ports.clock.now());
+    if (last && now - Date.parse(last) < minIntervalMs) return null;
+    return this.runExecutiveCycle({});
+  }
+
+  /** Morning / “What needs me?” with delta since last briefing (no spam of unchanged items). */
+  async prepareProactiveBrief(): Promise<{
+    reply: string;
+    board: AttentionBoardV1;
+    cycle: ExecutiveCycleResultV1 | null;
+  }> {
+    const state = await this.snapshot();
+    const board = await this.attentionBoard();
+    const cycle = state.executive?.lastCycleResult ?? null;
+    const lastBrief = state.executive?.lastBriefingAt;
+    const now = this.ports.clock.now();
+    const commits = (state.executive?.commitments ?? []).filter(
+      (c) => c.status === "overdue" || c.status === "due_soon",
+    );
+    const newJobs =
+      cycle && (!lastBrief || cycle.completedAt > lastBrief)
+        ? (state.executive?.autonomyJobs ?? []).filter(
+            (j) => j.state === "COMPLETED" && (!lastBrief || (j.completedAt || "") > lastBrief),
+          )
+        : [];
+    const deltaLines: string[] = [];
+    if (lastBrief) {
+      deltaLines.push(`Since last briefing (${lastBrief.slice(0, 16)}):`);
+      if (cycle && cycle.completedAt > lastBrief) {
+        deltaLines.push(
+          `  • Executive cycle: +${cycle.jobsCompleted} done, ${cycle.jobsOwnerRequired} need Owner, ${cycle.changesDetected} change(s)`,
+        );
+      }
+      if (newJobs.length) {
+        deltaLines.push(...newJobs.slice(0, 5).map((j) => `  • AION completed: ${j.capability} — ${(j.result || "").slice(0, 80)}`));
+      } else if (!cycle || cycle.completedAt <= lastBrief) {
+        deltaLines.push("  • No new AION completions since last briefing.");
+      }
+      if (commits.length) {
+        deltaLines.push(`  • Commitments due/overdue: ${commits.length}`);
+      }
+    } else {
+      deltaLines.push("First briefing this session — full queue below.");
+    }
+    await this.mutate((d) => {
+      if (!d.executive) d.executive = emptyExecutiveState(now);
+      d.executive.lastBriefingAt = now;
+      return null;
+    });
+    const reply = [
+      "PROACTIVE EXECUTIVE BRIEF",
+      "",
+      ...deltaLines,
+      "",
+      ...board.briefingLines,
+      "",
+      commits.length
+        ? `COMMITMENTS:\n${commits.slice(0, 5).map((c) => `  • [${c.status}] ${c.committedBy}→${c.committedTo}: ${c.statement}`).join("\n")}`
+        : "COMMITMENTS: none due/overdue.",
+      "",
+      cycle
+        ? `AION last cycle: ${cycle.aionCompleted.slice(0, 3).join("; ") || "quiet"} · unauth external: ${cycle.unauthorizedExternalAttempts}`
+        : "AION: no cycle yet — will run on next tick or “run executive cycle”.",
+    ].join("\n");
+    return { reply, board, cycle };
   }
 
   async createPlan(goal: string, steps: Array<{ title: string; description?: string; dependencies?: number[]; requiredCapabilities?: string[]; approvalRequired?: boolean; expectedOutput?: string }>): Promise<PlanV1> {
@@ -4784,20 +4865,27 @@ export class AionAssistantV1 {
   }
 
   async endOfDayWrap(): Promise<{ reply: string; questions: string[] }> {
+    // One quiet cycle first so wrap reflects latest autonomous work
+    await this.runExecutiveCycle({}).catch(() => null);
     const board = await this.attentionBoard();
     const state = await this.snapshot();
     const day = this.ports.clock.now().slice(0, 10);
     const interactions = state.relationships.flatMap((r) =>
       (r.interactions ?? [])
         .filter((i) => i.at?.startsWith(day))
-        .map((i) => ({ name: r.displayName, summary: i.summary })),
+        .map((i) => ({ name: r.displayName, summary: i.summary, workspace: r.workspace })),
+    );
+    const cycle = state.executive?.lastCycleResult;
+    const jobsToday = (state.executive?.autonomyJobs ?? []).filter((j) => (j.createdAt || "").startsWith(day));
+    const commits = (state.executive?.commitments ?? []).filter(
+      (c) => c.status === "open" || c.status === "due_soon" || c.status === "overdue",
     );
     const questions: string[] = [];
     if (interactions.length === 0) questions.push("Any conversations today worth logging?");
-    if (board.ownerMustDo.some((i) => i.sourceType === "follow-up")) {
-      questions.push("Which open follow-ups did you complete?");
+    if (board.ownerMustDo.some((i) => i.sourceType === "follow-up" || i.sourceType === "commitment")) {
+      questions.push("Which open follow-ups or commitments did you complete?");
     }
-    questions.push("Any vehicle interest or brand notes from today?");
+    if (questions.length < 2) questions.push("Anything for tomorrow only you can do?");
     await this.mutate((draft) => {
       if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
       draft.executive.lastEndOfDayAt = this.ports.clock.now();
@@ -4806,15 +4894,38 @@ export class AionAssistantV1 {
     const reply = [
       "END OF DAY WRAP",
       "",
-      `Interactions logged today: ${interactions.length}`,
-      ...interactions.slice(0, 8).map((i) => `  • ${i.name}: ${i.summary.slice(0, 100)}`),
+      "WHAT HAPPENED",
+      `  Interactions logged: ${interactions.length}`,
+      ...interactions.slice(0, 6).map((i) => `  • [${i.workspace}] ${i.name}: ${i.summary.slice(0, 80)}`),
       "",
-      ...board.briefingLines,
+      "WHAT AION COMPLETED",
+      ...(
+        (() => {
+          const lines = jobsToday
+            .filter((j) => j.state === "COMPLETED")
+            .slice(0, 6)
+            .map((j) => `  • ${j.capability}: ${(j.result || "").slice(0, 90)}`);
+          return lines.length ? lines : ["  • (none recorded)"];
+        })()
+      ),
+      cycle
+        ? `  Last cycle: done=${cycle.jobsCompleted} failed=${cycle.jobsFailed} owner-req=${cycle.jobsOwnerRequired} unauth-ext=${cycle.unauthorizedExternalAttempts}`
+        : "",
       "",
-      "Open questions (answer via Capture or Chat):",
-      ...questions.slice(0, 3).map((q, i) => `  ${i + 1}. ${q}`),
-    ].join("\n");
-    return { reply, questions: questions.slice(0, 3) };
+      "OPEN COMMITMENTS",
+      ...(commits.length
+        ? commits.slice(0, 6).map((c) => `  • [${c.status}] ${c.committedBy}→${c.committedTo}: ${c.statement}`)
+        : ["  • none"]),
+      "",
+      "TOMORROW LIKELY PRIORITIES",
+      ...board.ownerMustDo.slice(0, 4).map((i, n) => `  ${n + 1}. [${i.horizon}] ${i.title}`),
+      "",
+      "Open questions (min):",
+      ...questions.slice(0, 2).map((q, i) => `  ${i + 1}. ${q}`),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return { reply, questions: questions.slice(0, 2) };
   }
 
   async weeklyCeoReview(): Promise<{ reply: string }> {
@@ -5913,7 +6024,8 @@ export class AionAssistantV1 {
         route.intent === "WORK_QUEUE" ||
         /\bbriefing|what needs me|what can you handle|what changed|prepare me for today|what did i forget\b/i.test(text);
       if (useBriefing) {
-        const board = await this.attentionBoard();
+        // Prefer proactive brief with delta; keep CRM briefing as detail
+        const proactive = await this.prepareProactiveBrief();
         const brands = (state.workspaces ?? [])
           .filter((w) => w.kind === "business" && !w.archived)
           .map((w) => ({ name: w.brand?.name || w.label }));
@@ -5926,15 +6038,6 @@ export class AionAssistantV1 {
           workspaceId,
           nowIso: this.ports.clock.now(),
         });
-        const execHeader = [
-          "EXECUTIVE BRIEFING (multi-context)",
-          `Active workspace: ${state.settings.workspaceLabels?.[workspaceId] ?? workspaceId}`,
-          "",
-          ...board.briefingLines,
-          "",
-          "— Context detail —",
-          "",
-        ].join("\n");
         let brandExtra = "";
         if (/\bbrand|caleb|collaborator|scheduled|posted|metricool|performed\b/i.test(text)) {
           const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
@@ -5968,10 +6071,10 @@ export class AionAssistantV1 {
         return {
           intent: route.intent,
           confidence: route.confidence,
-          reply: execHeader + briefing.text + brandExtra,
+          reply: `${proactive.reply}\n\n— Active context CRM detail (${state.settings.workspaceLabels?.[workspaceId] ?? workspaceId}) —\n${briefing.text}${brandExtra}`,
           sources,
           action: "work.briefing",
-          data: briefing,
+          data: { briefing, proactive },
         };
       }
       const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
