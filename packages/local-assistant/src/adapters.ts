@@ -154,6 +154,19 @@ export function createEmptyStateV1(): AssistantStateV1 {
       commitments: [],
       identityResolutions: [],
       captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+      autonomyJobs: [],
+      lastSnapshotSig: null,
+      lastCycleResult: null,
+      cycleHistory: [],
+      resourceBudget: {
+        maxJobsPerCycle: 8,
+        maxResearchPerCycle: 2,
+        maxRetriesPerJob: 2,
+        maxDecompositionDepth: 2,
+        maxDecompositionItems: 6,
+        maxOwnerInterruptionsPerCycle: 3,
+      },
+      lastBriefingAt: null,
       lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
@@ -434,6 +447,19 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       commitments: [],
       identityResolutions: [],
       captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+      autonomyJobs: [],
+      lastSnapshotSig: null,
+      lastCycleResult: null,
+      cycleHistory: [],
+      resourceBudget: {
+        maxJobsPerCycle: 8,
+        maxResearchPerCycle: 2,
+        maxRetriesPerJob: 2,
+        maxDecompositionDepth: 2,
+        maxDecompositionItems: 6,
+        maxOwnerInterruptionsPerCycle: 3,
+      },
+      lastBriefingAt: null,
       lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
@@ -460,6 +486,21 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!ak.executive.captureFriction || typeof ak.executive.captureFriction !== "object") {
       ak.executive.captureFriction = { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null };
     }
+    if (!Array.isArray(ak.executive.autonomyJobs)) ak.executive.autonomyJobs = [];
+    if (!Array.isArray(ak.executive.cycleHistory)) ak.executive.cycleHistory = [];
+    if (!ak.executive.resourceBudget || typeof ak.executive.resourceBudget !== "object") {
+      ak.executive.resourceBudget = {
+        maxJobsPerCycle: 8,
+        maxResearchPerCycle: 2,
+        maxRetriesPerJob: 2,
+        maxDecompositionDepth: 2,
+        maxDecompositionItems: 6,
+        maxOwnerInterruptionsPerCycle: 3,
+      };
+    }
+    if (ak.executive.lastSnapshotSig === undefined) ak.executive.lastSnapshotSig = null;
+    if (ak.executive.lastCycleResult === undefined) ak.executive.lastCycleResult = null;
+    if (ak.executive.lastBriefingAt === undefined) ak.executive.lastBriefingAt = null;
   }
   for (const src of ak.importSourceQueue) {
     if (!src.stats || typeof src.stats !== "object") {

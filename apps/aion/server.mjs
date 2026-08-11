@@ -934,6 +934,9 @@ export async function createAionServer(options = {}) {
       });
       case "maintenance.daily": return service.runDailyMaintenance();
       case "belief.explain": return service.explainBelief(String(input.statement ?? ""), String(input.sourceRef ?? ""), input.sourceType);
+      case "executive.cycle": return service.runExecutiveCycle({ dryRun: input.dryRun === true });
+      case "executive.audit": return service.autonomyDayAudit();
+      case "executive.decompose": return service.decomposeGoal(String(input.goal ?? input.text ?? ""));
       case "opportunity.radar": return { opportunities: await service.refreshOpportunityRadar() };
       case "sales.copilot": return service.salesCopilotForCustomer(String(input.relationshipId ?? input.id ?? ""));
       case "executive.eod": return service.endOfDayWrap();

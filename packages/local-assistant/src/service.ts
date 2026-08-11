@@ -158,6 +158,20 @@ import {
   opportunityShouldSurface,
 } from "./source-trust.js";
 import {
+  buildSnapshotSig,
+  canRetry,
+  classifyFailure,
+  DEFAULT_RESOURCE_BUDGET,
+  decomposeInternalGoal,
+  detectChanges,
+  emptyCycleResult,
+  isExternalGatedCapability,
+  proposeJobsFromChanges,
+  verifyJobResult,
+  type AutonomyJobV1,
+  type ExecutiveCycleResultV1,
+} from "./executive-cycle.js";
+import {
   applyOnlineListings,
   buildDealershipContext,
   decodeVinNhtsa,
@@ -4022,6 +4036,390 @@ export class AionAssistantV1 {
     };
   }
 
+  /**
+   * One bounded executive work cycle: observe → prioritize → act (safe only) → verify → measure.
+   * Never SEND/POST/APPLY/SPEND. Never infinite loop.
+   */
+  async runExecutiveCycle(opts: { dryRun?: boolean } = {}): Promise<ExecutiveCycleResultV1> {
+    const now = this.ports.clock.now();
+    const state = await this.snapshot();
+    if (!state.executive) {
+      await this.mutate((d) => {
+        d.executive = emptyExecutiveState(now);
+        return null;
+      });
+    }
+    const exec = (await this.snapshot()).executive!;
+    const budget = exec.resourceBudget ?? { ...DEFAULT_RESOURCE_BUDGET };
+    const result = emptyCycleResult(now, budget);
+    result.cycleId = this.ports.ids.next("cycle");
+    result.audit.push(`Cycle ${result.cycleId} started (dryRun=${opts.dryRun === true}).`);
+
+    const inv = this.vehicleInv(state);
+    const sig = buildSnapshotSig({
+      now,
+      vehicles: inv.vehicles.map((v) => ({
+        vin: v.vin,
+        presenceStatus: v.presenceStatus,
+        price: v.priceHistory[0]?.advertisedPrice ?? null,
+      })),
+      commitments: exec.commitments ?? [],
+      opportunities: exec.opportunities ?? [],
+      importReviewOpen: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
+      jobAppCount: (state.jobApplications ?? []).length,
+      brandCount: state.workspaces.filter((w) => w.kind === "business" && !w.archived).length,
+      captureCount: (exec.captures ?? []).length,
+      relationshipWorkCount: state.relationships.filter((r) => r.workspace === "work" && !r.archived).length,
+    });
+    const changes = detectChanges(exec.lastSnapshotSig, sig);
+    result.changesDetected = changes.length;
+    result.audit.push(`Detected ${changes.length} change event(s).`);
+
+    let jobs = proposeJobsFromChanges(changes, (k) => this.ports.ids.next(k), now, budget.maxJobsPerCycle);
+    // Retry FAILED transient jobs from queue
+    const retries = (exec.autonomyJobs ?? [])
+      .filter((j) => j.state === "FAILED" && j.failureClass === "TRANSIENT" && canRetry(j, "TRANSIENT"))
+      .slice(0, 2)
+      .map((j) => ({
+        ...j,
+        state: "READY" as const,
+        retries: j.retries + 1,
+        failure: null,
+        failureClass: null,
+      }));
+    jobs = [...retries, ...jobs].slice(0, budget.maxJobsPerCycle);
+    result.jobsProposed = jobs.length;
+
+    const completedNotes: string[] = [];
+    const handling: string[] = [];
+    let researchUsed = 0;
+    let interruptions = 0;
+
+    for (const job of jobs) {
+      if (isExternalGatedCapability(job.capability)) {
+        result.unauthorizedExternalAttempts += 1;
+        result.audit.push(`Blocked gated capability: ${job.capability}`);
+        continue;
+      }
+      if (job.state === "OWNER_REQUIRED") {
+        result.jobsOwnerRequired += 1;
+        result.ownerMustDo.push(`[${job.workspace}] ${job.reason}`);
+        if (job.interruption === "IMMEDIATE" || job.interruption === "TODAY") {
+          if (interruptions < budget.maxOwnerInterruptionsPerCycle) {
+            result.interruptions.push({ level: job.interruption, message: job.reason });
+            interruptions += 1;
+          }
+        }
+        continue;
+      }
+      if (opts.dryRun) {
+        handling.push(`${job.capability}: ${job.reason}`);
+        continue;
+      }
+
+      result.jobsExecuted += 1;
+      let running: AutonomyJobV1 = { ...job, state: "RUNNING", startedAt: now };
+      try {
+        const outcome = await this.executeAutonomyCapability(running);
+        const verified = verifyJobResult(running, outcome);
+        running = {
+          ...running,
+          state: verified.state,
+          completedAt: this.ports.clock.now(),
+          result: outcome.detail,
+          failure: verified.failure,
+          failureClass: verified.failureClass,
+          verified: verified.verified,
+        };
+        if (verified.state === "COMPLETED") {
+          result.jobsCompleted += 1;
+          completedNotes.push(`${running.capability}: ${outcome.detail.slice(0, 120)}`);
+          if (running.interruption === "SILENT_LOG") result.silentLogs.push(running.reason);
+          else if (running.interruption === "NEXT_BRIEFING" || running.interruption === "TODAY") {
+            result.interruptions.push({ level: running.interruption, message: running.reason });
+          }
+        } else if (verified.state === "OWNER_REQUIRED") {
+          result.jobsOwnerRequired += 1;
+          result.ownerMustDo.push(running.reason);
+        } else {
+          result.jobsFailed += 1;
+          if (canRetry(running, verified.failureClass || "UNSUPPORTED")) {
+            running = { ...running, state: "FAILED", retries: running.retries };
+            result.audit.push(`Will retry ${running.capability}: ${verified.failure}`);
+          }
+        }
+        if (running.capability === "research.local") researchUsed += 1;
+        if (researchUsed > budget.maxResearchPerCycle) {
+          result.audit.push("Research budget exhausted for cycle.");
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const fc = classifyFailure(msg);
+        running = {
+          ...running,
+          state: fc === "OWNER_REQUIRED" ? "OWNER_REQUIRED" : "FAILED",
+          completedAt: this.ports.clock.now(),
+          failure: msg,
+          failureClass: fc,
+          verified: false,
+        };
+        result.jobsFailed += 1;
+        result.audit.push(`Job ${running.capability} threw: ${msg.slice(0, 200)}`);
+      }
+      // Persist job
+      await this.mutate((draft) => {
+        if (!draft.executive) draft.executive = emptyExecutiveState(now);
+        draft.executive.autonomyJobs = [running, ...draft.executive.autonomyJobs.filter((j) => j.id !== running.id)].slice(0, 300);
+        return null;
+      });
+    }
+
+    // Refresh attention for owner board
+    const board = await this.attentionBoard();
+    result.ownerMustDo = [
+      ...new Set([...result.ownerMustDo, ...board.ownerMustDo.slice(0, 5).map((i) => `[${i.contextLabel}] ${i.title}`)]),
+    ].slice(0, 12);
+    result.aionCompleted = completedNotes;
+    result.aionHandling = handling.length
+      ? handling
+      : board.aionCanDo.slice(0, 5).map((i) => i.title);
+
+    result.completedAt = this.ports.clock.now();
+    result.audit.push(
+      `Done: proposed=${result.jobsProposed} executed=${result.jobsExecuted} completed=${result.jobsCompleted} failed=${result.jobsFailed} ownerReq=${result.jobsOwnerRequired} unauthExt=${result.unauthorizedExternalAttempts}`,
+    );
+
+    // Value ledger estimate for cycle housekeeping
+    if (!opts.dryRun && result.jobsCompleted > 0) {
+      await this.mutate((draft) => {
+        if (!draft.executive) draft.executive = emptyExecutiveState(now);
+        const entry = buildValueLedgerEntry(
+          {
+            action: `Executive cycle ${result.cycleId}`,
+            capability: "executive.cycle",
+            timeSavedMinutes: Math.min(30, result.jobsCompleted * 2),
+            estimateKind: "estimated",
+            notes: `Completed ${result.jobsCompleted} safe jobs; no external send/spend.`,
+            ownerInterventionRequired: result.jobsOwnerRequired > 0,
+          },
+          { id: this.ports.ids.next("value"), now: result.completedAt, workspace: "personal" },
+        );
+        draft.executive.valueLedger.unshift(entry);
+        draft.executive.lastSnapshotSig = sig;
+        draft.executive.lastCycleResult = result;
+        draft.executive.cycleHistory = [result, ...draft.executive.cycleHistory].slice(0, 50);
+        this.activity(draft, "agent", "executive.cycle", result.audit[result.audit.length - 1] || "cycle", result.cycleId);
+        return null;
+      });
+    } else {
+      await this.mutate((draft) => {
+        if (!draft.executive) draft.executive = emptyExecutiveState(now);
+        draft.executive.lastSnapshotSig = sig;
+        draft.executive.lastCycleResult = result;
+        draft.executive.cycleHistory = [result, ...draft.executive.cycleHistory].slice(0, 50);
+        return null;
+      });
+    }
+
+    return result;
+  }
+
+  /** Execute one safe autonomy capability; returns measurable outcome. */
+  private async executeAutonomyCapability(
+    job: AutonomyJobV1,
+  ): Promise<{ ok: boolean; detail: string; artifacts?: string[] }> {
+    if (isExternalGatedCapability(job.capability)) {
+      return { ok: false, detail: "Capability is externally gated (send/post/apply/spend)." };
+    }
+    switch (job.capability) {
+      case "maintenance.daily": {
+        const m = await this.runDailyMaintenance();
+        return {
+          ok: true,
+          detail: `Maintenance: stale=${m.staleFacts} conflicts=${m.conflictsResolved} pruned=${m.opportunitiesPruned}`,
+          artifacts: m.notes,
+        };
+      }
+      case "opportunity.radar": {
+        const opps = await this.refreshOpportunityRadar();
+        return { ok: true, detail: `Radar: ${opps.length} signal(s)`, artifacts: opps.slice(0, 3).map((o) => o.title) };
+      }
+      case "attention.board": {
+        const b = await this.attentionBoard();
+        return {
+          ok: true,
+          detail: `Board: owner=${b.ownerMustDo.length} aion=${b.aionCanDo.length}`,
+          artifacts: b.briefingLines.slice(0, 4),
+        };
+      }
+      case "commitment.refresh": {
+        await this.mutate((draft) => {
+          if (!draft.executive) return null;
+          const now = this.ports.clock.now();
+          draft.executive.commitments = draft.executive.commitments.map((c) => refreshCommitmentStatus(c, now));
+          return null;
+        });
+        const n = (await this.snapshot()).executive?.commitments?.filter((c) => c.status === "overdue" || c.status === "due_soon").length ?? 0;
+        return { ok: true, detail: `Commitments due/overdue: ${n}`, artifacts: [`count=${n}`] };
+      }
+      case "draft.followup_notes": {
+        const state = await this.snapshot();
+        const due = state.relationships
+          .filter((r) => r.workspace === "work" && !r.archived)
+          .flatMap((r) => r.followUps.filter((f) => f.status === "open").map((f) => `${r.displayName}: ${f.reason}`))
+          .slice(0, 5);
+        if (!due.length) return { ok: true, detail: "No open follow-ups to draft against.", artifacts: ["none"] };
+        await this.mutate((draft) => {
+          if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+          const fact = buildTemporalFact(
+            {
+              title: "AION follow-up prep (draft)",
+              content: due.join("\n"),
+              category: "draft",
+              visibility: "WORKSPACE_ONLY",
+              sourceRef: "autonomy.draft.followup_notes",
+              confidence: 70,
+            },
+            { id: this.ports.ids.next("tfact"), now: this.ports.clock.now(), workspace: "work" },
+          );
+          draft.executive.temporalFacts.unshift(fact);
+          return null;
+        });
+        return { ok: true, detail: `Stored prep notes for ${due.length} follow-up(s) (not sent).`, artifacts: due };
+      }
+      case "research.local": {
+        // Local-only: reuse stored research jobs / vehicle facts — no paid network
+        const state = await this.snapshot();
+        const jobs = state.researchJobs ?? [];
+        return {
+          ok: true,
+          detail: `Local research inventory: ${jobs.length} job(s) on file (no new paid fetch).`,
+          artifacts: jobs.slice(0, 3).map((j) => j.question),
+        };
+      }
+      case "vehicle.recall_check": {
+        const inv = this.vehicleInv(await this.snapshot());
+        const sample = inv.vehicles.find((v) => v.vin && v.make && v.model && v.year);
+        if (!sample) return { ok: true, detail: "No vehicle with YMM for recall check.", artifacts: ["none"] };
+        try {
+          const recallArgs: { vin?: string; make?: string; model?: string; year?: number } = {};
+          if (sample.vin) recallArgs.vin = sample.vin;
+          if (sample.make) recallArgs.make = sample.make;
+          if (sample.model) recallArgs.model = sample.model;
+          if (sample.year != null) recallArgs.year = sample.year;
+          const recalls = await this.vehicleRecallLookup(recallArgs);
+          return {
+            ok: true,
+            detail: recalls.message.slice(0, 300),
+            artifacts: recalls.recalls.slice(0, 2).map((r) => r.campaignNumber),
+          };
+        } catch (e) {
+          return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+        }
+      }
+      case "job.scan_fit": {
+        const apps = (await this.snapshot()).jobApplications ?? [];
+        return {
+          ok: true,
+          detail: `Job tracker: ${apps.length} application(s). Fit scoring available; submission gated.`,
+          artifacts: apps.slice(0, 3).map((a) => `${a.title}@${a.employer}`),
+        };
+      }
+      case "product.scan_ideas": {
+        const state = await this.snapshot();
+        const opps = state.opportunities ?? [];
+        return {
+          ok: true,
+          detail: `Product studio opportunities: ${opps.length} (no external listing).`,
+          artifacts: opps.slice(0, 3).map((o) => ("title" in o ? String((o as { title?: string }).title || "") : String((o as { id: string }).id))),
+        };
+      }
+      case "brand.gap_scan": {
+        const state = await this.snapshot();
+        const brands = state.workspaces.filter((w) => w.kind === "business" && !w.archived);
+        const dna = state.executive?.brandDna ?? [];
+        const gaps = brands.filter((b) => !dna.some((d) => d.workspaceId === b.id && d.purpose));
+        if (gaps.length) {
+          await this.mutate((draft) => {
+            if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+            const fact = buildTemporalFact(
+              {
+                title: "Brand DNA gaps",
+                content: gaps.map((g) => g.label).join(", "),
+                category: "brand",
+                sourceRef: "autonomy.brand.gap_scan",
+              },
+              { id: this.ports.ids.next("tfact"), now: this.ports.clock.now(), workspace: "personal" },
+            );
+            draft.executive.temporalFacts.unshift(fact);
+            return null;
+          });
+        }
+        return {
+          ok: true,
+          detail: gaps.length ? `Brand DNA missing purpose for: ${gaps.map((g) => g.label).join(", ")}` : "No brand DNA gaps detected.",
+          artifacts: gaps.map((g) => g.id),
+        };
+      }
+      case "plan.decompose": {
+        const steps = decomposeInternalGoal(job.reason, DEFAULT_RESOURCE_BUDGET.maxDecompositionItems);
+        return { ok: true, detail: `Decomposed into ${steps.length} step(s)`, artifacts: steps };
+      }
+      case "briefing.prepare": {
+        const b = await this.attentionBoard();
+        await this.mutate((d) => {
+          if (!d.executive) d.executive = emptyExecutiveState(this.ports.clock.now());
+          d.executive.lastBriefingAt = this.ports.clock.now();
+          return null;
+        });
+        return { ok: true, detail: b.briefingLines.slice(0, 6).join(" | "), artifacts: b.briefingLines };
+      }
+      case "inventory.refresh":
+        return {
+          ok: false,
+          detail: "Public inventory refresh is level-3 (network); not auto-run without Owner/path approval in this cycle.",
+        };
+      default:
+        return { ok: false, detail: `Unsupported capability: ${job.capability}` };
+    }
+  }
+
+  async autonomyDayAudit(): Promise<{ reply: string; cycle: ExecutiveCycleResultV1 | null; jobs: AutonomyJobV1[] }> {
+    const state = await this.snapshot();
+    const cycle = state.executive?.lastCycleResult ?? null;
+    const jobs = state.executive?.autonomyJobs ?? [];
+    const day = this.ports.clock.now().slice(0, 10);
+    const todayJobs = jobs.filter((j) => (j.createdAt || "").startsWith(day));
+    const reply = [
+      "WHAT AION DID (audit)",
+      cycle ? `Last cycle ${cycle.cycleId}: completed ${cycle.jobsCompleted}, failed ${cycle.jobsFailed}, owner-req ${cycle.jobsOwnerRequired}` : "No cycle yet.",
+      "",
+      "Completed today:",
+      ...todayJobs.filter((j) => j.state === "COMPLETED").slice(0, 10).map((j) => `  • ${j.capability}: ${j.result?.slice(0, 100)}`),
+      "",
+      "Why:",
+      ...todayJobs.slice(0, 5).map((j) => `  • ${j.reason}`),
+      "",
+      "Failed:",
+      ...todayJobs.filter((j) => j.state === "FAILED").slice(0, 5).map((j) => `  • ${j.capability}: ${j.failure}`),
+      "",
+      "Did not interrupt Owner (silent):",
+      ...(cycle?.silentLogs ?? []).slice(0, 5).map((s) => `  • ${s}`),
+      "",
+      "Needs approval / Owner:",
+      ...todayJobs.filter((j) => j.state === "OWNER_REQUIRED").slice(0, 5).map((j) => `  • ${j.reason}`),
+      "",
+      `Unauthorized external attempts in last cycle: ${cycle?.unauthorizedExternalAttempts ?? 0}`,
+      `Cross-workspace leaks recorded: ${cycle?.crossWorkspaceLeaks ?? 0}`,
+    ].join("\n");
+    return { reply, cycle, jobs: todayJobs };
+  }
+
+  async decomposeGoal(goal: string) {
+    const steps = decomposeInternalGoal(goal, DEFAULT_RESOURCE_BUDGET.maxDecompositionItems);
+    return { goal, steps, depthLimit: DEFAULT_RESOURCE_BUDGET.maxDecompositionDepth };
+  }
+
   async inferImportWorkspaceForPath(path: string, extra: {
     filename?: string;
     extractedText?: string;
@@ -5008,6 +5406,41 @@ export class AionAssistantV1 {
         sources: [],
         action: "executive.weekly",
         data: weekly,
+      };
+    }
+    if (route.intent === "EXECUTIVE_CYCLE") {
+      const cycle = await this.runExecutiveCycle({});
+      return {
+        intent: route.intent,
+        confidence: "high",
+        reply: [
+          `Executive cycle ${cycle.cycleId}`,
+          `Changes: ${cycle.changesDetected} · Jobs proposed/executed/completed: ${cycle.jobsProposed}/${cycle.jobsExecuted}/${cycle.jobsCompleted}`,
+          `Failed: ${cycle.jobsFailed} · Owner required: ${cycle.jobsOwnerRequired}`,
+          `Unauthorized external attempts: ${cycle.unauthorizedExternalAttempts}`,
+          "",
+          "AION completed:",
+          ...cycle.aionCompleted.slice(0, 6).map((x) => `  • ${x}`),
+          "",
+          "Owner must do:",
+          ...cycle.ownerMustDo.slice(0, 5).map((x) => `  • ${x}`),
+          "",
+          ...cycle.audit.slice(-3),
+        ].join("\n"),
+        sources: [],
+        action: "executive.cycle",
+        data: cycle,
+      };
+    }
+    if (route.intent === "AUTONOMY_AUDIT") {
+      const audit = await this.autonomyDayAudit();
+      return {
+        intent: route.intent,
+        confidence: "high",
+        reply: audit.reply,
+        sources: [],
+        action: "executive.audit",
+        data: audit,
       };
     }
     // Cross-context isolation: broad "everything you know" stays in active workspace

@@ -111,6 +111,7 @@ function homeArea(s) {
 <button type="button" data-area-jump="Customers">Customers</button>
 <button type="button" data-area-jump="Inventory Walk">Inventory Walk</button>
 <button type="button" data-do="attention-board">Attention</button>
+<button type="button" data-do="executive-cycle">Run cycle</button>
 <button type="button" data-do="eod-wrap">Wrap day</button>
 </div>
 <div class="card next"><h2>Executive briefing</h2>
@@ -1524,6 +1525,20 @@ document.addEventListener("click", async (event) => {
       const wrap = await api("executive.eod", {});
       window.__aionLastBriefing = wrap.reply;
       toast("End-of-day wrap ready");
+      await load();
+      return;
+    }
+    if (verb === "executive-cycle") {
+      toast("Running executive cycle…");
+      const cycle = await api("executive.cycle", {});
+      window.__aionLastBriefing = [
+        `Cycle ${cycle.cycleId}`,
+        `Completed ${cycle.jobsCompleted}/${cycle.jobsExecuted} · Owner req ${cycle.jobsOwnerRequired}`,
+        ...(cycle.aionCompleted || []).slice(0, 4),
+        "Owner:",
+        ...(cycle.ownerMustDo || []).slice(0, 3),
+      ].join("\n");
+      toast(`Cycle done · ${cycle.jobsCompleted} completed`);
       await load();
       return;
     }

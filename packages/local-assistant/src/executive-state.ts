@@ -12,6 +12,13 @@ import type { OpportunitySignalV1, ValueLedgerEntryV1 } from "./opportunity-rada
 import type { CaptureResultV1 } from "./universal-capture.js";
 import type { WorkspaceCorrectionV1 } from "./import-workspace-map.js";
 import type { CommitmentV1 } from "./commitments.js";
+import type {
+  AutonomyJobV1,
+  ExecutiveCycleResultV1,
+  ExecutiveSnapshotSigV1,
+  ResourceBudgetV1,
+} from "./executive-cycle.js";
+import { DEFAULT_RESOURCE_BUDGET } from "./executive-cycle.js";
 
 export interface IdentityResolutionV1 {
   /** Lowercase first name or alias key */
@@ -67,6 +74,12 @@ export interface ExecutiveStateV1 {
   commitments: CommitmentV1[];
   identityResolutions: IdentityResolutionV1[];
   captureFriction: CaptureFrictionStatsV1;
+  autonomyJobs: AutonomyJobV1[];
+  lastSnapshotSig: ExecutiveSnapshotSigV1 | null;
+  lastCycleResult: ExecutiveCycleResultV1 | null;
+  cycleHistory: ExecutiveCycleResultV1[];
+  resourceBudget: ResourceBudgetV1;
+  lastBriefingAt: IsoTimestamp | null;
   lastDailyMaintenanceAt: IsoTimestamp | null;
   lastEndOfDayAt: IsoTimestamp | null;
   lastWeeklyReviewAt: IsoTimestamp | null;
@@ -85,6 +98,12 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     commitments: [],
     identityResolutions: [],
     captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+    autonomyJobs: [],
+    lastSnapshotSig: null,
+    lastCycleResult: null,
+    cycleHistory: [],
+    resourceBudget: { ...DEFAULT_RESOURCE_BUDGET },
+    lastBriefingAt: null,
     lastDailyMaintenanceAt: null,
     lastEndOfDayAt: null,
     lastWeeklyReviewAt: null,

@@ -41,7 +41,9 @@ export type CrmAssistantIntentV1 =
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
   | "END_OF_DAY"
-  | "WEEKLY_REVIEW";
+  | "WEEKLY_REVIEW"
+  | "EXECUTIVE_CYCLE"
+  | "AUTONOMY_AUDIT";
 
 export interface CrmIntentRouteV1 {
   intent: CrmAssistantIntentV1;
@@ -72,6 +74,23 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     intent: "WEEKLY_REVIEW",
     confidence: "high",
     patterns: [/\bweekly (ceo )?review\b/i, /\bweek in review\b/i],
+  },
+  {
+    intent: "EXECUTIVE_CYCLE",
+    confidence: "high",
+    patterns: [/\brun (an? )?executive cycle\b/i, /\bproactive cycle\b/i, /\brun autonomy\b/i],
+  },
+  {
+    intent: "AUTONOMY_AUDIT",
+    confidence: "high",
+    patterns: [
+      /\bwhat did you do today\b/i,
+      /\bwhy did you do that\b/i,
+      /\bwhat changed\b/i,
+      /\bwhat failed\b/i,
+      /\bwhat did you decide not to bother\b/i,
+      /\bwhat needs my approval\b/i,
+    ],
   },
   {
     intent: "ATTENTION_BOARD",
