@@ -10,6 +10,7 @@ import {
 } from "./executive-context.js";
 import type { OpportunitySignalV1, ValueLedgerEntryV1 } from "./opportunity-radar.js";
 import type { CaptureResultV1 } from "./universal-capture.js";
+import type { WorkspaceCorrectionV1 } from "./import-workspace-map.js";
 
 export interface BrandDnaV1 {
   workspaceId: string;
@@ -43,6 +44,8 @@ export interface ExecutiveStateV1 {
   valueLedger: ValueLedgerEntryV1[];
   captures: CaptureResultV1[];
   brandDna: BrandDnaV1[];
+  /** Owner corrections for import workspace mapping (durable guidance). */
+  importWorkspaceCorrections: WorkspaceCorrectionV1[];
   lastEndOfDayAt: IsoTimestamp | null;
   lastWeeklyReviewAt: IsoTimestamp | null;
 }
@@ -56,6 +59,7 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     valueLedger: [],
     captures: [],
     brandDna: [],
+    importWorkspaceCorrections: [],
     lastEndOfDayAt: null,
     lastWeeklyReviewAt: null,
   };

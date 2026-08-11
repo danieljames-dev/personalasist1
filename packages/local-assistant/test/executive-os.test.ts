@@ -8,9 +8,10 @@ import {
   supersedeTemporalFact,
   buildGraphEdge,
 } from "../src/executive-context.js";
-import { buildAttentionBoard } from "../src/attention-engine.js";
+import { buildAttentionBoard, filterAttentionBoard } from "../src/attention-engine.js";
 import { classifyCaptureText } from "../src/universal-capture.js";
 import { detectInventoryMatches, buildValueLedgerEntry } from "../src/opportunity-radar.js";
+import { inferImportWorkspace, gmailContextPolicy, metricoolContextPolicy } from "../src/import-workspace-map.js";
 import type { RelationshipV1 } from "../src/contracts.js";
 import type { VehicleRecordV1 } from "../src/vehicle-inventory.js";
 import { synthesizeValidVin } from "../src/vehicle-inventory.js";
@@ -194,6 +195,108 @@ test("value ledger estimates are labeled not invented measured", () => {
   );
   assert.equal(e.estimateKind, "estimated");
   assert.equal(e.revenueInfluenced, null);
+});
+
+test("import workspace inference isolates dealership vs career vs brand", () => {
+  const career = inferImportWorkspace({ path: "C:\\Users\\Owner\\Documents\\Resume\\daniel-cv.pdf" });
+  assert.equal(career.workspaceId, "personal");
+  assert.equal(career.role, "CAREER");
+  const dealer = inferImportWorkspace({ path: "C:\\Work\\Lakeland Toyota\\lot-notes\\vins.txt" });
+  assert.equal(dealer.workspaceId, "work");
+  assert.equal(dealer.role, "DEALERSHIP");
+  const brand = inferImportWorkspace({
+    path: "C:\\Brands\\Northline Media\\assets\\logo.png",
+    brandWorkspaceIds: [{ id: "northline-media", label: "Northline Media" }],
+  });
+  assert.equal(brand.workspaceId, "northline-media");
+  assert.equal(brand.role, "BRAND");
+  const amb = inferImportWorkspace({ path: "C:\\misc\\stuff\\file.txt" });
+  assert.equal(amb.needsReview, true);
+});
+
+test("Owner correction wins import workspace mapping", () => {
+  const r = inferImportWorkspace({
+    path: "C:\\misc\\client-alpha\\notes.md",
+    corrections: [{ pattern: "client-alpha", workspaceId: "work", role: "DEALERSHIP", at: "2030-01-01T00:00:00.000Z" }],
+  });
+  assert.equal(r.workspaceId, "work");
+  assert.equal(r.matchedCorrection, "client-alpha");
+});
+
+test("capture refuses to invent which Mike when multiple exist", () => {
+  const c = classifyCaptureText(
+    "I just talked to Mike about the Tacoma.",
+    "2030-01-01T00:00:00.000Z",
+    {
+      existingPeople: [
+        { id: "m1", displayName: "Mike Smith", workspace: "work" },
+        { id: "m2", displayName: "Mike Jones", workspace: "work" },
+      ],
+    },
+  );
+  assert.equal(c.needsConfirm, true);
+  assert.ok(c.ambiguousPersonIds.length >= 2);
+  assert.match(c.why, /Multiple|ambiguous/i);
+});
+
+test("attention filter dealership only keeps work items", () => {
+  const board = buildAttentionBoard({
+    nowIso: "2030-01-01T12:00:00.000Z",
+    relationships: [],
+    tasks: [
+      {
+        id: "t1",
+        workspace: "personal",
+        title: "Buy milk",
+        description: "",
+        priority: "normal",
+        state: "ready",
+        dueAt: null,
+        tags: [],
+        planId: null,
+        routineId: null,
+        createdAt: "2030-01-01T00:00:00.000Z",
+        completedAt: null,
+        provenance: { sourceType: "owner", sourceRef: "t", recordedAt: "2030-01-01T00:00:00.000Z" },
+        history: [],
+      },
+      {
+        id: "t2",
+        workspace: "work",
+        title: "Call desk about deal",
+        description: "call the desk",
+        priority: "high",
+        state: "ready",
+        dueAt: null,
+        tags: [],
+        planId: null,
+        routineId: null,
+        createdAt: "2030-01-01T00:00:00.000Z",
+        completedAt: null,
+        provenance: { sourceType: "owner", sourceRef: "t", recordedAt: "2030-01-01T00:00:00.000Z" },
+        history: [],
+      },
+    ],
+  });
+  const filtered = filterAttentionBoard(board, { workspace: "work" });
+  assert.ok(filtered.ownerMustDo.every((i) => i.workspace === "work"));
+  assert.ok(!filtered.ownerMustDo.some((i) => /milk/i.test(i.title)));
+});
+
+test("connector policies never allow global pool", () => {
+  assert.equal(gmailContextPolicy().neverGlobalPool, true);
+  assert.equal(metricoolContextPolicy().neverGlobalPool, true);
+  assert.match(gmailContextPolicy().policy, /staging review|classif/i);
+  assert.match(metricoolContextPolicy().policy, /Brand workspaces|mapping/i);
+});
+
+test("workspace isolation: work CRM not OWNER_SHARED into personal by default", () => {
+  const leak = mayUseAcrossContexts({
+    sourceWorkspace: "work",
+    activeWorkspace: "personal",
+    visibility: "WORKSPACE_ONLY",
+  });
+  assert.equal(leak.allowed, false, "Lakeland customers must not appear in personal/brand without share");
 });
 
 test("graph edge requires endpoints", () => {

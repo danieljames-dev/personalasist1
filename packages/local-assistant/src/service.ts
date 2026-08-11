@@ -130,12 +130,21 @@ import {
 } from "./executive-context.js";
 import { emptyBrandDna, emptyExecutiveState, type ExecutiveStateV1 } from "./executive-state.js";
 import { buildAttentionBoard, type AttentionBoardV1 } from "./attention-engine.js";
+// filterAttentionBoard imported with opportunity helpers below
 import { classifyCaptureText, type CaptureResultV1 } from "./universal-capture.js";
 import {
   buildValueLedgerEntry,
   detectInventoryMatches,
   type OpportunitySignalV1,
 } from "./opportunity-radar.js";
+import {
+  gmailContextPolicy,
+  inferImportWorkspace,
+  metricoolContextPolicy,
+  type ImportWorkspaceInferenceV1,
+  type WorkspaceCorrectionV1,
+} from "./import-workspace-map.js";
+import { filterAttentionBoard } from "./attention-engine.js";
 import {
   applyOnlineListings,
   buildDealershipContext,
@@ -2973,12 +2982,20 @@ export class AionAssistantV1 {
       ...(input.extractedText !== undefined ? { extractedText: input.extractedText } : {}),
       ...(input.tags !== undefined ? { tags: input.tags } : {}),
     });
+    const workspaceInference = await this.inferImportWorkspaceForPath(
+      input.sourcePath || input.relativePath || input.filename,
+      {
+        filename: input.filename,
+        ...(input.extractedText !== undefined ? { extractedText: input.extractedText } : {}),
+      },
+    );
     const auto = shouldAutoAssociate(candidates);
     const review = needsReview(candidates, input.extractionError);
+    const needsWorkspaceReview = workspaceInference.needsReview;
     let factId: string | null = null;
     let reviewItem: ImportReviewItemV1 | null = null;
 
-    if (auto && !review.needs) {
+    if (auto && !review.needs && !needsWorkspaceReview) {
       const draft = factDraftFromCandidate(auto, input.extractedText || "", input.relativePath || input.filename);
       if (draft) {
         const fact = await this.addOwnerKnowledgeFact({
@@ -3004,13 +3021,16 @@ export class AionAssistantV1 {
       }
     }
 
-    if (review.needs) {
+    if (review.needs || needsWorkspaceReview) {
+      const wsReason = needsWorkspaceReview
+        ? `Workspace: ${workspaceInference.role} (${workspaceInference.reason})`
+        : "";
       reviewItem = await this.addImportReviewItem({
         documentId: input.documentId ?? null,
         sourcePath: input.sourcePath || input.relativePath || input.filename,
         relativePath: input.relativePath || input.filename,
         candidates,
-        reason: review.reason,
+        reason: [review.reason, wsReason].filter(Boolean).join(" · ") || workspaceInference.reason,
         errors: input.extractionError ? [input.extractionError] : [],
         status: "needs-review",
       });
@@ -3825,7 +3845,11 @@ export class AionAssistantV1 {
     });
   }
 
-  async attentionBoard(): Promise<AttentionBoardV1> {
+  async attentionBoard(filter?: {
+    workspace?: string;
+    onlyOwner?: boolean;
+    onlyAion?: boolean;
+  }): Promise<AttentionBoardV1> {
     const state = await this.snapshot();
     const inv = this.vehicleInv(state);
     const lastWalk = inv.walks[0];
@@ -3838,7 +3862,7 @@ export class AionAssistantV1 {
         sum.photoReviewRequired.length +
         sum.seenButNotOnline.length;
     }
-    return buildAttentionBoard({
+    const board = buildAttentionBoard({
       nowIso: this.ports.clock.now(),
       relationships: state.relationships,
       tasks: state.tasks,
@@ -3849,11 +3873,72 @@ export class AionAssistantV1 {
       openApprovals: (state.approvals ?? []).filter((a) => a.state === "pending").length,
       opportunityCount: (state.executive?.opportunities ?? []).length,
     });
+    if (filter?.workspace || filter?.onlyOwner || filter?.onlyAion) {
+      return filterAttentionBoard(board, filter);
+    }
+    return board;
+  }
+
+  async inferImportWorkspaceForPath(path: string, extra: {
+    filename?: string;
+    extractedText?: string;
+    associateWith?: string;
+  } = {}): Promise<ImportWorkspaceInferenceV1> {
+    const state = await this.snapshot();
+    const brands = state.workspaces
+      .filter((w) => w.kind === "business" && !w.archived)
+      .map((w) => ({ id: w.id, label: w.brand?.name || w.label }));
+    return inferImportWorkspace({
+      path,
+      ...(extra.filename !== undefined ? { filename: extra.filename } : {}),
+      ...(extra.extractedText !== undefined ? { extractedText: extra.extractedText } : {}),
+      ...(extra.associateWith !== undefined ? { associateWith: extra.associateWith } : {}),
+      corrections: state.executive?.importWorkspaceCorrections ?? [],
+      brandWorkspaceIds: brands,
+    });
+  }
+
+  async rememberImportWorkspaceCorrection(input: {
+    pattern: string;
+    workspaceId: string;
+    role?: string;
+  }): Promise<WorkspaceCorrectionV1> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      const corr: WorkspaceCorrectionV1 = {
+        pattern: String(input.pattern).trim().toLowerCase().slice(0, 200),
+        workspaceId: String(input.workspaceId).trim(),
+        role: (input.role as WorkspaceCorrectionV1["role"]) || "AMBIGUOUS",
+        at: now,
+      };
+      if (!corr.pattern || !corr.workspaceId) throw new Error("pattern and workspaceId required.");
+      draft.executive.importWorkspaceCorrections = [
+        corr,
+        ...draft.executive.importWorkspaceCorrections.filter((c) => c.pattern !== corr.pattern),
+      ].slice(0, 200);
+      this.activity(draft, "settings", "import.workspace.correction", `Import paths ~${corr.pattern} → ${corr.workspaceId}`, null);
+      return corr;
+    });
+  }
+
+  async connectorContextCompatibility() {
+    return {
+      gmail: gmailContextPolicy(),
+      metricool: metricoolContextPolicy(),
+      message:
+        "Both connectors require explicit workspace/brand classification before durable association. No global shared pool.",
+    };
   }
 
   async universalCapture(text: string, opts: { apply?: boolean } = {}): Promise<CaptureResultV1> {
     const now = this.ports.clock.now();
-    const classification = classifyCaptureText(text, now);
+    const snap = await this.snapshot();
+    const classification = classifyCaptureText(text, now, {
+      existingPeople: snap.relationships
+        .filter((r) => !r.archived)
+        .map((r) => ({ id: r.id, displayName: r.displayName, workspace: r.workspace })),
+    });
     const applied: string[] = [];
     const skipped: string[] = [];
     const captureId = this.ports.ids.next("capture");
@@ -3907,7 +3992,7 @@ export class AionAssistantV1 {
           (r) => r.workspace === (classification.workspaceHint === "work" ? "work" : r.workspace) && !r.archived,
         );
         let person = findRelationshipsByName(people, classification.personName)[0] ?? null;
-        if (!person && classification.workspaceHint === "work") {
+        if (!person && classification.workspaceHint === "work" && !classification.needsConfirm) {
           const rid = this.ports.ids.next("relationship");
           person = buildCustomer(
             {
@@ -4649,12 +4734,27 @@ export class AionAssistantV1 {
         data: result,
       };
     }
-    if (route.intent === "ATTENTION_BOARD" || (route.intent === "WORK_QUEUE" && /\bonly i need\b|aion can do|owner must do/i.test(text))) {
-      const board = await this.attentionBoard();
+    if (
+      route.intent === "ATTENTION_BOARD" ||
+      (route.intent === "WORK_QUEUE" && /\bonly i need\b|aion can do|owner must do|dealership only|show me dealership|what can you handle|what should i do first|\bwhy\b/i.test(text))
+    ) {
+      let filter: { workspace?: string; onlyOwner?: boolean; onlyAion?: boolean } | undefined;
+      if (/\bdealership only\b|\bshow me dealership\b|\blakeland only\b/i.test(text)) {
+        filter = { workspace: "work" };
+      } else if (/\bwhat can you handle\b|\baion can (do|handle)\b/i.test(text)) {
+        filter = { onlyAion: true };
+      } else if (/\bonly i need\b|\bowner must\b|\bwhat should i do first\b/i.test(text)) {
+        filter = { onlyOwner: true };
+      }
+      const board = await this.attentionBoard(filter);
+      const whyExtra =
+        /\bwhy\b/i.test(text) && board.explanations?.length
+          ? ["", "Why (top items):", ...board.explanations.slice(0, 5).map((e) => `  • ${e}`)]
+          : [];
       return {
         intent: "ATTENTION_BOARD",
         confidence: "high",
-        reply: board.briefingLines.join("\n"),
+        reply: [...board.briefingLines, ...whyExtra].join("\n"),
         sources: [],
         action: "attention.board",
         data: board,

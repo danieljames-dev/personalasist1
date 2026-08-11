@@ -909,8 +909,23 @@ export async function createAionServer(options = {}) {
       case "vehicle.customers": return service.customersForVehicle({ vehicleId: input.vehicleId, vin: input.vin });
       case "import.lastSummary": return service.lastImportSummary();
       case "context.switch": return service.switchContext(String(input.name ?? input.text ?? ""));
-      case "attention.board": return service.attentionBoard();
+      case "attention.board": return service.attentionBoard({
+        workspace: input.workspace,
+        onlyOwner: input.onlyOwner === true,
+        onlyAion: input.onlyAion === true,
+      });
       case "capture.universal": return service.universalCapture(String(input.text ?? ""), { apply: input.apply !== false });
+      case "import.inferWorkspace": return service.inferImportWorkspaceForPath(String(input.path ?? ""), {
+        filename: input.filename,
+        extractedText: input.extractedText,
+        associateWith: input.associateWith,
+      });
+      case "import.workspaceCorrection": return service.rememberImportWorkspaceCorrection({
+        pattern: String(input.pattern ?? ""),
+        workspaceId: String(input.workspaceId ?? ""),
+        role: input.role,
+      });
+      case "connector.context.policy": return service.connectorContextCompatibility();
       case "opportunity.radar": return { opportunities: await service.refreshOpportunityRadar() };
       case "sales.copilot": return service.salesCopilotForCustomer(String(input.relationshipId ?? input.id ?? ""));
       case "executive.eod": return service.endOfDayWrap();

@@ -30,6 +30,40 @@ export interface AttentionBoardV1 {
   ownerMustDo: AttentionItemV1[];
   aionCanDo: AttentionItemV1[];
   briefingLines: string[];
+  /** Why top items scored highly (for "Why?" drill-down). */
+  explanations: string[];
+}
+
+export function filterAttentionBoard(
+  board: AttentionBoardV1,
+  filter: { workspace?: string; onlyOwner?: boolean; onlyAion?: boolean },
+): AttentionBoardV1 {
+  let owner = board.ownerMustDo;
+  let aion = board.aionCanDo;
+  if (filter.workspace) {
+    const w = filter.workspace.toLowerCase();
+    owner = owner.filter(
+      (i) => i.workspace.toLowerCase() === w || i.contextLabel.toLowerCase().includes(w),
+    );
+    aion = aion.filter(
+      (i) => i.workspace.toLowerCase() === w || i.contextLabel.toLowerCase().includes(w),
+    );
+  }
+  if (filter.onlyOwner) aion = [];
+  if (filter.onlyAion) owner = [];
+  return {
+    ...board,
+    ownerMustDo: owner,
+    aionCanDo: aion,
+    briefingLines: [
+      filter.workspace ? `Filtered context: ${filter.workspace}` : "All contexts",
+      "OWNER MUST DO:",
+      ...owner.slice(0, 5).map((i, n) => `  ${n + 1}. [${i.contextLabel}] ${i.title} — ${i.why} (score ${i.score.toFixed(0)})`),
+      owner.length ? "" : "  (none in filter)",
+      "AION CAN HANDLE:",
+      ...aion.slice(0, 5).map((i) => `  • ${i.title}`),
+    ],
+  };
 }
 
 function scoreItem(i: Omit<AttentionItemV1, "score">): number {
@@ -245,10 +279,15 @@ export function buildAttentionBoard(input: {
     ...aionCanDo.slice(0, 4).map((i) => `  • ${i.title}`),
   ];
 
+  const explanations = ownerMustDo.slice(0, 5).map((i) => {
+    return `${i.title}: urgency=${i.urgency} value=${i.value} risk=${i.risk} time=${i.timeMinutes}m human=${i.requiresHuman} → score ${i.score.toFixed(1)}. ${i.why}`;
+  });
+
   return {
     generatedAt: input.nowIso,
     ownerMustDo,
     aionCanDo,
     briefingLines,
+    explanations,
   };
 }

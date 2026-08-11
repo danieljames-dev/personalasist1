@@ -613,8 +613,10 @@ function knowledgeArea(s) {
 <input name="path" required maxlength="4096" placeholder="C:\\path\\owner-selected"></label>
 <label>Kind<select name="kind"><option>folder</option><option>file</option><option>csv</option><option>json</option></select></label>
 <label>Associate<select name="associateWith"><option value="none">none</option><option value="owner">owner knowledge</option><option value="business">business</option><option value="brand">brand</option><option value="customer">customer</option></select></label>
+<button type="button" data-do="import-infer-ws">Preview workspace mapping</button>
 <button>Queue source</button>
 </form>
+${window.__aionImportWs ? `<p class="meta next">Inferred workspace: <b>${esc(window.__aionImportWs.role)}</b> → ${esc(window.__aionImportWs.workspaceId || "needs review")} (${window.__aionImportWs.confidence}%) — ${esc(window.__aionImportWs.reason)}${window.__aionImportWs.needsReview ? " · REVIEW" : ""}</p>` : ""}
 ${(s.importSourceQueue ?? []).length ? `<div class="actions"><button data-do="import-queue-process" type="button">Process next queued source</button></div>
 <p class="meta">Queue: ${(s.importSourceQueue ?? []).slice(0, 6).map((q) => `${esc(q.label)} [${esc(q.status)}]`).join("; ")}</p>` : ""}
 ${window.__aionImportSummary ? (() => {
@@ -1068,13 +1070,24 @@ const mobileDebugEnabled = () => {
   catch { return false; }
 };
 
+function currentContextLabel() {
+  const s = model?.state;
+  if (!s) return "";
+  const ws = s.settings?.activeWorkspace ?? "personal";
+  const binding = s.executive?.context?.bindings?.find((b) => b.workspaceId === ws);
+  if (binding?.label) return binding.label;
+  if (ws === "work") return s.settings?.workspaceLabels?.work || "Lakeland Toyota";
+  return s.settings?.workspaceLabels?.[ws] || ws;
+}
+
 function connectionBadgeText() {
   const ra = model?.remoteAccess;
   const provider = (model?.providers ?? []).find((x) => x.id === model?.state?.settings?.providerId);
+  const ctx = currentContextLabel();
   if (model?.viewer === "device") {
-    if (ra?.privateRemoteState === "READY" || ra?.tailscale?.ipv4) return "● Private remote";
-    if (ra?.enabled) return "● Private";
-    return "● Connected";
+    if (ra?.privateRemoteState === "READY" || ra?.tailscale?.ipv4) return ctx ? `● ${ctx}` : "● Private remote";
+    if (ra?.enabled) return ctx ? `● ${ctx}` : "● Private";
+    return ctx ? `● ${ctx}` : "● Connected";
   }
   if (ra?.privateRemoteState === "READY") return "● Tailscale ready";
   if (provider?.location === "remote") return `● Remote model (${provider.id})`;
@@ -1525,6 +1538,16 @@ document.addEventListener("click", async (event) => {
       rec.onerror = () => toast("Voice capture failed");
       rec.start();
       toast("Listening…");
+      return;
+    }
+    if (verb === "import-infer-ws") {
+      const pathInput = document.querySelector('form[data-form="import-queue"] input[name="path"], form[data-form="folder-import"] input[name="path"]');
+      const path = pathInput?.value?.trim();
+      if (!path) throw new Error("Enter a path first.");
+      const assoc = document.querySelector('form[data-form="import-queue"] select[name="associateWith"]')?.value;
+      window.__aionImportWs = await api("import.inferWorkspace", { path, associateWith: assoc || undefined });
+      toast(`Workspace: ${window.__aionImportWs.role}${window.__aionImportWs.needsReview ? " (review)" : ""}`);
+      render();
       return;
     }
     await load();

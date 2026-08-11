@@ -150,6 +150,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       valueLedger: [],
       captures: [],
       brandDna: [],
+      importWorkspaceCorrections: [],
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
     },
@@ -425,6 +426,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       valueLedger: [],
       captures: [],
       brandDna: [],
+      importWorkspaceCorrections: [],
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
     };
@@ -444,6 +446,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(ak.executive.valueLedger)) ak.executive.valueLedger = [];
     if (!Array.isArray(ak.executive.captures)) ak.executive.captures = [];
     if (!Array.isArray(ak.executive.brandDna)) ak.executive.brandDna = [];
+    if (!Array.isArray(ak.executive.importWorkspaceCorrections)) ak.executive.importWorkspaceCorrections = [];
   }
   for (const src of ak.importSourceQueue) {
     if (!src.stats || typeof src.stats !== "object") {

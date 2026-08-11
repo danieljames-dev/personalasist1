@@ -21,6 +21,8 @@ export interface CaptureClassificationV1 {
   confidence: "high" | "medium" | "low";
   workspaceHint: "work" | "personal" | "business" | null;
   personName: string | null;
+  /** When multiple people match the same first name in CRM. */
+  ambiguousPersonIds: string[];
   vehicleHint: string | null;
   budgetHint: string | null;
   followUpWhen: string | null;
@@ -30,7 +32,11 @@ export interface CaptureClassificationV1 {
   why: string;
 }
 
-export function classifyCaptureText(text: string, nowIso: IsoTimestamp): CaptureClassificationV1 {
+export function classifyCaptureText(
+  text: string,
+  nowIso: IsoTimestamp,
+  opts: { existingPeople?: Array<{ id: string; displayName: string; workspace: string }> } = {},
+): CaptureClassificationV1 {
   const raw = String(text ?? "").trim();
   const lower = raw.toLowerCase();
   const person =
@@ -56,16 +62,35 @@ export function classifyCaptureText(text: string, nowIso: IsoTimestamp): Capture
             ? "unspecified"
             : null;
 
+  // Multiple CRM people share the same first name → do not fabricate which one
+  let ambiguousPersonIds: string[] = [];
+  if (person && opts.existingPeople?.length) {
+    const first = person.split(/\s+/)[0]!.toLowerCase();
+    const hits = opts.existingPeople.filter((p) => {
+      const n = p.displayName.toLowerCase();
+      return n === person.toLowerCase() || n.startsWith(first + " ") || n === first;
+    });
+    if (hits.length > 1) {
+      ambiguousPersonIds = hits.map((h) => h.id);
+    }
+  }
+  const multiMike = ambiguousPersonIds.length > 1;
+
+  const base = {
+    personName: person,
+    ambiguousPersonIds,
+    vehicleHint: vehicle,
+    budgetHint: budget,
+    followUpWhen: follow,
+    summary: raw.slice(0, 500),
+  };
+
   if (/\bidea\b|\boffer inventory-walk|\bproduct concept\b/i.test(raw)) {
     return {
+      ...base,
       kind: "idea",
       confidence: "high",
       workspaceHint: "personal",
-      personName: person,
-      vehicleHint: vehicle,
-      budgetHint: budget,
-      followUpWhen: follow,
-      summary: raw.slice(0, 500),
       proposedActions: ["Store as Owner idea / product note", "Optional: open project later"],
       needsConfirm: false,
       why: "Idea language detected.",
@@ -74,14 +99,13 @@ export function classifyCaptureText(text: string, nowIso: IsoTimestamp): Capture
 
   if (/\bcaleb\b|\bbrand\b|\bpost\b|\bcontent\b|\binstagram\b|\bmetricool\b/i.test(raw)) {
     return {
+      ...base,
       kind: "brand_note",
       confidence: "medium",
       workspaceHint: "business",
       personName: person || (/\bcaleb\b/i.test(raw) ? "Caleb" : null),
       vehicleHint: null,
       budgetHint: null,
-      followUpWhen: follow,
-      summary: raw.slice(0, 500),
       proposedActions: ["Brand note in active brand workspace", "Do not invent collaborator roles"],
       needsConfirm: true,
       why: "Brand/content language — confirm which brand workspace.",
@@ -90,46 +114,46 @@ export function classifyCaptureText(text: string, nowIso: IsoTimestamp): Capture
 
   if (person && (vehicle || /\binterested\b|\bwants the\b|\blikes the\b/i.test(raw))) {
     return {
+      ...base,
       kind: "vehicle_interest",
-      confidence: "high",
+      confidence: multiMike ? "medium" : "high",
       workspaceHint: "work",
-      personName: person,
-      vehicleHint: vehicle,
-      budgetHint: budget,
-      followUpWhen: follow,
-      summary: raw.slice(0, 500),
-      proposedActions: [
-        `Customer note for ${person}`,
-        vehicle ? `Vehicle interest: ${vehicle}` : "Record vehicle interest",
-        budget ? `Budget preference: ${budget}` : "Budget if stated",
-        follow ? `Follow-up: ${follow}` : "Optional follow-up",
-      ],
-      needsConfirm: !person || person.length < 2,
-      why: "Customer + vehicle interest pattern (dealership context).",
+      proposedActions: multiMike
+        ? [`Multiple people named ${person} — which one?`, ...ambiguousPersonIds.map((id) => `id:${id}`)]
+        : [
+            `Customer note for ${person}`,
+            vehicle ? `Vehicle interest: ${vehicle}` : "Record vehicle interest",
+            budget ? `Budget preference: ${budget}` : "Budget if stated",
+            follow ? `Follow-up: ${follow}` : "Optional follow-up",
+          ],
+      needsConfirm: multiMike || !person || person.length < 2,
+      why: multiMike
+        ? `Multiple CRM matches for "${person}" — Owner must choose; AION will not guess.`
+        : "Customer + vehicle interest pattern (dealership context).",
     };
   }
 
   if (follow || /\bfollow[- ]?up\b/i.test(raw)) {
     return {
+      ...base,
       kind: "follow_up",
-      confidence: person ? "high" : "medium",
+      confidence: person && !multiMike ? "high" : "medium",
       workspaceHint: /\b(brand|caleb|content)\b/i.test(raw) ? "business" : person ? "work" : "personal",
-      personName: person,
-      vehicleHint: vehicle,
-      budgetHint: budget,
       followUpWhen: follow || "unspecified",
-      summary: raw.slice(0, 500),
-      proposedActions: [
-        person ? `Follow-up task for ${person}` : "Create follow-up task",
-        follow ? `When: ${follow}` : "Confirm due date",
-      ],
-      needsConfirm: !person,
-      why: "Follow-up language detected.",
+      proposedActions: multiMike
+        ? [`Which ${person}?`, "Then schedule follow-up"]
+        : [
+            person ? `Follow-up task for ${person}` : "Create follow-up task",
+            follow ? `When: ${follow}` : "Confirm due date",
+          ],
+      needsConfirm: !person || multiMike,
+      why: multiMike ? "Follow-up: ambiguous person name." : "Follow-up language detected.",
     };
   }
 
   if (/\bprefer\b|\balways\b|\bnever\b|\bI like\b|\bI hate\b/i.test(raw)) {
     return {
+      ...base,
       kind: "preference",
       confidence: "high",
       workspaceHint: "personal",
@@ -137,7 +161,6 @@ export function classifyCaptureText(text: string, nowIso: IsoTimestamp): Capture
       vehicleHint: null,
       budgetHint: null,
       followUpWhen: null,
-      summary: raw.slice(0, 500),
       proposedActions: ["Owner preference / memory fact"],
       needsConfirm: false,
       why: "Preference language.",
@@ -146,14 +169,10 @@ export function classifyCaptureText(text: string, nowIso: IsoTimestamp): Capture
 
   if (/\btask\b|\bremind me\b|\bto[- ]?do\b/i.test(raw)) {
     return {
+      ...base,
       kind: "task",
       confidence: "high",
       workspaceHint: null,
-      personName: person,
-      vehicleHint: vehicle,
-      budgetHint: budget,
-      followUpWhen: follow,
-      summary: raw.slice(0, 500),
       proposedActions: ["Create task in active workspace"],
       needsConfirm: false,
       why: "Explicit task language.",
@@ -162,28 +181,25 @@ export function classifyCaptureText(text: string, nowIso: IsoTimestamp): Capture
 
   if (person || /\bjust talked\b|\bsaid that\b|\bnote\b/i.test(raw)) {
     return {
+      ...base,
       kind: "customer_update",
-      confidence: person ? "high" : "medium",
+      confidence: person && !multiMike ? "high" : "medium",
       workspaceHint: "work",
-      personName: person,
-      vehicleHint: vehicle,
-      budgetHint: budget,
-      followUpWhen: follow,
-      summary: raw.slice(0, 500),
-      proposedActions: person ? [`Add note to ${person}`] : ["Add CRM note — name the person if known"],
-      needsConfirm: !person,
-      why: "Interaction / note pattern.",
+      proposedActions: multiMike
+        ? [`Which ${person}?`]
+        : person
+          ? [`Add note to ${person}`]
+          : ["Add CRM note — name the person if known"],
+      needsConfirm: !person || multiMike,
+      why: multiMike ? "Interaction note: ambiguous person." : "Interaction / note pattern.",
     };
   }
 
   return {
+    ...base,
     kind: "note",
     confidence: "medium",
     workspaceHint: null,
-    personName: person,
-    vehicleHint: vehicle,
-    budgetHint: budget,
-    followUpWhen: follow,
     summary: raw.slice(0, 500) || "(empty)",
     proposedActions: ["Store note in active context", "Promote to fact if Owner confirms"],
     needsConfirm: raw.length < 8,
