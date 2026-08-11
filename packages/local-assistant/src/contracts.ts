@@ -638,6 +638,11 @@ export interface AssistantStateV1 {
    * Additive; defaulted forward when missing on load.
    */
   vehicleInventory: import("./vehicle-inventory.js").VehicleInventoryStateV1;
+  /**
+   * Multi-context executive layer (context bindings, temporal facts, graph, capture, value).
+   * Additive; defaulted forward when missing on load.
+   */
+  executive: import("./executive-state.js").ExecutiveStateV1;
   /** Phones the owner paired. Revoking one never touches owner data. */
   devices: PairedDeviceV1[];
   /** Sessions issued to paired devices. Only digests are stored. */

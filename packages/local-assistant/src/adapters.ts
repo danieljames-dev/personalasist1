@@ -116,6 +116,43 @@ export function createEmptyStateV1(): AssistantStateV1 {
       lastInventoryRefresh: {},
       onlineListings: [],
     },
+    executive: {
+      context: {
+        activeContextId: "personal",
+        bindings: [
+          {
+            workspaceId: "personal",
+            role: "PERSONAL",
+            label: "Personal",
+            defaultVisibility: "PRIVATE",
+            linkedDealershipSlug: null,
+            linkedBrandWorkspaceId: null,
+            notes: "",
+            updatedAt: GENESIS,
+          },
+          {
+            workspaceId: "work",
+            role: "LAKELAND_TOYOTA",
+            label: "Lakeland Toyota",
+            defaultVisibility: "WORKSPACE_ONLY",
+            linkedDealershipSlug: "lakeland-toyota",
+            linkedBrandWorkspaceId: null,
+            notes: "",
+            updatedAt: GENESIS,
+          },
+        ],
+        lastSwitchAt: null,
+        lastSwitchReason: "",
+      },
+      temporalFacts: [],
+      graphEdges: [],
+      opportunities: [],
+      valueLedger: [],
+      captures: [],
+      brandDna: [],
+      lastEndOfDayAt: null,
+      lastWeeklyReviewAt: null,
+    },
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
   };
@@ -352,6 +389,61 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!ak.vehicleInventory.lastInventoryRefresh || typeof ak.vehicleInventory.lastInventoryRefresh !== "object") {
       ak.vehicleInventory.lastInventoryRefresh = {};
     }
+  }
+  if (!ak.executive || typeof ak.executive !== "object") {
+    ak.executive = {
+      context: {
+        activeContextId: ak.settings?.activeWorkspace || "personal",
+        bindings: [
+          {
+            workspaceId: "personal",
+            role: "PERSONAL",
+            label: "Personal",
+            defaultVisibility: "PRIVATE",
+            linkedDealershipSlug: null,
+            linkedBrandWorkspaceId: null,
+            notes: "",
+            updatedAt: GENESIS,
+          },
+          {
+            workspaceId: "work",
+            role: "LAKELAND_TOYOTA",
+            label: "Lakeland Toyota",
+            defaultVisibility: "WORKSPACE_ONLY",
+            linkedDealershipSlug: "lakeland-toyota",
+            linkedBrandWorkspaceId: null,
+            notes: "",
+            updatedAt: GENESIS,
+          },
+        ],
+        lastSwitchAt: null,
+        lastSwitchReason: "",
+      },
+      temporalFacts: [],
+      graphEdges: [],
+      opportunities: [],
+      valueLedger: [],
+      captures: [],
+      brandDna: [],
+      lastEndOfDayAt: null,
+      lastWeeklyReviewAt: null,
+    };
+  } else {
+    if (!ak.executive.context || typeof ak.executive.context !== "object") {
+      ak.executive.context = {
+        activeContextId: ak.settings?.activeWorkspace || "personal",
+        bindings: [],
+        lastSwitchAt: null,
+        lastSwitchReason: "",
+      };
+    }
+    if (!Array.isArray(ak.executive.context.bindings)) ak.executive.context.bindings = [];
+    if (!Array.isArray(ak.executive.temporalFacts)) ak.executive.temporalFacts = [];
+    if (!Array.isArray(ak.executive.graphEdges)) ak.executive.graphEdges = [];
+    if (!Array.isArray(ak.executive.opportunities)) ak.executive.opportunities = [];
+    if (!Array.isArray(ak.executive.valueLedger)) ak.executive.valueLedger = [];
+    if (!Array.isArray(ak.executive.captures)) ak.executive.captures = [];
+    if (!Array.isArray(ak.executive.brandDna)) ak.executive.brandDna = [];
   }
   for (const src of ak.importSourceQueue) {
     if (!src.stats || typeof src.stats !== "object") {

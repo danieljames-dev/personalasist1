@@ -908,6 +908,15 @@ export async function createAionServer(options = {}) {
       case "vehicle.forCustomer": return { vehicles: await service.vehiclesForCustomer(String(input.relationshipId ?? "")) };
       case "vehicle.customers": return service.customersForVehicle({ vehicleId: input.vehicleId, vin: input.vin });
       case "import.lastSummary": return service.lastImportSummary();
+      case "context.switch": return service.switchContext(String(input.name ?? input.text ?? ""));
+      case "attention.board": return service.attentionBoard();
+      case "capture.universal": return service.universalCapture(String(input.text ?? ""), { apply: input.apply !== false });
+      case "opportunity.radar": return { opportunities: await service.refreshOpportunityRadar() };
+      case "sales.copilot": return service.salesCopilotForCustomer(String(input.relationshipId ?? input.id ?? ""));
+      case "executive.eod": return service.endOfDayWrap();
+      case "executive.weekly": return service.weeklyCeoReview();
+      case "brand.dna.upsert": return service.upsertBrandDna(String(input.workspaceId ?? ""), input.patch ?? input);
+      case "context.visibility": return service.checkVisibility(String(input.sourceWorkspace ?? ""), input.visibility || "WORKSPACE_ONLY");
       case "metricool.fixture.seed": return service.seedMetricoolFixtures(input);
       case "metricool.insight": return service.metricoolInsight(input.now);
       case "work.queue": return service.workQueue();

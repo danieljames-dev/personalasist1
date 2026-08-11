@@ -106,6 +106,14 @@ test("customer interested vehicles and import review UX present", () => {
   assert.match(js, /Review queue/);
 });
 
+test("universal Capture and context switching UX present", () => {
+  assert.match(js, /"Capture"/);
+  assert.match(js, /captureArea|universal-capture/);
+  assert.match(js, /context-lakeland|context-personal/);
+  assert.match(js, /attention-board|eod-wrap/);
+  assert.match(js, /SpeechRecognition|capture-voice/);
+});
+
 test("viewport contract for common iPhone sizes", () => {
   for (const vp of VIEWPORTS) {
     const usable = vp.h - 56 - 56 - 34;

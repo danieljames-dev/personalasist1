@@ -1,8 +1,8 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Home", "Chat", "Customers", "Tasks", "Intake", "Inventory Walk", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
-/** Primary phone bottom bar (5 slots). More opens a sheet for Intake / Knowledge / Inventory / Mobile. */
+const areas = ["Home", "Chat", "Customers", "Tasks", "Capture", "Intake", "Inventory Walk", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
+/** Primary phone bottom bar (5 slots). More opens a sheet for Capture / Intake / Inventory / Knowledge. */
 const mobilePrimaryAreas = ["Home", "Chat", "Customers", "Tasks", "More"];
-const mobileMoreAreas = new Set(["Intake", "Inventory Walk", "Knowledge", "Mobile", "Settings", "Sales", "People", "Imports"]);
+const mobileMoreAreas = new Set(["Capture", "Intake", "Inventory Walk", "Knowledge", "Mobile", "Settings", "Sales", "People", "Imports"]);
 let model = null;
 let area = "Home";
 let streaming = "";
@@ -108,6 +108,7 @@ function homeArea(s) {
 <button type="button" data-area-jump="Customers">Customers</button>
 <button type="button" data-area-jump="Tasks">Tasks</button>
 <button type="button" data-area-jump="Intake">Upload photo</button>
+<button type="button" data-area-jump="Capture">Capture</button>
 <button type="button" data-area-jump="Inventory Walk">Inventory Walk</button>
 <button type="button" data-area-jump="Knowledge">Knowledge</button>
 </div>
@@ -910,6 +911,38 @@ ${b.commands.map((c) => `<br><span class="meta">Exact ${esc(c.mode)} command: <c
 <div class="actions"><button data-do="state-export">Export all local data</button></div></div>`;
 }
 
+function captureArea(s) {
+  const ws = s.settings?.activeWorkspace ?? "personal";
+  const wsLabel = s.settings?.workspaceLabels?.[ws] ?? ws;
+  const last = window.__aionLastCapture;
+  return `<div class="sales"><div class="sales-head"><h1>Capture</h1>
+<p class="today"><span>Context <b>${esc(wsLabel)}</b></span></p></div>
+<div class="card next"><h2>Universal capture</h2>
+<p class="meta">Text or voice → note / follow-up / vehicle interest / idea. Provenance + timestamp. Confirm only when ambiguous.</p>
+<form data-form="universal-capture" class="quick-form" id="captureForm">
+<label>What happened?
+<textarea name="text" id="captureText" required maxlength="10000" rows="4" placeholder="I just talked to Mike. He likes the Limited but wants under 50k. Follow up tomorrow." style="font-size:16px;min-height:6rem"></textarea></label>
+<div class="tap-grid">
+<button type="submit" style="min-height:3rem">Save capture</button>
+<button type="button" data-do="capture-voice" style="min-height:3rem">Voice</button>
+</div>
+</form>
+<div class="tap-grid quick" style="margin-top:.6rem">
+<button type="button" data-do="context-personal">Personal</button>
+<button type="button" data-do="context-lakeland">Lakeland Toyota</button>
+<button type="button" data-do="attention-board">Attention board</button>
+<button type="button" data-do="eod-wrap">Wrap my day</button>
+</div>
+</div>
+${last ? `<div class="card"><h2>Last capture · ${esc(last.classification?.kind || "")}</h2>
+<p class="meta">${esc(last.classification?.why || "")}</p>
+<p class="meta">Applied: ${esc((last.applied || []).join("; ") || "—")}</p>
+${last.classification?.needsConfirm ? `<p class="warn">Confirm needed — edit context or rephrase.</p>` : ""}
+</div>` : ""}
+<p class="hint">Voice uses browser speech recognition when available (no custom speech stack).</p>
+</div>`;
+}
+
 function inventoryWalkArea(s) {
   const inv = s.vehicleInventory || { dealerships: [], vehicles: [], walks: [], observations: [], onlineListings: [] };
   const dealer = (inv.dealerships || []).find((d) => d.isCurrent) || inv.dealerships?.[0];
@@ -1006,6 +1039,7 @@ function page() {
   const s = model.state;
   if (area === "Home") return homeArea(s);
   if (area === "Customers" || area === "People") return area === "Customers" ? salesArea(s) : peopleArea(s);
+  if (area === "Capture") return captureArea(s);
   if (area === "Intake") return intakeArea(s);
   if (area === "Inventory Walk") return inventoryWalkArea(s);
   if (area === "Mobile") return mobileArea();
@@ -1450,6 +1484,49 @@ document.addEventListener("click", async (event) => {
       render();
       return;
     }
+    if (verb === "context-personal") {
+      await api("context.switch", { name: "Personal" });
+      toast("Context → Personal");
+      await load();
+      return;
+    }
+    if (verb === "context-lakeland") {
+      await api("context.switch", { name: "Lakeland Toyota" });
+      toast("Context → Lakeland Toyota (Work)");
+      await load();
+      return;
+    }
+    if (verb === "attention-board") {
+      const board = await api("attention.board", {});
+      window.__aionLastBriefing = (board.briefingLines || []).join("\n");
+      toast("Attention board refreshed");
+      await load();
+      return;
+    }
+    if (verb === "eod-wrap") {
+      const wrap = await api("executive.eod", {});
+      window.__aionLastBriefing = wrap.reply;
+      toast("End-of-day wrap ready");
+      await load();
+      return;
+    }
+    if (verb === "capture-voice") {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) { toast("Speech recognition not available in this browser."); return; }
+      const rec = new SR();
+      rec.lang = "en-US";
+      rec.interimResults = false;
+      rec.onresult = (ev) => {
+        const text = ev.results?.[0]?.[0]?.transcript || "";
+        const ta = document.getElementById("captureText");
+        if (ta) ta.value = text;
+        toast("Voice captured — review and Save");
+      };
+      rec.onerror = () => toast("Voice capture failed");
+      rec.start();
+      toast("Listening…");
+      return;
+    }
     await load();
   } catch (error) { toast(error.message); }
 });
@@ -1494,6 +1571,14 @@ document.addEventListener("submit", async (event) => {
         summary: d.summary || undefined,
       });
       toast(`Stored ${doc.filename} (${doc.byteLength} bytes)${doc.tags?.length ? ` · ${doc.tags.join(", ")}` : ""}`);
+      form.reset();
+      await load();
+      return;
+    }
+    if (kind === "universal-capture") {
+      const result = await api("capture.universal", { text: d.text, apply: true });
+      window.__aionLastCapture = result;
+      toast(result.classification?.needsConfirm ? "Capture needs confirm" : `Captured · ${result.classification?.kind}`);
       form.reset();
       await load();
       return;

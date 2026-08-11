@@ -120,6 +120,23 @@ import {
   type RecallLookupResultV1,
 } from "./vehicle-research.js";
 import {
+  buildGraphEdge,
+  buildTemporalFact,
+  ensureBindingForWorkspace,
+  mayUseAcrossContexts,
+  resolveContextSwitch,
+  supersedeTemporalFact,
+  type VisibilityClassV1,
+} from "./executive-context.js";
+import { emptyBrandDna, emptyExecutiveState, type ExecutiveStateV1 } from "./executive-state.js";
+import { buildAttentionBoard, type AttentionBoardV1 } from "./attention-engine.js";
+import { classifyCaptureText, type CaptureResultV1 } from "./universal-capture.js";
+import {
+  buildValueLedgerEntry,
+  detectInventoryMatches,
+  type OpportunitySignalV1,
+} from "./opportunity-radar.js";
+import {
   applyOnlineListings,
   buildDealershipContext,
   decodeVinNhtsa,
@@ -3757,6 +3774,453 @@ export class AionAssistantV1 {
     };
   }
 
+  // ─── Executive multi-context OS ───────────────────────────────────────────
+
+  private executiveOf(state: AssistantStateV1): ExecutiveStateV1 {
+    return state.executive ?? emptyExecutiveState(this.ports.clock.now());
+  }
+
+  async switchContext(textOrName: string): Promise<{
+    workspaceId: string;
+    label: string;
+    role: string;
+    message: string;
+  }> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      for (const w of draft.workspaces) {
+        draft.executive = {
+          ...draft.executive,
+          context: ensureBindingForWorkspace(draft.executive.context, w, now),
+        };
+      }
+      const resolved = resolveContextSwitch(textOrName, draft.executive.context, draft.workspaces);
+      if (!resolved) throw new Error(`Unknown context: ${textOrName}. Try Personal, Lakeland Toyota, or a brand name.`);
+      draft.settings.activeWorkspace = resolved.workspaceId;
+      draft.executive.context.activeContextId = resolved.workspaceId;
+      draft.executive.context.lastSwitchAt = now;
+      draft.executive.context.lastSwitchReason = `Owner switch: ${textOrName}`;
+      // Align Lakeland binding when switching to work
+      if (resolved.workspaceId === "work") {
+        draft.executive.context.bindings = draft.executive.context.bindings.map((b) =>
+          b.workspaceId === "work"
+            ? { ...b, role: "LAKELAND_TOYOTA", label: b.label || "Lakeland Toyota", linkedDealershipSlug: "lakeland-toyota", updatedAt: now }
+            : b,
+        );
+      }
+      this.activity(
+        draft,
+        "settings",
+        "context.switch",
+        `Context → ${resolved.binding.label} (${resolved.workspaceId})`,
+        null,
+      );
+      return {
+        workspaceId: resolved.workspaceId,
+        label: resolved.binding.label,
+        role: resolved.binding.role,
+        message: `Switched to ${resolved.binding.label}. Records stay in their source workspace; visibility boundaries preserved.`,
+      };
+    });
+  }
+
+  async attentionBoard(): Promise<AttentionBoardV1> {
+    const state = await this.snapshot();
+    const inv = this.vehicleInv(state);
+    const lastWalk = inv.walks[0];
+    let exceptions = 0;
+    if (lastWalk) {
+      const sum = reconcileInventoryWalk(lastWalk, inv.observations, inv.vehicles, this.ports.clock.now());
+      exceptions =
+        sum.stockMismatches.length +
+        sum.vinMismatches.length +
+        sum.photoReviewRequired.length +
+        sum.seenButNotOnline.length;
+    }
+    return buildAttentionBoard({
+      nowIso: this.ports.clock.now(),
+      relationships: state.relationships,
+      tasks: state.tasks,
+      workspaceLabels: state.settings.workspaceLabels,
+      inventoryExceptions: exceptions,
+      brandWorkspaceCount: state.workspaces.filter((w) => w.kind === "business" && !w.archived).length,
+      openImportReview: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
+      openApprovals: (state.approvals ?? []).filter((a) => a.state === "pending").length,
+      opportunityCount: (state.executive?.opportunities ?? []).length,
+    });
+  }
+
+  async universalCapture(text: string, opts: { apply?: boolean } = {}): Promise<CaptureResultV1> {
+    const now = this.ports.clock.now();
+    const classification = classifyCaptureText(text, now);
+    const applied: string[] = [];
+    const skipped: string[] = [];
+    const captureId = this.ports.ids.next("capture");
+
+    if (opts.apply === false || classification.needsConfirm) {
+      const result: CaptureResultV1 = {
+        classification,
+        applied: classification.needsConfirm ? [] : applied,
+        skipped: classification.needsConfirm
+          ? ["Awaiting Owner confirm — ambiguity material"]
+          : skipped,
+        captureId,
+        at: now,
+      };
+      await this.mutate((draft) => {
+        if (!draft.executive) draft.executive = emptyExecutiveState(now);
+        draft.executive.captures.unshift(result);
+        if (draft.executive.captures.length > 200) draft.executive.captures.length = 200;
+        return result;
+      });
+      if (classification.needsConfirm) return result;
+    }
+
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(now);
+      const ws =
+        classification.workspaceHint === "work"
+          ? "work"
+          : classification.workspaceHint === "personal"
+            ? "personal"
+            : draft.settings.activeWorkspace;
+
+      if (classification.kind === "preference" || classification.kind === "memory" || classification.kind === "idea") {
+        const fact = buildTemporalFact(
+          {
+            title: classification.kind === "idea" ? "Idea" : "Preference",
+            content: classification.summary,
+            category: classification.kind,
+            visibility: ws === "personal" ? "PRIVATE" : "WORKSPACE_ONLY",
+            confidence: 85,
+            sourceRef: "capture.universal",
+          },
+          { id: this.ports.ids.next("tfact"), now, workspace: ws },
+        );
+        draft.executive.temporalFacts.unshift(fact);
+        applied.push(`Temporal fact ${fact.id}`);
+      }
+
+      if (classification.personName && (classification.kind === "customer_update" || classification.kind === "vehicle_interest" || classification.kind === "follow_up" || classification.kind === "note")) {
+        const people = draft.relationships.filter(
+          (r) => r.workspace === (classification.workspaceHint === "work" ? "work" : r.workspace) && !r.archived,
+        );
+        let person = findRelationshipsByName(people, classification.personName)[0] ?? null;
+        if (!person && classification.workspaceHint === "work") {
+          const rid = this.ports.ids.next("relationship");
+          person = buildCustomer(
+            {
+              displayName: classification.personName,
+              source: "universal-capture",
+              notes: classification.summary,
+              relationshipType: "customer",
+            },
+            {
+              id: rid,
+              reference: `capture:${rid}`,
+              workspace: "work",
+              now,
+              relationshipType: "customer",
+              defaultOrigin: "owner-created",
+            },
+          );
+          draft.relationships.unshift(person);
+          applied.push(`Created prospect ${person.displayName}`);
+        }
+        if (person) {
+          const personId = person.id;
+          const interaction = buildInteraction(
+            { kind: "note", summary: classification.summary },
+            { id: this.ports.ids.next("interaction"), now },
+          );
+          let nextPerson = {
+            ...person,
+            interactions: [interaction, ...person.interactions].slice(0, 200),
+            lastContactAt: now,
+            updatedAt: now,
+            notes: person.notes
+              ? `${person.notes}\n${classification.summary}`.slice(0, 20_000)
+              : classification.summary,
+          };
+          if (classification.vehicleHint) {
+            nextPerson = {
+              ...nextPerson,
+              interests: [
+                { kind: "vehicle" as const, description: classification.vehicleHint.slice(0, 500), notedAt: now },
+                ...nextPerson.interests,
+              ].slice(0, 40),
+            };
+            applied.push(`Vehicle interest: ${classification.vehicleHint}`);
+          }
+          if (classification.budgetHint) {
+            nextPerson = {
+              ...nextPerson,
+              interests: [
+                { kind: "other" as const, description: `Budget: ${classification.budgetHint}`.slice(0, 500), notedAt: now },
+                ...nextPerson.interests,
+              ].slice(0, 40),
+            };
+          }
+          if (classification.followUpWhen) {
+            const due =
+              classification.followUpWhen === "tomorrow"
+                ? new Date(Date.parse(now) + 86400000).toISOString()
+                : classification.followUpWhen === "today"
+                  ? now
+                  : new Date(Date.parse(now) + 86400000).toISOString();
+            const fu = buildFollowUp(
+              { dueAt: due, channel: "phone", reason: classification.summary.slice(0, 500) },
+              { id: this.ports.ids.next("followup"), now },
+            );
+            nextPerson = { ...nextPerson, followUps: [fu, ...nextPerson.followUps] };
+            applied.push(`Follow-up scheduled (${classification.followUpWhen})`);
+          }
+          draft.relationships = draft.relationships.map((r) => (r.id === personId ? nextPerson : r));
+          applied.push(`Note on ${nextPerson.displayName}`);
+
+          if (classification.vehicleHint) {
+            try {
+              const edge = buildGraphEdge(
+                {
+                  type: "interested_in",
+                  fromKind: "customer",
+                  fromId: nextPerson.id,
+                  fromLabel: nextPerson.displayName,
+                  toKind: "vehicle_interest",
+                  toId: classification.vehicleHint.slice(0, 80),
+                  toLabel: classification.vehicleHint,
+                  note: classification.summary,
+                  visibility: "WORKSPACE_ONLY",
+                  sourceRef: "capture.universal",
+                },
+                { id: this.ports.ids.next("edge"), now, workspace: nextPerson.workspace },
+              );
+              draft.executive.graphEdges.unshift(edge);
+              applied.push("Graph: interested_in");
+            } catch {
+              skipped.push("graph edge skipped");
+            }
+          }
+        } else {
+          skipped.push("No matching customer — confirm name");
+        }
+      }
+
+      if (classification.kind === "task" || (classification.kind === "follow_up" && !classification.personName)) {
+        const task: TaskV1 = {
+          id: this.ports.ids.next("task"),
+          workspace: ws,
+          title: classification.summary.slice(0, 200),
+          description: classification.summary,
+          state: "ready",
+          priority: "normal",
+          tags: ["capture"],
+          dueAt: null,
+          planId: null,
+          routineId: null,
+          createdAt: now,
+          completedAt: null,
+          provenance: { sourceType: "owner", sourceRef: "capture.universal", recordedAt: now },
+          history: [],
+        };
+        draft.tasks.unshift(task);
+        applied.push(`Task created in ${ws}`);
+      }
+
+      if (classification.kind === "brand_note") {
+        const fact = buildTemporalFact(
+          {
+            title: "Brand capture",
+            content: classification.summary,
+            category: "brand",
+            visibility: "WORKSPACE_ONLY",
+            sourceRef: "capture.brand",
+          },
+          { id: this.ports.ids.next("tfact"), now, workspace: draft.settings.activeWorkspace },
+        );
+        draft.executive.temporalFacts.unshift(fact);
+        applied.push("Brand note stored (confirm brand workspace if needed)");
+      }
+
+      // Value ledger: capture saves Owner form-filling time (estimated)
+      const ledger = buildValueLedgerEntry(
+        {
+          action: `Universal capture (${classification.kind})`,
+          capability: "capture",
+          timeSavedMinutes: 3,
+          estimateKind: "estimated",
+          ownerInterventionRequired: classification.needsConfirm,
+          notes: "Estimated form-fill avoidance; not measured revenue.",
+        },
+        { id: this.ports.ids.next("value"), now, workspace: ws },
+      );
+      draft.executive.valueLedger.unshift(ledger);
+      if (draft.executive.valueLedger.length > 500) draft.executive.valueLedger.length = 500;
+      if (draft.executive.temporalFacts.length > 2000) draft.executive.temporalFacts.length = 2000;
+      if (draft.executive.graphEdges.length > 5000) draft.executive.graphEdges.length = 5000;
+
+      const result: CaptureResultV1 = { classification, applied, skipped, captureId, at: now };
+      draft.executive.captures.unshift(result);
+      if (draft.executive.captures.length > 200) draft.executive.captures.length = 200;
+      this.activity(draft, "agent", "capture.universal", `Capture ${classification.kind}: ${applied.length} applied`, captureId);
+      return result;
+    });
+  }
+
+  async refreshOpportunityRadar(): Promise<OpportunitySignalV1[]> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      const inv = this.vehicleInv(draft);
+      const signals = detectInventoryMatches({
+        relationships: draft.relationships,
+        vehicles: inv.vehicles,
+        nowIso: now,
+        nextId: (k) => this.ports.ids.next(k),
+      });
+      draft.executive.opportunities = signals;
+      this.activity(draft, "agent", "opportunity.radar", `Opportunity radar: ${signals.length} signal(s)`, null);
+      return signals;
+    });
+  }
+
+  async salesCopilotForCustomer(relationshipId: string): Promise<{
+    reply: string;
+    matches: OpportunitySignalV1[];
+    customer: string;
+  }> {
+    const state = await this.snapshot();
+    const customer = state.relationships.find((r) => r.id === relationshipId);
+    if (!customer) throw new Error("Customer not found.");
+    const signals = await this.refreshOpportunityRadar();
+    const matches = signals.filter(
+      (s) => s.kind === "inventory_match" && s.entityIds.includes(relationshipId),
+    );
+    const inv = this.vehicleInv(state);
+    const linked = inv.vehicles.filter((v) => v.relationshipIds.includes(relationshipId));
+    const lines = [
+      `Sales copilot for ${customer.displayName} (stored facts only):`,
+      `Stage: ${customer.lifecycle} · Next: ${customer.nextAction || "none"}`,
+      `Interests: ${(customer.interests ?? []).map((i) => i.description).join("; ") || "none recorded"}`,
+      `Linked vehicles: ${linked.map((v) => [v.year, v.make, v.model].filter(Boolean).join(" ") || v.vin).join("; ") || "none"}`,
+      "",
+      matches.length
+        ? `Best inventory matches (${matches.length}):\n${matches.slice(0, 3).map((m, i) => `  ${i + 1}. ${m.title} — ${m.detail}`).join("\n")}`
+        : "No strong inventory matches yet — refresh inventory or capture requirements.",
+      "",
+      "AION does not invent customer requirements or vehicle features.",
+    ];
+    return { reply: lines.join("\n"), matches, customer: customer.displayName };
+  }
+
+  async endOfDayWrap(): Promise<{ reply: string; questions: string[] }> {
+    const board = await this.attentionBoard();
+    const state = await this.snapshot();
+    const day = this.ports.clock.now().slice(0, 10);
+    const interactions = state.relationships.flatMap((r) =>
+      (r.interactions ?? [])
+        .filter((i) => i.at?.startsWith(day))
+        .map((i) => ({ name: r.displayName, summary: i.summary })),
+    );
+    const questions: string[] = [];
+    if (interactions.length === 0) questions.push("Any conversations today worth logging?");
+    if (board.ownerMustDo.some((i) => i.sourceType === "follow-up")) {
+      questions.push("Which open follow-ups did you complete?");
+    }
+    questions.push("Any vehicle interest or brand notes from today?");
+    await this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      draft.executive.lastEndOfDayAt = this.ports.clock.now();
+      return null;
+    });
+    const reply = [
+      "END OF DAY WRAP",
+      "",
+      `Interactions logged today: ${interactions.length}`,
+      ...interactions.slice(0, 8).map((i) => `  • ${i.name}: ${i.summary.slice(0, 100)}`),
+      "",
+      ...board.briefingLines,
+      "",
+      "Open questions (answer via Capture or Chat):",
+      ...questions.slice(0, 3).map((q, i) => `  ${i + 1}. ${q}`),
+    ].join("\n");
+    return { reply, questions: questions.slice(0, 3) };
+  }
+
+  async weeklyCeoReview(): Promise<{ reply: string }> {
+    const state = await this.snapshot();
+    const inv = this.vehicleInv(state);
+    const brands = state.workspaces.filter((w) => w.kind === "business" && !w.archived);
+    const board = await this.attentionBoard();
+    const radar = state.executive?.opportunities ?? [];
+    await this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      draft.executive.lastWeeklyReviewAt = this.ports.clock.now();
+      return null;
+    });
+    const reply = [
+      "WEEKLY CEO REVIEW (stored evidence only)",
+      "",
+      "DEALERSHIP (Lakeland / Work)",
+      `  Vehicles stored: ${inv.vehicles.length} · Walks: ${inv.walks.length} · Observations: ${inv.observations.length}`,
+      `  Open work follow-ups: ${state.relationships.filter((r) => r.workspace === "work" && !r.archived).flatMap((r) => r.followUps.filter((f) => f.status === "open")).length}`,
+      `  Opportunity signals: ${radar.length}`,
+      "",
+      "BUSINESSES / BRANDS",
+      brands.length ? brands.map((b) => `  • ${b.brand?.name || b.label}`).join("\n") : "  (none)",
+      "",
+      "AION AUTONOMY",
+      ...board.aionCanDo.slice(0, 4).map((i) => `  • ${i.title}`),
+      "",
+      "OWNER ATTENTION",
+      ...board.ownerMustDo.slice(0, 5).map((i) => `  • [${i.contextLabel}] ${i.title}`),
+      "",
+      "Recommendations: complete only-you follow-ups; let AION draft/match inventory; import one Owner knowledge folder; do not invent metrics.",
+    ].join("\n");
+    return { reply };
+  }
+
+  async upsertBrandDna(workspaceId: string, patch: Record<string, unknown>) {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const ws = draft.workspaces.find((w) => w.id === workspaceId);
+      if (!ws || ws.kind !== "business") throw new Error("Brand DNA applies to business/brand workspaces.");
+      const now = this.ports.clock.now();
+      let dna = draft.executive.brandDna.find((b) => b.workspaceId === workspaceId) || emptyBrandDna(workspaceId, now);
+      dna = {
+        ...dna,
+        purpose: patch.purpose !== undefined ? String(patch.purpose).slice(0, 2000) : dna.purpose,
+        audience: patch.audience !== undefined ? String(patch.audience).slice(0, 2000) : dna.audience,
+        voice: patch.voice !== undefined ? String(patch.voice).slice(0, 500) : dna.voice,
+        tone: patch.tone !== undefined ? String(patch.tone).slice(0, 500) : dna.tone,
+        goals: patch.goals !== undefined ? String(patch.goals).slice(0, 2000) : dna.goals,
+        claims: Array.isArray(patch.claims) ? patch.claims.map(String).slice(0, 40) : dna.claims,
+        forbiddenClaims: Array.isArray(patch.forbiddenClaims)
+          ? patch.forbiddenClaims.map(String).slice(0, 40)
+          : dna.forbiddenClaims,
+        platforms: Array.isArray(patch.platforms) ? patch.platforms.map(String).slice(0, 40) : dna.platforms,
+        provenanceSourceRef: "owner.brand-dna",
+        updatedAt: now,
+      };
+      draft.executive.brandDna = [
+        dna,
+        ...draft.executive.brandDna.filter((b) => b.workspaceId !== workspaceId),
+      ];
+      this.activity(draft, "settings", "brand.dna", `Brand DNA updated: ${ws.label}`, ws.id);
+      return dna;
+    });
+  }
+
+  async checkVisibility(sourceWorkspace: string, visibility: VisibilityClassV1) {
+    const state = await this.snapshot();
+    return mayUseAcrossContexts({
+      sourceWorkspace,
+      activeWorkspace: state.settings.activeWorkspace,
+      visibility,
+    });
+  }
+
   async workQueue() {
     const state = await this.snapshot();
     return buildWorkQueue(state.relationships, this.ports.clock.now());
@@ -4170,6 +4634,74 @@ export class AionAssistantV1 {
       };
     }
 
+    if (route.intent === "CONTEXT_SWITCH") {
+      const name =
+        text.match(/\bswitch to\s+(.+?)(?:\.|$)/i)?.[1] ||
+        text.match(/\buse\s+(.+?)(?:\.|$)/i)?.[1] ||
+        text;
+      const result = await this.switchContext(name.trim());
+      return {
+        intent: route.intent,
+        confidence: "high",
+        reply: result.message,
+        sources: [{ type: "context", id: result.workspaceId, label: result.label }],
+        action: "context.switch",
+        data: result,
+      };
+    }
+    if (route.intent === "ATTENTION_BOARD" || (route.intent === "WORK_QUEUE" && /\bonly i need\b|aion can do|owner must do/i.test(text))) {
+      const board = await this.attentionBoard();
+      return {
+        intent: "ATTENTION_BOARD",
+        confidence: "high",
+        reply: board.briefingLines.join("\n"),
+        sources: [],
+        action: "attention.board",
+        data: board,
+      };
+    }
+    if (route.intent === "UNIVERSAL_CAPTURE" || /\bcapture:\s*/i.test(text)) {
+      const payload = text.replace(/^\s*capture:\s*/i, "");
+      const result = await this.universalCapture(payload, { apply: true });
+      return {
+        intent: "UNIVERSAL_CAPTURE",
+        confidence: result.classification.confidence,
+        reply: [
+          `Capture · ${result.classification.kind} (${result.classification.confidence})`,
+          result.classification.why,
+          result.classification.needsConfirm ? "CONFIRM needed before full apply." : `Applied: ${result.applied.join("; ") || "none"}`,
+          result.skipped.length ? `Skipped: ${result.skipped.join("; ")}` : "",
+          `Proposed: ${result.classification.proposedActions.join(" · ")}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        sources: [],
+        action: "capture.universal",
+        data: result,
+      };
+    }
+    if (route.intent === "END_OF_DAY") {
+      const wrap = await this.endOfDayWrap();
+      return {
+        intent: route.intent,
+        confidence: "high",
+        reply: wrap.reply,
+        sources: [],
+        action: "executive.eod",
+        data: wrap,
+      };
+    }
+    if (route.intent === "WEEKLY_REVIEW") {
+      const weekly = await this.weeklyCeoReview();
+      return {
+        intent: route.intent,
+        confidence: "high",
+        reply: weekly.reply,
+        sources: [],
+        action: "executive.weekly",
+        data: weekly,
+      };
+    }
     if (route.intent === "VEHICLE_INVENTORY") {
       const inv = this.vehicleInv(state);
       // Owner work context
@@ -4536,6 +5068,7 @@ export class AionAssistantV1 {
         route.intent === "WORK_QUEUE" ||
         /\bbriefing|what needs me|what can you handle|what changed|prepare me for today|what did i forget\b/i.test(text);
       if (useBriefing) {
+        const board = await this.attentionBoard();
         const brands = (state.workspaces ?? [])
           .filter((w) => w.kind === "business" && !w.archived)
           .map((w) => ({ name: w.brand?.name || w.label }));
@@ -4548,6 +5081,15 @@ export class AionAssistantV1 {
           workspaceId,
           nowIso: this.ports.clock.now(),
         });
+        const execHeader = [
+          "EXECUTIVE BRIEFING (multi-context)",
+          `Active workspace: ${state.settings.workspaceLabels?.[workspaceId] ?? workspaceId}`,
+          "",
+          ...board.briefingLines,
+          "",
+          "— Context detail —",
+          "",
+        ].join("\n");
         let brandExtra = "";
         if (/\bbrand|caleb|collaborator|scheduled|posted|metricool|performed\b/i.test(text)) {
           const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
@@ -4581,7 +5123,7 @@ export class AionAssistantV1 {
         return {
           intent: route.intent,
           confidence: route.confidence,
-          reply: briefing.text + brandExtra,
+          reply: execHeader + briefing.text + brandExtra,
           sources,
           action: "work.briefing",
           data: briefing,

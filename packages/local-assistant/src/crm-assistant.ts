@@ -36,7 +36,12 @@ export type CrmAssistantIntentV1 =
   | "PRODUCT_BUILD"
   | "IMPORT_STATUS"
   | "CONNECTOR_STATUS"
-  | "VEHICLE_INVENTORY";
+  | "VEHICLE_INVENTORY"
+  | "CONTEXT_SWITCH"
+  | "UNIVERSAL_CAPTURE"
+  | "ATTENTION_BOARD"
+  | "END_OF_DAY"
+  | "WEEKLY_REVIEW";
 
 export interface CrmIntentRouteV1 {
   intent: CrmAssistantIntentV1;
@@ -48,6 +53,46 @@ export interface CrmIntentRouteV1 {
 
 /** Alias patterns: any match (word-boundary-ish includes) routes to intent. Order = priority. */
 const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidence: "high" | "medium" }> = [
+  {
+    intent: "CONTEXT_SWITCH",
+    confidence: "high",
+    patterns: [
+      /\bswitch to\b/i,
+      /\buse personal\b/i,
+      /\buse lakeland\b/i,
+      /\bcurrent context\b/i,
+    ],
+  },
+  {
+    intent: "END_OF_DAY",
+    confidence: "high",
+    patterns: [/\bwrap up my day\b/i, /\bend of day\b/i, /\beod wrap\b/i],
+  },
+  {
+    intent: "WEEKLY_REVIEW",
+    confidence: "high",
+    patterns: [/\bweekly (ceo )?review\b/i, /\bweek in review\b/i],
+  },
+  {
+    intent: "ATTENTION_BOARD",
+    confidence: "high",
+    patterns: [
+      /\bwhat (are )?the most important things only i need\b/i,
+      /\baion can do\b/i,
+      /\bowner must do\b/i,
+      /\battention (board|engine)\b/i,
+    ],
+  },
+  {
+    intent: "UNIVERSAL_CAPTURE",
+    confidence: "high",
+    patterns: [
+      /\bcapture:\s*/i,
+      /\bi just talked to\b/i,
+      /\bidea:\s*/i,
+      /\bfollow up with\b.+\btomorrow\b/i,
+    ],
+  },
   {
     intent: "VEHICLE_INVENTORY",
     confidence: "high",
