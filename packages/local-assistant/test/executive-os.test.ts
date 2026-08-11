@@ -114,7 +114,7 @@ test("attention board separates OWNER_MUST_DO and AION_CAN_DO", () => {
   });
   assert.ok(board.ownerMustDo.some((i) => /Mike|Follow up/i.test(i.title)));
   assert.ok(board.aionCanDo.some((i) => i.aionCanComplete));
-  assert.ok(board.briefingLines.some((l) => /OWNER MUST DO/i.test(l)));
+  assert.ok(board.briefingLines.some((l) => /WHAT DO I NEED TO DO|OWNER MUST/i.test(l)));
 });
 
 test("universal capture classifies dealership conversation", () => {

@@ -99,28 +99,32 @@ async function sendStreamed(id, content) {
 function homeArea(s) {
   const brief = window.__aionLastBriefing;
   const ws = s.settings?.activeWorkspace ?? "personal";
-  const wsLabel = s.settings?.workspaceLabels?.[ws] ?? ws;
+  const wsLabel = (typeof currentContextLabel === "function" ? currentContextLabel() : null) || s.settings?.workspaceLabels?.[ws] || ws;
+  const exec = s.executive || {};
+  const commits = (exec.commitments || []).filter((c) => c.status === "overdue" || c.status === "due_soon").slice(0, 4);
+  const opps = (exec.opportunities || []).slice(0, 3);
   return `<div class="sales home-mobile"><h1>Home</h1>
-<p class="lead">Phone-friendly AION. Workspace: <b>${esc(wsLabel)}</b>. Use the buttons below or the bottom tabs.</p>
+<p class="lead">Context: <b>${esc(wsLabel)}</b>. Owner must do · AION handling · commitments.</p>
 <div class="tap-grid quick">
 <button type="button" data-do="briefing-refresh">What needs me?</button>
-<button type="button" data-area-jump="Chat">Chat</button>
-<button type="button" data-area-jump="Customers">Customers</button>
-<button type="button" data-area-jump="Tasks">Tasks</button>
-<button type="button" data-area-jump="Intake">Upload photo</button>
 <button type="button" data-area-jump="Capture">Capture</button>
+<button type="button" data-area-jump="Customers">Customers</button>
 <button type="button" data-area-jump="Inventory Walk">Inventory Walk</button>
-<button type="button" data-area-jump="Knowledge">Knowledge</button>
+<button type="button" data-do="attention-board">Attention</button>
+<button type="button" data-do="eod-wrap">Wrap day</button>
 </div>
-<div class="card next"><h2>Briefing</h2>
-${brief ? `<pre class="msg assistant" style="white-space:pre-wrap;max-height:40vh;overflow:auto">${esc(brief)}</pre>` : `<p class="meta">Tap <b>What needs me?</b> for today's queue from stored facts only.</p>`}
-<form data-form="assistant-prompt" class="quick-form"><label>Ask AION<textarea name="text" required maxlength="10000" placeholder="What should I follow up on?" rows="3"></textarea></label>
+<div class="card next"><h2>Executive briefing</h2>
+${brief ? `<pre class="msg assistant" style="white-space:pre-wrap;max-height:28vh;overflow:auto">${esc(brief)}</pre>` : `<p class="meta">Tap <b>What needs me?</b> for OWNER MUST DO / AION HANDLING.</p>`}
+</div>
+${commits.length ? `<div class="card warnbox"><h2>Commitments</h2>${commits.map((c) => `<p class="meta"><b>${esc(c.status)}</b> ${esc(c.committedBy)}→${esc(c.committedTo)}: ${esc((c.statement || "").slice(0, 80))}</p>`).join("")}</div>` : ""}
+${opps.length ? `<div class="card"><h2>Opportunities</h2>${opps.map((o) => `<p class="meta">${esc(o.title)}</p>`).join("")}</div>` : ""}
+<div class="card"><h2>Ask</h2>
+<form data-form="assistant-prompt" class="quick-form"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What needs me?" rows="2" style="font-size:16px"></textarea></label>
 <div class="actions"><button type="submit">Ask</button>
-<button type="button" data-do="voice-prompt" title="Browser speech if available">Voice</button></div></form>
-${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p></div>` : ""}
+<button type="button" data-do="voice-prompt">Voice</button></div></form>
+${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc((window.__aionLastAssistant.reply || "").slice(0, 400))}</p></div>` : ""}
 </div>
-<p class="meta"><a href="/phone">Full-screen photo / file intake</a></p>
-<p class="hint">Tip: switch to <b>Work</b> at the top for customers/sales. Bottom tabs: Home · Chat · Customers · Tasks · Intake · Knowledge · Mobile.</p></div>`;
+<p class="meta"><a href="/phone">Photo intake</a></p></div>`;
 }
 
 function chatArea(s) {

@@ -42,6 +42,8 @@ export * from "./attention-engine.js";
 export * from "./universal-capture.js";
 export * from "./opportunity-radar.js";
 export * from "./import-workspace-map.js";
+export * from "./commitments.js";
+export * from "./source-trust.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
 export * from "./owner-authority-v2.js";

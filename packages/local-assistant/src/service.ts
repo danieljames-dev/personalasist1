@@ -146,6 +146,18 @@ import {
 } from "./import-workspace-map.js";
 import { filterAttentionBoard } from "./attention-engine.js";
 import {
+  buildCommitment,
+  extractCommitmentCandidates,
+  refreshCommitmentStatus,
+  type CommitmentV1,
+} from "./commitments.js";
+import {
+  detectFactConflicts,
+  explainBelief,
+  isStaleFact,
+  opportunityShouldSurface,
+} from "./source-trust.js";
+import {
   applyOnlineListings,
   buildDealershipContext,
   decodeVinNhtsa,
@@ -3862,21 +3874,152 @@ export class AionAssistantV1 {
         sum.photoReviewRequired.length +
         sum.seenButNotOnline.length;
     }
+    const now = this.ports.clock.now();
+    const commitments = (state.executive?.commitments ?? []).map((c) => refreshCommitmentStatus(c, now));
+    const opps = (state.executive?.opportunities ?? []).filter((o) =>
+      opportunityShouldSurface({
+        value: o.value,
+        urgency: o.urgency,
+        confidence: o.confidence,
+        interruptionCost: o.interruptionCost,
+        score: o.score,
+      }),
+    );
     const board = buildAttentionBoard({
-      nowIso: this.ports.clock.now(),
+      nowIso: now,
       relationships: state.relationships,
       tasks: state.tasks,
+      commitments,
       workspaceLabels: state.settings.workspaceLabels,
       inventoryExceptions: exceptions,
       brandWorkspaceCount: state.workspaces.filter((w) => w.kind === "business" && !w.archived).length,
       openImportReview: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
       openApprovals: (state.approvals ?? []).filter((a) => a.state === "pending").length,
-      opportunityCount: (state.executive?.opportunities ?? []).length,
+      opportunityCount: opps.length,
     });
     if (filter?.workspace || filter?.onlyOwner || filter?.onlyAion) {
       return filterAttentionBoard(board, filter);
     }
     return board;
+  }
+
+  async addCommitment(input: Record<string, unknown>): Promise<CommitmentV1> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      const c = buildCommitment(input, {
+        id: this.ports.ids.next("commit"),
+        now,
+        workspace: String(input.workspace ?? draft.settings.activeWorkspace),
+      });
+      draft.executive.commitments.unshift(c);
+      if (draft.executive.commitments.length > 500) draft.executive.commitments.length = 500;
+      this.activity(draft, "agent", "commitment.add", `Commitment: ${c.committedBy} → ${c.committedTo}`, c.id);
+      return c;
+    });
+  }
+
+  async resolveIdentityAmbiguity(input: {
+    key: string;
+    relationshipId: string;
+    workspace?: string;
+  }) {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const rel = draft.relationships.find((r) => r.id === input.relationshipId);
+      if (!rel) throw new Error("Relationship not found.");
+      const now = this.ports.clock.now();
+      const key = String(input.key).trim().toLowerCase();
+      const ws = input.workspace || rel.workspace;
+      draft.executive.identityResolutions = [
+        { key, workspace: ws, resolvedRelationshipId: rel.id, displayName: rel.displayName, at: now },
+        ...draft.executive.identityResolutions.filter((r) => !(r.key === key && r.workspace === ws)),
+      ].slice(0, 200);
+      this.activity(draft, "settings", "identity.resolve", `Resolved "${key}" → ${rel.displayName} in ${ws}`, rel.id);
+      return draft.executive.identityResolutions[0];
+    });
+  }
+
+  async runDailyMaintenance(): Promise<{
+    staleFacts: number;
+    conflictsResolved: number;
+    conflictsReview: number;
+    commitmentsRefreshed: number;
+    opportunitiesPruned: number;
+    notes: string[];
+  }> {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      const notes: string[] = [];
+      let staleFacts = 0;
+      let conflictsResolved = 0;
+      let conflictsReview = 0;
+
+      // Refresh commitment statuses
+      draft.executive.commitments = draft.executive.commitments.map((c) => refreshCommitmentStatus(c, now));
+      const commitmentsRefreshed = draft.executive.commitments.filter((c) => c.status === "overdue" || c.status === "due_soon").length;
+
+      // Flag stale temporal facts as UNCERTAIN (do not delete history)
+      draft.executive.temporalFacts = draft.executive.temporalFacts.map((f) => {
+        if (f.temporalStatus === "CURRENT" && isStaleFact(f, now)) {
+          staleFacts += 1;
+          return { ...f, temporalStatus: "UNCERTAIN" as const, updatedAt: now };
+        }
+        return f;
+      });
+      if (staleFacts) notes.push(`Marked ${staleFacts} fact(s) UNCERTAIN (stale by type).`);
+
+      // Conflicts
+      const conflicts = detectFactConflicts(draft.executive.temporalFacts, now);
+      for (const c of conflicts) {
+        if (c.resolution === "supersede_older") {
+          draft.executive.temporalFacts = draft.executive.temporalFacts.map((f) =>
+            f.id === c.olderId ? supersedeTemporalFact(f, c.newerId, now) : f,
+          );
+          conflictsResolved += 1;
+        } else {
+          conflictsReview += 1;
+        }
+      }
+      if (conflictsResolved) notes.push(`Superseded ${conflictsResolved} conflicting fact(s).`);
+      if (conflictsReview) notes.push(`${conflictsReview} conflict(s) need Owner review.`);
+
+      // Prune weak opportunities (keep history length bounded)
+      const before = draft.executive.opportunities.length;
+      draft.executive.opportunities = draft.executive.opportunities.filter((o) =>
+        opportunityShouldSurface({
+          value: o.value,
+          urgency: o.urgency,
+          confidence: o.confidence,
+          interruptionCost: o.interruptionCost,
+          score: o.score,
+        }),
+      );
+      const opportunitiesPruned = before - draft.executive.opportunities.length;
+      if (opportunitiesPruned) notes.push(`Pruned ${opportunitiesPruned} low-value opportunity signal(s).`);
+
+      draft.executive.lastDailyMaintenanceAt = now;
+      this.activity(draft, "agent", "maintenance.daily", `Daily maintenance: stale=${staleFacts} conflicts=${conflictsResolved}`, null);
+      return {
+        staleFacts,
+        conflictsResolved,
+        conflictsReview,
+        commitmentsRefreshed,
+        opportunitiesPruned,
+        notes,
+      };
+    });
+  }
+
+  async explainBelief(statement: string, sourceRef: string, sourceType?: string) {
+    return {
+      explanation: explainBelief({
+        statement,
+        sourceRef,
+        ...(sourceType !== undefined ? { sourceType } : {}),
+      }),
+    };
   }
 
   async inferImportWorkspaceForPath(path: string, extra: {
@@ -3931,14 +4074,27 @@ export class AionAssistantV1 {
     };
   }
 
-  async universalCapture(text: string, opts: { apply?: boolean } = {}): Promise<CaptureResultV1> {
+  async universalCapture(text: string, opts: { apply?: boolean; latencyMs?: number } = {}): Promise<CaptureResultV1> {
+    const started = Date.now();
     const now = this.ports.clock.now();
     const snap = await this.snapshot();
+    // Apply identity resolutions within active workspace before ambiguity check
+    const people = snap.relationships.filter((r) => !r.archived);
     const classification = classifyCaptureText(text, now, {
-      existingPeople: snap.relationships
-        .filter((r) => !r.archived)
-        .map((r) => ({ id: r.id, displayName: r.displayName, workspace: r.workspace })),
+      existingPeople: people.map((r) => ({ id: r.id, displayName: r.displayName, workspace: r.workspace })),
     });
+    if (classification.personName && classification.ambiguousPersonIds.length > 1) {
+      const key = classification.personName.split(/\s+/)[0]!.toLowerCase();
+      const ws = classification.workspaceHint === "work" ? "work" : snap.settings.activeWorkspace;
+      const resolved = (snap.executive?.identityResolutions ?? []).find((r) => r.key === key && r.workspace === ws);
+      if (resolved) {
+        classification.ambiguousPersonIds = [];
+        classification.needsConfirm = false;
+        classification.personName = resolved.displayName;
+        classification.why = `Used remembered identity resolution: ${resolved.displayName}`;
+        classification.confidence = "high";
+      }
+    }
     const applied: string[] = [];
     const skipped: string[] = [];
     const captureId = this.ports.ids.next("capture");
@@ -3957,6 +4113,10 @@ export class AionAssistantV1 {
         if (!draft.executive) draft.executive = emptyExecutiveState(now);
         draft.executive.captures.unshift(result);
         if (draft.executive.captures.length > 200) draft.executive.captures.length = 200;
+        const fr = draft.executive.captureFriction;
+        fr.total += 1;
+        fr.withConfirm += classification.needsConfirm ? 1 : 0;
+        fr.lastLatencyMs = opts.latencyMs ?? Date.now() - started;
         return result;
       });
       if (classification.needsConfirm) return result;
@@ -4128,6 +4288,27 @@ export class AionAssistantV1 {
         applied.push("Brand note stored (confirm brand workspace if needed)");
       }
 
+      // Commitments from language
+      for (const cand of extractCommitmentCandidates(text, now)) {
+        try {
+          const c = buildCommitment(
+            {
+              committedBy: cand.committedBy,
+              committedTo: cand.committedTo,
+              statement: cand.statement,
+              dueAt: cand.dueAt,
+              confidence: cand.confidence,
+              sourceRef: "capture.commitment",
+            },
+            { id: this.ports.ids.next("commit"), now, workspace: ws },
+          );
+          draft.executive.commitments.unshift(c);
+          applied.push(`Commitment: ${c.committedBy} → ${c.committedTo}`);
+        } catch {
+          skipped.push("commitment parse skipped");
+        }
+      }
+
       // Value ledger: capture saves Owner form-filling time (estimated)
       const ledger = buildValueLedgerEntry(
         {
@@ -4144,10 +4325,15 @@ export class AionAssistantV1 {
       if (draft.executive.valueLedger.length > 500) draft.executive.valueLedger.length = 500;
       if (draft.executive.temporalFacts.length > 2000) draft.executive.temporalFacts.length = 2000;
       if (draft.executive.graphEdges.length > 5000) draft.executive.graphEdges.length = 5000;
+      if (draft.executive.commitments.length > 500) draft.executive.commitments.length = 500;
 
       const result: CaptureResultV1 = { classification, applied, skipped, captureId, at: now };
       draft.executive.captures.unshift(result);
       if (draft.executive.captures.length > 200) draft.executive.captures.length = 200;
+      const fr = draft.executive.captureFriction;
+      fr.total += 1;
+      fr.autoApplied += 1;
+      fr.lastLatencyMs = opts.latencyMs ?? Date.now() - started;
       this.activity(draft, "agent", "capture.universal", `Capture ${classification.kind}: ${applied.length} applied`, captureId);
       return result;
     });
@@ -4239,30 +4425,52 @@ export class AionAssistantV1 {
     const brands = state.workspaces.filter((w) => w.kind === "business" && !w.archived);
     const board = await this.attentionBoard();
     const radar = state.executive?.opportunities ?? [];
+    const commits = state.executive?.commitments ?? [];
+    const overdueC = commits.filter((c) => c.status === "overdue" || c.status === "due_soon");
+    const ledger = state.executive?.valueLedger ?? [];
+    const estMinutes = ledger
+      .filter((v) => v.estimateKind === "estimated" && v.timeSavedMinutes != null)
+      .reduce((s, v) => s + (v.timeSavedMinutes || 0), 0);
+    const fr = state.executive?.captureFriction;
     await this.mutate((draft) => {
       if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
       draft.executive.lastWeeklyReviewAt = this.ports.clock.now();
       return null;
     });
+    const workRels = state.relationships.filter((r) => r.workspace === "work" && !r.archived);
+    const stalled = findStalledDeals(workRels, this.ports.clock.now(), 14);
     const reply = [
-      "WEEKLY CEO REVIEW (stored evidence only)",
+      "WEEKLY CEO REVIEW (stored evidence only — no invented revenue)",
       "",
-      "DEALERSHIP (Lakeland / Work)",
-      `  Vehicles stored: ${inv.vehicles.length} · Walks: ${inv.walks.length} · Observations: ${inv.observations.length}`,
-      `  Open work follow-ups: ${state.relationships.filter((r) => r.workspace === "work" && !r.archived).flatMap((r) => r.followUps.filter((f) => f.status === "open")).length}`,
-      `  Opportunity signals: ${radar.length}`,
+      "WHERE DID ATTENTION GO?",
+      `  Open Owner-must-do: ${board.ownerMustDo.length} · AION-can-do: ${board.aionCanDo.length}`,
+      `  Captures: ${fr?.total ?? 0} (confirm ${fr?.withConfirm ?? 0}, auto ${fr?.autoApplied ?? 0})`,
       "",
-      "BUSINESSES / BRANDS",
+      "VALUE (estimated, not measured $)",
+      `  Est. minutes saved (ledger): ${estMinutes} · entries: ${ledger.length}`,
+      "  Dollar revenue is UNKNOWN unless separately measured.",
+      "",
+      "COMMITMENTS",
+      overdueC.length
+        ? overdueC.slice(0, 8).map((c) => `  • [${c.status}] ${c.committedBy}→${c.committedTo}: ${c.statement}`).join("\n")
+        : "  (none overdue/due soon)",
+      "",
+      "DEALERSHIP",
+      `  Vehicles: ${inv.vehicles.length} · Walks: ${inv.walks.length} · Obs: ${inv.observations.length}`,
+      `  Open follow-ups: ${workRels.flatMap((r) => r.followUps.filter((f) => f.status === "open")).length}`,
+      `  Stalled signals: ${stalled.length} · Opportunities: ${radar.length}`,
+      "",
+      "BRANDS / BUSINESS",
       brands.length ? brands.map((b) => `  • ${b.brand?.name || b.label}`).join("\n") : "  (none)",
+      brands.length === 0 ? "  Neglected: no brand workspaces active." : "",
       "",
-      "AION AUTONOMY",
-      ...board.aionCanDo.slice(0, 4).map((i) => `  • ${i.title}`),
-      "",
-      "OWNER ATTENTION",
-      ...board.ownerMustDo.slice(0, 5).map((i) => `  • [${i.contextLabel}] ${i.title}`),
-      "",
-      "Recommendations: complete only-you follow-ups; let AION draft/match inventory; import one Owner knowledge folder; do not invent metrics.",
-    ].join("\n");
+      "RECOMMENDATIONS (evidence-grounded)",
+      "  1. Clear overdue commitments first (highest human interruption ROI).",
+      "  2. Let AION keep drafting follow-ups / radar scoring (no send).",
+      "  3. Import one approved Owner folder if knowledge still thin.",
+      "  4. Do not invent metrics or cross-context customer data into brands.",
+      stalled.length ? `  5. ${stalled.length} quiet dealership account(s) — Owner decides outreach.` : "",
+    ].filter(Boolean).join("\n");
     return { reply };
   }
 
@@ -4802,6 +5010,110 @@ export class AionAssistantV1 {
         data: weekly,
       };
     }
+    // Cross-context isolation: broad "everything you know" stays in active workspace
+    if (/\b(everything you know|search all my data|use anything you know|all customers)\b/i.test(text)) {
+      const active = state.settings.activeWorkspace;
+      const label = state.settings.workspaceLabels?.[active] ?? active;
+      const people = state.relationships.filter((r) => r.workspace === active && !r.archived);
+      return {
+        intent: "CONTEXT_SWITCH",
+        confidence: "high",
+        reply: [
+          `Scope limited to active context: ${label} (${active}).`,
+          "AION will not pull WORKSPACE_ONLY records from other contexts on a broad prompt.",
+          `People visible here: ${people.slice(0, 12).map((p) => p.displayName).join(", ") || "none"}`,
+          "Switch context explicitly, or mark facts OWNER_SHARED, to cross boundaries.",
+        ].join("\n"),
+        sources: people.slice(0, 5).map((p) => ({ type: "customer", id: p.id, label: p.displayName })),
+        action: "context.scope",
+        data: { workspace: active, count: people.length },
+      };
+    }
+
+    // Dealership sales copilot NL
+    if (
+      state.settings.activeWorkspace === "work" &&
+      /\b(who should i follow up|which customers have a matching|who did i promise|deals? (are )?going stale|what should i show|prepare me for my next appointment)\b/i.test(
+        text,
+      )
+    ) {
+      if (/\bpromise\b|\bcommitment\b/i.test(text)) {
+        const commits = (state.executive?.commitments ?? []).filter(
+          (c) => c.workspace === "work" && c.status !== "kept" && c.status !== "cancelled",
+        );
+        return {
+          intent: "VEHICLE_INVENTORY",
+          confidence: "high",
+          reply: commits.length
+            ? `Open dealership commitments:\n${commits.map((c) => `  • [${c.status}] ${c.committedBy}→${c.committedTo}: ${c.statement} due ${c.dueAt ?? "?"}`).join("\n")}`
+            : "No open dealership commitments stored.",
+          sources: [],
+          action: "commitment.list",
+          data: commits,
+        };
+      }
+      if (/\bstale\b/i.test(text)) {
+        const stalled = findStalledDeals(
+          state.relationships.filter((r) => r.workspace === "work" && !r.archived),
+          this.ports.clock.now(),
+          14,
+        );
+        return {
+          intent: "VEHICLE_INVENTORY",
+          confidence: "high",
+          reply: stalled.length
+            ? `Stalled work accounts:\n${stalled.slice(0, 10).map((s) => `  • ${s.customer}: ${s.reason}`).join("\n")}`
+            : "No stalled signals from stored CRM.",
+          sources: [],
+          action: "sales.stalled",
+          data: stalled,
+        };
+      }
+      if (/\bmatching vehicle\b|\bhave a matching\b/i.test(text)) {
+        const opps = await this.refreshOpportunityRadar();
+        const matches = opps.filter((o) => o.kind === "inventory_match");
+        return {
+          intent: "VEHICLE_INVENTORY",
+          confidence: "high",
+          reply: matches.length
+            ? matches.slice(0, 8).map((m) => `• ${m.title}`).join("\n")
+            : "No inventory×customer matches right now.",
+          sources: [],
+          action: "opportunity.radar",
+          data: matches,
+        };
+      }
+      if (/\bwhat should i show\b|\bprepare me for\b/i.test(text)) {
+        const name = text.match(/\bshow\s+([A-Z][a-z]+)\b/i)?.[1] || text.match(/\bfor\s+([A-Z][a-z]+)\b/i)?.[1];
+        const people = name
+          ? findRelationshipsByName(
+              state.relationships.filter((r) => r.workspace === "work" && !r.archived),
+              name,
+            )
+          : [];
+        if (people[0]) {
+          const pack = await this.salesCopilotForCustomer(people[0].id);
+          return {
+            intent: "VEHICLE_INVENTORY",
+            confidence: "high",
+            reply: pack.reply,
+            sources: [{ type: "customer", id: people[0].id, label: people[0].displayName }],
+            action: "sales.copilot",
+            data: pack,
+          };
+        }
+      }
+      const board = await this.attentionBoard({ workspace: "work", onlyOwner: true });
+      return {
+        intent: "ATTENTION_BOARD",
+        confidence: "high",
+        reply: ["Dealership focus:", ...board.briefingLines].join("\n"),
+        sources: [],
+        action: "attention.board",
+        data: board,
+      };
+    }
+
     if (route.intent === "VEHICLE_INVENTORY") {
       const inv = this.vehicleInv(state);
       // Owner work context

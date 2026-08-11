@@ -11,6 +11,24 @@ import {
 import type { OpportunitySignalV1, ValueLedgerEntryV1 } from "./opportunity-radar.js";
 import type { CaptureResultV1 } from "./universal-capture.js";
 import type { WorkspaceCorrectionV1 } from "./import-workspace-map.js";
+import type { CommitmentV1 } from "./commitments.js";
+
+export interface IdentityResolutionV1 {
+  /** Lowercase first name or alias key */
+  key: string;
+  workspace: string;
+  resolvedRelationshipId: string;
+  displayName: string;
+  at: string;
+}
+
+export interface CaptureFrictionStatsV1 {
+  total: number;
+  withConfirm: number;
+  autoApplied: number;
+  failed: number;
+  lastLatencyMs: number | null;
+}
 
 export interface BrandDnaV1 {
   workspaceId: string;
@@ -46,6 +64,10 @@ export interface ExecutiveStateV1 {
   brandDna: BrandDnaV1[];
   /** Owner corrections for import workspace mapping (durable guidance). */
   importWorkspaceCorrections: WorkspaceCorrectionV1[];
+  commitments: CommitmentV1[];
+  identityResolutions: IdentityResolutionV1[];
+  captureFriction: CaptureFrictionStatsV1;
+  lastDailyMaintenanceAt: IsoTimestamp | null;
   lastEndOfDayAt: IsoTimestamp | null;
   lastWeeklyReviewAt: IsoTimestamp | null;
 }
@@ -60,6 +82,10 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     captures: [],
     brandDna: [],
     importWorkspaceCorrections: [],
+    commitments: [],
+    identityResolutions: [],
+    captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+    lastDailyMaintenanceAt: null,
     lastEndOfDayAt: null,
     lastWeeklyReviewAt: null,
   };

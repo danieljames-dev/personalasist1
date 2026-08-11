@@ -151,8 +151,14 @@ export function detectInventoryMatches(input: {
   }
 
   signals.sort((a, b) => b.score - a.score);
-  // Only surface meaningful — filter low score / high interruption spam
-  return signals.filter((s) => s.score >= 80 || (s.value >= 55 && s.interruptionCost <= 30)).slice(0, 25);
+  // Only surface meaningful — filter low score / high interruption spam / weak confidence
+  return signals
+    .filter((s) => {
+      if (s.confidence < 45) return false;
+      if (s.score < 70 && s.interruptionCost > 40) return false;
+      return s.score >= 80 || (s.value >= 55 && s.interruptionCost <= 30);
+    })
+    .slice(0, 25);
 }
 
 // ─── Value ledger ───────────────────────────────────────────────────────────

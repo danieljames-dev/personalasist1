@@ -151,6 +151,10 @@ export function createEmptyStateV1(): AssistantStateV1 {
       captures: [],
       brandDna: [],
       importWorkspaceCorrections: [],
+      commitments: [],
+      identityResolutions: [],
+      captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+      lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
     },
@@ -427,6 +431,10 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       captures: [],
       brandDna: [],
       importWorkspaceCorrections: [],
+      commitments: [],
+      identityResolutions: [],
+      captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+      lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
     };
@@ -447,6 +455,11 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(ak.executive.captures)) ak.executive.captures = [];
     if (!Array.isArray(ak.executive.brandDna)) ak.executive.brandDna = [];
     if (!Array.isArray(ak.executive.importWorkspaceCorrections)) ak.executive.importWorkspaceCorrections = [];
+    if (!Array.isArray(ak.executive.commitments)) ak.executive.commitments = [];
+    if (!Array.isArray(ak.executive.identityResolutions)) ak.executive.identityResolutions = [];
+    if (!ak.executive.captureFriction || typeof ak.executive.captureFriction !== "object") {
+      ak.executive.captureFriction = { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null };
+    }
   }
   for (const src of ak.importSourceQueue) {
     if (!src.stats || typeof src.stats !== "object") {

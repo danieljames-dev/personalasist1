@@ -926,6 +926,14 @@ export async function createAionServer(options = {}) {
         role: input.role,
       });
       case "connector.context.policy": return service.connectorContextCompatibility();
+      case "commitment.add": return service.addCommitment(input);
+      case "identity.resolve": return service.resolveIdentityAmbiguity({
+        key: String(input.key ?? ""),
+        relationshipId: String(input.relationshipId ?? ""),
+        workspace: input.workspace,
+      });
+      case "maintenance.daily": return service.runDailyMaintenance();
+      case "belief.explain": return service.explainBelief(String(input.statement ?? ""), String(input.sourceRef ?? ""), input.sourceType);
       case "opportunity.radar": return { opportunities: await service.refreshOpportunityRadar() };
       case "sales.copilot": return service.salesCopilotForCustomer(String(input.relationshipId ?? input.id ?? ""));
       case "executive.eod": return service.endOfDayWrap();

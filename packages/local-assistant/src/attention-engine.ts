@@ -4,6 +4,8 @@
  */
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 import type { RelationshipV1, TaskV1 } from "./contracts.js";
+import type { CommitmentV1 } from "./commitments.js";
+import { attentionHorizon, type AttentionHorizonV1 } from "./source-trust.js";
 
 export type AttentionBucketV1 = "OWNER_MUST_DO" | "AION_CAN_DO";
 
@@ -18,6 +20,9 @@ export interface AttentionItemV1 {
   value: number;
   risk: number;
   timeMinutes: number;
+  /** Cost of interrupting Owner (0–100). High = prefer BACKGROUND/IGNORE. */
+  interruptionCost: number;
+  horizon: AttentionHorizonV1;
   score: number;
   sourceType: string;
   dueAt: string | null;
@@ -66,15 +71,39 @@ export function filterAttentionBoard(
   };
 }
 
-function scoreItem(i: Omit<AttentionItemV1, "score">): number {
-  // Higher urgency/value, lower time, human-required slightly prioritized for OWNER board
-  return i.urgency * 3 + i.value * 2.5 - i.risk * 0.5 - i.timeMinutes * 0.05 + (i.requiresHuman ? 5 : 0);
+function scoreItem(i: Omit<AttentionItemV1, "score" | "horizon"> & { horizon?: AttentionHorizonV1 }): number {
+  // Higher urgency/value, lower interruption/time; Owner-required slightly prioritized
+  return (
+    i.urgency * 3 +
+    i.value * 2.5 -
+    i.risk * 0.5 -
+    (i.interruptionCost ?? 30) * 0.4 -
+    i.timeMinutes * 0.05 +
+    (i.requiresHuman ? 5 : 0)
+  );
+}
+
+function withHorizon(
+  partial: Omit<AttentionItemV1, "score" | "horizon">,
+  nowIso: string,
+  confidence = 80,
+): Omit<AttentionItemV1, "score"> {
+  const horizon = attentionHorizon({
+    urgency: partial.urgency,
+    value: partial.value,
+    confidence,
+    interruptionCost: partial.interruptionCost,
+    dueAt: partial.dueAt,
+    nowIso,
+  });
+  return { ...partial, horizon };
 }
 
 export function buildAttentionBoard(input: {
   nowIso: string;
   relationships: readonly RelationshipV1[];
   tasks: readonly TaskV1[];
+  commitments?: readonly CommitmentV1[];
   workspaceLabels?: Record<string, string>;
   inventoryExceptions?: number;
   brandWorkspaceCount?: number;
@@ -82,9 +111,37 @@ export function buildAttentionBoard(input: {
   openApprovals?: number;
   opportunityCount?: number;
 }): AttentionBoardV1 {
-  const now = Date.parse(input.nowIso);
   const day = input.nowIso.slice(0, 10);
   const items: Omit<AttentionItemV1, "score">[] = [];
+
+  for (const c of input.commitments ?? []) {
+    if (c.status === "kept" || c.status === "cancelled") continue;
+    const overdue = c.status === "overdue";
+    const dueSoon = c.status === "due_soon";
+    items.push(
+      withHorizon(
+        {
+          id: c.id,
+          bucket: "OWNER_MUST_DO",
+          workspace: c.workspace,
+          contextLabel: input.workspaceLabels?.[c.workspace] ?? c.workspace,
+          title: `Commitment: ${c.committedBy} → ${c.committedTo}`,
+          why: c.statement,
+          urgency: overdue ? 98 : dueSoon ? 88 : 70,
+          value: 80,
+          risk: overdue ? 50 : 25,
+          timeMinutes: 15,
+          interruptionCost: 20,
+          sourceType: "commitment",
+          dueAt: c.dueAt,
+          aionCanComplete: false,
+          requiresHuman: true,
+        },
+        input.nowIso,
+        c.confidence,
+      ),
+    );
+  }
 
   for (const r of input.relationships) {
     if (r.archived) continue;
@@ -93,42 +150,54 @@ export function buildAttentionBoard(input: {
       const due = f.dueAt?.slice(0, 10) ?? day;
       const overdue = due < day;
       const dueSoon = due === day;
-      items.push({
-        id: f.id,
-        bucket: "OWNER_MUST_DO",
-        workspace: r.workspace,
-        contextLabel: input.workspaceLabels?.[r.workspace] ?? r.workspace,
-        title: `Follow up: ${r.displayName}`,
-        why: f.reason || `${f.channel} follow-up`,
-        urgency: overdue ? 95 : dueSoon ? 80 : 50,
-        value: 70,
-        risk: overdue ? 40 : 15,
-        timeMinutes: 10,
-        sourceType: "follow-up",
-        dueAt: f.dueAt,
-        aionCanComplete: false,
-        requiresHuman: true,
-      });
+      items.push(
+        withHorizon(
+          {
+            id: f.id,
+            bucket: "OWNER_MUST_DO",
+            workspace: r.workspace,
+            contextLabel: input.workspaceLabels?.[r.workspace] ?? r.workspace,
+            title: `Follow up: ${r.displayName}`,
+            why: f.reason || `${f.channel} follow-up`,
+            urgency: overdue ? 95 : dueSoon ? 80 : 50,
+            value: 70,
+            risk: overdue ? 40 : 15,
+            timeMinutes: 10,
+            interruptionCost: 25,
+            sourceType: "follow-up",
+            dueAt: f.dueAt,
+            aionCanComplete: false,
+            requiresHuman: true,
+          },
+          input.nowIso,
+        ),
+      );
     }
     for (const a of r.appointments ?? []) {
       if (!a.at?.startsWith(day)) continue;
       if (["cancelled", "no-show", "shown"].includes(a.status)) continue;
-      items.push({
-        id: a.id,
-        bucket: "OWNER_MUST_DO",
-        workspace: r.workspace,
-        contextLabel: input.workspaceLabels?.[r.workspace] ?? r.workspace,
-        title: `Appointment: ${r.displayName}`,
-        why: `${a.kind} ${a.at.slice(11, 16)}`,
-        urgency: 90,
-        value: 85,
-        risk: 20,
-        timeMinutes: 30,
-        sourceType: "appointment",
-        dueAt: a.at,
-        aionCanComplete: false,
-        requiresHuman: true,
-      });
+      items.push(
+        withHorizon(
+          {
+            id: a.id,
+            bucket: "OWNER_MUST_DO",
+            workspace: r.workspace,
+            contextLabel: input.workspaceLabels?.[r.workspace] ?? r.workspace,
+            title: `Appointment: ${r.displayName}`,
+            why: `${a.kind} ${a.at.slice(11, 16)}`,
+            urgency: 90,
+            value: 85,
+            risk: 20,
+            timeMinutes: 30,
+            interruptionCost: 15,
+            sourceType: "appointment",
+            dueAt: a.at,
+            aionCanComplete: false,
+            requiresHuman: true,
+          },
+          input.nowIso,
+        ),
+      );
     }
   }
 
@@ -138,149 +207,204 @@ export function buildAttentionBoard(input: {
       /\b(call|meet|drive|show|present|decide|approve|send|submit|apply)\b/i.test(
         `${t.title} ${t.description}`,
       );
-    items.push({
-      id: t.id,
-      bucket: human ? "OWNER_MUST_DO" : "AION_CAN_DO",
-      workspace: t.workspace,
-      contextLabel: input.workspaceLabels?.[t.workspace] ?? t.workspace,
-      title: t.title,
-      why: t.description?.slice(0, 120) || "Open task",
-      urgency: t.priority === "high" ? 75 : t.priority === "low" ? 30 : 50,
-      value: t.priority === "high" ? 70 : 45,
-      risk: 10,
-      timeMinutes: 20,
-      sourceType: "task",
-      dueAt: null,
-      aionCanComplete: !human,
-      requiresHuman: human,
-    });
+    items.push(
+      withHorizon(
+        {
+          id: t.id,
+          bucket: human ? "OWNER_MUST_DO" : "AION_CAN_DO",
+          workspace: t.workspace,
+          contextLabel: input.workspaceLabels?.[t.workspace] ?? t.workspace,
+          title: t.title,
+          why: t.description?.slice(0, 120) || "Open task",
+          urgency: t.priority === "high" || t.priority === "urgent" ? 75 : t.priority === "low" ? 30 : 50,
+          value: t.priority === "high" || t.priority === "urgent" ? 70 : 45,
+          risk: 10,
+          timeMinutes: 20,
+          interruptionCost: human ? 30 : 10,
+          sourceType: "task",
+          dueAt: t.dueAt,
+          aionCanComplete: !human,
+          requiresHuman: human,
+        },
+        input.nowIso,
+      ),
+    );
   }
 
   if ((input.inventoryExceptions ?? 0) > 0) {
-    items.push({
-      id: "inventory-exceptions",
-      bucket: "OWNER_MUST_DO",
-      workspace: "work",
-      contextLabel: "Lakeland Toyota",
-      title: "Review inventory walk exceptions",
-      why: `${input.inventoryExceptions} exception signal(s) from latest walk/refresh`,
-      urgency: 60,
-      value: 55,
-      risk: 25,
-      timeMinutes: 15,
-      sourceType: "inventory",
-      dueAt: null,
-      aionCanComplete: false,
-      requiresHuman: true,
-    });
+    items.push(
+      withHorizon(
+        {
+          id: "inventory-exceptions",
+          bucket: "OWNER_MUST_DO",
+          workspace: "work",
+          contextLabel: "Lakeland Toyota",
+          title: "Review inventory walk exceptions",
+          why: `${input.inventoryExceptions} exception signal(s) from latest walk/refresh`,
+          urgency: 60,
+          value: 55,
+          risk: 25,
+          timeMinutes: 15,
+          interruptionCost: 35,
+          sourceType: "inventory",
+          dueAt: null,
+          aionCanComplete: false,
+          requiresHuman: true,
+        },
+        input.nowIso,
+      ),
+    );
   }
 
   if ((input.openImportReview ?? 0) > 0) {
-    items.push({
-      id: "import-review",
-      bucket: "OWNER_MUST_DO",
-      workspace: "personal",
-      contextLabel: "Owner knowledge",
-      title: "Resolve import review items",
-      why: `${input.openImportReview} ambiguous import classification(s)`,
-      urgency: 40,
-      value: 50,
-      risk: 15,
-      timeMinutes: 10,
-      sourceType: "import",
-      dueAt: null,
-      aionCanComplete: false,
-      requiresHuman: true,
-    });
+    items.push(
+      withHorizon(
+        {
+          id: "import-review",
+          bucket: "OWNER_MUST_DO",
+          workspace: "personal",
+          contextLabel: "Owner knowledge",
+          title: "Resolve import review items",
+          why: `${input.openImportReview} ambiguous import classification(s)`,
+          urgency: 40,
+          value: 50,
+          risk: 15,
+          timeMinutes: 10,
+          interruptionCost: 40,
+          sourceType: "import",
+          dueAt: null,
+          aionCanComplete: false,
+          requiresHuman: true,
+        },
+        input.nowIso,
+      ),
+    );
   }
 
   if ((input.openApprovals ?? 0) > 0) {
-    items.push({
-      id: "approvals",
-      bucket: "OWNER_MUST_DO",
-      workspace: "personal",
-      contextLabel: "AION",
-      title: "Decide pending approvals",
-      why: `${input.openApprovals} action(s) await Owner decision`,
-      urgency: 70,
-      value: 60,
-      risk: 30,
-      timeMinutes: 5,
-      sourceType: "approval",
-      dueAt: null,
-      aionCanComplete: false,
-      requiresHuman: true,
-    });
+    items.push(
+      withHorizon(
+        {
+          id: "approvals",
+          bucket: "OWNER_MUST_DO",
+          workspace: "personal",
+          contextLabel: "AION",
+          title: "Decide pending approvals",
+          why: `${input.openApprovals} action(s) await Owner decision`,
+          urgency: 70,
+          value: 60,
+          risk: 30,
+          timeMinutes: 5,
+          interruptionCost: 20,
+          sourceType: "approval",
+          dueAt: null,
+          aionCanComplete: false,
+          requiresHuman: true,
+        },
+        input.nowIso,
+      ),
+    );
   }
 
-  // AION autonomous work it can handle without send/spend
-  items.push({
-    id: "aion-refresh-briefing",
-    bucket: "AION_CAN_DO",
-    workspace: "personal",
-    contextLabel: "AION",
-    title: "Refresh work queue & account summaries",
-    why: "Stored CRM only; no external send",
-    urgency: 20,
-    value: 30,
-    risk: 0,
-    timeMinutes: 1,
-    sourceType: "autonomy",
-    dueAt: null,
-    aionCanComplete: true,
-    requiresHuman: false,
-  });
-  items.push({
-    id: "aion-draft-followups",
-    bucket: "AION_CAN_DO",
-    workspace: "work",
-    contextLabel: "Lakeland Toyota",
-    title: "Draft follow-up messages for named contacts",
-    why: "Draft only — never send without authority",
-    urgency: 35,
-    value: 50,
-    risk: 5,
-    timeMinutes: 5,
-    sourceType: "autonomy",
-    dueAt: null,
-    aionCanComplete: true,
-    requiresHuman: false,
-  });
+  items.push(
+    withHorizon(
+      {
+        id: "aion-refresh-briefing",
+        bucket: "AION_CAN_DO",
+        workspace: "personal",
+        contextLabel: "AION",
+        title: "Refresh work queue & account summaries",
+        why: "Stored CRM only; no external send",
+        urgency: 20,
+        value: 30,
+        risk: 0,
+        timeMinutes: 1,
+        interruptionCost: 5,
+        sourceType: "autonomy",
+        dueAt: null,
+        aionCanComplete: true,
+        requiresHuman: false,
+      },
+      input.nowIso,
+      90,
+    ),
+  );
+  items.push(
+    withHorizon(
+      {
+        id: "aion-draft-followups",
+        bucket: "AION_CAN_DO",
+        workspace: "work",
+        contextLabel: "Lakeland Toyota",
+        title: "Draft follow-up messages for named contacts",
+        why: "Draft only — never send without authority",
+        urgency: 35,
+        value: 50,
+        risk: 5,
+        timeMinutes: 5,
+        interruptionCost: 10,
+        sourceType: "autonomy",
+        dueAt: null,
+        aionCanComplete: true,
+        requiresHuman: false,
+      },
+      input.nowIso,
+      85,
+    ),
+  );
   if ((input.opportunityCount ?? 0) > 0) {
-    items.push({
-      id: "aion-opportunity-radar",
-      bucket: "AION_CAN_DO",
-      workspace: "work",
-      contextLabel: "Opportunity Radar",
-      title: `Score ${input.opportunityCount} opportunity signal(s)`,
-      why: "Match inventory/customers without interrupting Owner",
-      urgency: 40,
-      value: 65,
-      risk: 10,
-      timeMinutes: 3,
-      sourceType: "opportunity",
-      dueAt: null,
-      aionCanComplete: true,
-      requiresHuman: false,
-    });
+    items.push(
+      withHorizon(
+        {
+          id: "aion-opportunity-radar",
+          bucket: "AION_CAN_DO",
+          workspace: "work",
+          contextLabel: "Opportunity Radar",
+          title: `Score ${input.opportunityCount} opportunity signal(s)`,
+          why: "Match inventory/customers without interrupting Owner",
+          urgency: 40,
+          value: 65,
+          risk: 10,
+          timeMinutes: 3,
+          interruptionCost: 15,
+          sourceType: "opportunity",
+          dueAt: null,
+          aionCanComplete: true,
+          requiresHuman: false,
+        },
+        input.nowIso,
+        70,
+      ),
+    );
   }
 
-  const scored: AttentionItemV1[] = items.map((i) => ({ ...i, score: scoreItem(i) }));
+  const scored: AttentionItemV1[] = items
+    .filter((i) => i.horizon !== "IGNORE")
+    .map((i) => ({ ...i, score: scoreItem(i) }));
   scored.sort((a, b) => b.score - a.score);
 
-  const ownerMustDo = scored.filter((i) => i.bucket === "OWNER_MUST_DO").slice(0, 12);
+  // Prefer NOW/TODAY on Owner board over BACKGROUND noise
+  const ownerMustDo = scored
+    .filter((i) => i.bucket === "OWNER_MUST_DO" && i.horizon !== "BACKGROUND")
+    .slice(0, 12);
   const aionCanDo = scored.filter((i) => i.bucket === "AION_CAN_DO").slice(0, 12);
 
+  const nowItems = ownerMustDo.filter((i) => i.horizon === "NOW");
+  const todayItems = ownerMustDo.filter((i) => i.horizon === "TODAY" || i.horizon === "NOW");
+
   const briefingLines = [
-    "OWNER MUST DO (highest value / only you):",
-    ...ownerMustDo.slice(0, 3).map((i, n) => `  ${n + 1}. [${i.contextLabel}] ${i.title} — ${i.why}`),
-    ownerMustDo.length ? "" : "  (nothing urgent only-you right now)",
-    "AION IS HANDLING / CAN HANDLE (no send/spend):",
+    "WHAT DO I NEED TO DO?",
+    ...todayItems.slice(0, 3).map((i, n) => `  ${n + 1}. [${i.horizon}] [${i.contextLabel}] ${i.title} — ${i.why}`),
+    todayItems.length ? "" : "  (nothing urgent only-you right now)",
+    "WHY (top)?",
+    ...ownerMustDo.slice(0, 2).map((i) => `  • ${i.title}: score ${i.score.toFixed(0)} (urgency ${i.urgency}, value ${i.value}, interrupt ${i.interruptionCost})`),
+    "WHAT IS AION HANDLING?",
     ...aionCanDo.slice(0, 4).map((i) => `  • ${i.title}`),
-  ];
+    nowItems.length ? `NOW focus: ${nowItems.length} item(s)` : "",
+  ].filter(Boolean);
 
   const explanations = ownerMustDo.slice(0, 5).map((i) => {
-    return `${i.title}: urgency=${i.urgency} value=${i.value} risk=${i.risk} time=${i.timeMinutes}m human=${i.requiresHuman} → score ${i.score.toFixed(1)}. ${i.why}`;
+    return `${i.title}: horizon=${i.horizon} urgency=${i.urgency} value=${i.value} interrupt=${i.interruptionCost} risk=${i.risk} → score ${i.score.toFixed(1)}. ${i.why}`;
   });
 
   return {
