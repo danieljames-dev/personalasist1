@@ -6,7 +6,7 @@
 # so closing an agent shell or IDE task does not kill production.
 [CmdletBinding()]
 param(
-  [ValidateSet('start','stop','status','restart','ensure')]
+  [ValidateSet('start','stop','status','restart','ensure','watch')]
   [string]$Action = 'status',
   [string]$RepositoryRoot = 'C:\AION-HQ',
   [int]$Port = 31415
@@ -149,6 +149,27 @@ function Start-AionDetached {
     return 0
   }
 
+  # Fallback: Start-Process when WScript path did not yield a healthy listener
+  Write-Host "START_FALLBACK Start-Process"
+  Write-Watch "START_FALLBACK"
+  try {
+    $psi = Start-Process -FilePath $node -ArgumentList @("`"$RepositoryRoot\apps\aion-command-center.mjs`"", "--port", "$Port") `
+      -WorkingDirectory $RepositoryRoot -WindowStyle Hidden -PassThru `
+      -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    for ($i = 0; $i -lt 40; $i++) {
+      Start-Sleep -Milliseconds 250
+      if ((Get-AionListeners) -and (Test-AionHealthy)) {
+        Set-Content -LiteralPath $pidFile -Value $psi.Id -Encoding ascii
+        $addrs = (Get-ListenerAddresses) -join ', '
+        Write-Host "STARTED pid=$($psi.Id) port=$Port listeners=$addrs (fallback)"
+        Write-Watch "STARTED_FALLBACK pid=$($psi.Id)"
+        return 0
+      }
+    }
+  } catch {
+    Write-Watch "START_FALLBACK_ERR $($_.Exception.Message)"
+  }
+
   Write-Host "START_FAILED see $stderr"
   Write-Watch "START_FAILED"
   if (Test-Path $stderr) { Get-Content $stderr -Tail 20 | ForEach-Object { Write-Host $_ } }
@@ -180,10 +201,37 @@ function Ensure-Aion {
   return (Start-AionDetached)
 }
 
+function Watch-Aion([int]$IntervalSec = 30, [int]$MaxHours = 12) {
+  # Lightweight durability loop: re-ensure production if health drops.
+  # Does not redesign networking. Safe for overnight soak alongside heavy import.
+  $deadline = (Get-Date).AddHours($MaxHours)
+  Write-Host "WATCH_START interval=${IntervalSec}s until=$($deadline.ToString('u'))"
+  Write-Watch "WATCH_START interval=$IntervalSec"
+  while ((Get-Date) -lt $deadline) {
+    try {
+      if (-not ((Get-AionListeners) -and (Test-AionHealthy))) {
+        Write-Host "WATCH_RECOVER $(Get-Date -Format o)"
+        Write-Watch "WATCH_RECOVER"
+        [void](Ensure-Aion)
+      } else {
+        $p = Get-AionProcess
+        Write-Watch "WATCH_OK pid=$(if($p){$p.Id}else{'?'})"
+      }
+    } catch {
+      Write-Watch "WATCH_ERR $($_.Exception.Message)"
+    }
+    Start-Sleep -Seconds ([Math]::Max(10, $IntervalSec))
+  }
+  Write-Host "WATCH_END"
+  Write-Watch "WATCH_END"
+  return 0
+}
+
 switch ($Action) {
   'start'   { exit (Start-AionDetached) }
   'stop'    { exit (Stop-AionAll) }
   'restart' { [void](Stop-AionAll); Start-Sleep -Seconds 1; exit (Start-AionDetached) }
   'status'  { exit (Status-Aion) }
   'ensure'  { exit (Ensure-Aion) }
+  'watch'   { exit (Watch-Aion 30 12) }
 }

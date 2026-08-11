@@ -3381,6 +3381,196 @@ export class AionAssistantV1 {
   }
 
   /**
+   * Deterministic review compression — auto-accept career/business evidence paths,
+   * auto-reject technical/synthetic/training noise. Groups remaining for Owner.
+   */
+  async compressImportReviewQueue(): Promise<{
+    before: number;
+    afterOpen: number;
+    autoRejected: number;
+    autoAccepted: number;
+    kept: number;
+    groups: Array<{ groupKey: string; bucket: string; count: number; action: string; samplePaths: string[] }>;
+    reply: string;
+  }> {
+    const { compressImportReviewQueue } = await import("./import-review-compress.js");
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.importReviewQueue)) draft.importReviewQueue = [];
+      const now = this.ports.clock.now();
+      const result = compressImportReviewQueue(draft.importReviewQueue, now);
+      draft.importReviewQueue = result.updated;
+      this.activity(
+        draft,
+        "import",
+        "import.review.compress",
+        `Review compress: ${result.stats.before}→${result.stats.afterOpen} open (reject=${result.stats.autoRejected} accept=${result.stats.autoAccepted})`,
+        null,
+      );
+      const reply = [
+        "IMPORT REVIEW COMPRESSION",
+        `Before open: ${result.stats.before}`,
+        `After open: ${result.stats.afterOpen}`,
+        `Auto-rejected (technical/synthetic/noise): ${result.stats.autoRejected}`,
+        `Auto-accepted (career/business evidence): ${result.stats.autoAccepted}`,
+        `Kept for Owner/group review: ${result.stats.kept}`,
+        "",
+        "GROUPS",
+        ...result.stats.groups.slice(0, 20).map(
+          (g) => `  • ${g.groupKey} [${g.bucket}/${g.action}] n=${g.count}`,
+        ),
+      ].join("\n");
+      return { ...result.stats, reply };
+    });
+  }
+
+  /**
+   * Grounded Brand DNA + workspace for Compassionate Choice from imported business evidence.
+   * Unknown fields remain empty. Provenance = imported documents.
+   */
+  async seedCompassionateChoiceBrandFromEvidence(): Promise<{
+    workspaceId: string;
+    created: boolean;
+    dna: import("./executive-state.js").BrandDnaV1;
+    factsAdded: number;
+    reply: string;
+  }> {
+    return this.mutate((draft) => {
+      const now = this.ports.clock.now();
+      if (!draft.executive) draft.executive = emptyExecutiveState(now);
+      let ws = draft.workspaces.find(
+        (w) =>
+          !w.archived &&
+          (/compassionate/i.test(w.label) ||
+            /compassionate/i.test(w.id) ||
+            /compassionate/i.test(w.brand?.name || "")),
+      );
+      let created = false;
+      if (!ws) {
+        ws = buildWorkspace(
+          {
+            id: "compassionate-choice",
+            label: "Compassionate Choice",
+            kind: "business",
+            purpose: "Non-medical in-home companion/homemaker services (Lakeland / Polk County, FL).",
+            brand: {
+              name: "Compassionate Choice Home Services",
+              positioning: "Dignity and independence for seniors and disabled adults at home",
+              audience: "Seniors, disabled adults, adult children, long-distance families",
+              channels: ["website", "phone", "local referral"],
+              notes: "From Owner BUSINESS_STRUCTURE.md import evidence",
+            },
+          },
+          { now, existing: draft.workspaces },
+        );
+        draft.workspaces.push(ws);
+        created = true;
+      }
+      const workspaceId = ws.id;
+      const products =
+        "Caring companionship; meal preparation; pet care; errands & shopping; light housekeeping; overnight non-medical presence; transportation coordination (does not drive clients).";
+      const forbidden = [
+        "nursing or medical care",
+        "medication administration",
+        "hands-on personal care (bathing/dressing/toileting/feeding/transferring)",
+        "driving clients ourselves",
+      ];
+      let dna =
+        draft.executive.brandDna.find((b) => b.workspaceId === workspaceId) ||
+        emptyBrandDna(workspaceId, now);
+      dna = {
+        ...dna,
+        purpose:
+          "Help seniors and disabled adults live with dignity, independence, and human connection in their own homes through non-medical in-home support.",
+        audience:
+          "Seniors at home, adults with disabilities, adult children of aging parents, long-distance families, post-hospital recovery (non-medical).",
+        productsServices: products,
+        offers: "Private-pay hourly companion/homemaker services (Year 1); grant pathways under review.",
+        voice: "Warm, plain-language, trustworthy, family-friendly",
+        tone: "Compassionate, clear, non-clinical",
+        claims: [
+          "Non-medical in-home help only",
+          "Serving Lakeland FL and Polk County",
+          "Companionship, meals, errands, light housekeeping, overnight presence",
+        ],
+        forbiddenClaims: forbidden,
+        platforms: ["website:compassionate-choice.com", "phone", "local referral"],
+        goals: "Build trusted local companion/homemaker presence; AHCA-compliant operations.",
+        kpis: "UNKNOWN — not evidenced as numeric targets yet",
+        collaboratorsNote: "Founder/owner: Kristina Leach (from business structure document).",
+        assetsNote: "LLC Florida; website and ops docs imported under Owner data roots.",
+        provenanceSourceRef: "import:BUSINESS_STRUCTURE.md",
+        updatedAt: now,
+      } as typeof dna;
+      draft.executive.brandDna = [dna, ...draft.executive.brandDna.filter((b) => b.workspaceId !== workspaceId)];
+
+      // Knowledge facts (imported_document channel)
+      if (!draft.ownerKnowledge) {
+        draft.ownerKnowledge = {
+          profile: { displayName: "Daniel Coffman", summary: "", updatedAt: now },
+          facts: [],
+        };
+      }
+      const seeds = [
+        {
+          category: "business" as const,
+          title: "Business — Compassionate Choice LLC",
+          content:
+            "COMPASSIONATE CHOICE LLC (FL), brand Compassionate Choice Home Services. Non-medical in-home help for seniors/disabled adults in Lakeland/Polk County. Founder Kristina Leach. Website compassionate-choice.com.",
+        },
+        {
+          category: "product-service" as const,
+          title: "Services — companion/homemaker (non-medical)",
+          content: products,
+        },
+        {
+          category: "collaborator" as const,
+          title: "Collaborator — Kristina Leach",
+          content: "Founder/owner of Compassionate Choice LLC (from business structure import). Daniel/Owner working materials related to this business.",
+        },
+      ];
+      let factsAdded = 0;
+      const titles = new Set(draft.ownerKnowledge.facts.filter((f) => f.enabled !== false).map((f) => f.title.toLowerCase()));
+      for (const s of seeds) {
+        if (titles.has(s.title.toLowerCase())) continue;
+        draft.ownerKnowledge.facts.unshift({
+          id: this.ports.ids.next("okf"),
+          category: s.category,
+          title: s.title,
+          content: s.content,
+          confidence: 85,
+          enabled: true,
+          corrections: [],
+          createdAt: now,
+          updatedAt: now,
+          provenance: {
+            sourceType: "import",
+            sourceRef: "import:BUSINESS_STRUCTURE.md",
+            recordedAt: now,
+          },
+        });
+        factsAdded += 1;
+      }
+      this.activity(
+        draft,
+        "import",
+        "brand.seed.compassionate",
+        `Compassionate Choice workspace/DNA seeded; factsAdded=${factsAdded} createdWs=${created}`,
+        workspaceId,
+      );
+      const reply = [
+        "COMPASSIONATE CHOICE — BRAND DNA FROM EVIDENCE",
+        `Workspace: ${ws.label} (${workspaceId}) created=${created}`,
+        `Purpose: ${dna.purpose.slice(0, 160)}`,
+        `Services: ${dna.productsServices.slice(0, 160)}`,
+        `Facts added: ${factsAdded}`,
+        "Trust: imported_document channel (BUSINESS_STRUCTURE.md).",
+        "Unknown: detailed pricing KPIs, Metricool accounts, full collaborator graph.",
+      ].join("\n");
+      return { workspaceId, created, dna, factsAdded, reply };
+    });
+  }
+
+  /**
    * Aggregate import dashboard for Owner UI: queue statuses, document counts, review backlog.
    */
   async importDashboard(): Promise<{
@@ -4995,7 +5185,12 @@ export class AionAssistantV1 {
     }
     const gaps: string[] = [];
     if (coverage.customer?.status === "UNKNOWN") gaps.push("No grounded customer facts from real CRM exports.");
-    if (coverage.brand?.status === "UNKNOWN") gaps.push("Brand DNA not yet populated from real brand evidence.");
+    const brandDnaCount = (state.executive?.brandDna ?? []).filter((b) => (b.purpose || b.productsServices || "").trim()).length;
+    if (coverage.brand?.status === "UNKNOWN" && brandDnaCount === 0) {
+      gaps.push("Brand DNA not yet populated from real brand evidence.");
+    } else if (brandDnaCount > 0 && coverage.brand?.status === "UNKNOWN") {
+      gaps.push(`Brand DNA records present (${brandDnaCount}) but knowledge category "brand" facts still thin.`);
+    }
     if (coverage.goal?.status === "UNKNOWN") gaps.push("No Owner goals captured as structured facts.");
     if (!(state.settings.importRoots ?? []).some((r) => /compassionate/i.test(r))) {
       gaps.push("Compassionate Choice root may need re-scan if new files appear.");
@@ -6925,6 +7120,21 @@ export class AionAssistantV1 {
     const redirectUri = connectors.gmailRedirectUri?.trim() || cfg.redirectUri;
     const config = { ...cfg, clientId, redirectUri };
     const status = gmailConnectorStatus(config, process.env, { sendAuthorized: sendGate.allowed });
+    const ownerSteps: string[] = [];
+    if (status.code === "NOT_CONFIGURED") {
+      ownerSteps.push(
+        "Open Settings → Connectors → Gmail",
+        "Paste Google OAuth Client ID (from Google Cloud console)",
+        "Click Connect / check Gmail",
+        "Complete Google account selection → Allow in browser",
+      );
+    } else if (status.code === "GMAIL_OWNER_CONSENT_REQUIRED") {
+      ownerSteps.push(
+        "Open Settings → Connectors → Gmail → Connect",
+        "Select Google account → Allow",
+        "Confirm status becomes READY (tokens stay in env — never paste into chat)",
+      );
+    }
     let authUrl: string | null = null;
     if ((status.code === "GMAIL_OWNER_CONSENT_REQUIRED" || status.code === "NOT_CONFIGURED") && clientId) {
       try {
@@ -6942,11 +7152,12 @@ export class AionAssistantV1 {
       clientSecretEnvVar: config.clientSecretEnvVar,
       refreshTokenEnvVar: config.refreshTokenEnvVar,
       redirectUri,
+      ownerSteps,
       ownerAction:
         status.code === "GMAIL_OWNER_CONSENT_REQUIRED"
-          ? `Open the auth URL, complete Google consent, then store the refresh token in ${config.refreshTokenEnvVar} and the client secret in ${config.clientSecretEnvVar} (never paste into chat). SEND scopes requested when envelope allows.`
+          ? `Settings → Connectors → Gmail → Connect → Google Allow. Then store refresh token in ${config.refreshTokenEnvVar} and client secret in ${config.clientSecretEnvVar} (never paste into chat).`
           : status.code === "NOT_CONFIGURED"
-            ? "Save a Google OAuth client id in Settings → Connectors (or set AION_GMAIL_CLIENT_ID). Do not paste passwords into chat."
+            ? "Settings → Connectors → Gmail: paste OAuth Client ID → Connect → Google Allow. Never paste passwords/tokens into chat."
             : status.code === "READY"
               ? "Gmail is OAuth-ready. Live read/search/draft available under policy; SEND still Owner-gated separately."
               : null,
