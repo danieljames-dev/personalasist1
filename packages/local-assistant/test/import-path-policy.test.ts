@@ -52,6 +52,29 @@ test("synthetic people and technical noise knowledge filtered", () => {
   assert.equal(isSyntheticRelationship({ displayName: "ACME R7 TEST COMPANY" }), true);
   assert.equal(isSyntheticRelationship({ displayName: "CSV E2E Contact" }), true);
   assert.equal(isSyntheticRelationship({ displayName: "Daniel Coffman" }), false);
+  // Daily-scenario / executive fixture captures must not look like real CRM
+  assert.equal(
+    isSyntheticRelationship({
+      displayName: "Mike",
+      notes: "I just talked to Mike. He likes the Limited Tacoma under 50000. Follow up tomorrow.",
+    }),
+    true,
+  );
+  assert.equal(
+    isSyntheticRelationship({
+      displayName: "John Smith",
+      notes: "Scenario: interested in Tacoma. Needs to talk to his wife. under $45,000.",
+    }),
+    true,
+  );
+  // Real short-name prospect without fixture note patterns stays Owner CRM
+  assert.equal(
+    isSyntheticRelationship({
+      displayName: "Sarah",
+      notes: "Add Sarah as a prospect. She is interested in a Camry under 30000.",
+    }),
+    false,
+  );
   assert.equal(isSyntheticOwnerFacingText("Match for Mike: 2025 Toyota", "e2e fixture"), true);
   assert.equal(
     isTechnicalNoiseKnowledgeFact({

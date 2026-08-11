@@ -298,10 +298,13 @@ export function isSyntheticRelationship(r: {
   }
   // Known executive-OS / daily-scenario fixture capture text (not real Owner CRM)
   const notes = String(r.notes ?? "").toLowerCase();
+  const name = String(r.displayName ?? "").toLowerCase();
   if (
     /limited tacoma under\s*50,?000/.test(notes) ||
     /likes the limited tacoma under/.test(notes) ||
-    /i just talked to mike\. he likes the limited/.test(notes)
+    /i just talked to mike\. he likes the limited/.test(notes) ||
+    // daily-use-scenario.mjs synthetic customer
+    (name === "john smith" && /scenario:|limited tacoma|talk to (his|her) wife|under\s*\$?45,?000/.test(notes))
   ) {
     return true;
   }

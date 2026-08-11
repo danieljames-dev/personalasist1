@@ -515,16 +515,44 @@ export class AionAssistantV1 {
     state.activity = state.activity.filter((entry) => Date.parse(entry.at) >= horizon);
     if (state.activity.length > 10_000) state.activity.length = 10_000;
   }
+  /**
+   * Durable mutation with in-process write queue.
+   * On revision conflict (external writer or concurrent offline tool), reload from disk
+   * and retry a bounded number of times so production does not stay write-stuck.
+   */
   private async mutate<T>(operation: (state: AssistantStateV1) => T | Promise<T>): Promise<T> {
     await this.ready; let result!: T; let failure: unknown;
     this.writeQueue = this.writeQueue.then(async () => {
-      const expected = this.state.revision; const draft = structuredClone(this.state);
-      try {
-        // Fail closed at the durable mutation boundary when authority is bound.
-        if (this.ports.authority) await this.ports.authority.assertWritable("persistent owner-state mutation");
-        result = await operation(draft); this.prune(draft); draft.revision = expected + 1; await this.ports.repository.save(expected, draft); this.state = draft;
+      const maxAttempts = 4;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const expected = this.state.revision;
+        const draft = structuredClone(this.state);
+        try {
+          // Fail closed at the durable mutation boundary when authority is bound.
+          if (this.ports.authority) await this.ports.authority.assertWritable("persistent owner-state mutation");
+          result = await operation(draft);
+          this.prune(draft);
+          draft.revision = expected + 1;
+          await this.ports.repository.save(expected, draft);
+          this.state = draft;
+          failure = undefined;
+          return;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          const isConflict = /revision conflict/i.test(msg);
+          if (isConflict && attempt < maxAttempts) {
+            try {
+              const loaded = await this.ports.repository.load();
+              if (loaded) this.state = loaded;
+            } catch {
+              /* keep memory state; next attempt may still fail */
+            }
+            continue;
+          }
+          failure = error;
+          return;
+        }
       }
-      catch (error) { failure = error; }
     });
     await this.writeQueue; if (failure) throw failure; return result;
   }
@@ -3011,7 +3039,25 @@ export class AionAssistantV1 {
     return best;
   }
 
-  async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> { const state = await this.snapshot(); const result = await this.ports.backup.create(state, destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.create", `Encrypted private backup verified (${result.bytes} bytes).`, `backup:${result.digest.slice(0, 16)}`); }); return result; }
+  async createPrivateBackup(destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> {
+    const state = await this.snapshot();
+    const result = await this.ports.backup.create(state, destination, passphrase);
+    // Activity log must not fail a verified encrypted backup (revision races during dual-tool use).
+    try {
+      await this.mutate((draft) => {
+        this.activity(
+          draft,
+          "export",
+          "backup.create",
+          `Encrypted private backup verified (${result.bytes} bytes).`,
+          `backup:${result.digest.slice(0, 16)}`,
+        );
+      });
+    } catch {
+      /* backup artifact is already on disk and verified by the backup port */
+    }
+    return result;
+  }
   async verifyPrivateBackup(destination: string, passphrase: string): Promise<AssistantStateV1> { const state = await this.ports.backup.restore(destination, passphrase); await this.mutate((draft) => { this.activity(draft, "export", "backup.verify", "Encrypted private backup integrity and restore validated.", null); }); return state; }
 
   // --- R7.1 Owner knowledge + brand collaborators -----------------------------------------------
@@ -5232,8 +5278,12 @@ export class AionAssistantV1 {
       try {
         const dest = join(snapDir, `aion-private-state-${ts}.aionbak`);
         await this.createPrivateBackup(dest, passphrase);
-        encryptedPath = dest;
-        encrypted = true;
+        // createPrivateBackup already wrote+verified .aionbak; treat as encrypted even if activity soft-failed.
+        const { existsSync } = await import("node:fs");
+        if (existsSync(dest)) {
+          encryptedPath = dest;
+          encrypted = true;
+        }
       } catch (e) {
         return {
           ok: false,
@@ -5247,16 +5297,20 @@ export class AionAssistantV1 {
         };
       }
     }
-    await this.mutate((draft) => {
-      this.activity(
-        draft,
-        "export",
-        "backup.pre-import",
-        `Pre-import snapshot ${sha256.slice(0, 16)}… bytes=${bytes} encrypted=${encrypted} keySource=${keyRes.source}`,
-        null,
-      );
-      return null;
-    });
+    try {
+      await this.mutate((draft) => {
+        this.activity(
+          draft,
+          "export",
+          "backup.pre-import",
+          `Pre-import snapshot ${sha256.slice(0, 16)}… bytes=${bytes} encrypted=${encrypted} keySource=${keyRes.source}`,
+          null,
+        );
+        return null;
+      });
+    } catch {
+      /* activity optional — snapshot + .aionbak are the durable artifacts */
+    }
     return {
       ok: true,
       snapshotPath,

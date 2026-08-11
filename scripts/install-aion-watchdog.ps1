@@ -25,12 +25,13 @@ $watchTr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidde
 # Logon start (interactive, current user)
 schtasks /Create /TN $StartTaskName /TR $startTr /SC ONLOGON /RL LIMITED /F /IT | Out-Host
 
-# Watchdog every 2 minutes — starts only when ensure finds AION down
-schtasks /Create /TN $WatchTaskName /TR $watchTr /SC MINUTE /MO 2 /RL LIMITED /F /IT | Out-Host
+# Watchdog every 5 minutes — starts only when ensure finds AION down.
+# Wider interval + production ensure lock/grace reduces thrash under load.
+schtasks /Create /TN $WatchTaskName /TR $watchTr /SC MINUTE /MO 5 /RL LIMITED /F /IT | Out-Host
 
 # Run ensure once now so recovery is armed immediately
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $prod -Action ensure -RepositoryRoot $RepositoryRoot
 
-Write-Host "INSTALLED $StartTaskName (ONLOGON) + $WatchTaskName (every 2 min ensure)"
+Write-Host "INSTALLED $StartTaskName (ONLOGON) + $WatchTaskName (every 5 min ensure)"
 Write-Host "Verify: schtasks /Query /TN $StartTaskName & schtasks /Query /TN $WatchTaskName"
 Write-Host "Manual: powershell -File $prod -Action status"
