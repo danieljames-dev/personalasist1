@@ -1001,9 +1001,6 @@ export async function createAionServer(options = {}) {
       }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
-      case "connector.gmail.sync":
-        // HTTP fetch in host helper; domain ingest only (see runLiveGmailSync).
-        return runLiveGmailSync(service, input, dataRoot);
       case "gmail.truth.repair":
         return service.repairGmailMarketingContamination({
           relationshipIds: Array.isArray(input.relationshipIds) ? input.relationshipIds.map(String) : undefined,
@@ -1378,9 +1375,13 @@ export async function createAionServer(options = {}) {
       case "executive.decompose": return service.decomposeGoal(String(input.goal ?? input.text ?? ""));
       case "executive.brief": return service.prepareProactiveBrief();
       case "executive.daily": return service.dailyOperatingReport();
-      case "executive.whatChanged": return service.whatChangedSince(Number(input.hours) || 24);
+      case "executive.whatChanged": {
+        const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
+        return service.whatChangedSince(Number(p.hours) || 24);
+      }
       case "executive.contextDaily": {
-        const c = String(input.context || "work").toLowerCase();
+        const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
+        const c = String(p.context || "work").toLowerCase();
         const ctx =
           c === "personal"
             ? "personal"
@@ -1393,14 +1394,21 @@ export async function createAionServer(options = {}) {
                   : "work";
         return service.contextDailyStatus(ctx);
       }
-      case "executive.morning":
+      case "executive.morning": {
+        const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
         return service.runMorningExecutiveCycle({
           scope:
-            input.scope === "work" || input.scope === "personal" || input.scope === "business"
-              ? input.scope
+            p.scope === "work" || p.scope === "personal" || p.scope === "business"
+              ? p.scope
               : "all",
-          skipCycle: input.skipCycle === true,
+          skipCycle: p.skipCycle === true,
         });
+      }
+      case "connector.gmail.sync": {
+        // Support both UI flat payload and { type, input } scripts
+        const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
+        return runLiveGmailSync(service, p, dataRoot);
+      }
       case "executive.maybeCycle": return service.maybeRunScheduledExecutiveCycle(
         input.minIntervalMs != null ? Number(input.minIntervalMs) : undefined,
       );
