@@ -55,6 +55,7 @@ export * from "./owner-data-discovery.js";
 export * from "./private-backup-key.js";
 export * from "./import-review-compress.js";
 export * from "./contact-discovery.js";
+export * from "./connector-secrets.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
 export * from "./owner-authority-v2.js";

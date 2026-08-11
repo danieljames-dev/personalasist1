@@ -845,6 +845,115 @@ export async function createAionServer(options = {}) {
       }
       case "import.csv.contacts": return service.importContactsFromCsv(String(input.csvText ?? input.text ?? ""), { sourceLabel: input.sourceLabel });
       case "connector.gmail.status": return service.gmailConsentStatus();
+      case "connector.gmail.sync": {
+        // HTTP stays in host layer (domain package forbids fetch)
+        const creds = await service.gmailLiveCredentials();
+        if (!creds.ready) {
+          return {
+            ok: false,
+            mode: "not_ready",
+            message: creds.message || "Gmail not READY",
+            scanned: 0,
+            classified: [],
+            commitmentsExtracted: 0,
+            contactsProposed: 0,
+            contactsCreated: 0,
+            backupOk: false,
+          };
+        }
+        const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: creds.clientId,
+            client_secret: creds.clientSecret,
+            refresh_token: creds.refreshToken,
+            grant_type: "refresh_token",
+          }).toString(),
+        });
+        const tokenJson = await tokenRes.json();
+        if (!tokenRes.ok || !tokenJson.access_token) {
+          return {
+            ok: false,
+            mode: "live",
+            message: `Token refresh failed: ${tokenJson.error || tokenRes.status}`.slice(0, 300),
+            scanned: 0,
+            classified: [],
+            commitmentsExtracted: 0,
+            contactsProposed: 0,
+            contactsCreated: 0,
+            backupOk: true,
+          };
+        }
+        const access = tokenJson.access_token;
+        const max = Math.min(40, Math.max(5, Number(input.maxMessages) || 25));
+        const q = String(input.query || "newer_than:30d -category:promotions -category:social");
+        const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+        listUrl.searchParams.set("maxResults", String(max));
+        listUrl.searchParams.set("q", q);
+        const listRes = await fetch(listUrl.toString(), { headers: { authorization: `Bearer ${access}` } });
+        const listJson = await listRes.json();
+        if (!listRes.ok) {
+          return {
+            ok: false,
+            mode: "live",
+            message: `Gmail list failed: ${listJson.error?.message || listRes.status}`.slice(0, 300),
+            scanned: 0,
+            classified: [],
+            commitmentsExtracted: 0,
+            contactsProposed: 0,
+            contactsCreated: 0,
+            backupOk: true,
+          };
+        }
+        const ids = (listJson.messages || []).map((m) => m.id).slice(0, max);
+        const decodePart = (data) => {
+          if (!data) return "";
+          try {
+            return Buffer.from(String(data).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+          } catch { return ""; }
+        };
+        const walkBody = (part) => {
+          if (!part) return "";
+          if (part.mimeType?.startsWith("text/plain") && part.body?.data) return decodePart(part.body.data);
+          if (Array.isArray(part.parts)) {
+            for (const p of part.parts) {
+              const t = walkBody(p);
+              if (t) return t;
+            }
+          }
+          return part.body?.data ? decodePart(part.body.data) : "";
+        };
+        const messages = [];
+        for (const id of ids) {
+          const fullRes = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+            { headers: { authorization: `Bearer ${access}` } },
+          );
+          if (!fullRes.ok) continue;
+          const msg = await fullRes.json();
+          const headers = msg.payload?.headers || [];
+          const getH = (n) => headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value || "";
+          messages.push({
+            id: msg.id || id,
+            from: getH("From"),
+            to: getH("To"),
+            subject: getH("Subject"),
+            snippet: msg.snippet || "",
+            bodyText: (walkBody(msg.payload) || msg.snippet || "").slice(0, 20000),
+            labelIds: msg.labelIds || [],
+          });
+        }
+        const result = await service.ingestGmailMessages(messages);
+        return { mode: "live", ...result };
+      }
+      case "connector.gmail.disconnect": return service.disconnectGmail();
+      case "connector.gmail.oauthComplete": return service.completeGmailOAuth({
+        refreshToken: String(input.refreshToken ?? ""),
+        clientId: input.clientId != null ? String(input.clientId) : undefined,
+        scopes: Array.isArray(input.scopes) ? input.scopes.map(String) : undefined,
+        accountHint: input.accountHint != null ? String(input.accountHint) : undefined,
+      });
       case "connector.metricool.status": return service.metricoolReadinessStatus();
       case "connector.settings.update": return service.updateConnectorSettings(input.connectors ?? input);
       case "import.readiness": return service.importReadiness();
@@ -1371,19 +1480,34 @@ export async function createAionServer(options = {}) {
           bodyHtml = `<h1>Gmail consent cancelled</h1><p class="meta">${escHtml(err)}</p><p><a href="/">Back to AION</a></p>`;
         } else if (!code) {
           bodyHtml = `<h1>Gmail OAuth callback</h1><p class="meta">No authorization code present. Start consent from Settings → Connectors.</p><p><a href="/">Back to AION</a></p>`;
-        } else if (!clientId || !clientSecret) {
-          bodyHtml = `<h1>Gmail almost ready</h1><p>Authorization code received, but client id/secret env is incomplete.</p>
-<p class="meta">Set <code>AION_GMAIL_CLIENT_ID</code> and <code>AION_GMAIL_CLIENT_SECRET</code>, save the client id in Settings if needed, then re-run consent.</p>
-<p class="meta">Code was not exchanged and will not be reused. <a href="/">Back to AION</a></p>`;
         } else {
+          // Prefer local encrypted secret store, then env (never show secrets in HTML)
+          let secret = clientSecret;
+          if (!secret) {
+            try {
+              const { resolveGmailCredentials } = await import("../../packages/local-assistant/dist/connector-secrets.js");
+              const creds = resolveGmailCredentials(dataRoot, process.env, clientId);
+              secret = creds.clientSecret || "";
+              if (!clientId && creds.clientId) {
+                /* keep clientId from status */
+              }
+            } catch { /* fall through */ }
+          }
+          const effectiveClientId = clientId || process.env.AION_GMAIL_CLIENT_ID || "";
+          if (!effectiveClientId || !secret) {
+            bodyHtml = `<h1>Gmail almost ready</h1>
+<p>Authorization code received, but Client ID or Client Secret is missing.</p>
+<p class="meta">In Settings → Connectors → Gmail, save Client ID and Client Secret, then Connect again. Secrets stay on this PC only.</p>
+<p class="meta">Code was not exchanged. <a href="/">Back to AION</a></p>`;
+          } else {
           try {
             const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
               method: "POST",
               headers: { "content-type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({
                 code,
-                client_id: clientId,
-                client_secret: clientSecret,
+                client_id: effectiveClientId,
+                client_secret: secret,
                 redirect_uri: redirectUri,
                 grant_type: "authorization_code",
               }).toString(),
@@ -1393,18 +1517,41 @@ export async function createAionServer(options = {}) {
               bodyHtml = `<h1>Gmail token exchange failed</h1><p class="meta">${escHtml(tokenJson.error || tokenRes.status)} ${escHtml(tokenJson.error_description || "")}</p><p><a href="/">Back to AION</a></p>`;
             } else {
               const refresh = tokenJson.refresh_token || "";
-              const envName = gmailStatus.refreshTokenEnvVar || "AION_GMAIL_REFRESH_TOKEN";
-              bodyHtml = refresh
-                ? `<h1>Gmail consent complete</h1>
-<p>Copy this refresh token into a user environment variable named <code>${escHtml(envName)}</code>, then restart AION. AION does not store the token in assistant state.</p>
-<pre style="white-space:pre-wrap;word-break:break-all;background:#111;color:#eee;padding:12px;border-radius:8px">${escHtml(refresh)}</pre>
-<p class="meta">SEND remains disabled until a separate Owner SEND policy is enabled. <a href="/">Back to AION</a></p>`
-                : `<h1>Gmail consent partial</h1>
-<p>Google did not return a refresh token (often when consent was already granted). Revoke app access in Google Account → Security, then re-run consent with prompt=consent.</p>
+              if (refresh) {
+                try {
+                  await service.completeGmailOAuth({
+                    refreshToken: refresh,
+                    clientId: effectiveClientId,
+                    scopes: String(tokenJson.scope || "").split(/\s+/).filter(Boolean),
+                  });
+                  // Auto first sync (bounded) after connect
+                  let syncNote = "";
+                  try {
+                    const sync = await service.syncGmailRecent({ maxMessages: 20 });
+                    syncNote = sync.ok
+                      ? `<p class="meta">Initial sync: scanned ${sync.scanned}, commitments ${sync.commitmentsExtracted}, contacts +${sync.contactsCreated}.</p>`
+                      : `<p class="meta">Connected; initial sync deferred: ${escHtml(sync.message || "")}</p>`;
+                  } catch (e) {
+                    syncNote = `<p class="meta">Connected; sync later from Settings. ${escHtml(e?.message || e)}</p>`;
+                  }
+                  bodyHtml = `<h1>Gmail connected</h1>
+<p>Refresh credential saved on this computer (encrypted local store — not Git, not chat).</p>
+${syncNote}
+<p class="meta">SEND remains Owner-gated per message. <a href="/">Back to AION</a></p>`;
+                } catch (e) {
+                  bodyHtml = `<h1>Gmail consent OK — local store failed</h1>
+<p class="meta">${escHtml(e?.message || e)}</p>
+<p class="meta">You may set env <code>AION_GMAIL_REFRESH_TOKEN</code> as fallback (never paste into chat). <a href="/">Back to AION</a></p>`;
+                }
+              } else {
+                bodyHtml = `<h1>Gmail consent partial</h1>
+<p>Google did not return a refresh token (often when consent was already granted). Revoke app access in Google Account → Security, then re-run Connect with consent prompt.</p>
 <p class="meta">Access token received but not stored. <a href="/">Back to AION</a></p>`;
+              }
             }
           } catch (error) {
             bodyHtml = `<h1>Gmail token exchange error</h1><p class="meta">${escHtml(error?.message || error)}</p><p><a href="/">Back to AION</a></p>`;
+          }
           }
         }
         const html = `<!doctype html><html><head><meta charset="utf-8"><title>AION Gmail OAuth</title>

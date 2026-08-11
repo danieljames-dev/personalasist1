@@ -7484,27 +7484,32 @@ export class AionAssistantV1 {
       metricoolTokenEnvVar: "AION_METRICOOL_USER_TOKEN",
       metricoolBlogIdEnvVar: "AION_METRICOOL_BLOG_ID",
     };
-    // Prefer Owner-stored client id, then env (never secrets in state)
-    const clientId =
-      connectors.gmailClientId?.trim() ||
-      process.env.AION_GMAIL_CLIENT_ID?.trim() ||
-      cfg.clientId;
+    const dataRoot = this.repositoryDataRoot();
+    const { resolveGmailCredentials } = await import("./connector-secrets.js");
+    const creds = resolveGmailCredentials(dataRoot, process.env, connectors.gmailClientId);
+    const clientId = creds.clientId || cfg.clientId;
     const redirectUri = connectors.gmailRedirectUri?.trim() || cfg.redirectUri;
+    // Synthetic env for status so local secrets count as configured
+    const envForStatus = {
+      ...process.env,
+      [cfg.clientSecretEnvVar]: creds.clientSecret || process.env[cfg.clientSecretEnvVar] || "",
+      [cfg.refreshTokenEnvVar]: creds.refreshToken || process.env[cfg.refreshTokenEnvVar] || "",
+    };
     const config = { ...cfg, clientId, redirectUri };
-    const status = gmailConnectorStatus(config, process.env, { sendAuthorized: sendGate.allowed });
+    const status = gmailConnectorStatus(config, envForStatus, { sendAuthorized: sendGate.allowed });
     const ownerSteps: string[] = [];
     if (status.code === "NOT_CONFIGURED") {
       ownerSteps.push(
         "Open Settings → Connectors → Gmail",
-        "Paste Google OAuth Client ID (from Google Cloud console)",
-        "Click Connect / check Gmail",
-        "Complete Google account selection → Allow in browser",
+        "Paste Google OAuth Client ID + Client Secret (secret stays on this PC only)",
+        "Click Save connector settings",
+        "Click Connect / check Gmail → Google Allow",
       );
     } else if (status.code === "GMAIL_OWNER_CONSENT_REQUIRED") {
       ownerSteps.push(
-        "Open Settings → Connectors → Gmail → Connect",
+        "Click Connect / check Gmail (or Open Google consent)",
         "Select Google account → Allow",
-        "Confirm status becomes READY (tokens stay in env — never paste into chat)",
+        "Callback stores refresh token on this PC automatically — no env/PowerShell",
       );
     }
     let authUrl: string | null = null;
@@ -7517,19 +7522,26 @@ export class AionAssistantV1 {
         authUrl = null;
       }
     }
+    const hasLocalSecret = Boolean(creds.clientSecret && creds.source.clientSecret === "local_file");
+    const hasLocalRefresh = Boolean(creds.refreshToken && creds.source.refreshToken === "local_file");
     return {
       ...status,
       authUrl,
       clientIdConfigured: Boolean(clientId),
+      clientSecretConfigured: Boolean(creds.clientSecret),
+      refreshConfigured: Boolean(creds.refreshToken),
       clientSecretEnvVar: config.clientSecretEnvVar,
       refreshTokenEnvVar: config.refreshTokenEnvVar,
+      credentialSources: creds.source,
+      localSecretStore: hasLocalSecret || hasLocalRefresh,
+      lastSyncAt: creds.local?.lastSyncAt ?? null,
       redirectUri,
       ownerSteps,
       ownerAction:
         status.code === "GMAIL_OWNER_CONSENT_REQUIRED"
-          ? `Settings → Connectors → Gmail → Connect → Google Allow. Then store refresh token in ${config.refreshTokenEnvVar} and client secret in ${config.clientSecretEnvVar} (never paste into chat).`
+          ? "Settings → Connectors → Gmail → Connect → Google Allow. Refresh token is saved on this PC automatically."
           : status.code === "NOT_CONFIGURED"
-            ? "Settings → Connectors → Gmail: paste OAuth Client ID → Connect → Google Allow. Never paste passwords/tokens into chat."
+            ? "Settings → Connectors → Gmail: enter Client ID + Client Secret → Save → Connect → Google Allow. Never paste tokens into chat."
             : status.code === "READY"
               ? "Gmail is OAuth-ready. Live read/search/draft available under policy; SEND still Owner-gated separately."
               : null,
@@ -7566,7 +7578,45 @@ export class AionAssistantV1 {
     };
   }
 
+  /** Resolve private/aion data root from repository (file or gated wrapper). */
+  private repositoryDataRoot(): string | null {
+    const repo = this.ports.repository as {
+      root?: string;
+      statePath?: string;
+      inner?: { root?: string; statePath?: string };
+    };
+    if (typeof repo.root === "string" && repo.root) return repo.root;
+    if (typeof repo.inner?.root === "string" && repo.inner.root) return repo.inner.root;
+    if (typeof repo.statePath === "string" && repo.statePath.endsWith("state-v1.json")) {
+      return repo.statePath.replace(/[\\/]state-v1\.json$/i, "");
+    }
+    if (typeof repo.inner?.statePath === "string" && repo.inner.statePath.endsWith("state-v1.json")) {
+      return repo.inner.statePath.replace(/[\\/]state-v1\.json$/i, "");
+    }
+    return null;
+  }
+
   async updateConnectorSettings(input: Record<string, unknown> = {}): Promise<SettingsV1["connectors"]> {
+    const dataRoot = this.repositoryDataRoot();
+    // Secrets never enter assistant state JSON — only local encrypted secret files.
+    if (dataRoot && (typeof input.gmailClientSecret === "string" || typeof input.gmailRefreshToken === "string")) {
+      const { saveGmailLocalSecrets } = await import("./connector-secrets.js");
+      const patch: {
+        clientId?: string;
+        clientSecretPlain?: string;
+        refreshTokenPlain?: string;
+      } = {};
+      if (typeof input.gmailClientId === "string" && input.gmailClientId.trim()) {
+        patch.clientId = input.gmailClientId.trim().slice(0, 200);
+      }
+      if (typeof input.gmailClientSecret === "string" && input.gmailClientSecret.trim()) {
+        patch.clientSecretPlain = input.gmailClientSecret.trim();
+      }
+      if (typeof input.gmailRefreshToken === "string" && input.gmailRefreshToken.trim()) {
+        patch.refreshTokenPlain = input.gmailRefreshToken.trim();
+      }
+      saveGmailLocalSecrets(dataRoot, patch);
+    }
     return this.mutate((draft) => {
       if (!draft.settings.connectors) {
         draft.settings.connectors = {
@@ -7595,9 +7645,66 @@ export class AionAssistantV1 {
         if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) throw new Error("Metricool blog id env var name is invalid.");
         c.metricoolBlogIdEnvVar = name;
       }
-      this.activity(draft, "settings", "connectors.update", "Connector settings updated (no secrets stored).", null);
+      this.activity(
+        draft,
+        "settings",
+        "connectors.update",
+        "Connector settings updated (secrets only in private local store if provided).",
+        null,
+      );
       return structuredClone(c);
     });
+  }
+
+  /**
+   * Persist OAuth refresh token after loopback callback (local encrypted file only).
+   * Never stores secrets in assistant state or activity logs.
+   */
+  async completeGmailOAuth(input: {
+    refreshToken: string;
+    clientId?: string;
+    scopes?: string[];
+    accountHint?: string;
+  }): Promise<{ ok: boolean; message: string }> {
+    const dataRoot = this.repositoryDataRoot();
+    if (!dataRoot) return { ok: false, message: "No private data root — cannot store Gmail credentials." };
+    const token = String(input.refreshToken || "").trim();
+    if (token.length < 20) return { ok: false, message: "Refresh token missing or too short." };
+    const { saveGmailLocalSecrets } = await import("./connector-secrets.js");
+    const state = await this.snapshot();
+    const savePatch: {
+      clientId?: string;
+      refreshTokenPlain: string;
+      scopes?: string[];
+      accountHint?: string;
+      connectedAt: string;
+    } = {
+      refreshTokenPlain: token,
+      connectedAt: this.ports.clock.now(),
+    };
+    const cid = input.clientId || state.settings.connectors?.gmailClientId || "";
+    if (cid) savePatch.clientId = cid;
+    if (input.scopes?.length) savePatch.scopes = input.scopes;
+    if (input.accountHint) savePatch.accountHint = input.accountHint;
+    saveGmailLocalSecrets(dataRoot, savePatch);
+    await this.mutate((draft) => {
+      this.activity(draft, "settings", "gmail.oauth.complete", "Gmail OAuth refresh credential stored locally (encrypted file).", null);
+      return null;
+    });
+    return { ok: true, message: "Gmail connected. Refresh token stored in private local secrets (not Git, not chat)." };
+  }
+
+  async disconnectGmail(): Promise<{ ok: boolean; message: string }> {
+    const dataRoot = this.repositoryDataRoot();
+    if (dataRoot) {
+      const { clearGmailLocalSecrets } = await import("./connector-secrets.js");
+      clearGmailLocalSecrets(dataRoot);
+    }
+    await this.mutate((draft) => {
+      this.activity(draft, "settings", "gmail.disconnect", "Gmail local credentials cleared.", null);
+      return null;
+    });
+    return { ok: true, message: "Gmail local credentials cleared. Env vars (if any) unchanged." };
   }
 
   searchGmailFixtures(query: string) {
@@ -7608,6 +7715,230 @@ export class AionAssistantV1 {
       commitments: hits.flatMap((m) =>
         extractCommitmentsFromBody(m.bodyText).map((c) => ({ messageId: m.id, text: c })),
       ),
+    };
+  }
+
+    /**
+   * Ingest already-fetched Gmail messages (HTTP lives in apps/aion server, not domain).
+   * Classifies, extracts commitments/contacts — no full-mailbox permanent body store.
+   */
+  async ingestGmailMessages(
+    messages: Array<{
+      id: string;
+      from: string;
+      to?: string;
+      subject: string;
+      snippet?: string;
+      bodyText?: string;
+      labelIds?: string[];
+    }>,
+  ): Promise<{
+    ok: boolean;
+    message: string;
+    scanned: number;
+    classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string }>;
+    commitmentsExtracted: number;
+    contactsProposed: number;
+    contactsCreated: number;
+    backupOk: boolean;
+  }> {
+    const backup = await this.preImportPrivateStateBackup();
+    if (!backup.ok || !backup.encrypted) {
+      return {
+        ok: false,
+        message: "Encrypted private backup required before Gmail knowledge mutation.",
+        scanned: 0,
+        classified: [],
+        commitmentsExtracted: 0,
+        contactsProposed: 0,
+        contactsCreated: 0,
+        backupOk: false,
+      };
+    }
+    const { classifyGmailMessage, extractCommitmentsFromBody } = await import("./connectors/gmail-connector.js");
+    const classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string }> = [];
+    let commitmentsExtracted = 0;
+    let contactsProposed = 0;
+    let contactsCreated = 0;
+    const now = this.ports.clock.now();
+    const dataRoot = this.repositoryDataRoot();
+
+    for (const msg of messages) {
+      const from = msg.from || "";
+      const subject = msg.subject || "";
+      const snippet = msg.snippet || "";
+      const bodyText = msg.bodyText || snippet;
+      const clsInput: {
+        from: string;
+        to?: string;
+        subject: string;
+        snippet?: string;
+        bodyText?: string;
+        labelIds?: string[];
+      } = { from, subject, snippet, bodyText };
+      if (msg.to) clsInput.to = msg.to;
+      if (msg.labelIds) clsInput.labelIds = msg.labelIds;
+      const cls = classifyGmailMessage(clsInput);
+      classified.push({
+        id: msg.id,
+        from: from.slice(0, 120),
+        subject: subject.slice(0, 160),
+        relevance: cls.relevance,
+        workspaceHint: cls.workspaceHint,
+      });
+      if (cls.relevance === "noise") continue;
+      void isInstructionLikeDocument(bodyText);
+
+      const commits = cls.shouldExtractCommitments ? extractCommitmentsFromBody(bodyText) : [];
+      if (commits.length) {
+        await this.mutate((draft) => {
+          if (!draft.executive) draft.executive = emptyExecutiveState(now);
+          for (const line of commits.slice(0, 3)) {
+            try {
+              const ws =
+                cls.workspaceHint === "work"
+                  ? "work"
+                  : cls.workspaceHint === "compassionate-choice"
+                    ? "compassionate-choice"
+                    : "personal";
+              const c = buildCommitment(
+                {
+                  committedBy: /i will|i'll|we will|we'll/i.test(line) ? "Owner" : from.slice(0, 80),
+                  committedTo: /i will|i'll|we will|we'll/i.test(line) ? from.slice(0, 80) : "Owner",
+                  statement: line.slice(0, 500),
+                  dueAt: null,
+                  sourceRef: `gmail:${msg.id}`,
+                  confidence: 70,
+                },
+                { id: this.ports.ids.next("commit"), now, workspace: ws },
+              );
+              draft.executive.commitments.unshift(c);
+              commitmentsExtracted += 1;
+            } catch {
+              /* skip */
+            }
+          }
+          return null;
+        });
+      }
+
+      if (cls.shouldProposeContact && cls.contactClass !== "UNKNOWN") {
+        contactsProposed += 1;
+        const emailMatch = from.match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i);
+        const nameMatch = from.match(/^"?([^"<]+)"?\s*</) || from.match(/^([^@]+)/);
+        const displayName = (nameMatch?.[1] || "").trim().replace(/"/g, "");
+        const email = emailMatch?.[0] || "";
+        if (email && displayName.length > 1 && !/noreply/i.test(email)) {
+          await this.mutate((draft) => {
+            const exists = draft.relationships.some(
+              (r) =>
+                !r.archived &&
+                (r.contactMethods || []).some((m) => m.channel === "email" && m.value.toLowerCase() === email.toLowerCase()),
+            );
+            if (exists) return null;
+            if (/daniel|nearmiss1193|coffman/i.test(email) || /daniel coffman/i.test(displayName)) return null;
+            const rid = this.ports.ids.next("relationship");
+            const ws =
+              cls.workspaceHint === "work"
+                ? "work"
+                : cls.workspaceHint === "compassionate-choice" &&
+                    draft.workspaces.some((w) => w.id === "compassionate-choice")
+                  ? "compassionate-choice"
+                  : "personal";
+            const relType =
+              cls.contactClass === "COLLABORATOR"
+                ? "partner"
+                : cls.contactClass === "VENDOR"
+                  ? "vendor"
+                  : cls.contactClass === "CUSTOMER"
+                    ? "customer"
+                    : cls.contactClass === "PROSPECT"
+                      ? "prospect"
+                      : "contact";
+            const person = buildCustomer(
+              {
+                displayName: displayName.slice(0, 120),
+                organisation: "",
+                source: "gmail-live",
+                notes: `From Gmail ${msg.id}: ${subject.slice(0, 200)}. Class=${cls.contactClass} (live_connector — not owner_direct).`,
+                relationshipType: relType,
+                contactMethods: [{ channel: "email", label: "email", value: email }],
+                lifecycle: relType === "prospect" || relType === "customer" ? "prospect" : "active",
+              },
+              {
+                id: rid,
+                reference: `gmail-contact:${rid}`,
+                workspace: ws,
+                now,
+                relationshipType: relType,
+                defaultOrigin: "owner-created",
+              },
+            );
+            draft.relationships.unshift(person);
+            contactsCreated += 1;
+            return null;
+          });
+        }
+      }
+    }
+
+    if (dataRoot) {
+      const { saveGmailLocalSecrets } = await import("./connector-secrets.js");
+      saveGmailLocalSecrets(dataRoot, { lastSyncAt: now });
+    }
+    await this.mutate((draft) => {
+      this.activity(
+        draft,
+        "import",
+        "gmail.ingest",
+        `Gmail ingest scanned=${messages.length} commits=${commitmentsExtracted} contacts+${contactsCreated}`,
+        null,
+      );
+      return null;
+    });
+    return {
+      ok: true,
+      message: `Gmail ingest complete. scanned=${messages.length}; commitments=${commitmentsExtracted}; contacts created=${contactsCreated}.`,
+      scanned: messages.length,
+      classified,
+      commitmentsExtracted,
+      contactsProposed,
+      contactsCreated,
+      backupOk: true,
+    };
+  }
+
+  /** Credential snapshot for host-layer Gmail HTTP (no secrets returned). */
+  async gmailLiveCredentials(): Promise<{
+    ready: boolean;
+    clientId: string;
+    clientSecret: string;
+    refreshToken: string;
+    redirectUri: string;
+    message: string;
+  }> {
+    const status = await this.gmailConsentStatus();
+    if (status.code !== "READY") {
+      return {
+        ready: false,
+        clientId: "",
+        clientSecret: "",
+        refreshToken: "",
+        redirectUri: status.redirectUri || "",
+        message: status.ownerAction || status.message || "not ready",
+      };
+    }
+    const dataRoot = this.repositoryDataRoot();
+    const { resolveGmailCredentials } = await import("./connector-secrets.js");
+    const state = await this.snapshot();
+    const creds = resolveGmailCredentials(dataRoot, process.env, state.settings.connectors?.gmailClientId);
+    return {
+      ready: Boolean(creds.clientId && creds.clientSecret && creds.refreshToken),
+      clientId: creds.clientId,
+      clientSecret: creds.clientSecret,
+      refreshToken: creds.refreshToken,
+      redirectUri: state.settings.connectors?.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback",
+      message: "ok",
     };
   }
 

@@ -835,7 +835,9 @@ function connectorsCard() {
 <p class="meta"><b>Owner data:</b> Knowledge → Direct select &amp; import (desktop picker auto-registers; no path paste into chat).</p>
 <form data-form="connector-settings">
 <label>Gmail — OAuth client id (public)
-<input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com"></label>
+<input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com" autocomplete="off"></label>
+<label>Gmail — OAuth client secret (stays on this PC only; never chat)
+<input name="gmailClientSecret" type="password" maxlength="200" value="" placeholder="${g?.clientSecretConfigured ? "•••• saved locally — leave blank to keep" : "paste once from Google Cloud console"}" autocomplete="new-password"></label>
 <label>Gmail redirect URI (loopback)
 <input name="gmailRedirectUri" maxlength="500" value="${esc(c.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback")}"></label>
 <label>Metricool — env var <i>name</i> for user token (not the token value)
@@ -846,14 +848,17 @@ function connectorsCard() {
 </form>
 <div class="actions">
 <button data-do="connector-gmail-status" type="button">Connect / check Gmail</button>
+<button data-do="connector-gmail-sync" type="button">Sync recent Gmail</button>
+<button data-do="connector-gmail-disconnect" type="button" class="danger">Disconnect Gmail</button>
 <button data-do="connector-metricool-status" type="button">Connect / check Metricool</button>
 </div>
 ${g ? `<article class="card"><h3>Gmail · ${esc(g.code)}</h3>
 <p class="meta">${esc(g.message || "")}</p>
 ${g.ownerAction ? `<p class="meta"><b>Owner action:</b> ${esc(g.ownerAction)}</p>` : ""}
-<p class="meta">clientId=${g.clientIdConfigured ? "yes" : "no"} · secret env <code>${esc(g.clientSecretEnvVar || "AION_GMAIL_CLIENT_SECRET")}</code> · refresh env <code>${esc(g.refreshTokenEnvVar || "AION_GMAIL_REFRESH_TOKEN")}</code></p>
-${g.authUrl ? `<p class="meta"><a href="${esc(g.authUrl)}" target="_blank" rel="noopener">Open Google consent</a> (loopback callback after consent)</p>` : ""}
-</article>` : `<p class="meta">Gmail status not loaded yet — press Check Gmail readiness.</p>`}
+${(g.ownerSteps || []).length ? `<ol class="meta">${g.ownerSteps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>` : ""}
+<p class="meta">clientId=${g.clientIdConfigured ? "yes" : "no"} · secret=${g.clientSecretConfigured ? "yes" : "no"} · refresh=${g.refreshConfigured ? "yes" : "no"} · localStore=${g.localSecretStore ? "yes" : "no"} · lastSync=${esc(g.lastSyncAt || "never")}</p>
+${g.authUrl ? `<p class="meta"><a href="${esc(g.authUrl)}" target="_blank" rel="noopener"><b>Open Google consent → Allow</b></a></p>` : ""}
+</article>` : `<p class="meta">Gmail status not loaded yet — press Connect / check Gmail.</p>`}
 ${m ? `<article class="card"><h3>Metricool · ${esc(m.code)}</h3>
 <p class="meta">${esc(m.message || "")}</p>
 ${m.ownerAction ? `<p class="meta"><b>Owner action:</b> ${esc(m.ownerAction)}</p>` : ""}
@@ -1444,6 +1449,28 @@ document.addEventListener("click", async (event) => {
     if (verb === "connector-gmail-status") {
       model._gmailStatus = await api("connector.gmail.status", {});
       toast(`Gmail: ${model._gmailStatus.code}`);
+      if (model._gmailStatus.authUrl && model._gmailStatus.code !== "READY") {
+        // Offer consent open when configured
+        try {
+          window.open(model._gmailStatus.authUrl, "_blank", "noopener");
+        } catch { /* popup blocked */ }
+      }
+      render();
+      return;
+    }
+    if (verb === "connector-gmail-sync") {
+      toast("Gmail sync starting (encrypted backup first)…");
+      const sync = await api("connector.gmail.sync", { maxMessages: 25 });
+      toast(sync.ok ? sync.message : `Gmail sync: ${sync.message || sync.code || "failed"}`);
+      model._gmailStatus = await api("connector.gmail.status", {});
+      await load();
+      return;
+    }
+    if (verb === "connector-gmail-disconnect") {
+      if (!confirm("Disconnect Gmail local credentials on this PC?")) return;
+      await api("connector.gmail.disconnect", {});
+      model._gmailStatus = await api("connector.gmail.status", {});
+      toast("Gmail disconnected (local store cleared).");
       render();
       return;
     }
@@ -1924,13 +1951,18 @@ document.addEventListener("submit", async (event) => {
       toast(form.enabled.checked ? "Private phone access is on. Restart AION for the bind address to take effect." : "Private phone access is off and every device session has ended.");
     }
     if (kind === "connector-settings") {
-      const connectors = await api("connector.settings.update", {
+      const payload = {
         gmailClientId: d.gmailClientId || "",
         gmailRedirectUri: d.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback",
         metricoolTokenEnvVar: d.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN",
         metricoolBlogIdEnvVar: d.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID",
-      });
-      toast("Connector settings saved (no secrets stored).");
+      };
+      // Optional secret — only if Owner typed a new value (masked field empty means keep)
+      if (d.gmailClientSecret && String(d.gmailClientSecret).trim()) {
+        payload.gmailClientSecret = String(d.gmailClientSecret).trim();
+      }
+      await api("connector.settings.update", payload);
+      toast("Connector settings saved. Secrets stay on this PC only (not Git, not chat).");
       model._gmailStatus = await api("connector.gmail.status", {});
       model._metricoolStatus = await api("connector.metricool.status", {});
       await load();
