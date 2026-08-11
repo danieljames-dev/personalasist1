@@ -294,9 +294,21 @@ export class FileWriterAuthorityV1 implements WriterAuthorityPortV1 {
  */
 export class AuthorityGatedStateRepositoryV1 {
   constructor(
-    private readonly inner: { load(): Promise<import("./contracts.js").AssistantStateV1 | null>; save(expectedRevision: number, state: import("./contracts.js").AssistantStateV1): Promise<void> },
+    readonly inner: {
+      load(): Promise<import("./contracts.js").AssistantStateV1 | null>;
+      save(expectedRevision: number, state: import("./contracts.js").AssistantStateV1): Promise<void>;
+      root?: string;
+      statePath?: string;
+    },
     private readonly authority: WriterAuthorityPortV1,
   ) {}
+  /** Surface file-repo root through the gate wrapper for backups/exports. */
+  get root(): string | undefined {
+    return typeof this.inner.root === "string" ? this.inner.root : undefined;
+  }
+  get statePath(): string | undefined {
+    return typeof this.inner.statePath === "string" ? this.inner.statePath : undefined;
+  }
   load(): Promise<import("./contracts.js").AssistantStateV1 | null> {
     return this.inner.load();
   }

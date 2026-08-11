@@ -4625,7 +4625,22 @@ export class AionAssistantV1 {
     const { join } = await import("node:path");
     const state = await this.snapshot();
     // Persist latest via mutate no-op? State already on disk via repository — re-save by reading path
-    const dataRoot = (this.ports.repository as { root?: string }).root;
+    const repo = this.ports.repository as {
+      root?: string;
+      statePath?: string;
+      inner?: { root?: string; statePath?: string };
+      underlying?: { root?: string; statePath?: string };
+    };
+    const dataRoot =
+      (typeof repo.root === "string" && repo.root) ||
+      (typeof repo.inner?.root === "string" && repo.inner.root) ||
+      (typeof repo.underlying?.root === "string" && repo.underlying.root) ||
+      (typeof repo.statePath === "string" && repo.statePath.endsWith("state-v1.json")
+        ? repo.statePath.replace(/[\\/]state-v1\.json$/i, "")
+        : "") ||
+      (typeof repo.inner?.statePath === "string" && repo.inner.statePath.endsWith("state-v1.json")
+        ? repo.inner.statePath.replace(/[\\/]state-v1\.json$/i, "")
+        : "");
     if (!dataRoot || typeof dataRoot !== "string") {
       // In-memory tests: write snapshot to temp via backup port only
       const ts = this.ports.clock.now().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");

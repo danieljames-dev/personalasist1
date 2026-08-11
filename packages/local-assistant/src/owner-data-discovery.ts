@@ -516,17 +516,26 @@ export function discoverOwnerDataSources(opts: {
   };
 }
 
+/** Prefer text-heavy knowledge roots; defer pure media/render output. */
+function isLowValueMediaRoot(path: string): boolean {
+  const lower = path.toLowerCase();
+  return /out_clips|out_audiogram|out_long|screen recordings?|captures|videos?$|\.mkv|recordings$/i.test(lower);
+}
+
 /** Roots ready for auto-register under Owner broad authorization. */
 export function rootsForAutoRegister(inventory: OwnerDataInventoryV1, maxRoots = 24): string[] {
   return inventory.useful
     .filter((s) => s.policyOk && s.exists && s.realVsSynthetic === "REAL_OWNER_DATA")
     .filter((s) => !isDriveOrProfileContainer(s.path) || s.estimatedSupportedFileCount > 0)
+    .filter((s) => !isLowValueMediaRoot(s.path))
     // Prefer non-container specific folders
     .filter((s) => {
       const lower = s.path.toLowerCase();
       const home = (process.env.USERPROFILE || "").toLowerCase();
-      // Allow Desktop top-level files via Desktop root only if it has supported files and few children
-      if (lower === `${home}\\downloads`) return s.priority <= 2; // downloads often noisy
+      // Downloads often noisy installers — only high priority
+      if (lower === `${home}\\downloads`) return s.priority <= 2;
+      // Huge archives after current work
+      if (s.priority >= 6 && s.estimatedBytes > 50 * 1024 * 1024) return false;
       return true;
     })
     .slice(0, maxRoots)

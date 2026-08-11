@@ -930,15 +930,22 @@ export async function createAionServer(options = {}) {
        * Does not require per-folder Owner paste. Honors hard exclusions.
        */
       case "import.broadIngest": {
-        const maxRoots = Number(input.maxRoots ?? 12) || 12;
-        const maxFilesPerRoot = Number(input.maxFilesPerRoot ?? 200) || 200;
-        const priorityMax = Number(input.priorityMax ?? 4) || 4;
+        const maxRoots = Number(input.maxRoots ?? 8) || 8;
+        const maxFilesPerRoot = Number(input.maxFilesPerRoot ?? 80) || 80;
+        const priorityMax = Number(input.priorityMax ?? 3) || 3;
+        // Default bounds protect production from OOM on huge media trees
+        const maxFileBytes = Number(input.maxFileBytes ?? (2 * 1024 * 1024)) || (2 * 1024 * 1024);
+        const maxTotalBytes = Number(input.maxTotalBytes ?? (40 * 1024 * 1024)) || (40 * 1024 * 1024);
         const inventory = await service.discoverOwnerDataInventory({ inventory: true });
+        const mediaRe = /out_clips|out_audiogram|out_long|screen recordings?|captures|recordings$/i;
         const candidatePaths = (Array.isArray(input.paths) && input.paths.length
           ? input.paths.map(String)
           : inventory.useful
               .filter((s) => s.priority <= priorityMax && s.policyOk && s.exists)
               .filter((s) => s.realVsSynthetic === "REAL_OWNER_DATA")
+              .filter((s) => !mediaRe.test(s.path))
+              // Prefer smaller high-value roots first within priority
+              .sort((a, b) => a.priority - b.priority || a.estimatedBytes - b.estimatedBytes)
               .slice(0, maxRoots)
               .map((s) => s.path));
         if (!candidatePaths.length) {
@@ -983,7 +990,9 @@ export async function createAionServer(options = {}) {
               tags: ["owner-discovered", "broad-ingest", "real-owner-data"],
               summary: `Owner broad ingest: ${root}`,
               maxFiles: maxFilesPerRoot,
-              maxDepth: Number(input.maxDepth ?? 10) || 10,
+              maxDepth: Number(input.maxDepth ?? 8) || 8,
+              maxFileBytes,
+              maxTotalBytes,
             });
             try {
               await service.queueImportSource({
@@ -993,7 +1002,7 @@ export async function createAionServer(options = {}) {
                 associateWith: "none",
               });
               const sources = await service.listImportSourceQueue();
-              const src = sources.find((s) => s.path === root || s.label.startsWith("broad:"));
+              const src = [...sources].reverse().find((s) => s.path === root || (s.label && String(s.label).startsWith("broad:")));
               if (src) {
                 await service.finalizeImportSource(src.id, {
                   status: (result.stats?.reviewItems > 0 && (result.imported?.length ?? 0) > 0)
