@@ -99,15 +99,15 @@ export function detectInventoryMatches(input: {
         workspace: "work",
         title: `Match for ${r.displayName}: ${[v.year, v.make, v.model, v.trim].filter(Boolean).join(" ")}`,
         detail: `Customer signals matched inventory ${v.vin ?? v.stockNumber ?? v.id}. Presence ${v.presenceStatus}. Online ≠ on lot.`,
-        value: Math.min(95, 50 + fit / 2),
+        value: Math.round(Math.min(95, 50 + fit / 2)),
         urgency: v.presenceStatus === "PHYSICALLY_VERIFIED" ? 70 : 55,
-        confidence: Math.min(90, 40 + fit / 2),
+        confidence: Math.round(Math.min(90, 40 + fit / 2)),
         interruptionCost: 25,
         entityIds: [r.id, v.id],
         createdAt: input.nowIso,
         source: "opportunity.inventory_match",
       };
-      signals.push({ ...base, score: scoreOpportunitySignal(base) });
+      signals.push({ ...base, score: Math.round(scoreOpportunitySignal(base)) });
     }
   }
 
@@ -131,7 +131,7 @@ export function detectInventoryMatches(input: {
       createdAt: input.nowIso,
       source: "opportunity.price_change",
     };
-    signals.push({ ...base, score: scoreOpportunitySignal(base) });
+    signals.push({ ...base, score: Math.round(scoreOpportunitySignal(base)) });
   }
 
   // Stale customers (no contact 14+ days, still open follow-ups or nextAction)
@@ -156,7 +156,7 @@ export function detectInventoryMatches(input: {
       createdAt: input.nowIso,
       source: "opportunity.stale_customer",
     };
-    signals.push({ ...base, score: scoreOpportunitySignal(base) });
+    signals.push({ ...base, score: Math.round(scoreOpportunitySignal(base)) });
   }
 
   signals.sort((a, b) => b.score - a.score);
