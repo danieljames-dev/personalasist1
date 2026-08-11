@@ -383,11 +383,11 @@ export function buildAttentionBoard(input: {
     .map((i) => ({ ...i, score: scoreItem(i) }));
   scored.sort((a, b) => b.score - a.score);
 
-  // Prefer NOW/TODAY on Owner board over BACKGROUND noise
+  // Owner attention is scarce: default high-priority interruption set max 5.
   const ownerMustDo = scored
     .filter((i) => i.bucket === "OWNER_MUST_DO" && i.horizon !== "BACKGROUND")
-    .slice(0, 12);
-  const aionCanDo = scored.filter((i) => i.bucket === "AION_CAN_DO").slice(0, 12);
+    .slice(0, 5);
+  const aionCanDo = scored.filter((i) => i.bucket === "AION_CAN_DO").slice(0, 10);
 
   const nowItems = ownerMustDo.filter((i) => i.horizon === "NOW");
   const todayItems = ownerMustDo.filter((i) => i.horizon === "TODAY" || i.horizon === "NOW");

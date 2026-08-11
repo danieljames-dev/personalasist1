@@ -48,6 +48,7 @@ export * from "./executive-cycle.js";
 export * from "./attention-budget.js";
 export * from "./entity-resolution.js";
 export * from "./proactive-usefulness.js";
+export * from "./daily-operating.js";
 export * from "./walk-acceptance.js";
 export * from "./authority-envelope.js";
 export * from "./import-path-policy.js";

@@ -172,6 +172,13 @@ import {
   type ExternalActionRecordV1,
 } from "./authority-envelope.js";
 import {
+  buildContextDailyView,
+  buildDailyOperatingReport,
+  buildWhatChangedSince,
+  type ContextDailyViewV1,
+  type DailyOperatingReportV1,
+} from "./daily-operating.js";
+import {
   isTestOrE2eWorkspace,
   isSyntheticOwnerFacingText,
   isSyntheticRelationship,
@@ -948,6 +955,7 @@ export class AionAssistantV1 {
     board: AttentionBoardV1;
     cycle: ExecutiveCycleResultV1 | null;
     dealership: DealershipMorningAssistV1 | null;
+    daily: DailyOperatingReportV1;
   }> {
     const scope = opts.scope ?? "all";
     let cycle: ExecutiveCycleResultV1 | null = null;
@@ -997,7 +1005,11 @@ export class AionAssistantV1 {
       d.executive.lastMorningCycleAt = now;
       return null;
     });
+    const daily = await this.dailyOperatingReport({ skipBoardRefresh: true, board });
     const reply = [
+      daily.reply,
+      "",
+      "---",
       brief.reply,
       "",
       dealership && (scope === "all" || scope === "work")
@@ -1006,7 +1018,112 @@ export class AionAssistantV1 {
     ]
       .filter(Boolean)
       .join("\n");
-    return { reply, brief, board, cycle, dealership };
+    // Measured value: Owner avoided manual board assembly
+    await this.recordConservativeValue({
+      action: "daily_operating_brief_prepared",
+      capability: "executive.daily",
+      timeSavedMinutes: 5,
+      evidenceIds: [`brief:${now}`],
+      notes: "Morning/daily operating brief assembled from local state",
+    }).catch(() => null);
+    return { reply, brief, board, cycle, dealership, daily };
+  }
+
+  async dailyOperatingReport(opts: {
+    skipBoardRefresh?: boolean;
+    board?: AttentionBoardV1;
+  } = {}): Promise<DailyOperatingReportV1> {
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    const board = opts.board ?? (await this.attentionBoard());
+    const { loadGmailLocalSecrets } = await import("./connector-secrets.js");
+    const gmailLocal = loadGmailLocalSecrets(this.repositoryDataRoot());
+    return buildDailyOperatingReport({
+      nowIso: now,
+      board,
+      relationships: state.relationships,
+      commitments: state.executive?.commitments ?? [],
+      opportunities: state.executive?.opportunities ?? [],
+      activity: state.activity ?? [],
+      workspaceLabels: state.settings.workspaceLabels,
+      lastGmailSyncAt: gmailLocal?.lastSyncAt ?? null,
+    });
+  }
+
+  async contextDailyStatus(
+    context: "personal" | "work" | "compassionate-choice" | "career" | "project",
+  ): Promise<ContextDailyViewV1> {
+    const state = await this.snapshot();
+    return buildContextDailyView({
+      context,
+      nowIso: this.ports.clock.now(),
+      relationships: state.relationships,
+      commitments: state.executive?.commitments ?? [],
+      opportunities: state.executive?.opportunities ?? [],
+      tasks: state.tasks,
+      activity: state.activity ?? [],
+      workspaceLabels: state.settings.workspaceLabels,
+    });
+  }
+
+  async whatChangedSince(hours = 24): Promise<{ reply: string; lines: string[] }> {
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    const sinceIso = new Date(Date.parse(now) - Math.max(1, hours) * 3_600_000).toISOString();
+    const { loadGmailLocalSecrets } = await import("./connector-secrets.js");
+    const gmailLocal = loadGmailLocalSecrets(this.repositoryDataRoot());
+    const cycle = state.executive?.lastCycleResult;
+    return buildWhatChangedSince({
+      nowIso: now,
+      sinceIso,
+      activity: state.activity ?? [],
+      commitments: state.executive?.commitments ?? [],
+      relationships: state.relationships,
+      lastSyncAt: gmailLocal?.lastSyncAt ?? null,
+      lastCycle: cycle
+        ? {
+            completedAt: cycle.completedAt,
+            jobsCompleted: cycle.jobsCompleted,
+            changesDetected: cycle.changesDetected,
+            aionCompleted: cycle.aionCompleted,
+          }
+        : null,
+    });
+  }
+
+  async recordConservativeValue(input: {
+    action: string;
+    capability: string;
+    timeSavedMinutes?: number | null;
+    evidenceIds?: string[];
+    notes?: string;
+    workspace?: string;
+  }): Promise<void> {
+    await this.mutate((draft) => {
+      const now = this.ports.clock.now();
+      if (!draft.executive) draft.executive = emptyExecutiveState(now);
+      const entry = buildValueLedgerEntry(
+        {
+          action: input.action,
+          capability: input.capability,
+          timeSavedMinutes: input.timeSavedMinutes ?? null,
+          revenueInfluenced: null,
+          costAvoided: null,
+          estimateKind: input.evidenceIds?.length ? "measured" : "unknown",
+          evidenceIds: input.evidenceIds ?? [],
+          notes: input.notes ?? "",
+          ownerInterventionRequired: false,
+        },
+        {
+          id: this.ports.ids.next("value"),
+          now,
+          workspace: input.workspace || draft.settings.activeWorkspace || "personal",
+        },
+      );
+      draft.executive.valueLedger.unshift(entry);
+      if (draft.executive.valueLedger.length > 500) draft.executive.valueLedger.length = 500;
+      return null;
+    });
   }
 
   async dealershipMorningAssist(): Promise<DealershipMorningAssistV1> {
@@ -8524,9 +8641,9 @@ export class AionAssistantV1 {
       }
     }
 
-    // Morning executive cycle / dealership assist
+    // Daily operating / morning executive
     if (
-      /\b(morning (brief|cycle|executive)|start my day|what should i do today|dealership morning|morning assist)\b/i.test(
+      /\b(morning (brief|cycle|executive)|start my day|what should i do( today)?|what do i need to do|what needs my attention|what is most important|dealership morning|morning assist|daily (brief|operating|os))\b/i.test(
         text,
       )
     ) {
@@ -8543,6 +8660,79 @@ export class AionAssistantV1 {
         sources: [],
         action: "executive.morning",
         data: morning,
+      };
+    }
+
+    if (/\bwhat (am i|are we) waiting on\b|\bwaiting on others\b|\bwho (owes|promised) me\b/i.test(text)) {
+      const daily = await this.dailyOperatingReport();
+      const lines = daily.waitingOnOthers.length
+        ? daily.waitingOnOthers.map(
+            (w) => `  • [${w.workspace}] ${w.person}: ${w.expected.slice(0, 120)} (src ${w.source.slice(0, 40)})`,
+          )
+        : ["  (nothing grounded — no inferred marketing obligations)"];
+      return {
+        intent: "WAITING_ON",
+        confidence: "high",
+        reply: ["WAITING ON OTHERS", ...lines].join("\n"),
+        sources: [],
+        action: "executive.waiting_on",
+        data: daily.waitingOnOthers,
+      };
+    }
+
+    if (/\bwho should i follow up\b|\bfollow[- ]?up (queue|list|intelligence)\b|\bwho needs follow[- ]?up\b/i.test(text)) {
+      const daily = await this.dailyOperatingReport();
+      return {
+        intent: "FOLLOW_UP_INTEL",
+        confidence: "high",
+        reply: [
+          "FOLLOW-UP INTELLIGENCE",
+          ...(daily.importantFollowUps.length
+            ? daily.importantFollowUps.map((x) => `  • ${x}`)
+            : ["  (none ranked — no open high-confidence follow-ups)"]),
+        ].join("\n"),
+        sources: [],
+        action: "executive.followups",
+        data: daily.importantFollowUps,
+      };
+    }
+
+    if (/\bwhat can aion (handle|do)\b|\bwhat can you handle\b|\baion can do\b/i.test(text)) {
+      const daily = await this.dailyOperatingReport();
+      return {
+        intent: "AION_CAN_DO",
+        confidence: "high",
+        reply: [
+          "AION CAN DO (safe / prep only — external gates intact)",
+          ...daily.aionCanDo.map((x) => `  • ${x}`),
+        ].join("\n"),
+        sources: [],
+        action: "executive.aion_can_do",
+        data: daily.aionCanDo,
+      };
+    }
+
+    if (
+      /\bwhat('?s| is) happening (at |with )?(lakeland|dealership|compassionate choice|career|personal)\b/i.test(
+        text,
+      ) ||
+      /\b(lakeland toyota|compassionate choice|career) (status|mode|today|attention)\b/i.test(text)
+    ) {
+      const ctx = /\bcompassionate\b/i.test(text)
+        ? ("compassionate-choice" as const)
+        : /\bcareer\b/i.test(text)
+          ? ("career" as const)
+          : /\bpersonal\b/i.test(text)
+            ? ("personal" as const)
+            : ("work" as const);
+      const view = await this.contextDailyStatus(ctx);
+      return {
+        intent: "CONTEXT_DAILY",
+        confidence: "high",
+        reply: view.reply,
+        sources: [],
+        action: "executive.context_daily",
+        data: view,
       };
     }
 
@@ -8570,22 +8760,15 @@ export class AionAssistantV1 {
         };
       }
       if (/\bwhat changed\b/i.test(text)) {
-        const cycle = state.executive?.lastCycleResult;
-        const last = state.executive?.lastBriefingAt;
+        const hours = /\byesterday\b/i.test(text) ? 24 : /\blast briefing\b/i.test(text) ? 12 : 24;
+        const changed = await this.whatChangedSince(hours);
         return {
           intent: "EXPLAIN",
           confidence: "high",
-          reply: [
-            "WHAT CHANGED",
-            last ? `Since last briefing ${last.slice(0, 16)}:` : "No prior briefing baseline.",
-            cycle
-              ? `  Cycle ${cycle.cycleId}: changes=${cycle.changesDetected} completed=${cycle.jobsCompleted} owner-req=${cycle.jobsOwnerRequired}`
-              : "  No executive cycle yet.",
-            ...(cycle?.audit.slice(-5).map((a) => `  • ${a}`) ?? []),
-          ].join("\n"),
+          reply: changed.reply,
           sources: [],
           action: "explain.what_changed",
-          data: cycle,
+          data: changed,
         };
       }
       const top = board.ownerMustDo[0];

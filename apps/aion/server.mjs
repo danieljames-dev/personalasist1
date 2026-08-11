@@ -1377,6 +1377,30 @@ export async function createAionServer(options = {}) {
       case "executive.audit": return service.autonomyDayAudit();
       case "executive.decompose": return service.decomposeGoal(String(input.goal ?? input.text ?? ""));
       case "executive.brief": return service.prepareProactiveBrief();
+      case "executive.daily": return service.dailyOperatingReport();
+      case "executive.whatChanged": return service.whatChangedSince(Number(input.hours) || 24);
+      case "executive.contextDaily": {
+        const c = String(input.context || "work").toLowerCase();
+        const ctx =
+          c === "personal"
+            ? "personal"
+            : c === "compassionate-choice" || c === "compassionate"
+              ? "compassionate-choice"
+              : c === "career"
+                ? "career"
+                : c === "project" || c === "aion"
+                  ? "project"
+                  : "work";
+        return service.contextDailyStatus(ctx);
+      }
+      case "executive.morning":
+        return service.runMorningExecutiveCycle({
+          scope:
+            input.scope === "work" || input.scope === "personal" || input.scope === "business"
+              ? input.scope
+              : "all",
+          skipCycle: input.skipCycle === true,
+        });
       case "executive.maybeCycle": return service.maybeRunScheduledExecutiveCycle(
         input.minIntervalMs != null ? Number(input.minIntervalMs) : undefined,
       );
