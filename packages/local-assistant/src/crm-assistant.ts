@@ -81,6 +81,12 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\baion can do\b/i,
       /\bowner must do\b/i,
       /\battention (board|engine)\b/i,
+      /\bshow me dealership\b/i,
+      /\bdealership only\b/i,
+      /\blakeland only\b/i,
+      /\bwhat can you handle\b/i,
+      /\bwhat should i do first\b/i,
+      /\bwhy is this important\b/i,
     ],
   },
   {
