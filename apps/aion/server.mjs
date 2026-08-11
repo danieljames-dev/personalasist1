@@ -51,7 +51,7 @@ const SEARCH_VARIABLE = "AION_SEARCH_BASE_URL";
  * HTTP stays in the host layer; domain only receives already-fetched message payloads.
  * Used by connector.gmail.sync and post-OAuth initial sync (never invent service.syncGmailRecent).
  */
-async function runLiveGmailSync(service, input = {}) {
+async function runLiveGmailSync(service, input = {}, dataRoot = null) {
   const creds = await service.gmailLiveCredentials();
   if (!creds.ready) {
     return {
@@ -93,9 +93,12 @@ async function runLiveGmailSync(service, input = {}) {
   const access = tokenJson.access_token;
   const max = Math.min(40, Math.max(5, Number(input.maxMessages) || 25));
   const q = String(input.query || "newer_than:30d -category:promotions -category:social");
+  // Pull a wider list page so we can skip already-scanned ids and advance the cursor.
+  const listMax = Math.min(100, Math.max(max * 4, max));
   const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
-  listUrl.searchParams.set("maxResults", String(max));
+  listUrl.searchParams.set("maxResults", String(listMax));
   listUrl.searchParams.set("q", q);
+  if (input.pageToken) listUrl.searchParams.set("pageToken", String(input.pageToken));
   const listRes = await fetch(listUrl.toString(), { headers: { authorization: `Bearer ${access}` } });
   const listJson = await listRes.json();
   if (!listRes.ok) {
@@ -111,7 +114,27 @@ async function runLiveGmailSync(service, input = {}) {
       backupOk: true,
     };
   }
-  const ids = (listJson.messages || []).map((m) => m.id).slice(0, max);
+  let seen = new Set();
+  try {
+    const root = dataRoot || null;
+    if (root) {
+      const { loadGmailScanState, recordGmailScanIds } = await import("../../packages/local-assistant/dist/connector-secrets.js");
+      seen = new Set(loadGmailScanState(root).seenMessageIds || []);
+      // Seed cursor from prior assimilations already in Owner state
+      if (typeof service.gmailMessageIdsAlreadyInState === "function") {
+        const fromState = await service.gmailMessageIdsAlreadyInState();
+        if (fromState.length) {
+          for (const id of fromState) seen.add(id);
+          recordGmailScanIds(root, fromState, "seed:state");
+        }
+      }
+    }
+  } catch {
+    seen = new Set();
+  }
+  const rawIds = (listJson.messages || []).map((m) => m.id).filter(Boolean);
+  const ids = rawIds.filter((id) => !seen.has(id)).slice(0, max);
+  const skippedSeen = rawIds.length - ids.length;
   const decodePart = (data) => {
     if (!data) return "";
     try {
@@ -160,7 +183,23 @@ async function runLiveGmailSync(service, input = {}) {
     });
   }
   const result = await service.ingestGmailMessages(messages);
-  return { mode: "live", ...result };
+  // Record all listed ids we considered (including noise-only fetches) so batches advance.
+  try {
+    if (dataRoot && ids.length) {
+      const { recordGmailScanIds } = await import("../../packages/local-assistant/dist/connector-secrets.js");
+      recordGmailScanIds(dataRoot, ids, q);
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return {
+    mode: "live",
+    ...result,
+    uniqueNew: ids.length,
+    skippedSeen,
+    nextPageToken: listJson.nextPageToken || null,
+    query: q,
+  };
 }
 
 /** Removes absolute local paths from any text that reaches the browser, logs, or activity. */
@@ -964,7 +1003,7 @@ export async function createAionServer(options = {}) {
       case "connector.gmail.status": return service.gmailConsentStatus();
       case "connector.gmail.sync":
         // HTTP fetch in host helper; domain ingest only (see runLiveGmailSync).
-        return runLiveGmailSync(service, input);
+        return runLiveGmailSync(service, input, dataRoot);
       case "gmail.truth.repair":
         return service.repairGmailMarketingContamination({
           relationshipIds: Array.isArray(input.relationshipIds) ? input.relationshipIds.map(String) : undefined,
@@ -1551,7 +1590,7 @@ export async function createAionServer(options = {}) {
                   // Auto first sync (bounded) after connect — same host path as connector.gmail.sync
                   let syncNote = "";
                   try {
-                    const sync = await runLiveGmailSync(service, { maxMessages: 20 });
+                    const sync = await runLiveGmailSync(service, { maxMessages: 20 }, dataRoot);
                     syncNote = sync.ok
                       ? `<p class="meta">Initial sync: scanned ${sync.scanned}, commitments ${sync.commitmentsExtracted}, contacts +${sync.contactsCreated}.</p>`
                       : `<p class="meta">Connected; initial sync deferred: ${escHtml(sync.message || "")}</p>`;

@@ -7810,6 +7810,32 @@ export class AionAssistantV1 {
    * Ingest already-fetched Gmail messages (HTTP lives in apps/aion server, not domain).
    * Classifies, extracts commitments/contacts — no full-mailbox permanent body store.
    */
+  /** Message ids already referenced in state (commitments / gmail-live notes) — for scan cursor seed. */
+  async gmailMessageIdsAlreadyInState(): Promise<string[]> {
+    const state = await this.snapshot();
+    const ids = new Set<string>();
+    const re = /gmail:([a-zA-Z0-9_-]+)/g;
+    for (const c of state.executive?.commitments ?? []) {
+      const src = c.provenance?.sourceRef || "";
+      let m: RegExpExecArray | null;
+      re.lastIndex = 0;
+      while ((m = re.exec(src))) ids.add(m[1]!);
+    }
+    for (const r of state.relationships ?? []) {
+      const blob = `${r.notes || ""} ${r.reference || ""} ${r.source || ""}`;
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(blob))) ids.add(m[1]!);
+    }
+    for (const a of state.activity ?? []) {
+      if (!/gmail/i.test(a.action || "")) continue;
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(a.summary || ""))) ids.add(m[1]!);
+    }
+    return [...ids];
+  }
+
   /**
    * Archive false Gmail-live CRM prospects and cancel false marketing commitments
    * from first-sync contamination. Preserves provenance notes; does not delete Gmail evidence refs.

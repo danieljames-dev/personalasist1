@@ -191,14 +191,15 @@ test("Gmail OAuth callback uses runLiveGmailSync host path — never a missing s
   assert.match(server, /async function runLiveGmailSync\s*\(/u, "host-layer live sync helper must exist");
   assert.match(
     server,
-    /runLiveGmailSync\s*\(\s*service\s*,\s*\{\s*maxMessages:\s*20\s*\}\s*\)/u,
+    /runLiveGmailSync\s*\(\s*service\s*,\s*\{\s*maxMessages:\s*20\s*\}\s*,\s*dataRoot\s*\)/u,
     "OAuth success path must call runLiveGmailSync for bounded initial sync",
   );
   assert.match(
     server,
-    /case\s+["']connector\.gmail\.sync["'][\s\S]{0,80}runLiveGmailSync/u,
+    /case\s+["']connector\.gmail\.sync["'][\s\S]{0,120}runLiveGmailSync\s*\(\s*service\s*,\s*input\s*,\s*dataRoot\s*\)/u,
     "connector.gmail.sync must use the same runLiveGmailSync path",
   );
+  assert.match(server, /recordGmailScanIds|loadGmailScanState/u, "scan cursor advances unique message ids");
   assert.match(server, /ingestGmailMessages/u, "domain ingest remains the knowledge write path");
 });
 

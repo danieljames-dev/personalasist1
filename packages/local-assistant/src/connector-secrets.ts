@@ -8,7 +8,9 @@ import { join } from "node:path";
 
 const SECRETS_DIR = "secrets";
 const GMAIL_FILE = "gmail-oauth.local.json";
+const GMAIL_SCAN_FILE = "gmail-scan-state.local.json";
 const MACHINE_KEY = "machine-key.local";
+const MAX_SEEN_IDS = 2500;
 
 export interface GmailLocalSecretsV1 {
   version: 1;
@@ -20,6 +22,15 @@ export interface GmailLocalSecretsV1 {
   connectedAt?: string;
   accountHint?: string;
   lastSyncAt?: string | null;
+  updatedAt?: string;
+}
+
+/** Non-secret scan cursor (message ids only) — under private/, never Git. */
+export interface GmailScanStateV1 {
+  version: 1;
+  seenMessageIds: string[];
+  totalScanned: number;
+  lastQuery?: string;
   updatedAt?: string;
 }
 
@@ -187,4 +198,66 @@ export function clearGmailLocalSecrets(dataRoot: string): void {
 export function fingerprintSecret(value: string): string {
   if (!value) return "";
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function gmailScanPath(dataRoot: string): string {
+  return join(secretsDir(dataRoot), GMAIL_SCAN_FILE);
+}
+
+export function loadGmailScanState(dataRoot: string | null | undefined): GmailScanStateV1 {
+  if (!dataRoot) return { version: 1, seenMessageIds: [], totalScanned: 0 };
+  const p = gmailScanPath(dataRoot);
+  if (!existsSync(p)) return { version: 1, seenMessageIds: [], totalScanned: 0 };
+  try {
+    const raw = JSON.parse(readFileSync(p, "utf8")) as GmailScanStateV1;
+    if (raw?.version !== 1 || !Array.isArray(raw.seenMessageIds)) {
+      return { version: 1, seenMessageIds: [], totalScanned: 0 };
+    }
+    const out: GmailScanStateV1 = {
+      version: 1,
+      seenMessageIds: raw.seenMessageIds.map(String).filter(Boolean).slice(-MAX_SEEN_IDS),
+      totalScanned: Number(raw.totalScanned) || raw.seenMessageIds.length,
+    };
+    if (raw.lastQuery) out.lastQuery = raw.lastQuery;
+    if (raw.updatedAt) out.updatedAt = raw.updatedAt;
+    return out;
+  } catch {
+    return { version: 1, seenMessageIds: [], totalScanned: 0 };
+  }
+}
+
+export function recordGmailScanIds(
+  dataRoot: string,
+  ids: string[],
+  query?: string,
+): GmailScanStateV1 {
+  mkdirSync(secretsDir(dataRoot), { recursive: true });
+  const prev = loadGmailScanState(dataRoot);
+  const set = new Set(prev.seenMessageIds);
+  let added = 0;
+  for (const id of ids) {
+    const s = String(id || "").trim();
+    if (!s || set.has(s)) continue;
+    set.add(s);
+    added += 1;
+  }
+  const seenMessageIds = [...set].slice(-MAX_SEEN_IDS);
+  const next: GmailScanStateV1 = {
+    version: 1,
+    seenMessageIds,
+    totalScanned: (prev.totalScanned || 0) + added,
+    updatedAt: new Date().toISOString(),
+  };
+  const q = query ?? prev.lastQuery;
+  if (q) next.lastQuery = q;
+  writeFileSync(gmailScanPath(dataRoot), JSON.stringify(next, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  try {
+    chmodSync(gmailScanPath(dataRoot), 0o600);
+  } catch {
+    /* */
+  }
+  return next;
 }
