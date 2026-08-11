@@ -153,7 +153,17 @@ export function createEmptyStateV1(): AssistantStateV1 {
       importWorkspaceCorrections: [],
       commitments: [],
       identityResolutions: [],
-      captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+      captureFriction: {
+        total: 0,
+        withConfirm: 0,
+        autoApplied: 0,
+        failed: 0,
+        lastLatencyMs: null,
+        corrections: 0,
+        falseMatches: 0,
+        briefingDismissed: 0,
+        opportunitiesActed: 0,
+      },
       autonomyJobs: [],
       lastSnapshotSig: null,
       lastCycleResult: null,
@@ -186,10 +196,12 @@ export function createEmptyStateV1(): AssistantStateV1 {
       },
       entityMergeProposals: [],
       entityUnmerges: [],
+      correctionPatterns: [],
       lastBriefingAt: null,
       lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
+      lastMorningCycleAt: null,
     },
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
@@ -466,7 +478,17 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       importWorkspaceCorrections: [],
       commitments: [],
       identityResolutions: [],
-      captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+      captureFriction: {
+        total: 0,
+        withConfirm: 0,
+        autoApplied: 0,
+        failed: 0,
+        lastLatencyMs: null,
+        corrections: 0,
+        falseMatches: 0,
+        briefingDismissed: 0,
+        opportunitiesActed: 0,
+      },
       autonomyJobs: [],
       lastSnapshotSig: null,
       lastCycleResult: null,
@@ -499,10 +521,12 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       },
       entityMergeProposals: [],
       entityUnmerges: [],
+      correctionPatterns: [],
       lastBriefingAt: null,
       lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
       lastWeeklyReviewAt: null,
+      lastMorningCycleAt: null,
     };
   } else {
     if (!ak.executive.context || typeof ak.executive.context !== "object") {
@@ -551,7 +575,23 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(ak.executive.commitments)) ak.executive.commitments = [];
     if (!Array.isArray(ak.executive.identityResolutions)) ak.executive.identityResolutions = [];
     if (!ak.executive.captureFriction || typeof ak.executive.captureFriction !== "object") {
-      ak.executive.captureFriction = { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null };
+      ak.executive.captureFriction = {
+        total: 0,
+        withConfirm: 0,
+        autoApplied: 0,
+        failed: 0,
+        lastLatencyMs: null,
+        corrections: 0,
+        falseMatches: 0,
+        briefingDismissed: 0,
+        opportunitiesActed: 0,
+      };
+    } else {
+      const fr = ak.executive.captureFriction;
+      if (fr.corrections === undefined) fr.corrections = 0;
+      if (fr.falseMatches === undefined) fr.falseMatches = 0;
+      if (fr.briefingDismissed === undefined) fr.briefingDismissed = 0;
+      if (fr.opportunitiesActed === undefined) fr.opportunitiesActed = 0;
     }
     if (!Array.isArray(ak.executive.autonomyJobs)) ak.executive.autonomyJobs = [];
     if (!Array.isArray(ak.executive.cycleHistory)) ak.executive.cycleHistory = [];
@@ -589,9 +629,11 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     }
     if (!Array.isArray(ak.executive.entityMergeProposals)) ak.executive.entityMergeProposals = [];
     if (!Array.isArray(ak.executive.entityUnmerges)) ak.executive.entityUnmerges = [];
+    if (!Array.isArray(ak.executive.correctionPatterns)) ak.executive.correctionPatterns = [];
     if (ak.executive.lastSnapshotSig === undefined) ak.executive.lastSnapshotSig = null;
     if (ak.executive.lastCycleResult === undefined) ak.executive.lastCycleResult = null;
     if (ak.executive.lastBriefingAt === undefined) ak.executive.lastBriefingAt = null;
+    if (ak.executive.lastMorningCycleAt === undefined) ak.executive.lastMorningCycleAt = null;
   }
   for (const src of ak.importSourceQueue) {
     if (!src.stats || typeof src.stats !== "object") {

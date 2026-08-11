@@ -58,9 +58,18 @@ export function classifyCaptureText(
         ? "today"
         : /\bnext week\b/i.test(raw)
           ? "next week"
-          : /\bfollow[- ]?up\b/i.test(raw)
-            ? "unspecified"
-            : null;
+          : /\bthursday\b/i.test(raw)
+            ? "thursday"
+            : /\bfriday\b/i.test(raw)
+              ? "friday"
+              : /\bmonday\b|\btuesday\b|\bwednesday\b|\bsaturday\b|\bsunday\b/i.test(raw)
+                ? (raw.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i)?.[1]?.toLowerCase() ??
+                  "weekday")
+                : /\bcall\b/i.test(raw) && /\b(mon|tue|wed|thu|fri|sat|sun)/i.test(raw)
+                  ? "scheduled call"
+                  : /\bfollow[- ]?up\b|\bcall (him|her|them|back)\b/i.test(raw)
+                    ? "unspecified"
+                    : null;
 
   // Multiple CRM people share the same first name → do not fabricate which one
   let ambiguousPersonIds: string[] = [];
@@ -85,6 +94,24 @@ export function classifyCaptureText(
     summary: raw.slice(0, 500),
   };
 
+  // "Brand A idea: comparison video" — high confidence brand idea when brand named + idea
+  if (
+    /\bidea\b/i.test(raw) &&
+    /\bbrand\b|\binstagram\b|\bcontent\b|\bvideo\b|\bmetricool\b/i.test(raw)
+  ) {
+    return {
+      ...base,
+      kind: "brand_note",
+      confidence: "high",
+      workspaceHint: "business",
+      vehicleHint: null,
+      budgetHint: null,
+      proposedActions: ["Brand/content idea stored", "No social post"],
+      needsConfirm: false,
+      why: "Brand idea language with content cue — auto-store as brand note.",
+    };
+  }
+
   if (/\bidea\b|\boffer inventory-walk|\bproduct concept\b/i.test(raw)) {
     return {
       ...base,
@@ -98,34 +125,68 @@ export function classifyCaptureText(
   }
 
   if (/\bcaleb\b|\bbrand\b|\bpost\b|\bcontent\b|\binstagram\b|\bmetricool\b/i.test(raw)) {
+    const brandNamed = /\bbrand\s+[a-z0-9]/i.test(raw) || /\b(instagram|metricool)\b/i.test(raw);
     return {
       ...base,
       kind: "brand_note",
-      confidence: "medium",
+      confidence: brandNamed ? "high" : "medium",
       workspaceHint: "business",
       personName: person || (/\bcaleb\b/i.test(raw) ? "Caleb" : null),
       vehicleHint: null,
       budgetHint: null,
       proposedActions: ["Brand note in active brand workspace", "Do not invent collaborator roles"],
-      needsConfirm: true,
-      why: "Brand/content language — confirm which brand workspace.",
+      needsConfirm: !brandNamed,
+      why: brandNamed
+        ? "Brand/content language with identifiable brand cue."
+        : "Brand/content language — confirm which brand workspace.",
     };
   }
 
-  if (person && (vehicle || /\binterested\b|\bwants the\b|\blikes the\b/i.test(raw))) {
+  // "Remember to renew my license Friday" — personal task, no confirm
+  if (/\bremember (to|i need)\b|\brenew my\b|\bdon't forget\b/i.test(raw)) {
+    return {
+      ...base,
+      kind: "task",
+      confidence: "high",
+      workspaceHint: "personal",
+      personName: null,
+      vehicleHint: null,
+      budgetHint: null,
+      followUpWhen: follow,
+      proposedActions: [
+        "Create personal task",
+        follow ? `Due hint: ${follow}` : "Confirm due if needed",
+      ],
+      needsConfirm: false,
+      why: "Personal remember/renew task language.",
+    };
+  }
+
+  // "John loved the white Tacoma but wants to talk to his wife. Call Thursday."
+  if (
+    person &&
+    (vehicle ||
+      /\binterested\b|\bwants the\b|\blikes the\b|\bloved the\b|\bloves the\b|\btalk to (his|her) wife\b/i.test(
+        raw,
+      ))
+  ) {
     return {
       ...base,
       kind: "vehicle_interest",
       confidence: multiMike ? "medium" : "high",
       workspaceHint: "work",
+      followUpWhen: follow || (/\bcall\b/i.test(raw) ? "unspecified" : null),
       proposedActions: multiMike
         ? [`Multiple people named ${person} — which one?`, ...ambiguousPersonIds.map((id) => `id:${id}`)]
         : [
             `Customer note for ${person}`,
             vehicle ? `Vehicle interest: ${vehicle}` : "Record vehicle interest",
             budget ? `Budget preference: ${budget}` : "Budget if stated",
-            follow ? `Follow-up: ${follow}` : "Optional follow-up",
-          ],
+            follow || /\bcall\b/i.test(raw)
+              ? `Follow-up: ${follow || "call"}`
+              : "Optional follow-up",
+            /\bwife\b|\bspouse\b|\bpartner\b/i.test(raw) ? "Note: decision involves spouse/partner" : "",
+          ].filter(Boolean),
       needsConfirm: multiMike || !person || person.length < 2,
       why: multiMike
         ? `Multiple CRM matches for "${person}" — Owner must choose; AION will not guess.`

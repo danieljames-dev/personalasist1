@@ -178,6 +178,23 @@ import {
   DEFAULT_ATTENTION_BUDGET,
 } from "./attention-budget.js";
 import {
+  aggregateUsageMetrics,
+  applyCorrectionPattern,
+  buildCustomerPrepCard,
+  buildDealershipMorningAssist,
+  buildEndOfDayClosure,
+  buildMorningExecutiveBrief,
+  detectDealStallSignals,
+  explainWhyFirst,
+  explainWhySurfacing,
+  formatUsageMetrics,
+  recordCorrectionPattern,
+  type CustomerPrepCardV1,
+  type DealershipMorningAssistV1,
+  type MorningExecutiveBriefV1,
+  type RealUsageMetricsV1,
+} from "./proactive-usefulness.js";
+import {
   applyOnlineListings,
   buildDealershipContext,
   decodeVinNhtsa,
@@ -791,6 +808,13 @@ export class AionAssistantV1 {
     board: AttentionBoardV1;
     cycle: ExecutiveCycleResultV1 | null;
   }> {
+    // Prefer full morning cycle when no morning brief today
+    const state0 = await this.snapshot();
+    const day = this.ports.clock.now().slice(0, 10);
+    if (!state0.executive?.lastMorningCycleAt?.startsWith(day)) {
+      const morning = await this.runMorningExecutiveCycle({});
+      return { reply: morning.reply, board: morning.board, cycle: morning.cycle };
+    }
     const state = await this.snapshot();
     const board = await this.attentionBoard();
     const cycle = state.executive?.lastCycleResult ?? null;
@@ -845,6 +869,191 @@ export class AionAssistantV1 {
         : "AION: no cycle yet — will run on next tick or “run executive cycle”.",
     ].join("\n");
     return { reply, board, cycle };
+  }
+
+  /**
+   * First genuinely useful proactive daily cycle.
+   * Runs bounded executive work, then surfaces only changed/high-value sections.
+   * scope=work keeps dealership-only; scope=all aggregates without mixing records into each other.
+   */
+  async runMorningExecutiveCycle(opts: {
+    scope?: "all" | "work" | "personal" | "business";
+    skipCycle?: boolean;
+  } = {}): Promise<{
+    reply: string;
+    brief: MorningExecutiveBriefV1;
+    board: AttentionBoardV1;
+    cycle: ExecutiveCycleResultV1 | null;
+    dealership: DealershipMorningAssistV1 | null;
+  }> {
+    const scope = opts.scope ?? "all";
+    let cycle: ExecutiveCycleResultV1 | null = null;
+    if (!opts.skipCycle) {
+      cycle = await this.runExecutiveCycle({}).catch(() => null);
+    }
+    await this.refreshOpportunityRadar().catch(() => []);
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    const boardFilter =
+      scope === "work"
+        ? { workspace: "work" as const }
+        : scope === "personal"
+          ? { workspace: "personal" as const }
+          : undefined;
+    const board = await this.attentionBoard(boardFilter);
+    const commits = state.executive?.commitments ?? [];
+    const opps = state.executive?.opportunities ?? [];
+    const stalls = detectDealStallSignals({
+      relationships: state.relationships,
+      nowIso: now,
+      commitments: commits,
+      opportunities: opps,
+      ...(scope === "work" ? { workspace: "work" } : {}),
+    });
+    const brands = state.workspaces
+      .filter((w) => w.kind === "business" && !w.archived)
+      .map((w) => w.brand?.name || w.label);
+    const brief = buildMorningExecutiveBrief({
+      nowIso: now,
+      board,
+      commitments: commits,
+      opportunities: opps,
+      stalls,
+      cycle: cycle ?? state.executive?.lastCycleResult ?? null,
+      lastBriefingAt: state.executive?.lastBriefingAt ?? null,
+      brandLabels: brands,
+      scope,
+    });
+    let dealership: DealershipMorningAssistV1 | null = null;
+    if (scope === "all" || scope === "work") {
+      dealership = await this.dealershipMorningAssist();
+    }
+    await this.mutate((d) => {
+      if (!d.executive) d.executive = emptyExecutiveState(now);
+      d.executive.lastBriefingAt = now;
+      d.executive.lastMorningCycleAt = now;
+      return null;
+    });
+    const reply = [
+      brief.reply,
+      "",
+      dealership && (scope === "all" || scope === "work")
+        ? ["---", dealership.reply].join("\n")
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return { reply, brief, board, cycle, dealership };
+  }
+
+  async dealershipMorningAssist(): Promise<DealershipMorningAssistV1> {
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    const inv = this.vehicleInv(state);
+    const opps = state.executive?.opportunities?.length
+      ? state.executive.opportunities
+      : await this.refreshOpportunityRadar().catch(() => []);
+    const changeSummaries: string[] = [];
+    const sig = state.executive?.lastCycleResult;
+    if (sig) {
+      changeSummaries.push(
+        ...sig.audit.filter((a) => /inventory|price|vin|change/i.test(a)).slice(0, 6),
+      );
+      if (sig.changesDetected) changeSummaries.push(`${sig.changesDetected} change event(s) in last cycle`);
+    }
+    const researchNotes = (state.executive?.temporalFacts ?? [])
+      .filter((f) => f.workspace === "work" && /research|draft|recall/i.test(f.category + f.title))
+      .slice(0, 5)
+      .map((f) => `${f.title}: ${f.content.slice(0, 80)}`);
+    return buildDealershipMorningAssist({
+      nowIso: now,
+      relationships: state.relationships.filter((r) => r.workspace === "work"),
+      commitments: (state.executive?.commitments ?? []).filter((c) => c.workspace === "work"),
+      opportunities: opps,
+      vehicles: inv.vehicles,
+      changeSummaries,
+      researchNotes,
+    });
+  }
+
+  async prepareCustomerCard(name: string): Promise<CustomerPrepCardV1> {
+    const state = await this.snapshot();
+    const now = this.ports.clock.now();
+    // Respect active workspace isolation for candidates; also allow work when name is dealership-flavored
+    const active = state.settings.activeWorkspace;
+    let candidates = state.relationships.filter((r) => !r.archived && r.workspace === active);
+    if (active !== "work") {
+      // "Prepare me for John" from personal should not pull work CRM unless Owner is in work context
+      // — isolation preserved.
+    } else {
+      candidates = state.relationships.filter((r) => !r.archived && r.workspace === "work");
+    }
+    const opps = state.executive?.opportunities?.length
+      ? state.executive.opportunities
+      : await this.refreshOpportunityRadar().catch(() => []);
+    const stalls = detectDealStallSignals({
+      relationships: candidates,
+      nowIso: now,
+      commitments: state.executive?.commitments ?? [],
+      opportunities: opps,
+      workspace: active === "work" ? "work" : active,
+    });
+    return buildCustomerPrepCard({
+      queryName: name.trim(),
+      candidates,
+      nowIso: now,
+      commitments: state.executive?.commitments ?? [],
+      opportunities: opps,
+      vehicles: this.vehicleInv(state).vehicles,
+      stalls,
+      recentFacts: (state.executive?.temporalFacts ?? []).filter((f) => f.temporalStatus === "CURRENT").slice(0, 50),
+    });
+  }
+
+  async realUsageMetrics(): Promise<RealUsageMetricsV1> {
+    const state = await this.snapshot();
+    return aggregateUsageMetrics({
+      captureFriction: state.executive?.captureFriction,
+      correctionCount: state.executive?.captureFriction?.corrections ?? 0,
+      falseMatchCount: state.executive?.captureFriction?.falseMatches ?? 0,
+      briefingDismissed: state.executive?.captureFriction?.briefingDismissed ?? 0,
+      opportunitiesActed: state.executive?.captureFriction?.opportunitiesActed ?? 0,
+      jobs: state.executive?.autonomyJobs ?? [],
+      ledger: state.executive?.valueLedger ?? [],
+      cycle: state.executive?.lastCycleResult,
+    });
+  }
+
+  async recordOwnerCorrection(input: {
+    kind: "person" | "workspace" | "fact" | "relationship" | "category";
+    fromValue: string;
+    toValue: string;
+    workspace?: string;
+    notes?: string;
+  }) {
+    return this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
+      const now = this.ports.clock.now();
+      const ws = input.workspace || draft.settings.activeWorkspace;
+      draft.executive.correctionPatterns = recordCorrectionPattern(draft.executive.correctionPatterns, {
+        kind: input.kind,
+        fromValue: input.fromValue,
+        toValue: input.toValue,
+        workspace: ws,
+        now,
+        id: this.ports.ids.next("corr"),
+        ...(input.notes ? { notes: input.notes } : {}),
+      });
+      draft.executive.captureFriction.corrections += 1;
+      this.activity(
+        draft,
+        "settings",
+        "correction.learn",
+        `Correction ${input.kind}: "${input.fromValue}" → "${input.toValue}" (${ws})`,
+        null,
+      );
+      return draft.executive.correctionPatterns[0];
+    });
   }
 
   async createPlan(goal: string, steps: Array<{ title: string; description?: string; dependencies?: number[]; requiredCapabilities?: string[]; approvalRequired?: boolean; expectedOutput?: string }>): Promise<PlanV1> {
@@ -4036,6 +4245,17 @@ export class AionAssistantV1 {
         { key, workspace: ws, resolvedRelationshipId: rel.id, displayName: rel.displayName, at: now },
         ...draft.executive.identityResolutions.filter((r) => !(r.key === key && r.workspace === ws)),
       ].slice(0, 200);
+      // Teach AION: person correction pattern (auto-apply only after repeated confirms)
+      draft.executive.correctionPatterns = recordCorrectionPattern(draft.executive.correctionPatterns, {
+        kind: "person",
+        fromValue: key,
+        toValue: rel.displayName,
+        workspace: ws,
+        now,
+        id: this.ports.ids.next("corr"),
+        notes: "identity.resolve",
+      });
+      draft.executive.captureFriction.corrections += 1;
       this.activity(draft, "settings", "identity.resolve", `Resolved "${key}" → ${rel.displayName} in ${ws}`, rel.id);
       return draft.executive.identityResolutions[0];
     });
@@ -4655,7 +4875,7 @@ export class AionAssistantV1 {
     const started = Date.now();
     const now = this.ports.clock.now();
     const snap = await this.snapshot();
-    // Apply identity resolutions within active workspace before ambiguity check
+    // Apply identity resolutions + multi-hit correction patterns within workspace
     const people = snap.relationships.filter((r) => !r.archived);
     const classification = classifyCaptureText(text, now, {
       existingPeople: people.map((r) => ({ id: r.id, displayName: r.displayName, workspace: r.workspace })),
@@ -4670,6 +4890,20 @@ export class AionAssistantV1 {
         classification.personName = resolved.displayName;
         classification.why = `Used remembered identity resolution: ${resolved.displayName}`;
         classification.confidence = "high";
+      } else {
+        const taught = applyCorrectionPattern(
+          snap.executive?.correctionPatterns ?? [],
+          "person",
+          key,
+          ws,
+        );
+        if (taught) {
+          classification.ambiguousPersonIds = [];
+          classification.needsConfirm = false;
+          classification.personName = taught;
+          classification.why = `Used learned person correction (multi-hit): ${taught}`;
+          classification.confidence = "high";
+        }
       }
     }
     const applied: string[] = [];
@@ -4968,62 +5202,41 @@ export class AionAssistantV1 {
     const board = await this.attentionBoard();
     const state = await this.snapshot();
     const day = this.ports.clock.now().slice(0, 10);
-    const interactions = state.relationships.flatMap((r) =>
-      (r.interactions ?? [])
-        .filter((i) => i.at?.startsWith(day))
-        .map((i) => ({ name: r.displayName, summary: i.summary, workspace: r.workspace })),
-    );
-    const cycle = state.executive?.lastCycleResult;
-    const jobsToday = (state.executive?.autonomyJobs ?? []).filter((j) => (j.createdAt || "").startsWith(day));
-    const commits = (state.executive?.commitments ?? []).filter(
-      (c) => c.status === "open" || c.status === "due_soon" || c.status === "overdue",
-    );
-    const questions: string[] = [];
-    if (interactions.length === 0) questions.push("Any conversations today worth logging?");
-    if (board.ownerMustDo.some((i) => i.sourceType === "follow-up" || i.sourceType === "commitment")) {
-      questions.push("Which open follow-ups or commitments did you complete?");
-    }
-    if (questions.length < 2) questions.push("Anything for tomorrow only you can do?");
+    const cycle = state.executive?.lastCycleResult ?? null;
+    const jobs = state.executive?.autonomyJobs ?? [];
+    const commits = state.executive?.commitments ?? [];
+    const capturesToday = (state.executive?.captures ?? [])
+      .filter((c) => (c.at || "").startsWith(day))
+      .map((c) => ({
+        summary: c.classification.summary,
+        kind: c.classification.kind,
+      }));
+    const closure = buildEndOfDayClosure({
+      nowIso: this.ports.clock.now(),
+      commitments: commits,
+      board,
+      capturesToday,
+      jobs,
+      opportunities: state.executive?.opportunities ?? [],
+      cycle,
+    });
+    const metrics = aggregateUsageMetrics({
+      captureFriction: state.executive?.captureFriction,
+      correctionCount: state.executive?.captureFriction?.corrections ?? 0,
+      falseMatchCount: state.executive?.captureFriction?.falseMatches ?? 0,
+      briefingDismissed: state.executive?.captureFriction?.briefingDismissed ?? 0,
+      opportunitiesActed: state.executive?.captureFriction?.opportunitiesActed ?? 0,
+      jobs,
+      ledger: state.executive?.valueLedger ?? [],
+      cycle,
+    });
     await this.mutate((draft) => {
       if (!draft.executive) draft.executive = emptyExecutiveState(this.ports.clock.now());
       draft.executive.lastEndOfDayAt = this.ports.clock.now();
       return null;
     });
-    const reply = [
-      "END OF DAY WRAP",
-      "",
-      "WHAT HAPPENED",
-      `  Interactions logged: ${interactions.length}`,
-      ...interactions.slice(0, 6).map((i) => `  • [${i.workspace}] ${i.name}: ${i.summary.slice(0, 80)}`),
-      "",
-      "WHAT AION COMPLETED",
-      ...(
-        (() => {
-          const lines = jobsToday
-            .filter((j) => j.state === "COMPLETED")
-            .slice(0, 6)
-            .map((j) => `  • ${j.capability}: ${(j.result || "").slice(0, 90)}`);
-          return lines.length ? lines : ["  • (none recorded)"];
-        })()
-      ),
-      cycle
-        ? `  Last cycle: done=${cycle.jobsCompleted} failed=${cycle.jobsFailed} owner-req=${cycle.jobsOwnerRequired} unauth-ext=${cycle.unauthorizedExternalAttempts}`
-        : "",
-      "",
-      "OPEN COMMITMENTS",
-      ...(commits.length
-        ? commits.slice(0, 6).map((c) => `  • [${c.status}] ${c.committedBy}→${c.committedTo}: ${c.statement}`)
-        : ["  • none"]),
-      "",
-      "TOMORROW LIKELY PRIORITIES",
-      ...board.ownerMustDo.slice(0, 4).map((i, n) => `  ${n + 1}. [${i.horizon}] ${i.title}`),
-      "",
-      "Open questions (min):",
-      ...questions.slice(0, 2).map((q, i) => `  ${i + 1}. ${q}`),
-    ]
-      .filter(Boolean)
-      .join("\n");
-    return { reply, questions: questions.slice(0, 2) };
+    const reply = [closure.reply, "", formatUsageMetrics(metrics)].join("\n");
+    return { reply, questions: closure.questions };
   }
 
   async weeklyCeoReview(): Promise<{ reply: string }> {
@@ -5595,6 +5808,121 @@ export class AionAssistantV1 {
         data: result,
       };
     }
+    // Customer prep card: "Prepare me for John."
+    {
+      const prepMatch =
+        text.match(/^\s*prepare me for\s+(.+?)\s*[.!]?\s*$/i) ||
+        text.match(/\bprep(?:are)?(?:\s+me)?\s+for\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i);
+      if (prepMatch?.[1] && !/\btoday\b|\bmy day\b|\bmy calls\b|\bmy next appointment\b/i.test(prepMatch[1])) {
+        const card = await this.prepareCustomerCard(prepMatch[1].replace(/[.!]+$/, "").trim());
+        return {
+          intent: "CUSTOMER_PREP",
+          confidence: card.ambiguous ? "medium" : card.relationshipId ? "high" : "low",
+          reply: card.reply,
+          sources: card.relationshipId
+            ? [{ type: "customer", id: card.relationshipId, label: card.who }]
+            : [],
+          action: "customer.prep_card",
+          data: card,
+        };
+      }
+    }
+
+    // Morning executive cycle / dealership assist
+    if (
+      /\b(morning (brief|cycle|executive)|start my day|what should i do today|dealership morning|morning assist)\b/i.test(
+        text,
+      )
+    ) {
+      const scope = /\bdealership\b|\blakeland\b/i.test(text)
+        ? ("work" as const)
+        : /\bpersonal only\b/i.test(text)
+          ? ("personal" as const)
+          : ("all" as const);
+      const morning = await this.runMorningExecutiveCycle({ scope });
+      return {
+        intent: "MORNING_CYCLE",
+        confidence: "high",
+        reply: morning.reply,
+        sources: [],
+        action: "executive.morning",
+        data: morning,
+      };
+    }
+
+    // Explainability
+    if (
+      /\bwhy are you telling me this\b|\bwhy is this first\b|\bwhere did that come from\b|\bwhat changed\b/i.test(
+        text,
+      )
+    ) {
+      const board = await this.attentionBoard();
+      if (/\bwhy is this first\b/i.test(text)) {
+        return {
+          intent: "EXPLAIN",
+          confidence: "high",
+          reply: explainWhyFirst(
+            board.ownerMustDo.slice(0, 3).map((i) => ({
+              title: i.title,
+              score: i.score,
+              why: i.why,
+            })),
+          ),
+          sources: [],
+          action: "explain.why_first",
+          data: board.ownerMustDo.slice(0, 3),
+        };
+      }
+      if (/\bwhat changed\b/i.test(text)) {
+        const cycle = state.executive?.lastCycleResult;
+        const last = state.executive?.lastBriefingAt;
+        return {
+          intent: "EXPLAIN",
+          confidence: "high",
+          reply: [
+            "WHAT CHANGED",
+            last ? `Since last briefing ${last.slice(0, 16)}:` : "No prior briefing baseline.",
+            cycle
+              ? `  Cycle ${cycle.cycleId}: changes=${cycle.changesDetected} completed=${cycle.jobsCompleted} owner-req=${cycle.jobsOwnerRequired}`
+              : "  No executive cycle yet.",
+            ...(cycle?.audit.slice(-5).map((a) => `  • ${a}`) ?? []),
+          ].join("\n"),
+          sources: [],
+          action: "explain.what_changed",
+          data: cycle,
+        };
+      }
+      const top = board.ownerMustDo[0];
+      return {
+        intent: "EXPLAIN",
+        confidence: "high",
+        reply: top
+          ? explainWhySurfacing({
+              title: top.title,
+              reason: top.why,
+              sourceRef: top.sourceType,
+              score: top.score,
+              horizon: top.horizon,
+            })
+          : "Nothing is currently surfaced on the Owner-must-do board.",
+        sources: [],
+        action: "explain.why",
+        data: top ?? null,
+      };
+    }
+
+    if (/\busage metrics\b|\bfriction metrics\b|\bhow am i using aion\b/i.test(text)) {
+      const m = await this.realUsageMetrics();
+      return {
+        intent: "USAGE_METRICS",
+        confidence: "high",
+        reply: formatUsageMetrics(m),
+        sources: [],
+        action: "metrics.usage",
+        data: m,
+      };
+    }
+
     if (route.intent === "END_OF_DAY") {
       const wrap = await this.endOfDayWrap();
       return {
@@ -5727,21 +6055,17 @@ export class AionAssistantV1 {
       }
       if (/\bwhat should i show\b|\bprepare me for\b/i.test(text)) {
         const name = text.match(/\bshow\s+([A-Z][a-z]+)\b/i)?.[1] || text.match(/\bfor\s+([A-Z][a-z]+)\b/i)?.[1];
-        const people = name
-          ? findRelationshipsByName(
-              state.relationships.filter((r) => r.workspace === "work" && !r.archived),
-              name,
-            )
-          : [];
-        if (people[0]) {
-          const pack = await this.salesCopilotForCustomer(people[0].id);
+        if (name && !/\btoday|calls|appointment\b/i.test(name)) {
+          const card = await this.prepareCustomerCard(name);
           return {
-            intent: "VEHICLE_INVENTORY",
-            confidence: "high",
-            reply: pack.reply,
-            sources: [{ type: "customer", id: people[0].id, label: people[0].displayName }],
-            action: "sales.copilot",
-            data: pack,
+            intent: "CUSTOMER_PREP",
+            confidence: card.relationshipId ? "high" : "medium",
+            reply: card.reply,
+            sources: card.relationshipId
+              ? [{ type: "customer", id: card.relationshipId, label: card.who }]
+              : [],
+            action: "customer.prep_card",
+            data: card,
           };
         }
       }

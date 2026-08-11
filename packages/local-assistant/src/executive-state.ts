@@ -23,6 +23,26 @@ import type { AttentionBudgetConfigV1, AttentionBudgetStateV1 } from "./attentio
 import { DEFAULT_ATTENTION_BUDGET, emptyAttentionBudgetState } from "./attention-budget.js";
 import type { EntityMergeProposalV1, EntityUnmergeRecordV1 } from "./entity-resolution.js";
 
+export type CorrectionKindV1 =
+  | "person"
+  | "workspace"
+  | "fact"
+  | "relationship"
+  | "category";
+
+/** Local correction pattern — never auto-apply from a single hit. */
+export interface CorrectionPatternV1 {
+  id: OpaqueId | string;
+  kind: CorrectionKindV1;
+  fromValue: string;
+  toValue: string;
+  workspace: string;
+  hits: number;
+  autoApplyEligible: boolean;
+  at: IsoTimestamp;
+  notes: string;
+}
+
 export interface IdentityResolutionV1 {
   /** Lowercase first name or alias key */
   key: string;
@@ -38,6 +58,12 @@ export interface CaptureFrictionStatsV1 {
   autoApplied: number;
   failed: number;
   lastLatencyMs: number | null;
+  /** Owner corrected person/workspace/fact after capture. */
+  corrections: number;
+  /** Ambiguous person false-match attempts (Owner rejected guess path). */
+  falseMatches: number;
+  briefingDismissed: number;
+  opportunitiesActed: number;
 }
 
 export interface BrandDnaV1 {
@@ -88,10 +114,13 @@ export interface ExecutiveStateV1 {
   /** Merge proposals only — never auto-applied. */
   entityMergeProposals: EntityMergeProposalV1[];
   entityUnmerges: EntityUnmergeRecordV1[];
+  /** Local correction patterns — never auto-apply from a single hit. */
+  correctionPatterns: CorrectionPatternV1[];
   lastBriefingAt: IsoTimestamp | null;
   lastDailyMaintenanceAt: IsoTimestamp | null;
   lastEndOfDayAt: IsoTimestamp | null;
   lastWeeklyReviewAt: IsoTimestamp | null;
+  lastMorningCycleAt: IsoTimestamp | null;
 }
 
 export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000Z"): ExecutiveStateV1 {
@@ -106,7 +135,17 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     importWorkspaceCorrections: [],
     commitments: [],
     identityResolutions: [],
-    captureFriction: { total: 0, withConfirm: 0, autoApplied: 0, failed: 0, lastLatencyMs: null },
+    captureFriction: {
+      total: 0,
+      withConfirm: 0,
+      autoApplied: 0,
+      failed: 0,
+      lastLatencyMs: null,
+      corrections: 0,
+      falseMatches: 0,
+      briefingDismissed: 0,
+      opportunitiesActed: 0,
+    },
     autonomyJobs: [],
     lastSnapshotSig: null,
     lastCycleResult: null,
@@ -116,10 +155,12 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     attentionBudgetState: emptyAttentionBudgetState(now),
     entityMergeProposals: [],
     entityUnmerges: [],
+    correctionPatterns: [],
     lastBriefingAt: null,
     lastDailyMaintenanceAt: null,
     lastEndOfDayAt: null,
     lastWeeklyReviewAt: null,
+    lastMorningCycleAt: null,
   };
 }
 
