@@ -157,38 +157,42 @@ function Start-AionDetached {
     $p = Get-AionProcess
     $addrs = (Get-ListenerAddresses) -join ', '
     Write-Host "ALREADY_RUNNING pid=$(if($p){$p.Id}else{'?'}) port=$Port listeners=$addrs"
+    Write-Watch "ALREADY_RUNNING pid=$(if($p){$p.Id}else{'?'})"
     return 0
   }
 
-  # Listener/process exists but health failed: within start grace, do not kill (boot / load spike).
+  # CRITICAL: if aion-command-center is alive AND port is listening, never kill it
+  # for a transient HTTP failure (dual-writer load / long request). Watchdog must
+  # not become the normal kill path.
   $aliveNodes = @(Get-AionNodeProcesses)
   $listeners = @(Get-AionListeners)
-  if (($aliveNodes.Count -gt 0 -or $listeners.Count -gt 0) -and (Test-WithinStartGrace)) {
-    $p = Get-AionProcess
-    Write-Host "START_GRACE hold pid=$(if($p){$p.Id}else{'?'}) (within ${StartGraceSec}s of last start)"
-    Write-Watch "START_GRACE hold"
-    return 0
-  }
-
-  # Process alive + listening but HTTP briefly unhealthy: soft wait before kill.
   if ($aliveNodes.Count -gt 0 -and $listeners.Count -gt 0) {
-    Write-Host "SOFT_WAIT health-retry"
-    Write-Watch "SOFT_WAIT"
-    for ($i = 0; $i -lt 8; $i++) {
+    $p = Get-AionProcess
+    if (Test-WithinStartGrace) {
+      Write-Host "START_GRACE hold pid=$(if($p){$p.Id}else{'?'}) (within ${StartGraceSec}s of last start)"
+      Write-Watch "START_GRACE hold"
+      return 0
+    }
+    Write-Host "SOFT_WAIT health-retry (alive+listen — will NOT kill)"
+    Write-Watch "SOFT_WAIT alive_listen"
+    for ($i = 0; $i -lt 12; $i++) {
       Start-Sleep -Milliseconds 500
       if (Test-AionHealthy) {
-        $p = Get-AionProcess
         $addrs = (Get-ListenerAddresses) -join ', '
         Write-Host "ALREADY_RUNNING after soft-wait pid=$(if($p){$p.Id}else{'?'}) listeners=$addrs"
         Write-Watch "RECOVERED_SOFT_WAIT"
         return 0
       }
     }
+    # Still unhealthy but process owns the port — hold, do not CLEANUP_STALE.
+    Write-Host "HOLD_ALIVE_DEGRADED pid=$(if($p){$p.Id}else{'?'}) — process alive + port listen; refusing kill"
+    Write-Watch "HOLD_ALIVE_DEGRADED pid=$(if($p){$p.Id}else{'?'})"
+    return 0
   }
 
-  # Listener without health, or orphaned nodes: clear and start clean.
+  # Only clean up when process is dead or port is free (true stale).
   if ((Get-AionListeners) -or (Get-AionNodeProcesses)) {
-    Write-Host "CLEANUP_STALE"
+    Write-Host "CLEANUP_STALE (no healthy alive+listen pair)"
     Write-Watch "CLEANUP_STALE"
     [void](Stop-AionAll)
     Start-Sleep -Seconds 1
@@ -221,35 +225,32 @@ function Start-AionDetached {
   Add-Content -LiteralPath $stdout -Value "`n---- start $(Get-Date -Format o) ----`n" -Encoding utf8
   Add-Content -LiteralPath $stderr -Value "`n---- start $(Get-Date -Format o) ----`n" -Encoding utf8
 
-  # Durable detach (fixes silent ~30-60s death from `cmd /c start /b` + broken redirect):
-  # 1) Prefer WScript.Shell.Run(node, 0, false) — fully outside agent Job Objects, no cmd wrapper.
-  # 2) Fallback: nested powershell Start-Process (also detached) with log redirect.
-  # 3) Last resort: direct Start-Process in this shell.
+  # Durable detach outside agent Job Objects:
+  # Prefer nested PowerShell Start-Process launched via WScript (detached + log redirect).
+  # Fallback: WScript.Run(node) then direct Start-Process.
   $cc = Join-Path $RepositoryRoot 'apps\aion-command-center.mjs'
   $launched = $false
   try {
-    $wsh = New-Object -ComObject WScript.Shell
-    $wsh.CurrentDirectory = $RepositoryRoot
-    # WindowStyle 0 = hidden; bWaitOnReturn false = do not re-parent under this shell's lifetime.
-    $runCmd = "`"$node`" `"$cc`" --port $Port"
-    [void]$wsh.Run($runCmd, 0, $false)
+    $argList = "`"$cc`" --port $Port"
+    $psLaunch = "Start-Process -FilePath '$node' -ArgumentList '$argList' -WorkingDirectory '$RepositoryRoot' -WindowStyle Hidden -RedirectStandardOutput '$stdout' -RedirectStandardError '$stderr'"
+    $wsh2 = New-Object -ComObject WScript.Shell
+    [void]$wsh2.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command $psLaunch", 0, $false)
     $launched = $true
-    Write-Watch "START_WScript_Run"
+    Write-Watch "START_NESTED_PS"
   } catch {
-    Write-Watch "START_WScript_ERR $($_.Exception.Message)"
+    Write-Watch "START_NESTED_PS_ERR $($_.Exception.Message)"
   }
 
   if (-not $launched) {
     try {
-      $psLaunch = @"
-Start-Process -FilePath '$node' -ArgumentList @('`"$cc`"','--port','$Port') -WorkingDirectory '$RepositoryRoot' -WindowStyle Hidden -RedirectStandardOutput '$stdout' -RedirectStandardError '$stderr'
-"@
-      $wsh2 = New-Object -ComObject WScript.Shell
-      [void]$wsh2.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command $psLaunch", 0, $false)
+      $wsh = New-Object -ComObject WScript.Shell
+      $wsh.CurrentDirectory = $RepositoryRoot
+      $runCmd = "`"$node`" `"$cc`" --port $Port"
+      [void]$wsh.Run($runCmd, 0, $false)
       $launched = $true
-      Write-Watch "START_NESTED_PS"
+      Write-Watch "START_WScript_Run"
     } catch {
-      Write-Watch "START_NESTED_PS_ERR $($_.Exception.Message)"
+      Write-Watch "START_WScript_ERR $($_.Exception.Message)"
     }
   }
 
@@ -323,16 +324,27 @@ function Ensure-Aion {
     Write-Host "ENSURE_OK pid=$(if($p){$p.Id}else{'?'})"
     return 0
   }
-  # Live process in start grace: do not thrash (watchdog / concurrent ensure).
+  # Live process + listener: never recover-kill; optional soft health retry only.
   $nodes = @(Get-AionNodeProcesses)
-  if ($nodes.Count -gt 0 -and (Test-WithinStartGrace)) {
+  $listeners = @(Get-AionListeners)
+  if ($nodes.Count -gt 0 -and $listeners.Count -gt 0) {
     $p = Get-AionProcess
-    Write-Host "ENSURE_GRACE pid=$(if($p){$p.Id}else{'?'})"
-    Write-Watch "ENSURE_GRACE"
+    if (Test-WithinStartGrace) {
+      Write-Host "ENSURE_GRACE pid=$(if($p){$p.Id}else{'?'})"
+      Write-Watch "ENSURE_GRACE"
+      return 0
+    }
+    if (Test-AionHealthy) {
+      Write-Host "ENSURE_OK pid=$(if($p){$p.Id}else{'?'})"
+      return 0
+    }
+    Write-Host "ENSURE_HOLD_DEGRADED pid=$(if($p){$p.Id}else{'?'}) (alive+listen)"
+    Write-Watch "ENSURE_HOLD_DEGRADED pid=$(if($p){$p.Id}else{'?'})"
     return 0
   }
+  # True down: no listener or no process
   Write-Host "ENSURE_RECOVER"
-  Write-Watch "ENSURE_RECOVER starting"
+  Write-Watch "ENSURE_RECOVER starting reason=down nodes=$($nodes.Count) listeners=$($listeners.Count)"
   return (Start-AionDetached)
 }
 
