@@ -24,3 +24,18 @@ test("command center has lifecycle exit logging and single-instance lock", async
   assert.match(cc, /BEFORE_EXIT|EXIT/);
   assert.doesNotMatch(cc, /AION_GMAIL_CLIENT_SECRET|refresh_token|client_secret/i);
 });
+
+test("production launch prefers scheduled task breakaway (not redirected Start-Process)", async () => {
+  const ps1 = await readFile(join(root, "scripts", "aion-production.ps1"), "utf8");
+  assert.match(ps1, /AION-Production-Launch/);
+  // Register-ScheduledTask (not schtasks /TR) — Program Files path quoting is safe
+  assert.match(ps1, /Register-ScheduledTask/);
+  assert.match(ps1, /New-ScheduledTaskAction/);
+  assert.match(ps1, /HOLD_ALIVE_DEGRADED/);
+  assert.match(ps1, /START_FALLBACK_WScript|START_FALLBACK WScript/);
+  // Primary launch path must not RedirectStandardOutput (pipe-kill from short-lived parent)
+  const startFn = ps1.slice(ps1.indexOf("function Start-AionDetached"), ps1.indexOf("function Status-Aion"));
+  assert.doesNotMatch(startFn, /RedirectStandardOutput/);
+  // Do not use nested PowerShell Start-Process as primary (Job Object inheritance)
+  assert.doesNotMatch(startFn, /START_NESTED_PS/);
+});

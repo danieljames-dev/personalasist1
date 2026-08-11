@@ -2,8 +2,9 @@
 # Loopback + auto private LAN/Tailscale on port 31415.
 # Usage: -Action start|stop|status|restart|ensure
 #
-# start/ensure launch outside the caller's process Job Object (WScript.Shell),
-# so closing an agent shell or IDE task does not kill production.
+# start/ensure launch outside the caller's process Job Object via Task Scheduler
+# (Register-ScheduledTask), with WScript.Run fallback — so agent shell exit
+# does not kill production. Never RedirectStandardOutput on the primary process.
 [CmdletBinding()]
 param(
   [ValidateSet('start','stop','status','restart','ensure','watch')]
@@ -173,7 +174,7 @@ function Start-AionDetached {
       Write-Watch "START_GRACE hold"
       return 0
     }
-    Write-Host "SOFT_WAIT health-retry (alive+listen — will NOT kill)"
+    Write-Host "SOFT_WAIT health-retry (alive+listen - will NOT kill)"
     Write-Watch "SOFT_WAIT alive_listen"
     for ($i = 0; $i -lt 12; $i++) {
       Start-Sleep -Milliseconds 500
@@ -184,8 +185,8 @@ function Start-AionDetached {
         return 0
       }
     }
-    # Still unhealthy but process owns the port — hold, do not CLEANUP_STALE.
-    Write-Host "HOLD_ALIVE_DEGRADED pid=$(if($p){$p.Id}else{'?'}) — process alive + port listen; refusing kill"
+    # Still unhealthy but process owns the port - hold, do not CLEANUP_STALE.
+    Write-Host "HOLD_ALIVE_DEGRADED pid=$(if($p){$p.Id}else{'?'}) - process alive + port listen; refusing kill"
     Write-Watch "HOLD_ALIVE_DEGRADED pid=$(if($p){$p.Id}else{'?'})"
     return 0
   }
@@ -225,70 +226,76 @@ function Start-AionDetached {
   Add-Content -LiteralPath $stdout -Value "`n---- start $(Get-Date -Format o) ----`n" -Encoding utf8
   Add-Content -LiteralPath $stderr -Value "`n---- start $(Get-Date -Format o) ----`n" -Encoding utf8
 
-  # Durable detach outside agent Job Objects:
-  # Prefer nested PowerShell Start-Process launched via WScript (detached + log redirect).
-  # Fallback: WScript.Run(node) then direct Start-Process.
+  # Durable detach OUTSIDE agent Job Objects.
+  # Evidence (process.log): children started under agent shells die with NO EXIT/handler
+  # (Job Object / short-lived redirected parent kill). Prefer Task Scheduler ownership.
+  # NOTE: schtasks /TR breaks on "Program Files" quoting; use Register-ScheduledTask.
   $cc = Join-Path $RepositoryRoot 'apps\aion-command-center.mjs'
+  $launchTask = 'AION-Production-Launch'
   $launched = $false
   try {
-    $argList = "`"$cc`" --port $Port"
-    $psLaunch = "Start-Process -FilePath '$node' -ArgumentList '$argList' -WorkingDirectory '$RepositoryRoot' -WindowStyle Hidden -RedirectStandardOutput '$stdout' -RedirectStandardError '$stderr'"
-    $wsh2 = New-Object -ComObject WScript.Shell
-    [void]$wsh2.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command $psLaunch", 0, $false)
+    Stop-ScheduledTask -TaskName $launchTask -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $launchTask -Confirm:$false -ErrorAction SilentlyContinue
+    # ArgumentList-style: quoted script path + port (path may contain spaces)
+    $taskArg = "`"$cc`" --port $Port"
+    $action = New-ScheduledTaskAction -Execute $node -Argument $taskArg -WorkingDirectory $RepositoryRoot
+    $settings = New-ScheduledTaskSettingsSet `
+      -AllowStartIfOnBatteries `
+      -DontStopIfGoingOnBatteries `
+      -StartWhenAvailable `
+      -ExecutionTimeLimit ([TimeSpan]::Zero) `
+      -RestartCount 0
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $launchTask -Action $action -Settings $settings -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName $launchTask
     $launched = $true
-    Write-Watch "START_NESTED_PS"
+    Write-Watch "LAUNCH_TASK_START ok"
+    Write-Host "START_SCHEDULED_TASK $launchTask"
   } catch {
-    Write-Watch "START_NESTED_PS_ERR $($_.Exception.Message)"
-  }
-
-  if (-not $launched) {
-    try {
-      $wsh = New-Object -ComObject WScript.Shell
-      $wsh.CurrentDirectory = $RepositoryRoot
-      $runCmd = "`"$node`" `"$cc`" --port $Port"
-      [void]$wsh.Run($runCmd, 0, $false)
-      $launched = $true
-      Write-Watch "START_WScript_Run"
-    } catch {
-      Write-Watch "START_WScript_ERR $($_.Exception.Message)"
-    }
+    Write-Watch "LAUNCH_TASK_ERR $($_.Exception.Message)"
+    Write-Host "LAUNCH_TASK_ERR $($_.Exception.Message)"
   }
 
   # Discover PID: wait for listener then match node process
   $found = $null
-  for ($i = 0; $i -lt 50; $i++) {
-    Start-Sleep -Milliseconds 250
-    if (-not (Get-AionListeners)) { continue }
-    if (-not (Test-AionHealthyOnce)) { continue }
-    $found = Get-AionNodeProcesses | Select-Object -First 1
-    if ($found) { break }
+  if ($launched) {
+    for ($i = 0; $i -lt 60; $i++) {
+      Start-Sleep -Milliseconds 250
+      if (-not (Get-AionListeners)) { continue }
+      if (-not (Test-AionHealthyOnce)) { continue }
+      $found = Get-AionNodeProcesses | Select-Object -First 1
+      if ($found) { break }
+    }
   }
 
   if ($found -and (Test-AionHealthyOnce)) {
     Set-Content -LiteralPath $pidFile -Value $found.ProcessId -Encoding ascii
     Write-StartedAt
     $addrs = (Get-ListenerAddresses) -join ', '
-    Write-Host "STARTED pid=$($found.ProcessId) port=$Port listeners=$addrs"
-    Write-Watch "STARTED pid=$($found.ProcessId) listeners=$addrs"
+    Write-Host "STARTED pid=$($found.ProcessId) port=$Port listeners=$addrs (scheduled-task)"
+    Write-Watch "STARTED_TASK pid=$($found.ProcessId) listeners=$addrs"
     return 0
   }
 
-  # Last resort: Start-Process in this process (may inherit Job Object in some agent shells)
-  Write-Host "START_FALLBACK Start-Process"
-  Write-Watch "START_FALLBACK"
+  # Fallback: WScript.Run without redirect (outside many job objects; no stdio pipes)
+  Write-Host "START_FALLBACK WScript.Run"
+  Write-Watch "START_FALLBACK_WScript"
   try {
-    $psi = Start-Process -FilePath $node -ArgumentList @("`"$cc`"", "--port", "$Port") `
-      -WorkingDirectory $RepositoryRoot -WindowStyle Hidden -PassThru `
-      -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $wsh = New-Object -ComObject WScript.Shell
+    $wsh.CurrentDirectory = $RepositoryRoot
+    [void]$wsh.Run("`"$node`" `"$cc`" --port $Port", 0, $false)
     for ($i = 0; $i -lt 50; $i++) {
       Start-Sleep -Milliseconds 250
       if ((Get-AionListeners) -and (Test-AionHealthyOnce)) {
-        Set-Content -LiteralPath $pidFile -Value $psi.Id -Encoding ascii
-        Write-StartedAt
-        $addrs = (Get-ListenerAddresses) -join ', '
-        Write-Host "STARTED pid=$($psi.Id) port=$Port listeners=$addrs (fallback)"
-        Write-Watch "STARTED_FALLBACK pid=$($psi.Id)"
-        return 0
+        $found = Get-AionNodeProcesses | Select-Object -First 1
+        if ($found) {
+          Set-Content -LiteralPath $pidFile -Value $found.ProcessId -Encoding ascii
+          Write-StartedAt
+          $addrs = (Get-ListenerAddresses) -join ', '
+          Write-Host "STARTED pid=$($found.ProcessId) port=$Port listeners=$addrs (wscript)"
+          Write-Watch "STARTED_WSCRIPT pid=$($found.ProcessId)"
+          return 0
+        }
       }
     }
   } catch {
