@@ -6295,6 +6295,10 @@ export class AionAssistantV1 {
     const ownerCommitments = commitments.filter(
       (c) =>
         !isSyntheticCommitment(c) &&
+        c.status !== "cancelled" &&
+        c.status !== "kept" &&
+        c.status !== "broken" &&
+        !/\[INVALIDATED\b/i.test(c.statement || "") &&
         String(c.committedBy || c.committedTo || c.statement || "").trim().length > 0,
     );
     const ownerOpps = opps.filter(
@@ -7806,6 +7810,68 @@ export class AionAssistantV1 {
    * Ingest already-fetched Gmail messages (HTTP lives in apps/aion server, not domain).
    * Classifies, extracts commitments/contacts — no full-mailbox permanent body store.
    */
+  /**
+   * Archive false Gmail-live CRM prospects and cancel false marketing commitments
+   * from first-sync contamination. Preserves provenance notes; does not delete Gmail evidence refs.
+   */
+  async repairGmailMarketingContamination(opts: {
+    relationshipIds?: string[];
+    commitmentIds?: string[];
+    reason?: string;
+  } = {}): Promise<{ relationshipsArchived: string[]; commitmentsCancelled: string[] }> {
+    const reason = String(opts.reason || "Gmail first-sync truth repair: marketing false positive").slice(0, 300);
+    return this.mutate((draft) => {
+      const relationshipsArchived: string[] = [];
+      const commitmentsCancelled: string[] = [];
+      const now = this.ports.clock.now();
+      const relIds = new Set(opts.relationshipIds || []);
+      const comIds = new Set(opts.commitmentIds || []);
+      // Default targets: gmail-live prospects with known marketing senders from first batch
+      for (const r of draft.relationships) {
+        if (r.archived) continue;
+        const email = (r.contactMethods || [])
+          .filter((m) => m.channel === "email")
+          .map((m) => m.value.toLowerCase())
+          .join(" ");
+        const isTarget =
+          relIds.has(r.id) ||
+          (r.source === "gmail-live" &&
+            (r.relationshipType === "prospect" || r.relationshipType === "customer") &&
+            (/funderpro\.com|vesica\.org|somabreath\.com/i.test(email) ||
+              /support@funderpro|info@vesica/i.test(email)));
+        if (!isTarget) continue;
+        r.archived = true;
+        r.updatedAt = now;
+        r.notes = `${r.notes || ""}\n[CORRECTED ${now}] ${reason} — archived; Gmail source refs retained as DATA only.`.slice(0, 4000);
+        relationshipsArchived.push(r.id);
+      }
+      if (draft.executive?.commitments) {
+        for (const c of draft.executive.commitments) {
+          const src = c.provenance?.sourceRef || "";
+          const isTarget =
+            comIds.has(c.id) ||
+            (/gmail:19ff0b1d5de7628e|gmail:19ff16cca690c9c7/i.test(src) &&
+              (c.status === "open" || c.status === "due_soon" || c.status === "overdue"));
+          if (!isTarget) continue;
+          if (c.status === "cancelled" || c.status === "kept") continue;
+          c.status = "cancelled";
+          c.updatedAt = now;
+          c.resolvedAt = now;
+          c.statement = `${c.statement} [INVALIDATED ${now}: ${reason}]`.slice(0, 2000);
+          commitmentsCancelled.push(c.id);
+        }
+      }
+      this.activity(
+        draft,
+        "settings",
+        "gmail.truth.repair",
+        `Gmail marketing contamination repair: archived ${relationshipsArchived.length} rel(s), cancelled ${commitmentsCancelled.length} commitment(s).`,
+        null,
+      );
+      return { relationshipsArchived, commitmentsCancelled };
+    });
+  }
+
   async ingestGmailMessages(
     messages: Array<{
       id: string;
@@ -7818,6 +7884,7 @@ export class AionAssistantV1 {
       labelIds?: string[];
       /** ISO message time from Gmail internalDate when available */
       internalDate?: string | null;
+      headers?: Record<string, string>;
     }>,
   ): Promise<{
     ok: boolean;
@@ -7842,7 +7909,7 @@ export class AionAssistantV1 {
         backupOk: false,
       };
     }
-    const { classifyGmailMessage, extractCommitmentsFromBody } = await import("./connectors/gmail-connector.js");
+    const { classifyGmailMessage, extractInterpersonalCommitments } = await import("./connectors/gmail-connector.js");
     const classified: Array<{ id: string; from: string; subject: string; relevance: string; workspaceHint: string; threadId?: string }> = [];
     let commitmentsExtracted = 0;
     let contactsProposed = 0;
@@ -7855,6 +7922,7 @@ export class AionAssistantV1 {
       const subject = msg.subject || "";
       const snippet = msg.snippet || "";
       const bodyText = msg.bodyText || snippet;
+      const headers = (msg as { headers?: Record<string, string> }).headers;
       const clsInput: {
         from: string;
         to?: string;
@@ -7862,9 +7930,11 @@ export class AionAssistantV1 {
         snippet?: string;
         bodyText?: string;
         labelIds?: string[];
+        headers?: Record<string, string>;
       } = { from, subject, snippet, bodyText };
       if (msg.to) clsInput.to = msg.to;
       if (msg.labelIds) clsInput.labelIds = msg.labelIds;
+      if (headers) clsInput.headers = headers;
       const cls = classifyGmailMessage(clsInput);
       const row: { id: string; from: string; subject: string; relevance: string; workspaceHint: string; threadId?: string } = {
         id: msg.id,
@@ -7875,39 +7945,49 @@ export class AionAssistantV1 {
       };
       if (msg.threadId) row.threadId = msg.threadId;
       classified.push(row);
-      if (cls.relevance === "noise") continue;
+      if (cls.relevance === "noise" || cls.marketingOrBulk) continue;
       // Email body is DATA only — flag instruction-like text; never treat as Owner authority.
       void isInstructionLikeDocument(bodyText);
       const sourceRef = msg.threadId
         ? `gmail:${msg.id}|thread:${msg.threadId}${msg.internalDate ? `|at:${msg.internalDate}` : ""}`
         : `gmail:${msg.id}${msg.internalDate ? `|at:${msg.internalDate}` : ""}`;
 
-      const commits = cls.shouldExtractCommitments ? extractCommitmentsFromBody(bodyText) : [];
-      if (commits.length) {
+      // Sent-folder / Owner-authored: only when From matches Owner mailbox patterns (not inbound marketing)
+      const fromOwnerMailbox =
+        /nearmiss1193@gmail\.com|daniel\.?coffman/i.test(from) ||
+        (msg.labelIds || []).some((l) => String(l).toUpperCase() === "SENT");
+      const extracted = cls.shouldExtractCommitments
+        ? extractInterpersonalCommitments(bodyText, {
+            fromOwnerMailbox,
+            marketing: cls.marketingOrBulk,
+          })
+        : [];
+      if (extracted.length) {
         await this.mutate((draft) => {
           if (!draft.executive) draft.executive = emptyExecutiveState(now);
-          for (const line of commits.slice(0, 3)) {
+          for (const hit of extracted.slice(0, 3)) {
             try {
+              // Uncertain actor → do not create OWNER_MUST_DO commitment
+              if (hit.actor === "uncertain" || !hit.interpersonal) continue;
               const ws =
                 cls.workspaceHint === "work"
                   ? "work"
                   : cls.workspaceHint === "compassionate-choice"
                     ? "compassionate-choice"
                     : "personal";
-              // Deduplicate same provenance sourceRef + statement
+              const statement = hit.statement.slice(0, 500);
               const already = (draft.executive.commitments || []).some(
-                (c) => c.provenance?.sourceRef === sourceRef && c.statement === line.slice(0, 500),
+                (c) => c.provenance?.sourceRef === sourceRef && c.statement === statement,
               );
               if (already) continue;
-              const ownerSays = /\b(i will|i'll|i am going to|i'll|we will|we'll)\b/i.test(line);
               const c = buildCommitment(
                 {
-                  committedBy: ownerSays ? "Owner" : from.slice(0, 80),
-                  committedTo: ownerSays ? from.slice(0, 80) : "Owner",
-                  statement: line.slice(0, 500),
+                  committedBy: hit.actor === "owner" ? "Owner" : from.slice(0, 80),
+                  committedTo: hit.actor === "owner" ? from.slice(0, 80) : "Owner",
+                  statement,
                   dueAt: null,
                   sourceRef,
-                  confidence: 70,
+                  confidence: hit.actor === "owner" || hit.actor === "other" ? 75 : 40,
                 },
                 { id: this.ports.ids.next("commit"), now, workspace: ws },
               );
@@ -7921,13 +8001,15 @@ export class AionAssistantV1 {
         });
       }
 
-      if (cls.shouldProposeContact && cls.contactClass !== "UNKNOWN") {
+      // CRM auto-create: only when classifier says so AND not marketing AND not support@/info@ style
+      if (cls.shouldProposeContact && cls.contactClass !== "UNKNOWN" && !cls.marketingOrBulk) {
         contactsProposed += 1;
         const emailMatch = from.match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i);
         const nameMatch = from.match(/^"?([^"<]+)"?\s*</) || from.match(/^([^@]+)/);
         const displayName = (nameMatch?.[1] || "").trim().replace(/"/g, "");
         const email = emailMatch?.[0] || "";
-        if (email && displayName.length > 1 && !/noreply/i.test(email)) {
+        const genericInbox = /^(support|info|hello|sales|noreply|no-reply|newsletter|marketing|team|contact)@/i.test(email);
+        if (email && displayName.length > 1 && !/noreply/i.test(email) && !genericInbox) {
           await this.mutate((draft) => {
             const exists = draft.relationships.some(
               (r) =>
@@ -7936,6 +8018,11 @@ export class AionAssistantV1 {
             );
             if (exists) return null;
             if (/daniel|nearmiss1193|coffman/i.test(email) || /daniel coffman/i.test(displayName)) return null;
+            // Do not auto-create prospect/customer without human-grade class (collaborator ok for CC)
+            if (cls.contactClass === "PROSPECT" || cls.contactClass === "CUSTOMER") {
+              // Require dealership interpersonal evidence already encoded in classifier direct flag
+              if (cls.workspaceHint !== "work" && cls.contactClass === "PROSPECT") return null;
+            }
             const rid = this.ports.ids.next("relationship");
             const ws =
               cls.workspaceHint === "work"
@@ -7962,7 +8049,6 @@ export class AionAssistantV1 {
                 notes: `From Gmail ${msg.id}${msg.threadId ? ` thread ${msg.threadId}` : ""}${msg.internalDate ? ` at ${msg.internalDate}` : ""}: ${subject.slice(0, 200)}. Class=${cls.contactClass} (live_connector DATA — not owner_direct authority).`,
                 relationshipType: relType,
                 contactMethods: [{ channel: "email", label: "email", value: email }],
-                // Never invent sold/engaged from mail alone — prospect only for customer-class, else active contact/partner
                 lifecycle: relType === "prospect" || relType === "customer" ? "prospect" : "active",
               },
               {

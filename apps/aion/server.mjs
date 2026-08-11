@@ -141,6 +141,10 @@ async function runLiveGmailSync(service, input = {}) {
     const msg = await fullRes.json();
     const headers = msg.payload?.headers || [];
     const getH = (n) => headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value || "";
+    const headerMap = {};
+    for (const h of headers) {
+      if (h?.name && h?.value) headerMap[String(h.name).toLowerCase()] = String(h.value).slice(0, 2000);
+    }
     const internalMs = msg.internalDate ? Number(msg.internalDate) : NaN;
     messages.push({
       id: msg.id || id,
@@ -152,6 +156,7 @@ async function runLiveGmailSync(service, input = {}) {
       bodyText: (walkBody(msg.payload) || msg.snippet || "").slice(0, 20000),
       labelIds: msg.labelIds || [],
       internalDate: Number.isFinite(internalMs) ? new Date(internalMs).toISOString() : null,
+      headers: headerMap,
     });
   }
   const result = await service.ingestGmailMessages(messages);
@@ -960,6 +965,12 @@ export async function createAionServer(options = {}) {
       case "connector.gmail.sync":
         // HTTP fetch in host helper; domain ingest only (see runLiveGmailSync).
         return runLiveGmailSync(service, input);
+      case "gmail.truth.repair":
+        return service.repairGmailMarketingContamination({
+          relationshipIds: Array.isArray(input.relationshipIds) ? input.relationshipIds.map(String) : undefined,
+          commitmentIds: Array.isArray(input.commitmentIds) ? input.commitmentIds.map(String) : undefined,
+          reason: input.reason != null ? String(input.reason) : undefined,
+        });
       case "connector.gmail.disconnect": return service.disconnectGmail();
       case "connector.gmail.oauthComplete": return service.completeGmailOAuth({
         refreshToken: String(input.refreshToken ?? ""),
