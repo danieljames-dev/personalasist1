@@ -179,6 +179,15 @@ import {
   type DailyOperatingReportV1,
 } from "./daily-operating.js";
 import {
+  loadPilotState,
+  startPilot,
+  recordFriction,
+  recordPilotDay,
+  recordFeatureUse,
+  pilotCheckpointSummary,
+  type PilotDayV1,
+} from "./pilot-ops.js";
+import {
   isTestOrE2eWorkspace,
   isSyntheticOwnerFacingText,
   isSyntheticRelationship,
@@ -1124,6 +1133,245 @@ export class AionAssistantV1 {
       if (draft.executive.valueLedger.length > 500) draft.executive.valueLedger.length = 500;
       return null;
     });
+  }
+
+  /** Start or continue 7-day Owner daily-use pilot (local private metrics only). */
+  async pilotStart(): Promise<{ startedAt: string | null; daysUsed: number; reply: string }> {
+    const root = this.repositoryDataRoot();
+    if (!root) return { startedAt: null, daysUsed: 0, reply: "No private data root — pilot not started." };
+    const now = this.ports.clock.now();
+    const state = startPilot(root, now);
+    recordFeatureUse(root, "pilot.start", now);
+    return {
+      startedAt: state.startedAt,
+      daysUsed: state.days.length,
+      reply: `7-DAY OWNER DAILY USE PILOT active (started ${state.startedAt?.slice(0, 10) || now.slice(0, 10)}). Days logged: ${state.days.length}.`,
+    };
+  }
+
+  async pilotRecordDay(partial: Partial<PilotDayV1> = {}): Promise<PilotDayV1> {
+    const root = this.repositoryDataRoot();
+    if (!root) throw new Error("No private data root.");
+    const now = this.ports.clock.now();
+    const day = partial.day || now.slice(0, 10);
+    const board = await this.attentionBoard();
+    const daily = await this.dailyOperatingReport({ board });
+    const row: PilotDayV1 = {
+      day,
+      briefGenerated: partial.briefGenerated ?? true,
+      ownerMustDo: partial.ownerMustDo ?? daily.ownerMustDo.length,
+      aionCanDo: partial.aionCanDo ?? daily.aionCanDo.length,
+      waitingOn: partial.waitingOn ?? daily.waitingOnOthers.length,
+      attentionItems: partial.attentionItems ?? board.ownerMustDo.length,
+      gmailNewScanned: partial.gmailNewScanned ?? 0,
+      draftsPrepared: partial.draftsPrepared ?? 0,
+      emailsSent: partial.emailsSent ?? 0,
+      corrections: partial.corrections ?? 0,
+      ownerPrompts: partial.ownerPrompts ?? 0,
+      at: now,
+    };
+    if (partial.notes) row.notes = partial.notes.slice(0, 500);
+    recordPilotDay(root, row);
+    recordFeatureUse(root, "pilot.day", now);
+    return row;
+  }
+
+  async pilotRecordFriction(input: {
+    problem: string;
+    impact?: "low" | "medium" | "high";
+    smallestFix: string;
+    category?: string;
+  }): Promise<{ entry: ReturnType<typeof recordFriction>; reply: string }> {
+    const root = this.repositoryDataRoot();
+    if (!root) throw new Error("No private data root.");
+    const now = this.ports.clock.now();
+    const frictionArg: {
+      id: string;
+      at: string;
+      problem: string;
+      smallestFix: string;
+      impact?: "low" | "medium" | "high";
+      category?: string;
+    } = {
+      id: this.ports.ids.next("friction"),
+      at: now,
+      problem: input.problem,
+      smallestFix: input.smallestFix,
+    };
+    if (input.impact) frictionArg.impact = input.impact;
+    if (input.category) frictionArg.category = input.category;
+    const entry = recordFriction(root, frictionArg);
+    recordFeatureUse(root, "pilot.friction", now);
+    await this.recordConservativeValue({
+      action: "friction_logged",
+      capability: "pilot.friction",
+      timeSavedMinutes: null,
+      evidenceIds: [entry.id],
+      notes: `Friction: ${entry.problem.slice(0, 120)}`,
+    }).catch(() => null);
+    return {
+      entry,
+      reply: `Friction logged (freq=${entry.frequency}, impact=${entry.impact}): ${entry.problem}\nSmallest fix: ${entry.smallestFix}`,
+    };
+  }
+
+  async pilotStatus(): Promise<{
+    reply: string;
+    summary: ReturnType<typeof pilotCheckpointSummary>;
+    startedAt: string | null;
+  }> {
+    const root = this.repositoryDataRoot();
+    const state = loadPilotState(root);
+    const summary = pilotCheckpointSummary(state);
+    const reply = [
+      "7-DAY OWNER DAILY USE PILOT",
+      `Started: ${state.startedAt?.slice(0, 16) || "(not started)"}`,
+      `Days used: ${summary.daysUsed}`,
+      `Owner prompts: ${summary.ownerPrompts}`,
+      `Daily briefs: ${summary.dailyBriefs}`,
+      `Avg Must Do: ${summary.ownerMustDoAvg.toFixed(1)} · Avg AION Can Do: ${summary.aionCanDoAvg.toFixed(1)} · Avg attention: ${summary.attentionAvg.toFixed(1)}`,
+      `Gmail refreshed (new msgs): ${summary.gmailRefreshed}`,
+      `Drafts prepared: ${summary.drafts} · Emails sent: ${summary.emailsSent}`,
+      `Corrections: ${summary.corrections}`,
+      "",
+      "TOP FRICTIONS",
+      ...(summary.topFrictions.length
+        ? summary.topFrictions.map((f) => `  • [${f.impact}] x${f.frequency} ${f.problem} → ${f.smallestFix}`)
+        : ["  (none logged)"]),
+      "",
+      "TOP FEATURES USED",
+      ...(summary.topFeatures.length
+        ? summary.topFeatures.map((f) => `  • ${f.feature}: ${f.count}`)
+        : ["  (none)"]),
+    ].join("\n");
+    return { reply, summary, startedAt: state.startedAt };
+  }
+
+  /**
+   * Apply Owner correction to live CRM/commitment truth (not just hide UI).
+   * Examples: "Sarah is not a customer", "that commitment is wrong", "not important".
+   */
+  async applyOwnerOperationalCorrection(text: string): Promise<{
+    reply: string;
+    archived: string[];
+    cancelled: string[];
+    patterns: string[];
+  }> {
+    const raw = String(text || "").trim();
+    const now = this.ports.clock.now();
+    const archived: string[] = [];
+    const cancelled: string[] = [];
+    const patterns: string[] = [];
+    const nameMatch =
+      raw.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+is not a (customer|prospect|contact)\b/i) ||
+      raw.match(/\bnot a (customer|prospect)\b.*\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i) ||
+      raw.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:is )?(?:wrong|irrelevant|old)\b/i);
+
+    await this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(now);
+      // Archive named relationship
+      if (nameMatch) {
+        const name = (nameMatch[1] || nameMatch[2] || "").trim();
+        if (name && name.length > 1) {
+          for (const r of draft.relationships) {
+            if (r.archived) continue;
+            if (r.displayName.toLowerCase() === name.toLowerCase() || r.displayName.toLowerCase().includes(name.toLowerCase())) {
+              if (/\bnot a (customer|prospect|contact)\b/i.test(raw) || /\birrelevant\b|\bwrong\b/i.test(raw)) {
+                r.archived = true;
+                r.updatedAt = now;
+                r.notes = `${r.notes || ""}\n[OWNER CORRECTION ${now}] ${raw.slice(0, 200)}`.slice(0, 4000);
+                archived.push(r.id);
+              }
+            }
+          }
+        }
+      }
+      // Cancel open commitments marked not important / wrong / old
+      if (/\b(not important|wrong commitment|that.?s wrong|old|ignore that|cancel)\b/i.test(raw)) {
+        for (const c of draft.executive.commitments) {
+          if (c.status === "cancelled" || c.status === "kept") continue;
+          // If a name is present, only cancel matching; else cancel top open Owner noise if "not important"
+          const name = nameMatch?.[1] || nameMatch?.[2];
+          if (name && !new RegExp(name, "i").test(c.committedBy + c.committedTo + c.statement)) continue;
+          if (!name && !/\bnot important\b|\bignore\b/i.test(raw)) continue;
+          c.status = "cancelled";
+          c.resolvedAt = now;
+          c.updatedAt = now;
+          c.statement = `${c.statement} [OWNER CORRECTION ${now}: ${raw.slice(0, 120)}]`.slice(0, 2000);
+          cancelled.push(c.id);
+        }
+      }
+      // Workspace reassignment correction patterns
+      if (/\b(this is|that is|belongs in|move to)\s+(personal|work|career|compassionate choice|lakeland)\b/i.test(raw)) {
+        const m = raw.match(/\b(personal|work|career|compassionate choice|lakeland)\b/i);
+        if (m) {
+          const ws =
+            /compassionate/i.test(m[1]!)
+              ? "compassionate-choice"
+              : /lakeland|work/i.test(m[1]!)
+                ? "work"
+                : "personal";
+          const pat = (nameMatch?.[1] || nameMatch?.[2] || "owner-correction").toLowerCase().slice(0, 80);
+          const corrWs: WorkspaceCorrectionV1 = {
+            pattern: pat,
+            workspaceId: ws,
+            role: "AMBIGUOUS",
+            at: now,
+          };
+          draft.executive.importWorkspaceCorrections = [
+            corrWs,
+            ...draft.executive.importWorkspaceCorrections.filter((c) => c.pattern !== pat),
+          ].slice(0, 200);
+          patterns.push(`${pat}→${ws}`);
+        }
+      }
+      // Durable correction pattern (never auto-apply from single hit — recorded for pilot)
+      draft.executive.correctionPatterns.push({
+        id: this.ports.ids.next("corr-pat"),
+        kind: archived.length ? "relationship" : cancelled.length ? "fact" : "category",
+        fromValue: raw.slice(0, 120),
+        toValue: archived.length ? "archived" : cancelled.length ? "cancelled" : "noted",
+        workspace: draft.settings.activeWorkspace || "personal",
+        hits: 1,
+        autoApplyEligible: false,
+        at: now,
+        notes: raw.slice(0, 200),
+      });
+      this.activity(
+        draft,
+        "settings",
+        "owner.correction.operational",
+        `Owner correction: archived=${archived.length} cancelled=${cancelled.length} patterns=${patterns.length}`,
+        null,
+      );
+      return null;
+    });
+
+    const root = this.repositoryDataRoot();
+    if (root) {
+      recordFriction(root, {
+        id: this.ports.ids.next("friction"),
+        at: now,
+        problem: `Owner correction applied: ${raw.slice(0, 160)}`,
+        impact: "medium",
+        smallestFix: "Propagate archive/cancel to derived views (done)",
+        category: "correction",
+      });
+      recordFeatureUse(root, "owner.correction", now);
+    }
+
+    return {
+      archived,
+      cancelled,
+      patterns,
+      reply: [
+        "OWNER CORRECTION APPLIED",
+        `Relationships archived: ${archived.length}`,
+        `Commitments cancelled: ${cancelled.length}`,
+        patterns.length ? `Workspace guidance: ${patterns.join(", ")}` : "No workspace pattern added",
+        "Derived boards will omit cancelled/archived items.",
+      ].join("\n"),
+    };
   }
 
   async dealershipMorningAssist(): Promise<DealershipMorningAssistV1> {
@@ -8641,9 +8889,26 @@ export class AionAssistantV1 {
       }
     }
 
+    // Owner operational corrections (propagate to truth, not mere hide)
+    if (
+      /\b(is not a (customer|prospect|contact)|not a (customer|prospect)|not important|that.?s (wrong|irrelevant|old)|ignore that|belongs in (personal|work|career|compassionate|lakeland)|move to (personal|work))\b/i.test(
+        text,
+      )
+    ) {
+      const corr = await this.applyOwnerOperationalCorrection(text);
+      return {
+        intent: "OWNER_CORRECTION",
+        confidence: "high",
+        reply: corr.reply,
+        sources: [],
+        action: "owner.correction.operational",
+        data: corr,
+      };
+    }
+
     // Daily operating / morning executive
     if (
-      /\b(morning (brief|cycle|executive)|start my day|what should i do( today)?|what do i need to do|what needs my attention|what is most important|dealership morning|morning assist|daily (brief|operating|os))\b/i.test(
+      /\b(morning (brief|cycle|executive)|start my day|what should i do( today)?|what do i need to do|what needs my attention|what is most important|dealership morning|morning assist|daily (brief|operating|os)|prepare me for today)\b/i.test(
         text,
       )
     ) {

@@ -1375,6 +1375,22 @@ export async function createAionServer(options = {}) {
       case "executive.decompose": return service.decomposeGoal(String(input.goal ?? input.text ?? ""));
       case "executive.brief": return service.prepareProactiveBrief();
       case "executive.daily": return service.dailyOperatingReport();
+      case "pilot.start": return service.pilotStart();
+      case "pilot.day": return service.pilotRecordDay(input.input && typeof input.input === "object" ? { ...input, ...input.input } : input);
+      case "pilot.friction": {
+        const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
+        return service.pilotRecordFriction({
+          problem: String(p.problem || ""),
+          impact: p.impact === "low" || p.impact === "high" ? p.impact : "medium",
+          smallestFix: String(p.smallestFix || "Review and fix smallest path"),
+          category: p.category != null ? String(p.category) : undefined,
+        });
+      }
+      case "pilot.status": return service.pilotStatus();
+      case "owner.correction.operational": {
+        const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
+        return service.applyOwnerOperationalCorrection(String(p.text || p.content || ""));
+      }
       case "executive.whatChanged": {
         const p = input.input && typeof input.input === "object" ? { ...input, ...input.input } : input;
         return service.whatChangedSince(Number(p.hours) || 24);

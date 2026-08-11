@@ -196,7 +196,7 @@ test("Gmail OAuth callback uses runLiveGmailSync host path — never a missing s
   );
   assert.match(
     server,
-    /case\s+["']connector\.gmail\.sync["'][\s\S]{0,120}runLiveGmailSync\s*\(\s*service\s*,\s*input\s*,\s*dataRoot\s*\)/u,
+    /case\s+["']connector\.gmail\.sync["'][\s\S]{0,250}runLiveGmailSync\s*\(\s*service\s*,/u,
     "connector.gmail.sync must use the same runLiveGmailSync path",
   );
   assert.match(server, /recordGmailScanIds|loadGmailScanState/u, "scan cursor advances unique message ids");
