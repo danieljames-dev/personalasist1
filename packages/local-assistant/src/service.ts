@@ -3041,6 +3041,149 @@ export class AionAssistantV1 {
     });
   }
 
+  /**
+   * Deterministic knowledge quality: disable exact duplicate facts (same category+title+content).
+   * Keeps the newest enabled fact; does not erase history (disabled, not deleted).
+   */
+  async dedupeOwnerKnowledgeFacts(): Promise<{
+    examined: number;
+    duplicatesDisabled: number;
+    enabledRemaining: number;
+    keys: string[];
+  }> {
+    return this.mutate((draft) => {
+      if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+      const now = this.ports.clock.now();
+      const facts = draft.ownerKnowledge.facts;
+      const byKey = new Map<string, typeof facts>();
+      for (const f of facts) {
+        const key = `${f.category}::${f.title.trim().toLowerCase()}::${f.content.trim().toLowerCase()}`;
+        const list = byKey.get(key) ?? [];
+        list.push(f);
+        byKey.set(key, list);
+      }
+      let duplicatesDisabled = 0;
+      const keys: string[] = [];
+      for (const [key, group] of byKey) {
+        if (group.length < 2) continue;
+        keys.push(key.slice(0, 120));
+        // Keep newest by updatedAt; disable others that are enabled
+        const sorted = [...group].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        for (const f of sorted.slice(1)) {
+          if (f.enabled) {
+            f.enabled = false;
+            f.updatedAt = now;
+            duplicatesDisabled += 1;
+          }
+        }
+      }
+      this.activity(
+        draft,
+        "memory",
+        "owner.knowledge.dedupe",
+        `Knowledge dedupe: disabled ${duplicatesDisabled} exact duplicate fact(s)`,
+        null,
+      );
+      return {
+        examined: facts.length,
+        duplicatesDisabled,
+        enabledRemaining: facts.filter((f) => f.enabled).length,
+        keys: keys.slice(0, 40),
+      };
+    });
+  }
+
+  /** Coverage / gap report for Owner knowledge (counts only — no invented content). */
+  async ownerKnowledgeCoverageReport(): Promise<{
+    totals: {
+      factsEnabled: number;
+      factsDisabled: number;
+      documents: number;
+      relationships: number;
+      temporalFacts: number;
+      commitments: number;
+      opportunities: number;
+      reviewOpen: number;
+      brandWorkspaces: number;
+      e2eSyntheticWorkspaces: number;
+    };
+    byCategory: Record<string, number>;
+    workspacesPopulated: string[];
+    approvedImportRoots: string[];
+    topGaps: string[];
+    syntheticMarkers: string[];
+    realVsSynthetic: { realOwnerDocuments: number; syntheticOrTestDocuments: number };
+  }> {
+    const state = await this.snapshot();
+    const facts = state.ownerKnowledge?.facts ?? [];
+    const byCategory: Record<string, number> = {};
+    for (const f of facts.filter((x) => x.enabled)) {
+      byCategory[f.category] = (byCategory[f.category] || 0) + 1;
+    }
+    const docs = state.crmDocuments ?? [];
+    const syntheticMarkers: string[] = [];
+    let syntheticOrTestDocuments = 0;
+    let realOwnerDocuments = 0;
+    for (const d of docs) {
+      const blob = `${d.filename} ${d.summary} ${d.extractedText} ${d.sourceRootPath || ""} ${d.tags?.join(" ") || ""}`.toLowerCase();
+      const synthetic =
+        /synthetic|e2e|fixture|smoke|example\.test|runway first-source|aion-smoke|temp\\aion|acme-r7/.test(blob);
+      if (synthetic) {
+        syntheticOrTestDocuments += 1;
+        if (syntheticMarkers.length < 12) syntheticMarkers.push(d.filename);
+      } else {
+        realOwnerDocuments += 1;
+      }
+    }
+    const brands = state.workspaces.filter((w) => w.kind === "business" && !w.archived);
+    const e2e = brands.filter((w) => /e2e/i.test(w.label || w.id));
+    const gaps: string[] = [];
+    if (!byCategory.profile) gaps.push("No Owner profile fact (display name / identity summary).");
+    if (!byCategory.role && !byCategory.employment) gaps.push("No current role/employment assertion beyond synthetic pack.");
+    if (!byCategory.customer && !byCategory.prospect)
+      gaps.push("No Owner-asserted customer/prospect knowledge facts (CRM may have records separately).");
+    if (!byCategory.brand && !byCategory.business)
+      gaps.push("No non-synthetic brand/business DNA knowledge beyond import stubs.");
+    if (!byCategory.goal) gaps.push("No Owner goals recorded.");
+    if (!byCategory.collaborator) gaps.push("No collaborators recorded.");
+    if (!byCategory["product-service"]) gaps.push("No product/service catalog facts.");
+    if ((state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length)
+      gaps.push("Import review queue has unresolved items.");
+    if ((state.settings.importRoots ?? []).length <= 1)
+      gaps.push("Only one approved import root — no external real Owner folders configured.");
+    if (realOwnerDocuments === 0)
+      gaps.push("No documents classified as non-synthetic real Owner data under current markers.");
+
+    const workspacesPopulated = [
+      ...new Set([
+        ...facts.filter((f) => f.enabled).map(() => "ownerKnowledge"),
+        ...(state.relationships ?? []).map((r) => r.workspace),
+        ...(state.crmDocuments ?? []).map((d) => d.workspace),
+      ]),
+    ];
+
+    return {
+      totals: {
+        factsEnabled: facts.filter((f) => f.enabled).length,
+        factsDisabled: facts.filter((f) => !f.enabled).length,
+        documents: docs.length,
+        relationships: (state.relationships ?? []).length,
+        temporalFacts: (state.executive?.temporalFacts ?? []).length,
+        commitments: (state.executive?.commitments ?? []).length,
+        opportunities: (state.executive?.opportunities ?? []).length,
+        reviewOpen: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
+        brandWorkspaces: brands.length,
+        e2eSyntheticWorkspaces: e2e.length,
+      },
+      byCategory,
+      workspacesPopulated,
+      approvedImportRoots: Array.isArray(state.settings.importRoots) ? [...state.settings.importRoots] : [],
+      topGaps: gaps.slice(0, 12),
+      syntheticMarkers,
+      realVsSynthetic: { realOwnerDocuments, syntheticOrTestDocuments },
+    };
+  }
+
   async listBrandCollaborators(): Promise<BrandCollaboratorV1[]> {
     const state = await this.snapshot();
     return Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];

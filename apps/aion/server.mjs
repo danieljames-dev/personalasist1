@@ -708,6 +708,8 @@ export async function createAionServer(options = {}) {
       case "owner.knowledge.add": return service.addOwnerKnowledgeFact(input.fact ?? input);
       case "owner.knowledge.correct": return service.correctOwnerKnowledgeFact(input.id, String(input.content ?? ""), String(input.reason ?? ""));
       case "owner.knowledge.enable": return service.setOwnerKnowledgeEnabled(input.id, input.enabled === true);
+      case "owner.knowledge.dedupe": return service.dedupeOwnerKnowledgeFacts();
+      case "owner.knowledge.coverage": return service.ownerKnowledgeCoverageReport();
       case "brand.collaborator.list": return { collaborators: await service.listBrandCollaborators() };
       case "brand.collaborator.add": return service.addBrandCollaborator(input.collaborator ?? input);
       case "job.list": return { applications: await service.listJobApplications() };
