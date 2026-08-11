@@ -74,6 +74,7 @@ import {
   findCustomersMentioning,
   findRelationshipsByName,
   findStalledDeals,
+  formatCustomerList,
   newCrmDocument,
   newEmailDraft,
   routeCrmAssistantIntent,
@@ -4674,7 +4675,9 @@ export class AionAssistantV1 {
     const sha256 = createHash("sha256").update(await readFile(snapshotPath)).digest("hex");
     let encryptedPath: string | null = null;
     let encrypted = false;
-    const passphrase = process.env.AION_PRIVATE_BACKUP_PASSPHRASE?.trim();
+    const { resolvePrivateBackupPassphrase } = await import("./private-backup-key.js");
+    const keyRes = resolvePrivateBackupPassphrase(dataRoot);
+    const passphrase = keyRes.passphrase;
     if (passphrase && passphrase.length >= 12) {
       try {
         const dest = join(snapDir, `aion-private-state-${ts}.aionbak`);
@@ -4699,7 +4702,7 @@ export class AionAssistantV1 {
         draft,
         "export",
         "backup.pre-import",
-        `Pre-import snapshot ${sha256.slice(0, 16)}… bytes=${bytes} encrypted=${encrypted}`,
+        `Pre-import snapshot ${sha256.slice(0, 16)}… bytes=${bytes} encrypted=${encrypted} keySource=${keyRes.source}`,
         null,
       );
       return null;
@@ -4713,8 +4716,8 @@ export class AionAssistantV1 {
       encryptedPath,
       encrypted,
       message: encrypted
-        ? "Verified file snapshot + encrypted private backup PASS."
-        : "Verified file snapshot PASS (SHA256). Encrypted .aionbak skipped (no AION_PRIVATE_BACKUP_PASSPHRASE).",
+        ? `Verified file snapshot + encrypted private backup PASS (keySource=${keyRes.source}).`
+        : "Verified file snapshot PASS (SHA256). Encrypted .aionbak unavailable (no env passphrase and local key file could not be created).",
     };
   }
 
@@ -8370,18 +8373,76 @@ export class AionAssistantV1 {
       };
     }
 
+    if (route.intent === "CRM_LIST") {
+      // List real customers in active workspace (or filtered context); never invent "Show" as a person.
+      let pool = inWorkspace.filter((r) => !isSyntheticRelationship(r));
+      const sub = (route.subject || "").toLowerCase();
+      if (sub.startsWith("context:dealership") || sub.includes("lakeland") || sub.includes("dealership")) {
+        pool = pool.filter((r) => r.workspace === "work" || /toyota|dealership|lakeland/i.test(`${r.notes} ${r.organisation}`));
+      } else if (sub.startsWith("context:work") || sub === "work") {
+        pool = state.relationships.filter(
+          (r) => r.workspace === "work" && !r.archived && !isSyntheticRelationship(r),
+        );
+      } else if (sub.startsWith("brand:")) {
+        const brand = sub.slice("brand:".length).trim();
+        pool = state.relationships.filter(
+          (r) =>
+            !r.archived &&
+            !isSyntheticRelationship(r) &&
+            new RegExp(brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(
+              `${r.workspace} ${r.organisation} ${r.notes} ${r.displayName}`,
+            ),
+        );
+      }
+      const formatted = formatCustomerList(pool, {
+        title: sub.startsWith("brand:")
+          ? `CUSTOMERS — ${route.subject?.replace(/^brand:/i, "") || "brand"}`
+          : sub.includes("dealership") || sub.includes("lakeland")
+            ? "CUSTOMERS — dealership"
+            : "CUSTOMERS",
+      });
+      for (const c of pool.slice(0, 12)) {
+        sources.push({ type: "relationship", id: c.id, label: c.displayName });
+      }
+      return {
+        intent: "CRM_LIST",
+        confidence: route.confidence,
+        reply: formatted.reply,
+        sources,
+        action: "crm.customer.list",
+        data: { count: formatted.count, subject: route.subject || "" },
+      };
+    }
+
     if (route.intent === "CRM_LOOKUP" || route.intent === "ACCOUNT_SUMMARY") {
+      // Guard: empty/list-like subject → list, never create junk "Show"/"List"
+      const subj = (route.subject || "").trim();
+      if (!subj || /^(show|list|find|get|customers?|my customers?)$/i.test(subj)) {
+        const pool = inWorkspace.filter((r) => !isSyntheticRelationship(r));
+        const formatted = formatCustomerList(pool);
+        return {
+          intent: "CRM_LIST",
+          confidence: route.confidence,
+          reply: formatted.reply,
+          sources,
+          action: "crm.customer.list",
+          data: { count: formatted.count, subject: "" },
+        };
+      }
       const matches = [
         ...findRelationshipsByName(inWorkspace, route.subject),
         ...findRelationshipsByName(inWorkspace, text),
-      ].filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i);
+      ].filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i)
+        .filter((r) => !isSyntheticRelationship(r));
       if (!matches.length) {
+        // Do not suggest creating junk imperative names
+        const safeName = subj && !/^(show|list|find|get)$/i.test(subj);
         return {
           intent: route.intent,
           confidence: route.confidence,
-          reply: route.subject
+          reply: safeName
             ? `No stored CRM record matched "${route.subject}". You can create a customer with: create a customer for ${route.subject}.`
-            : "Say who or which company to look up.",
+            : "Say who or which company to look up (e.g. “Show me John” or “List my customers”).",
           sources,
           action: "crm.lookup.empty",
           data: { matches: [] },

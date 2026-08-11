@@ -87,7 +87,14 @@ test("NL_ROUTING: distinct intents stay distinct", () => {
   assert.equal(routeCrmAssistantIntent("Start my day.").intent, "WORK_QUEUE");
   assert.equal(routeCrmAssistantIntent("What can you handle?").intent, "ATTENTION_BOARD");
   assert.equal(routeCrmAssistantIntent("Who should I follow up with?").intent, "LIST_FOLLOWUPS");
-  assert.equal(routeCrmAssistantIntent("Show me my customers.").intent, "CRM_LOOKUP");
+  assert.equal(routeCrmAssistantIntent("Show me my customers.").intent, "CRM_LIST");
+  assert.equal(routeCrmAssistantIntent("Show me my customers.").subject, "");
+  assert.equal(routeCrmAssistantIntent("List my customers.").intent, "CRM_LIST");
+  assert.equal(routeCrmAssistantIntent("Who are my customers?").intent, "CRM_LIST");
+  assert.equal(routeCrmAssistantIntent("Show me John.").intent, "CRM_LOOKUP");
+  assert.match(routeCrmAssistantIntent("Show me John.").subject, /John/i);
+  assert.match(routeCrmAssistantIntent("Find Mike.").subject, /Mike/i);
+  assert.notEqual(routeCrmAssistantIntent("Show me my customers.").subject.toLowerCase(), "show");
   assert.equal(routeCrmAssistantIntent("Wrap up my day.").intent, "END_OF_DAY");
   // Prepare me for John — may be GENERAL or CUSTOMER path; at least not AUTONOMY_AUDIT
   const prep = routeCrmAssistantIntent("Prepare me for John.");

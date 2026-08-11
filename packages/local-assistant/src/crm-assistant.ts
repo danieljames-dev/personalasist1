@@ -17,6 +17,7 @@ import { callPreparation, followUpDraft } from "./sales-coach.js";
 
 export type CrmAssistantIntentV1 =
   | "CRM_LOOKUP"
+  | "CRM_LIST"
   | "CRM_CREATE"
   | "CRM_UPDATE"
   | "ADD_NOTE"
@@ -260,6 +261,24 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
     ],
   },
   {
+    // Customer LIST — before single-entity CRM_LOOKUP so "Show me my customers" never becomes person "Show"
+    intent: "CRM_LIST",
+    confidence: "high",
+    patterns: [
+      /\bshow (me )?(my |all |our )?customers?\b/i,
+      /\blist (my |all |our )?customers?\b/i,
+      /\bfind (my |all |our )?customers?\b/i,
+      /\bwho are (my |our )?customers?\b/i,
+      /\bmy customers?\b[.!?]?\s*$/i,
+      /\bour customers?\b[.!?]?\s*$/i,
+      /\ball customers?\b[.!?]?\s*$/i,
+      /\bshow (me )?(dealership|work|sales|lakeland) customers?\b/i,
+      /\blist (dealership|work|sales|lakeland) customers?\b/i,
+      /\bshow (me )?brand\s+.+\s+customers?\b/i,
+      /\blist brand\s+.+\s+customers?\b/i,
+    ],
+  },
+  {
     intent: "CRM_LOOKUP",
     confidence: "medium",
     patterns: [
@@ -267,10 +286,11 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwho talked about\b/i,
       /\binterested in\b/i,
       /\bcustomers? in\b/i,
-      /\bshow (me )?(my )?customers?\b/i,
-      /\blist (my )?customers?\b/i,
       /\bfind that customer\b/i,
       /\bwhat do we know about them\b/i,
+      /\bshow me [A-Z][a-z]+\b/i,
+      /\bfind [A-Z][a-z]+\b/i,
+      /\bget customer\s+[A-Za-z]/i,
     ],
   },
   {
@@ -398,24 +418,170 @@ export function routeCrmAssistantIntent(text: string): CrmIntentRouteV1 {
   };
 }
 
-function extractSubjectLoose(text: string, pattern: RegExp): string {
-  const m = pattern.exec(text);
+/** Leading verbs / list words that must never become entity names. */
+const IMPERATIVE_OR_LIST_STOP = new Set([
+  "show",
+  "list",
+  "find",
+  "get",
+  "tell",
+  "give",
+  "display",
+  "open",
+  "view",
+  "see",
+  "prepare",
+  "me",
+  "my",
+  "our",
+  "all",
+  "the",
+  "a",
+  "an",
+  "about",
+  "for",
+  "to",
+  "with",
+  "on",
+  "of",
+  "customer",
+  "customers",
+  "contact",
+  "contacts",
+  "prospect",
+  "prospects",
+  "people",
+  "person",
+  "who",
+  "what",
+  "which",
+  "are",
+  "is",
+  "please",
+]);
+
+/**
+ * Extract person/entity subject without treating list imperatives as names.
+ * "Show me my customers." → ""
+ * "Show me John." → "John"
+ * "Find Mike." → "Mike"
+ * "Get customer John." → "John"
+ * "Prepare me for John." → "John"
+ */
+export function extractSubjectLoose(text: string, pattern: RegExp): string {
+  const raw = String(text ?? "").trim();
+  // Explicit list phrasing → no person subject
+  if (
+    /\b(show|list|who are|display|view)\b[\s\w']*\b(my |our |all |the )?(customers?|contacts?|prospects?)\b/i.test(
+      raw,
+    ) &&
+    !/\b(customers?|contacts?|prospects?)\s+(named|called)\s+/i.test(raw)
+  ) {
+    // Allow "list customers for Brand X" / "show dealership customers" as filter, not person
+    const filter = raw.match(
+      /\b(?:for|in|at|from)\s+([A-Za-z][A-Za-z0-9 &\-]{1,60}?)(?:\s+customers?)?[.!?]?$/i,
+    );
+    if (filter?.[1] && !IMPERATIVE_OR_LIST_STOP.has(filter[1].trim().toLowerCase())) {
+      return filter[1].trim().slice(0, 200);
+    }
+    const brand = raw.match(/\bbrand\s+([A-Za-z][A-Za-z0-9 &\-]{1,40})/i);
+    if (brand?.[1]) return `brand:${brand[1].trim()}`.slice(0, 200);
+    if (/\b(dealership|lakeland|sales|work)\b/i.test(raw)) {
+      if (/\bdealership|lakeland\b/i.test(raw)) return "context:dealership";
+      if (/\bwork\b/i.test(raw)) return "context:work";
+      if (/\bsales\b/i.test(raw)) return "context:sales";
+    }
+    return "";
+  }
+
+  // "Prepare me for John" / "Show me John" / "Find Mike" / "Get customer John"
+  const prepare = raw.match(/\bprepare me for\s+(.+?)(?:[.!?]|$)/i);
+  if (prepare?.[1]) return cleanPersonSubject(prepare[1]);
+
+  const showPerson = raw.match(/\bshow me\s+(?!my\b|our\b|all\b|the\b)(.+?)(?:[.!?]|$)/i);
+  if (showPerson?.[1] && !/\bcustomers?\b/i.test(showPerson[1])) return cleanPersonSubject(showPerson[1]);
+
+  const findPerson = raw.match(/\bfind\s+(?!customers?\b|me\b)(.+?)(?:[.!?]|$)/i);
+  if (findPerson?.[1] && !/\bcustomers?\b/i.test(findPerson[1])) return cleanPersonSubject(findPerson[1]);
+
+  const getCustomer = raw.match(/\bget customer\s+(.+?)(?:[.!?]|$)/i);
+  if (getCustomer?.[1]) return cleanPersonSubject(getCustomer[1]);
+
+  const m = pattern.exec(raw);
   if (!m) return "";
-  let rest = text.slice(m.index + m[0].length).trim();
+  let rest = raw.slice(m.index + m[0].length).trim();
   rest = rest.replace(/^[:\-\s]+/, "").replace(/[?.!].*$/, "").trim();
   rest = rest.replace(/^(about|for|to|with|on)\s+/i, "").trim();
-  // If pattern consumed the entity (e.g. "what is jane"), pull name tokens from full text.
-  if (!rest) {
-    const named = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g);
-    if (named?.length) return named[named.length - 1]!.slice(0, 200);
+  if (rest) return cleanPersonSubject(rest);
+
+  // Pattern consumed entity (e.g. "what is jane") — pull Capitalized names, never imperatives
+  const named = raw.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g) ?? [];
+  for (let i = named.length - 1; i >= 0; i--) {
+    const candidate = named[i]!;
+    if (IMPERATIVE_OR_LIST_STOP.has(candidate.toLowerCase())) continue;
+    if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(candidate)) continue;
+    return candidate.slice(0, 200);
   }
-  return rest.slice(0, 200);
+  return "";
+}
+
+function cleanPersonSubject(raw: string): string {
+  let s = String(raw ?? "")
+    .trim()
+    .replace(/[?.!,;:]+$/g, "")
+    .replace(/^(the|a|an|my|our|customer|prospect|contact)\s+/i, "")
+    .trim();
+  const first = s.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (IMPERATIVE_OR_LIST_STOP.has(first) && s.split(/\s+/).length === 1) return "";
+  // Drop leading imperative if multi-word slipped through
+  if (IMPERATIVE_OR_LIST_STOP.has(first)) {
+    s = s.replace(/^\S+\s+/, "").trim();
+  }
+  if (!s || IMPERATIVE_OR_LIST_STOP.has(s.toLowerCase())) return "";
+  return s.slice(0, 200);
 }
 
 export function findRelationshipsByName(relationships: readonly RelationshipV1[], query: string): RelationshipV1[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
-  const stop = new Set(["what", "who", "the", "about", "for", "with", "from", "that", "this", "have", "do", "we", "know", "tell", "me", "show", "all", "and", "or", "to", "a", "an", "is", "are", "was", "did", "of", "on", "in", "my", "our", "their", "should", "next", "concerned", "concern", "interested"]);
+  // Never treat list/imperative leftovers as person queries
+  if (IMPERATIVE_OR_LIST_STOP.has(q) || /^(show|list|find|get|customers?)$/i.test(q)) return [];
+  const stop = new Set([
+    ...IMPERATIVE_OR_LIST_STOP,
+    "what",
+    "who",
+    "the",
+    "about",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "have",
+    "do",
+    "we",
+    "know",
+    "tell",
+    "all",
+    "and",
+    "or",
+    "to",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "did",
+    "of",
+    "on",
+    "in",
+    "their",
+    "should",
+    "next",
+    "concerned",
+    "concern",
+    "interested",
+  ]);
   const tokens = q
     .replace(/[?.!,]/g, " ")
     .split(/\s+/)
@@ -429,6 +595,48 @@ export function findRelationshipsByName(relationships: readonly RelationshipV1[]
     // Any distinctive token match (first/last name, company word) is enough for CRM lookup.
     return tokens.some((tok) => hay.includes(tok));
   });
+}
+
+/** Concise Owner-facing customer list lines (workspace already filtered by caller). */
+export function formatCustomerList(
+  customers: readonly RelationshipV1[],
+  opts: { title?: string; limit?: number } = {},
+): { reply: string; count: number } {
+  const limit = opts.limit ?? 25;
+  const list = customers.filter((c) => !c.archived).slice(0, limit);
+  if (!list.length) {
+    return {
+      count: 0,
+      reply: [
+        opts.title || "CUSTOMERS",
+        "No real (non-synthetic) customers in this workspace yet.",
+        "Import CRM notes or create a customer when you have a real prospect.",
+      ].join("\n"),
+    };
+  }
+  const lines = list.map((c, i) => {
+    const openFu = (c.followUps ?? []).filter((f) => f.status === "open");
+    const nextFu = openFu[0];
+    const interest = (c.interests ?? [])[0]?.description?.trim();
+    const last = lastInteraction(c);
+    const bits = [
+      `${i + 1}. ${c.displayName}${c.organisation ? ` (${c.organisation})` : ""}`,
+      `stage=${c.lifecycle || "unknown"}`,
+      nextFu ? `next=${nextFu.reason || nextFu.channel}${nextFu.dueAt ? ` due ${nextFu.dueAt.slice(0, 10)}` : ""}` : c.nextAction ? `next=${c.nextAction.slice(0, 60)}` : null,
+      interest ? `interest=${interest.slice(0, 40)}` : null,
+      last ? `last=${last.at.slice(0, 10)}` : null,
+    ].filter(Boolean);
+    return bits.join(" · ");
+  });
+  return {
+    count: list.length,
+    reply: [
+      opts.title || "CUSTOMERS",
+      `Showing ${list.length}${customers.length > limit ? ` of ${customers.length}` : ""} (active workspace; synthetic excluded).`,
+      "",
+      ...lines,
+    ].join("\n"),
+  };
 }
 
 export function buildAccountSummary(customer: CustomerV1): {

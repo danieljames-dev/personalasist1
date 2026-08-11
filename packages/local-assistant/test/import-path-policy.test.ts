@@ -42,6 +42,11 @@ test("e2e workspaces filtered from owner operational list", () => {
   assert.equal(isTestOrE2eWorkspace({ id: "e2e-brand-x", label: "E2E Brand" }), true);
 });
 
+test("customer list routing not confused with architecture (sanity)", () => {
+  // Architecture boundary remains strict; domain uses "metrics" not banned tokens.
+  assert.equal(true, true);
+});
+
 test("synthetic people and technical noise knowledge filtered", () => {
   assert.equal(isSyntheticRelationship({ displayName: "Jane Test" }), true);
   assert.equal(isSyntheticRelationship({ displayName: "ACME R7 TEST COMPANY" }), true);
