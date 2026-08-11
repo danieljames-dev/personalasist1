@@ -215,6 +215,15 @@ import {
   type WalkReconciliationV1,
 } from "./vehicle-inventory.js";
 import {
+  buildWalkAcceptanceReport,
+  buildWalkObservationTelemetry,
+  deriveOnlineMatch,
+  deriveStockMatch,
+  type VinEntrySourceV1,
+  type WalkAcceptanceReportV1,
+  type WalkObservationTelemetryV1,
+} from "./walk-acceptance.js";
+import {
   applyOwnerProfileSummary,
   buildBrandCollaborator,
   buildOwnerKnowledgeFact,
@@ -3679,7 +3688,22 @@ export class AionAssistantV1 {
     recognitionConfidence?: number | null;
     entryMethod?: "manual" | "photo" | "mixed";
     walkId?: string;
-  }): Promise<{ observation: PhysicalObservationV1; vehicle: VehicleRecordV1 | null; validation: ReturnType<typeof validateVin> }> {
+    /** Acceptance telemetry — VIN capture path for lot test. */
+    vinSource?: VinEntrySourceV1 | string;
+    ocrResult?: string | null;
+    ownerCorrectionRequired?: boolean;
+    photoRetryCount?: number;
+    /** Wall-clock ms for this observation (client-measured or server). */
+    processingDurationMs?: number | null;
+    /** Epoch ms when processing started (server computes duration if set). */
+    processingStartedAtMs?: number;
+  }): Promise<{
+    observation: PhysicalObservationV1;
+    vehicle: VehicleRecordV1 | null;
+    validation: ReturnType<typeof validateVin>;
+    telemetry: WalkObservationTelemetryV1;
+  }> {
+    const processStarted = input.processingStartedAtMs ?? Date.now();
     let walk = input.walkId
       ? this.vehicleInv(await this.snapshot()).walks.find((w) => w.id === input.walkId) ?? null
       : await this.activeInventoryWalk();
@@ -3704,121 +3728,223 @@ export class AionAssistantV1 {
       matchStatusForced = "PHOTO_REVIEW_REQUIRED";
     }
 
-    return this.mutate((draft) => {
-      if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
-      const inv = draft.vehicleInventory;
-      const now = this.ports.clock.now();
-      const w = inv.walks.find((x) => x.id === walk!.id)!;
-      const match = matchStatusForced
-        ? { vehicle: null as VehicleRecordV1 | null, matchStatus: matchStatusForced }
-        : matchObservationToInventory({ vin, stockNumber }, inv.vehicles, w.dealershipName);
+    try {
+      return this.mutate((draft) => {
+        if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+        const inv = draft.vehicleInventory;
+        if (!Array.isArray(inv.walkAcceptanceTelemetry)) inv.walkAcceptanceTelemetry = [];
+        const now = this.ports.clock.now();
+        const w = inv.walks.find((x) => x.id === walk!.id)!;
+        const match = matchStatusForced
+          ? { vehicle: null as VehicleRecordV1 | null, matchStatus: matchStatusForced }
+          : matchObservationToInventory({ vin, stockNumber }, inv.vehicles, w.dealershipName);
 
-      // Duplicate observation in same walk
-      const prior = inv.observations.filter((o) => o.walkId === w.id && vin && o.vin === vin);
-      const matchStatus =
-        prior.length > 0 && match.matchStatus === "VERIFIED_ON_LOT"
-          ? ("DUPLICATE_OBSERVATION" as const)
-          : match.matchStatus === "VERIFIED_ON_LOT" && !rawVin
-            ? match.matchStatus
-            : match.matchStatus;
+        // Duplicate observation in same walk
+        const prior = inv.observations.filter((o) => o.walkId === w.id && vin && o.vin === vin);
+        const matchStatus =
+          prior.length > 0 && match.matchStatus === "VERIFIED_ON_LOT"
+            ? ("DUPLICATE_OBSERVATION" as const)
+            : match.matchStatus === "VERIFIED_ON_LOT" && !rawVin
+              ? match.matchStatus
+              : match.matchStatus;
 
-      let vehicle = match.vehicle;
-      if (!vehicle && vin && validation.valid) {
-        // Create physical-only vehicle record
-        vehicle = {
-          id: this.ports.ids.next("vehicle"),
-          vin,
-          dealershipId: w.dealershipId,
-          dealershipName: w.dealershipName,
-          stockNumber,
-          year: null,
-          make: null,
-          model: null,
-          trim: null,
-          condition: null,
-          exteriorColor: null,
-          interiorColor: null,
-          mileage: null,
-          presenceStatus: "PHYSICALLY_VERIFIED",
-          listingUrl: null,
-          detailUrl: null,
-          lastOnlineAt: null,
-          lastPhysicalAt: now,
-          priceHistory: [],
-          statusHistory: [{ at: now, status: "PHYSICALLY_VERIFIED", note: "Physical Owner walk." }],
-          listingObservations: [],
-          relationshipIds: [],
-          opportunityIds: [],
-          createdAt: now,
-          updatedAt: now,
-        };
-        inv.vehicles.unshift(vehicle);
-      } else if (vehicle) {
-        inv.vehicles = inv.vehicles.map((v) => {
-          if (v.id !== vehicle!.id) return v;
-          return {
-            ...v,
-            stockNumber: stockNumber || v.stockNumber,
-            presenceStatus: "PHYSICALLY_VERIFIED" as const,
+        let vehicle = match.vehicle;
+        if (!vehicle && vin && validation.valid) {
+          // Create physical-only vehicle record
+          vehicle = {
+            id: this.ports.ids.next("vehicle"),
+            vin,
+            dealershipId: w.dealershipId,
+            dealershipName: w.dealershipName,
+            stockNumber,
+            year: null,
+            make: null,
+            model: null,
+            trim: null,
+            condition: null,
+            exteriorColor: null,
+            interiorColor: null,
+            mileage: null,
+            presenceStatus: "PHYSICALLY_VERIFIED",
+            listingUrl: null,
+            detailUrl: null,
+            lastOnlineAt: null,
             lastPhysicalAt: now,
-            statusHistory: [
-              { at: now, status: "PHYSICALLY_VERIFIED" as const, note: "Physical Owner walk." },
-              ...v.statusHistory,
-            ].slice(0, 50),
+            priceHistory: [],
+            statusHistory: [{ at: now, status: "PHYSICALLY_VERIFIED", note: "Physical Owner walk." }],
+            listingObservations: [],
+            relationshipIds: [],
+            opportunityIds: [],
+            createdAt: now,
             updatedAt: now,
           };
-        });
-        vehicle = inv.vehicles.find((v) => v.id === vehicle!.id) ?? vehicle;
-      }
+          inv.vehicles.unshift(vehicle);
+        } else if (vehicle) {
+          inv.vehicles = inv.vehicles.map((v) => {
+            if (v.id !== vehicle!.id) return v;
+            return {
+              ...v,
+              stockNumber: stockNumber || v.stockNumber,
+              presenceStatus: "PHYSICALLY_VERIFIED" as const,
+              lastPhysicalAt: now,
+              statusHistory: [
+                { at: now, status: "PHYSICALLY_VERIFIED" as const, note: "Physical Owner walk." },
+                ...v.statusHistory,
+              ].slice(0, 50),
+              updatedAt: now,
+            };
+          });
+          vehicle = inv.vehicles.find((v) => v.id === vehicle!.id) ?? vehicle;
+        }
 
-      const observation: PhysicalObservationV1 = {
-        id: this.ports.ids.next("obs"),
-        walkId: w.id,
-        dealershipId: w.dealershipId,
-        dealershipName: w.dealershipName,
-        vin: validation.valid ? vin : vin,
-        stockNumber,
-        note: String(input.note ?? "").slice(0, 2000),
-        photoDocumentIds: Array.isArray(input.photoDocumentIds) ? input.photoDocumentIds.slice(0, 20) : [],
-        recognitionConfidence: confidence,
-        matchStatus:
-          matchStatusForced ||
-          (input.entryMethod === "manual" && matchStatus === "VERIFIED_ON_LOT"
-            ? "VERIFIED_ON_LOT"
-            : input.entryMethod === "manual" && matchStatus === "SEEN_ON_LOT_NOT_ONLINE"
-              ? "SEEN_ON_LOT_NOT_ONLINE"
-              : matchStatus === "DUPLICATE_OBSERVATION"
-                ? "DUPLICATE_OBSERVATION"
-                : matchStatus),
-        vehicleId: vehicle?.id ?? null,
-        source: "PHYSICAL_OWNER_WALK",
-        entryMethod: input.entryMethod ?? "manual",
-        observedAt: now,
-        provenance: {
-          sourceType: "owner",
-          sourceRef: "inventory.walk.observation",
-          recordedAt: now,
-        },
-      };
-      // Prefer MANUAL_ENTRY label when manual and matched
-      if (observation.entryMethod === "manual" && observation.matchStatus === "VERIFIED_ON_LOT") {
-        /* keep VERIFIED_ON_LOT — stronger */
-      } else if (observation.entryMethod === "manual" && !observation.matchStatus) {
-        observation.matchStatus = "MANUAL_ENTRY";
-      }
+        const observation: PhysicalObservationV1 = {
+          id: this.ports.ids.next("obs"),
+          walkId: w.id,
+          dealershipId: w.dealershipId,
+          dealershipName: w.dealershipName,
+          vin: validation.valid ? vin : vin,
+          stockNumber,
+          note: String(input.note ?? "").slice(0, 2000),
+          photoDocumentIds: Array.isArray(input.photoDocumentIds) ? input.photoDocumentIds.slice(0, 20) : [],
+          recognitionConfidence: confidence,
+          matchStatus:
+            matchStatusForced ||
+            (input.entryMethod === "manual" && matchStatus === "VERIFIED_ON_LOT"
+              ? "VERIFIED_ON_LOT"
+              : input.entryMethod === "manual" && matchStatus === "SEEN_ON_LOT_NOT_ONLINE"
+                ? "SEEN_ON_LOT_NOT_ONLINE"
+                : matchStatus === "DUPLICATE_OBSERVATION"
+                  ? "DUPLICATE_OBSERVATION"
+                  : matchStatus),
+          vehicleId: vehicle?.id ?? null,
+          source: "PHYSICAL_OWNER_WALK",
+          entryMethod: input.entryMethod ?? "manual",
+          observedAt: now,
+          provenance: {
+            sourceType: "owner",
+            sourceRef: "inventory.walk.observation",
+            recordedAt: now,
+          },
+        };
+        // Prefer MANUAL_ENTRY label when manual and matched
+        if (observation.entryMethod === "manual" && observation.matchStatus === "VERIFIED_ON_LOT") {
+          /* keep VERIFIED_ON_LOT — stronger */
+        } else if (observation.entryMethod === "manual" && !observation.matchStatus) {
+          observation.matchStatus = "MANUAL_ENTRY";
+        }
 
-      inv.observations.unshift(observation);
-      if (inv.observations.length > 5000) inv.observations.length = 5000;
-      w.observationIds = [observation.id, ...w.observationIds];
-      inv.walks = inv.walks.map((x) => (x.id === w.id ? w : x));
-      this.activity(
-        draft,
-        "agent",
-        "inventory.observation",
-        `Walk observation: VIN ${observation.vin ?? "?"} · ${observation.matchStatus}`,
-        observation.id,
-      );
-      return { observation, vehicle, validation };
+        inv.observations.unshift(observation);
+        if (inv.observations.length > 5000) inv.observations.length = 5000;
+        w.observationIds = [observation.id, ...w.observationIds];
+        inv.walks = inv.walks.map((x) => (x.id === w.id ? w : x));
+
+        const durationMs =
+          input.processingDurationMs != null
+            ? Number(input.processingDurationMs)
+            : Math.max(0, Date.now() - processStarted);
+        const telemetry = buildWalkObservationTelemetry(
+          {
+            walkId: w.id,
+            workspace: "work",
+            timestamp: now,
+            ...(input.vinSource != null ? { vinSource: input.vinSource } : {}),
+            entryMethod: observation.entryMethod,
+            ocrResult: input.ocrResult != null ? String(input.ocrResult) : rawVin || null,
+            ocrConfidence: confidence,
+            ...(input.ownerCorrectionRequired !== undefined
+              ? { ownerCorrectionRequired: input.ownerCorrectionRequired }
+              : {}),
+            finalConfirmedVin: observation.vin,
+            vinValidationCode: validation.code,
+            vinValidationValid: validation.valid,
+            onlineInventoryMatch: deriveOnlineMatch(observation.matchStatus),
+            stockMatch: deriveStockMatch(stockNumber, vehicle?.stockNumber, observation.matchStatus),
+            photoRetryCount: input.photoRetryCount ?? 0,
+            processingDurationMs: durationMs,
+            saveSuccess: true,
+            observationId: observation.id,
+            matchStatus: observation.matchStatus,
+          },
+          { id: this.ports.ids.next("walktel") },
+        );
+        inv.walkAcceptanceTelemetry.unshift(telemetry);
+        if (inv.walkAcceptanceTelemetry.length > 5000) inv.walkAcceptanceTelemetry.length = 5000;
+
+        this.activity(
+          draft,
+          "agent",
+          "inventory.observation",
+          `Walk observation: VIN ${observation.vin ?? "?"} · ${observation.matchStatus}`,
+          observation.id,
+        );
+        return { observation, vehicle, validation, telemetry };
+      });
+    } catch (err) {
+      // Record failed save telemetry without throwing away the error
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.mutate((draft) => {
+        if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
+        if (!Array.isArray(draft.vehicleInventory.walkAcceptanceTelemetry)) {
+          draft.vehicleInventory.walkAcceptanceTelemetry = [];
+        }
+        const now = this.ports.clock.now();
+        const tel = buildWalkObservationTelemetry(
+          {
+            walkId: walk!.id,
+            workspace: "work",
+            timestamp: now,
+            ...(input.vinSource != null ? { vinSource: input.vinSource } : {}),
+            ...(input.entryMethod != null ? { entryMethod: input.entryMethod } : {}),
+            ocrResult: input.ocrResult != null ? String(input.ocrResult) : rawVin || null,
+            ocrConfidence: confidence,
+            finalConfirmedVin: vin,
+            vinValidationCode: validation.code,
+            vinValidationValid: validation.valid,
+            onlineInventoryMatch: false,
+            stockMatch: null,
+            photoRetryCount: input.photoRetryCount ?? 0,
+            processingDurationMs:
+              input.processingDurationMs != null
+                ? Number(input.processingDurationMs)
+                : Math.max(0, Date.now() - processStarted),
+            saveSuccess: false,
+            saveError: msg,
+            observationId: null,
+            matchStatus: null,
+          },
+          { id: this.ports.ids.next("walktel") },
+        );
+        draft.vehicleInventory.walkAcceptanceTelemetry.unshift(tel);
+        return null;
+      }).catch(() => null);
+      throw err;
+    }
+  }
+
+  /**
+   * Acceptance telemetry summary for current/most recent physical walk.
+   * REAL_DEALERSHIP_WALK stays OWNER_TEST_PENDING — never auto-PASS.
+   * Does not write Value Ledger.
+   */
+  async inventoryWalkTestResults(walkId?: string): Promise<WalkAcceptanceReportV1 | null> {
+    const inv = this.vehicleInv(await this.snapshot());
+    const walk =
+      (walkId ? inv.walks.find((w) => w.id === walkId) : null) ||
+      inv.walks.find((w) => w.state === "active") ||
+      inv.walks[0];
+    if (!walk) return null;
+    const reconciliation = reconcileInventoryWalk(
+      walk,
+      inv.observations,
+      inv.vehicles,
+      this.ports.clock.now(),
+    );
+    const entries = (inv.walkAcceptanceTelemetry ?? []).filter((e) => e.walkId === walk.id);
+    return buildWalkAcceptanceReport({
+      walk,
+      entries,
+      reconciliation,
+      workspace: "work",
     });
   }
 
@@ -6216,6 +6342,32 @@ export class AionAssistantV1 {
           sources: hits.slice(0, 8).map((v) => ({ type: "vehicle", id: v.id, label: v.vin || v.id })),
           action: "vehicle.query",
           data: { count: hits.length, vehicles: hits.slice(0, 25) },
+        };
+      }
+      if (
+        /\binventory walk test results\b/i.test(text) ||
+        /\bwalk (acceptance|test) (results|report|telemetry)\b/i.test(text) ||
+        /\bphysical walk (results|telemetry|acceptance)\b/i.test(text)
+      ) {
+        const report = await this.inventoryWalkTestResults();
+        if (!report) {
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply:
+              "No inventory walk on record yet.\nREAL_DEALERSHIP_WALK = OWNER_TEST_PENDING\nStart Inventory Walk on phone, then ask again.",
+            sources: [],
+            action: "inventory.walk.test_results",
+            data: null,
+          };
+        }
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply: report.reply,
+          sources: [{ type: "walk", id: report.walkId, label: report.dealershipName }],
+          action: "inventory.walk.test_results",
+          data: report,
         };
       }
       if (/\bwhich cars did i verify today\b/i.test(text) || /\bverified (today|this morning)\b/i.test(text)) {

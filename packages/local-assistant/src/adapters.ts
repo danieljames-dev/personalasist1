@@ -115,6 +115,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
       observations: [],
       lastInventoryRefresh: {},
       onlineListings: [],
+      walkAcceptanceTelemetry: [],
     },
     executive: {
       context: {
@@ -429,6 +430,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
       observations: [],
       lastInventoryRefresh: {},
       onlineListings: [],
+      walkAcceptanceTelemetry: [],
     };
   } else {
     if (!Array.isArray(ak.vehicleInventory.dealerships)) ak.vehicleInventory.dealerships = [];
@@ -438,6 +440,9 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(ak.vehicleInventory.onlineListings)) ak.vehicleInventory.onlineListings = [];
     if (!ak.vehicleInventory.lastInventoryRefresh || typeof ak.vehicleInventory.lastInventoryRefresh !== "object") {
       ak.vehicleInventory.lastInventoryRefresh = {};
+    }
+    if (!Array.isArray(ak.vehicleInventory.walkAcceptanceTelemetry)) {
+      ak.vehicleInventory.walkAcceptanceTelemetry = [];
     }
   }
   if (!ak.executive || typeof ak.executive !== "object") {
