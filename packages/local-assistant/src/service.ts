@@ -174,6 +174,7 @@ import {
   isTestOrE2eWorkspace,
   isSyntheticOwnerFacingText,
   isSyntheticRelationship,
+  isSyntheticCommitment,
   isTechnicalNoiseKnowledgeFact,
   ownerOperationalWorkspaces,
   validateImportRootCandidate,
@@ -4769,10 +4770,16 @@ export class AionAssistantV1 {
       let opportunitiesDisabled = 0;
       if (draft.executive?.opportunities) {
         const before = draft.executive.opportunities.length;
-        draft.executive.opportunities = draft.executive.opportunities.filter(
-          (o) => !isSyntheticOwnerFacingText(o.title, o.workspace, o.detail, o.source),
-        );
+        draft.executive.opportunities = draft.executive.opportunities.filter((o) => {
+          if (isSyntheticOwnerFacingText(o.title, o.workspace, o.detail, o.source)) return false;
+          // Drop inventory matches for people we just archived / fixture Mike demos
+          if (/^match for mike:/i.test(o.title || "")) return false;
+          return true;
+        });
         opportunitiesDisabled = before - draft.executive.opportunities.length;
+      }
+      if (draft.executive?.commitments) {
+        draft.executive.commitments = draft.executive.commitments.filter((c) => !isSyntheticCommitment(c));
       }
       let noiseFactsDisabled = 0;
       if (draft.ownerKnowledge?.facts) {
@@ -5625,13 +5632,27 @@ export class AionAssistantV1 {
     const inv = this.vehicleInv(state);
     const lastWalk = inv.walks[0];
     let exceptions = 0;
-    if (lastWalk) {
-      const sum = reconcileInventoryWalk(lastWalk, inv.observations, inv.vehicles, this.ports.clock.now());
-      exceptions =
-        sum.stockMismatches.length +
-        sum.vinMismatches.length +
-        sum.photoReviewRequired.length +
-        sum.seenButNotOnline.length;
+    // Only surface walk exceptions when a real Owner walk produced observations (not empty/demo walks)
+    if (lastWalk && (inv.observations?.length ?? 0) > 0) {
+      const realObs = (inv.observations ?? []).filter((o) => {
+        const vin = String(o.vin || "");
+        // Acceptance-harness VINs / labels must not create Owner must-do noise
+        // Harness/demo VINs used in walk acceptance (not a real lot scan)
+        if (/NLY000|TESTVIN|FIXTURE|0000000|RW2900000000|RW1X00000000/i.test(vin)) return false;
+        if (vin.length >= 17 && /0{6,}/.test(vin)) return false;
+        if (isSyntheticOwnerFacingText((o as { note?: string }).note, vin, o.stockNumber, (o as { source?: string }).source)) {
+          return false;
+        }
+        return true;
+      });
+      if (realObs.length > 0) {
+        const sum = reconcileInventoryWalk(lastWalk, realObs, inv.vehicles, this.ports.clock.now());
+        exceptions =
+          sum.stockMismatches.length +
+          sum.vinMismatches.length +
+          sum.photoReviewRequired.length +
+          sum.seenButNotOnline.length;
+      }
     }
     const now = this.ports.clock.now();
     const commitments = (state.executive?.commitments ?? []).map((c) => refreshCommitmentStatus(c, now));
@@ -5649,7 +5670,7 @@ export class AionAssistantV1 {
     );
     const ownerCommitments = commitments.filter(
       (c) =>
-        !isSyntheticOwnerFacingText(c.committedBy, c.committedTo, c.statement, c.workspace) &&
+        !isSyntheticCommitment(c) &&
         String(c.committedBy || c.committedTo || c.statement || "").trim().length > 0,
     );
     const ownerOpps = opps.filter(
@@ -5658,7 +5679,11 @@ export class AionAssistantV1 {
     const board = buildAttentionBoard({
       nowIso: now,
       relationships: ownerRels,
-      tasks: state.tasks.filter((t) => !isSyntheticOwnerFacingText(t.title, t.description, t.workspace)),
+      tasks: state.tasks.filter(
+        (t) =>
+          !isSyntheticOwnerFacingText(t.title, t.description, t.workspace) &&
+          !/\btest aion\b|\bsynthetic task\b|\be2e task\b/i.test(`${t.title} ${t.description}`),
+      ),
       commitments: ownerCommitments,
       workspaceLabels: state.settings.workspaceLabels,
       inventoryExceptions: exceptions,

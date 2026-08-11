@@ -279,15 +279,48 @@ export function isSyntheticRelationship(r: {
   tags?: readonly string[];
   company?: string;
   email?: string;
+  organisation?: string;
+  source?: string;
 }): boolean {
-  return isSyntheticOwnerFacingText(
-    r.id,
-    r.displayName,
-    r.notes,
-    r.company,
-    r.email,
-    ...(r.tags ?? []),
-  );
+  if (
+    isSyntheticOwnerFacingText(
+      r.id,
+      r.displayName,
+      r.notes,
+      r.company,
+      r.organisation,
+      r.email,
+      r.source,
+      ...(r.tags ?? []),
+    )
+  ) {
+    return true;
+  }
+  // Known executive-OS / daily-scenario fixture capture text (not real Owner CRM)
+  const notes = String(r.notes ?? "").toLowerCase();
+  if (
+    /limited tacoma under\s*50,?000/.test(notes) ||
+    /likes the limited tacoma under/.test(notes) ||
+    /i just talked to mike\. he likes the limited/.test(notes)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Demo commitments seeded with scenario first names (Riley/Jordan + Tacoma/Highlander demo). */
+export function isSyntheticCommitment(c: {
+  committedBy?: string;
+  committedTo?: string;
+  statement?: string;
+  workspace?: string;
+}): boolean {
+  if (isSyntheticOwnerFacingText(c.committedBy, c.committedTo, c.statement, c.workspace)) return true;
+  const to = String(c.committedTo ?? "").toLowerCase();
+  const st = String(c.statement ?? "").toLowerCase();
+  if ((to === "riley" || to === "jordan") && /highlander|tacoma/.test(st)) return true;
+  if (!String(c.statement ?? "").trim() && !String(c.committedTo ?? "").trim()) return true;
+  return false;
 }
 
 /** Low-value technical import content mis-tagged as career/employment knowledge. */

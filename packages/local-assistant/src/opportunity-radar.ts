@@ -53,7 +53,7 @@ export function detectInventoryMatches(input: {
     // Never emit inventory-match opportunities for synthetic/fixture customers
     const nameBlob = `${r.displayName} ${r.organisation} ${r.notes}`.toLowerCase();
     if (
-      /\be2e\b|\bsynthetic\b|\bfixture\b|\bjane test\b|\bacme r7\b|\bcsv e2e\b|\bfirst source contact\b|\btest company\b/.test(
+      /\be2e\b|\bsynthetic\b|\bfixture\b|\bjane test\b|\bacme r7\b|\bcsv e2e\b|\bfirst source contact\b|\btest company\b|limited tacoma under/.test(
         nameBlob,
       )
     ) {
