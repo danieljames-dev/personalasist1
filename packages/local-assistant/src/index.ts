@@ -50,6 +50,7 @@ export * from "./entity-resolution.js";
 export * from "./proactive-usefulness.js";
 export * from "./walk-acceptance.js";
 export * from "./authority-envelope.js";
+export * from "./import-path-policy.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
 export * from "./owner-authority-v2.js";

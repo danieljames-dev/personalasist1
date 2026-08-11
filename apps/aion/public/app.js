@@ -591,7 +591,7 @@ function careerArea() {
 function knowledgeArea(s) {
   const docs = (s.crmDocuments ?? []).filter((d) => d.workspace === s.settings.activeWorkspace).slice(0, 40);
   const people = (s.relationships ?? []).filter((r) => r.workspace === s.settings.activeWorkspace && !r.archived);
-  const brands = (s.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived);
+  const brands = (s.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived && !/e2e|synthetic|fixture|test business/i.test(`${w.id} ${w.label}`));
   const ok = s.ownerKnowledge ?? { profile: { displayName: "", summary: "" }, facts: [] };
   const facts = (ok.facts ?? []).filter((f) => f.enabled !== false).slice(0, 40);
   const collabs = s.brandCollaborators ?? [];
@@ -599,12 +599,18 @@ function knowledgeArea(s) {
   const roots = Array.isArray(s.settings?.importRoots) ? s.settings.importRoots : [];
   return `<h1>Knowledge / Import</h1>
 <p class="lead">Owner profile, brand registry, and real file intake. Originals are preserved under private intake. AION never scans whole drives and never invents collaborator roles.</p>
-<div class="card next"><h2>Add source (Owner-selected once)</h2>
-<p class="meta">Highest-value first sources: <b>1) Resume / career folder</b> · <b>2) Brand / business notes</b> · <b>3) Sales / customer notes or contacts CSV</b>. Not whole drives. Not browser passwords.</p>
-<p class="meta">Approved roots (${roots.length}): ${roots.length ? roots.map((r) => `<code>${esc(r)}</code>`).join(" · ") : "none yet — add parent folder below, then import a child folder."}</p>
+<div class="card next"><h2>Direct select &amp; import (no path paste)</h2>
+<p class="meta">Suggested: CAREER · BUSINESS · BRANDS · PROJECTS · PRODUCTS · SALES · COLLABORATORS · PERSONAL. Click folders in the desktop picker — AION registers and imports automatically.</p>
+<p class="meta"><b>One Owner action:</b> run on this PC (AION must be running):</p>
+<pre class="meta" style="white-space:pre-wrap">powershell -NoProfile -ExecutionPolicy Bypass -File C:\\AION-HQ\\scripts\\pick-import-folders-multi.ps1</pre>
+<p class="meta">Or use the paths below only if you prefer manual root entry (not required).</p>
+<p class="meta">Approved roots (${roots.length}): ${roots.length ? roots.map((r) => `<code>${esc(r)}</code>`).join(" · ") : "none yet."}</p>
+<div class="actions"><button type="button" data-do="import-registry-refresh">Refresh import registry / coverage</button>
+<button type="button" data-do="import-separate-e2e">Hide test/e2e workspaces from Owner view</button></div>
+${window.__aionImportRegistry ? `<pre class="meta" style="white-space:pre-wrap;max-height:220px;overflow:auto">${esc(window.__aionImportRegistry)}</pre>` : ""}
 <form data-form="import-root-add">
-<label>Approve import root (parent folder absolute path — not a whole drive)
-<input name="root" required maxlength="500" placeholder="C:\\Users\\…\\Documents\\Career"></label>
+<label>Optional: approve import root by path
+<input name="root" maxlength="500" placeholder="C:\\Users\\…\\Documents\\Career"></label>
 <button>Save approved root</button>
 </form>
 <form data-form="folder-import">
@@ -824,18 +830,23 @@ function connectorsCard() {
   };
   const g = model._gmailStatus;
   const m = model._metricoolStatus;
-  return `<div class="card"><h2>Connectors (OAuth / token ready)</h2>
-<p class="meta">Secrets never enter chat or assistant state. Store only public client ids here; tokens stay in environment variables.</p>
+  return `<div class="card"><h2>Connection status center</h2>
+<p class="meta">GMAIL · METRICOOL · OWNER DATA · DEALERSHIP WEB · NHTSA · VISION — secrets never enter chat. Prefer: Connect → Sign in → Allow.</p>
+<p class="meta"><b>Owner data:</b> Knowledge → Direct select &amp; import (desktop picker auto-registers; no path paste into chat).</p>
 <form data-form="connector-settings">
-<label>Gmail OAuth client id (public)<input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com"></label>
-<label>Gmail redirect URI (loopback)<input name="gmailRedirectUri" maxlength="500" value="${esc(c.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback")}"></label>
-<label>Metricool token env var name<input name="metricoolTokenEnvVar" maxlength="128" value="${esc(c.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN")}"></label>
-<label>Metricool blog id env var name<input name="metricoolBlogIdEnvVar" maxlength="128" value="${esc(c.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID")}"></label>
+<label>Gmail — OAuth client id (public)
+<input name="gmailClientId" maxlength="200" value="${esc(c.gmailClientId || "")}" placeholder="….apps.googleusercontent.com"></label>
+<label>Gmail redirect URI (loopback)
+<input name="gmailRedirectUri" maxlength="500" value="${esc(c.gmailRedirectUri || "http://127.0.0.1:31415/oauth/gmail/callback")}"></label>
+<label>Metricool — env var <i>name</i> for user token (not the token value)
+<input name="metricoolTokenEnvVar" maxlength="128" value="${esc(c.metricoolTokenEnvVar || "AION_METRICOOL_USER_TOKEN")}"></label>
+<label>Metricool blog id env var name
+<input name="metricoolBlogIdEnvVar" maxlength="128" value="${esc(c.metricoolBlogIdEnvVar || "AION_METRICOOL_BLOG_ID")}"></label>
 <button>Save connector settings</button>
 </form>
 <div class="actions">
-<button data-do="connector-gmail-status" type="button">Check Gmail readiness</button>
-<button data-do="connector-metricool-status" type="button">Check Metricool readiness</button>
+<button data-do="connector-gmail-status" type="button">Connect / check Gmail</button>
+<button data-do="connector-metricool-status" type="button">Connect / check Metricool</button>
 </div>
 ${g ? `<article class="card"><h3>Gmail · ${esc(g.code)}</h3>
 <p class="meta">${esc(g.message || "")}</p>
@@ -1350,6 +1361,24 @@ document.addEventListener("click", async (event) => {
       const done = await api("import.queue.process", {});
       toast(done.status === "completed" ? `Import done: +${done.itemsImported || 0} (skip ${done.itemsSkipped || 0})` : `Import ${done.status}: ${done.lastError || ""}`);
       try { window.__aionImportSummary = await api("import.lastSummary", {}); } catch { /* ignore */ }
+    }
+    if (verb === "import-registry-refresh") {
+      try {
+        const reg = await api("import.registry", {});
+        const cov = await api("import.knowledgeCoverage", {});
+        window.__aionImportRegistry = `${reg.reply || ""}\n\n${cov.reply || ""}`;
+        toast("Import registry + knowledge coverage refreshed.");
+      } catch (e) {
+        toast(String(e.message || e));
+      }
+      render();
+      return;
+    }
+    if (verb === "import-separate-e2e") {
+      const r = await api("import.separateTestWorkspaces", {});
+      toast(`Archived ${r.archived?.length || 0} test/e2e workspace(s) from Owner view.`);
+      await load();
+      return;
     }
     if (action === "onboarding") await api("onboarding.complete");
     if (verb === "task") await api("task.transition", { id, state, reason: "Command Center" });

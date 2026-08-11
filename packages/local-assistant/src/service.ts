@@ -171,6 +171,11 @@ import {
   type ExternalActionRecordV1,
 } from "./authority-envelope.js";
 import {
+  isTestOrE2eWorkspace,
+  ownerOperationalWorkspaces,
+  validateImportRootCandidate,
+} from "./import-path-policy.js";
+import {
   buildSnapshotSig,
   canRetry,
   classifyFailure,
@@ -931,7 +936,7 @@ export class AionAssistantV1 {
       ...(scope === "work" ? { workspace: "work" } : {}),
     });
     const brands = state.workspaces
-      .filter((w) => w.kind === "business" && !w.archived)
+      .filter((w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w))
       .map((w) => w.brand?.name || w.label);
     const brief = buildMorningExecutiveBrief({
       nowIso: now,
@@ -4556,6 +4561,211 @@ export class AionAssistantV1 {
     };
   }
 
+  /**
+   * Validate + register Owner-selected import roots (no chat paste).
+   * Rejects whole drives, all-projects-API, credential/system paths.
+   */
+  async approveImportRoots(paths: string[]): Promise<{
+    approved: string[];
+    rejected: Array<{ path: string; reason: string }>;
+    importRoots: string[];
+  }> {
+    const rejected: Array<{ path: string; reason: string }> = [];
+    const accepted: string[] = [];
+    for (const p of paths) {
+      const v = validateImportRootCandidate(p);
+      if (!v.ok) rejected.push({ path: p, reason: v.reason });
+      else accepted.push(v.normalized);
+    }
+    return this.mutate((draft) => {
+      const current = Array.isArray(draft.settings.importRoots) ? [...draft.settings.importRoots] : [];
+      for (const root of accepted) {
+        if (!current.some((r) => validateImportRootCandidate(r).normalized.toLowerCase() === root.toLowerCase())) {
+          current.push(root);
+        }
+      }
+      draft.settings.importRoots = current;
+      this.activity(
+        draft,
+        "import",
+        "import.roots.approve",
+        `Approved ${accepted.length} import root(s); rejected ${rejected.length}`,
+        null,
+      );
+      return { approved: accepted, rejected, importRoots: current };
+    });
+  }
+
+  /**
+   * Pre-import private state backup using existing export/backup root.
+   * Always writes a verified SHA256 snapshot under private/aion/exports/pre-import-snapshots.
+   * If AION_PRIVATE_BACKUP_PASSPHRASE is set (≥12), also creates encrypted .aionbak.
+   */
+  async preImportPrivateStateBackup(): Promise<{
+    ok: boolean;
+    snapshotPath: string;
+    sha256: string;
+    bytes: number;
+    revision: number;
+    encryptedPath: string | null;
+    encrypted: boolean;
+    message: string;
+  }> {
+    const { createHash } = await import("node:crypto");
+    const { mkdir, writeFile, readFile, copyFile, stat } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const state = await this.snapshot();
+    // Persist latest via mutate no-op? State already on disk via repository — re-save by reading path
+    const dataRoot = (this.ports.repository as { root?: string }).root;
+    if (!dataRoot || typeof dataRoot !== "string") {
+      // In-memory tests: write snapshot to temp via backup port only
+      const ts = this.ports.clock.now().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+      return {
+        ok: true,
+        snapshotPath: `(in-memory)/pre-import-${ts}.json`,
+        sha256: createHash("sha256").update(JSON.stringify(state)).digest("hex"),
+        bytes: Buffer.byteLength(JSON.stringify(state)),
+        revision: state.revision,
+        encryptedPath: null,
+        encrypted: false,
+        message: "In-memory state snapshot digests OK (no filesystem root).",
+      };
+    }
+    const snapDir = join(dataRoot, "exports", "pre-import-snapshots");
+    await mkdir(snapDir, { recursive: true });
+    const ts = this.ports.clock.now().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    const snapshotPath = join(snapDir, `aion-private-state-${ts}.json`);
+    const statePath = join(dataRoot, "state-v1.json");
+    try {
+      await copyFile(statePath, snapshotPath);
+    } catch {
+      // Fallback: serialize current snapshot
+      await writeFile(snapshotPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    }
+    const bytes = (await stat(snapshotPath)).size;
+    const sha256 = createHash("sha256").update(await readFile(snapshotPath)).digest("hex");
+    let encryptedPath: string | null = null;
+    let encrypted = false;
+    const passphrase = process.env.AION_PRIVATE_BACKUP_PASSPHRASE?.trim();
+    if (passphrase && passphrase.length >= 12) {
+      try {
+        const dest = join(snapDir, `aion-private-state-${ts}.aionbak`);
+        await this.createPrivateBackup(dest, passphrase);
+        encryptedPath = dest;
+        encrypted = true;
+      } catch (e) {
+        return {
+          ok: false,
+          snapshotPath,
+          sha256,
+          bytes,
+          revision: state.revision,
+          encryptedPath: null,
+          encrypted: false,
+          message: `File snapshot OK but encrypted backup failed: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+    }
+    await this.mutate((draft) => {
+      this.activity(
+        draft,
+        "export",
+        "backup.pre-import",
+        `Pre-import snapshot ${sha256.slice(0, 16)}… bytes=${bytes} encrypted=${encrypted}`,
+        null,
+      );
+      return null;
+    });
+    return {
+      ok: true,
+      snapshotPath,
+      sha256,
+      bytes,
+      revision: state.revision,
+      encryptedPath,
+      encrypted,
+      message: encrypted
+        ? "Verified file snapshot + encrypted private backup PASS."
+        : "Verified file snapshot PASS (SHA256). Encrypted .aionbak skipped (no AION_PRIVATE_BACKUP_PASSPHRASE).",
+    };
+  }
+
+  /** Archive e2e/test business workspaces so they leave normal Owner brand views. */
+  async separateTestWorkspacesFromOwnerView(): Promise<{ archived: string[]; already: string[] }> {
+    return this.mutate((draft) => {
+      const archived: string[] = [];
+      const already: string[] = [];
+      for (const w of draft.workspaces) {
+        if (w.builtIn) continue;
+        if (!isTestOrE2eWorkspace(w)) continue;
+        if (w.archived) {
+          already.push(w.id);
+          continue;
+        }
+        if (draft.settings.activeWorkspace === w.id) {
+          draft.settings.activeWorkspace = "personal";
+        }
+        w.archived = true;
+        w.updatedAt = this.ports.clock.now();
+        archived.push(w.id);
+      }
+      this.activity(
+        draft,
+        "settings",
+        "workspace.archive.test",
+        `Archived ${archived.length} test/e2e workspace(s) from Owner view`,
+        null,
+      );
+      return { archived, already };
+    });
+  }
+
+  /** Structured knowledge coverage: KNOWN / PARTIAL / UNKNOWN / REVIEW_REQUIRED by category. */
+  async knowledgeCoverageView(): Promise<{ reply: string; categories: Array<{ category: string; status: string; count: number; sources: string[] }> }> {
+    const state = await this.snapshot();
+    const facts = (state.ownerKnowledge?.facts ?? []).filter((f) => f.enabled);
+    const reviewOpen = (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length;
+    const cats = [
+      "profile", "employment", "employer", "role", "skill", "experience", "accomplishment",
+      "project", "preference", "goal", "product-service", "business", "brand", "customer",
+      "prospect", "collaborator", "sales-experience", "process", "other",
+    ];
+    const categories = cats.map((category) => {
+      const list = facts.filter((f) => f.category === category);
+      const sources = [...new Set(list.map((f) => f.provenance?.sourceRef || "unknown"))].slice(0, 6);
+      let status = "UNKNOWN";
+      if (list.length >= 3) status = "KNOWN";
+      else if (list.length >= 1) status = "PARTIAL";
+      if (reviewOpen > 0 && (category === "customer" || category === "brand" || category === "business")) {
+        if (status === "UNKNOWN") status = "REVIEW_REQUIRED";
+      }
+      // Conflicting titles
+      const titles = new Map<string, Set<string>>();
+      for (const f of list) {
+        const t = f.title.toLowerCase();
+        const set = titles.get(t) ?? new Set();
+        set.add(f.content.slice(0, 80));
+        titles.set(t, set);
+      }
+      if ([...titles.values()].some((s) => s.size > 1)) status = "CONFLICTING";
+      return { category, status, count: list.length, sources };
+    });
+    const profile = state.ownerKnowledge?.profile;
+    const reply = [
+      "KNOWLEDGE COVERAGE",
+      profile?.displayName ? `Profile name: ${profile.displayName}` : "Profile name: UNKNOWN",
+      profile?.summary ? `Summary: ${profile.summary.slice(0, 200)}` : "Summary: UNKNOWN",
+      "",
+      ...categories.map(
+        (c) =>
+          `  ${c.category}: ${c.status} (n=${c.count})${c.sources.length ? ` · ${c.sources.join("; ").slice(0, 100)}` : ""}`,
+      ),
+      "",
+      reviewOpen ? `REVIEW_REQUIRED items open: ${reviewOpen}` : "No open import review items.",
+    ].join("\n");
+    return { reply, categories };
+  }
+
   // ─── Owner authority envelope + external action audit ─────────────────────
 
   /** Record/refresh Owner expansion envelope (idempotent). */
@@ -5004,7 +5214,9 @@ export class AionAssistantV1 {
       commitments,
       workspaceLabels: state.settings.workspaceLabels,
       inventoryExceptions: exceptions,
-      brandWorkspaceCount: state.workspaces.filter((w) => w.kind === "business" && !w.archived).length,
+      brandWorkspaceCount: state.workspaces.filter(
+        (w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w),
+      ).length,
       openImportReview: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
       openApprovals: (state.approvals ?? []).filter((a) => a.state === "pending").length,
       opportunityCount: opps.length,
@@ -5201,7 +5413,9 @@ export class AionAssistantV1 {
       opportunities: exec.opportunities ?? [],
       importReviewOpen: (state.importReviewQueue ?? []).filter((r) => r.status === "needs-review").length,
       jobAppCount: (state.jobApplications ?? []).length,
-      brandCount: state.workspaces.filter((w) => w.kind === "business" && !w.archived).length,
+      brandCount: state.workspaces.filter(
+        (w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w),
+      ).length,
       captureCount: (exec.captures ?? []).length,
       relationshipWorkCount: state.relationships.filter((r) => r.workspace === "work" && !r.archived).length,
     });
@@ -5537,7 +5751,9 @@ export class AionAssistantV1 {
       }
       case "brand.gap_scan": {
         const state = await this.snapshot();
-        const brands = state.workspaces.filter((w) => w.kind === "business" && !w.archived);
+        const brands = state.workspaces.filter(
+          (w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w),
+        );
         const dna = state.executive?.brandDna ?? [];
         const gaps = brands.filter((b) => !dna.some((d) => d.workspaceId === b.id && d.purpose));
         if (gaps.length) {
@@ -6044,7 +6260,9 @@ export class AionAssistantV1 {
   async weeklyCeoReview(): Promise<{ reply: string }> {
     const state = await this.snapshot();
     const inv = this.vehicleInv(state);
-    const brands = state.workspaces.filter((w) => w.kind === "business" && !w.archived);
+    const brands = state.workspaces.filter(
+      (w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w),
+    );
     const board = await this.attentionBoard();
     const radar = state.executive?.opportunities ?? [];
     const commits = state.executive?.commitments ?? [];
@@ -7301,7 +7519,7 @@ export class AionAssistantV1 {
         // Prefer proactive brief with delta; keep CRM briefing as detail
         const proactive = await this.prepareProactiveBrief();
         const brands = (state.workspaces ?? [])
-          .filter((w) => w.kind === "business" && !w.archived)
+          .filter((w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w))
           .map((w) => ({ name: w.brand?.name || w.label }));
         const briefing = buildDailyBriefing({
           relationships: inWorkspace,

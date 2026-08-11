@@ -911,6 +911,99 @@ export async function createAionServer(options = {}) {
       case "vehicle.customers": return service.customersForVehicle({ vehicleId: input.vehicleId, vin: input.vin });
       case "import.lastSummary": return service.lastImportSummary();
       case "import.registry": return service.realDataSourceRegistry();
+      case "import.approveRoots": return service.approveImportRoots(Array.isArray(input.paths) ? input.paths.map(String) : []);
+      case "import.preBackup": return service.preImportPrivateStateBackup();
+      case "import.knowledgeCoverage": return service.knowledgeCoverageView();
+      case "import.separateTestWorkspaces": return service.separateTestWorkspacesFromOwnerView();
+      /**
+       * Direct select-and-import: backup → approve roots → recursive import each root.
+       * No chat paste. Paths come from local picker or desktop UI only.
+       */
+      case "import.approveAndIngest": {
+        const paths = Array.isArray(input.paths) ? input.paths.map(String) : [];
+        if (!paths.length) throw new Error("No import roots provided.");
+        const backup = await service.preImportPrivateStateBackup();
+        if (!backup.ok) {
+          return {
+            ok: false,
+            phase: "backup",
+            backup,
+            message: backup.message || "Pre-import backup failed — ingestion blocked.",
+          };
+        }
+        const approved = await service.approveImportRoots(paths);
+        if (!approved.approved.length) {
+          return {
+            ok: false,
+            phase: "approve",
+            backup,
+            approved,
+            message: "No valid roots after policy checks.",
+          };
+        }
+        // Archive e2e clutter from Owner view before real import briefings
+        const testSep = await service.separateTestWorkspacesFromOwnerView();
+        const results = [];
+        for (const root of approved.approved) {
+          try {
+            const result = await dispatch({
+              type: "crm.document.importFolder",
+              path: root,
+              tags: ["owner-selected", "direct-ingest", "real-data"],
+              summary: `Direct Owner import: ${root}`,
+            });
+            // Also queue for registry history
+            try {
+              await service.queueImportSource({
+                path: root,
+                kind: "folder",
+                label: `direct:${root.split(/[/\\]/).filter(Boolean).slice(-2).join("/")}`,
+                associateWith: "none",
+              });
+              const sources = await service.listImportSourceQueue();
+              const src = sources.find((s) => s.path === root || s.label.startsWith("direct:"));
+              if (src) {
+                await service.finalizeImportSource(src.id, {
+                  status: (result.stats?.reviewItems > 0 && (result.imported?.length ?? 0) > 0)
+                    ? "needs-review"
+                    : "completed",
+                  itemsImported: result.imported?.length ?? 0,
+                  itemsSkipped: result.skipped?.length ?? 0,
+                  stats: result.stats ?? {},
+                  errorLog: result.errorLog ?? [],
+                });
+              }
+            } catch { /* queue history best-effort */ }
+            results.push({
+              root,
+              ok: true,
+              imported: result.imported?.length ?? 0,
+              skipped: result.skipped?.length ?? 0,
+              stats: result.stats,
+              truncated: result.truncated,
+            });
+          } catch (error) {
+            results.push({
+              root,
+              ok: false,
+              error: String(error?.message || error).slice(0, 500),
+            });
+          }
+        }
+        const coverage = await service.knowledgeCoverageView();
+        const registry = await service.realDataSourceRegistry();
+        return {
+          ok: results.some((r) => r.ok),
+          phase: "ingest",
+          backup,
+          approved,
+          testSep,
+          results,
+          coverage,
+          registryReply: registry.reply,
+          message: `Backup OK · approved ${approved.approved.length} · processed ${results.filter((r) => r.ok).length}/${results.length}`,
+        };
+      }
       case "authority.ensure": return service.ensureAuthorityEnvelope();
       case "authority.report": return service.authorityReport();
       case "authority.kill": return service.setAuthorityKillSwitches(input.patch ?? input);
