@@ -21,6 +21,12 @@ test("accepts normal document folders", () => {
   assert.match(v.normalized, /Career/i);
 });
 
+test("rejects credential and OS trees", () => {
+  assert.equal(validateImportRootCandidate("C:\\Users\\User\\.ssh\\keys").ok, false);
+  assert.equal(validateImportRootCandidate("C:\\Windows\\System32\\drivers").ok, false);
+  assert.equal(validateImportRootCandidate("C:\\Program Files\\Something").ok, false);
+});
+
 test("e2e workspaces filtered from owner operational list", () => {
   const list = ownerOperationalWorkspaces([
     { id: "personal", label: "Personal", archived: false },

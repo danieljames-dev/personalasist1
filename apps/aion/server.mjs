@@ -915,6 +915,147 @@ export async function createAionServer(options = {}) {
       case "import.preBackup": return service.preImportPrivateStateBackup();
       case "import.knowledgeCoverage": return service.knowledgeCoverageView();
       case "import.separateTestWorkspaces": return service.separateTestWorkspacesFromOwnerView();
+      /** Owner broad-data discovery inventory (no mutate beyond activity log). */
+      case "import.discover": return service.discoverOwnerDataInventory({
+        inventory: input.inventory !== false,
+        expandChildren: input.expandChildren !== false,
+      });
+      case "import.registerDiscovered": return service.registerDiscoveredOwnerRoots({
+        maxRoots: input.maxRoots != null ? Number(input.maxRoots) : 24,
+        paths: Array.isArray(input.paths) ? input.paths.map(String) : undefined,
+      });
+      /**
+       * Owner-authorized broad ingest pipeline:
+       * discover → inventory → backup → register useful roots → priority ingest.
+       * Does not require per-folder Owner paste. Honors hard exclusions.
+       */
+      case "import.broadIngest": {
+        const maxRoots = Number(input.maxRoots ?? 12) || 12;
+        const maxFilesPerRoot = Number(input.maxFilesPerRoot ?? 200) || 200;
+        const priorityMax = Number(input.priorityMax ?? 4) || 4;
+        const inventory = await service.discoverOwnerDataInventory({ inventory: true });
+        const candidatePaths = (Array.isArray(input.paths) && input.paths.length
+          ? input.paths.map(String)
+          : inventory.useful
+              .filter((s) => s.priority <= priorityMax && s.policyOk && s.exists)
+              .filter((s) => s.realVsSynthetic === "REAL_OWNER_DATA")
+              .slice(0, maxRoots)
+              .map((s) => s.path));
+        if (!candidatePaths.length) {
+          return {
+            ok: false,
+            phase: "discover",
+            inventory,
+            message: "No useful Owner data roots discovered for ingest.",
+          };
+        }
+        const backup = await service.preImportPrivateStateBackup();
+        if (!backup.ok) {
+          return {
+            ok: false,
+            phase: "backup",
+            backup,
+            inventory,
+            message: backup.message || "Pre-import backup failed — ingestion blocked.",
+          };
+        }
+        const approved = await service.approveImportRoots(candidatePaths);
+        if (!approved.approved.length) {
+          return {
+            ok: false,
+            phase: "approve",
+            backup,
+            approved,
+            inventory,
+            message: "No valid roots after policy checks.",
+          };
+        }
+        const testSep = await service.separateTestWorkspacesFromOwnerView();
+        const results = [];
+        let totalImported = 0;
+        let totalSkipped = 0;
+        let totalFailed = 0;
+        for (const root of approved.approved) {
+          try {
+            const result = await dispatch({
+              type: "crm.document.importFolder",
+              path: root,
+              tags: ["owner-discovered", "broad-ingest", "real-owner-data"],
+              summary: `Owner broad ingest: ${root}`,
+              maxFiles: maxFilesPerRoot,
+              maxDepth: Number(input.maxDepth ?? 10) || 10,
+            });
+            try {
+              await service.queueImportSource({
+                path: root,
+                kind: "folder",
+                label: `broad:${root.split(/[/\\]/).filter(Boolean).slice(-2).join("/")}`,
+                associateWith: "none",
+              });
+              const sources = await service.listImportSourceQueue();
+              const src = sources.find((s) => s.path === root || s.label.startsWith("broad:"));
+              if (src) {
+                await service.finalizeImportSource(src.id, {
+                  status: (result.stats?.reviewItems > 0 && (result.imported?.length ?? 0) > 0)
+                    ? "needs-review"
+                    : "completed",
+                  itemsImported: result.imported?.length ?? 0,
+                  itemsSkipped: result.skipped?.length ?? 0,
+                  stats: result.stats ?? {},
+                  errorLog: result.errorLog ?? [],
+                });
+              }
+            } catch { /* queue history best-effort */ }
+            totalImported += result.imported?.length ?? 0;
+            totalSkipped += result.skipped?.length ?? 0;
+            results.push({
+              root,
+              ok: true,
+              imported: result.imported?.length ?? 0,
+              skipped: result.skipped?.length ?? 0,
+              stats: result.stats,
+              truncated: result.truncated,
+            });
+          } catch (error) {
+            totalFailed += 1;
+            results.push({
+              root,
+              ok: false,
+              error: String(error?.message || error).slice(0, 500),
+            });
+          }
+        }
+        // Quality pass
+        let dedupe = null;
+        try {
+          dedupe = await service.dedupeOwnerKnowledgeFacts();
+        } catch { /* optional */ }
+        const coverage = await service.knowledgeCoverageView();
+        const registry = await service.realDataSourceRegistry();
+        return {
+          ok: results.some((r) => r.ok),
+          phase: "ingest",
+          backup,
+          approved,
+          testSep,
+          inventorySummary: {
+            useful: inventory.useful.length,
+            estimatedSupported: inventory.totals.estimatedSupportedFiles,
+            reply: inventory.reply,
+          },
+          results,
+          totals: {
+            rootsProcessed: results.filter((r) => r.ok).length,
+            rootsFailed: totalFailed,
+            filesImported: totalImported,
+            filesSkipped: totalSkipped,
+          },
+          dedupe,
+          coverage,
+          registryReply: registry.reply,
+          message: `Broad ingest: backup OK · registered ${approved.approved.length} · processed ${results.filter((r) => r.ok).length}/${results.length} · imported ${totalImported}`,
+        };
+      }
       /**
        * Direct select-and-import: backup → approve roots → recursive import each root.
        * No chat paste. Paths come from local picker or desktop UI only.

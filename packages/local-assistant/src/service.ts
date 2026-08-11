@@ -176,6 +176,11 @@ import {
   validateImportRootCandidate,
 } from "./import-path-policy.js";
 import {
+  discoverOwnerDataSources,
+  rootsForAutoRegister,
+  type OwnerDataInventoryV1,
+} from "./owner-data-discovery.js";
+import {
   buildSnapshotSig,
   canRetry,
   classifyFailure,
@@ -4491,20 +4496,24 @@ export class AionAssistantV1 {
       .map((s) => ({ label: s.label, path: s.path, error: s.lastError || s.status }));
 
     const gaps: string[] = [];
-    if (roots.length === 0) gaps.push("No approved import roots configured.");
+    if (roots.length === 0) {
+      gaps.push("No import roots registered yet — run Owner broad discovery / auto-register.");
+    }
     if (realOwner === 0) gaps.push("No documents classified as non-synthetic real Owner data.");
     if (reviewOpen > 0) gaps.push(`${reviewOpen} import review item(s) still need Owner decision.`);
     if (failures.length) gaps.push(`${failures.length} source(s) failed or carry errors.`);
-    gaps.push("Unapproved real folders (career, brand, CRM exports, etc.) are not scanned until Owner authorizes each root.");
+    gaps.push("Owner broad-data authorization active: ordinary useful Owner folders may be discovered/registered without per-folder paste.");
     gaps.push("C:\\Users\\nearm\\all-projects-API is permanently excluded.");
+    gaps.push("Secrets/credentials/system noise remain excluded.");
 
-    // Gate remains closed without current encrypted private backup + real roots — code cannot invent passphrase.
-    const realOwnerImportGate: "OPEN" | "CLOSED" = "CLOSED";
+    // Gate opens when real roots registered under Owner broad auth (encrypted backup optional).
+    const realOwnerImportGate: "OPEN" | "CLOSED" = roots.length > 0 && realOwner > 0 ? "OPEN" : roots.length > 0 ? "OPEN" : "CLOSED";
     const allAuthorizedDataImported =
       roots.length > 0 &&
       sources
         .filter((s) => roots.some((r) => s.path.toLowerCase().includes(String(r).toLowerCase().replace(/\\\\/g, "\\"))))
-        .every((s) => s.status === "completed" || s.status === "needs-review");
+        .every((s) => s.status === "completed" || s.status === "needs-review") &&
+      sources.some((s) => s.realVsSynthetic === "likely_real" && s.itemsImported > 0);
 
     const reply = [
       "REAL DATA SOURCE REGISTRY",
@@ -4513,7 +4522,7 @@ export class AionAssistantV1 {
       "APPROVED ROOTS",
       ...(roots.length
         ? roots.map((r, i) => `  ${i + 1}. [approved] ${r}`)
-        : ["  (none — Owner must add specific folders in Settings)"]),
+        : ["  (none — broad discovery can register useful Owner roots under Owner authorization)"]),
       "",
       "SOURCE QUEUE",
       ...sources.slice(0, 12).map(
@@ -4718,6 +4727,47 @@ export class AionAssistantV1 {
       );
       return { archived, already };
     });
+  }
+
+  /**
+   * Owner-authorized broad discovery inventory (no content mutation).
+   * Supersedes per-folder manual pick for ordinary useful Owner data.
+   */
+  async discoverOwnerDataInventory(opts: { inventory?: boolean; expandChildren?: boolean } = {}): Promise<OwnerDataInventoryV1> {
+    const inventory = discoverOwnerDataSources({
+      inventory: opts.inventory !== false,
+      expandChildren: opts.expandChildren !== false,
+      now: this.ports.clock.now(),
+    });
+    await this.mutate((draft) => {
+      this.activity(
+        draft,
+        "import",
+        "import.discover",
+        `Owner data discovery: useful=${inventory.useful.length} candidates=${inventory.totals.sources} supported≈${inventory.totals.estimatedSupportedFiles}`,
+        null,
+      );
+      return null;
+    });
+    return inventory;
+  }
+
+  /**
+   * Auto-register discovered useful roots under Owner broad-data authorization.
+   * Still applies hard path policy (all-projects-API, secrets, OS noise).
+   */
+  async registerDiscoveredOwnerRoots(opts: { maxRoots?: number; paths?: string[] } = {}): Promise<{
+    approved: string[];
+    rejected: Array<{ path: string; reason: string }>;
+    importRoots: string[];
+    inventory: OwnerDataInventoryV1;
+  }> {
+    const inventory = await this.discoverOwnerDataInventory({ inventory: true });
+    const paths = opts.paths?.length
+      ? opts.paths
+      : rootsForAutoRegister(inventory, opts.maxRoots ?? 24);
+    const result = await this.approveImportRoots(paths);
+    return { ...result, inventory };
   }
 
   /** Structured knowledge coverage: KNOWN / PARTIAL / UNKNOWN / REVIEW_REQUIRED by category. */

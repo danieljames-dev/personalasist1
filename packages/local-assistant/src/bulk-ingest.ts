@@ -7,7 +7,8 @@
 
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep, basename } from "node:path";
+import { isNoiseDirectoryName, isSecretOrProtectedPath } from "./import-path-policy.js";
 
 export const BULK_SUPPORTED_EXTENSIONS = [
   ".pdf",
@@ -16,6 +17,9 @@ export const BULK_SUPPORTED_EXTENSIONS = [
   ".md",
   ".csv",
   ".json",
+  ".xlsx",
+  ".xls",
+  ".pptx",
   ".png",
   ".jpg",
   ".jpeg",
@@ -62,7 +66,9 @@ export interface BulkWalkSkippedV1 {
     | "escape"
     | "unreadable"
     | "not-file"
-    | "duplicate-in-batch";
+    | "duplicate-in-batch"
+    | "noise-directory"
+    | "secret-or-protected";
   detail?: string;
 }
 
@@ -240,8 +246,27 @@ export function walkAuthorizedFolder(options: BulkWalkOptionsV1): BulkWalkResult
 
     for (const entry of entries) {
       if (truncated) break;
+      // System / package noise — never descend
+      if (entry.isDirectory() && isNoiseDirectoryName(entry.name)) {
+        skipped.push({
+          absolutePath: join(dir, entry.name),
+          relativePath: toPosixRelative(relative(folder, join(dir, entry.name))),
+          reason: "noise-directory",
+          detail: entry.name,
+        });
+        continue;
+      }
       const full = join(dir, entry.name);
       const relFromFolder = toPosixRelative(relative(folder, full));
+      if (isSecretOrProtectedPath(full) || isSecretOrProtectedPath(entry.name)) {
+        skipped.push({
+          absolutePath: full,
+          relativePath: relFromFolder,
+          reason: "secret-or-protected",
+          detail: "credential/secret pattern",
+        });
+        continue;
+      }
 
       let lst;
       try {
@@ -325,6 +350,15 @@ export function walkAuthorizedFolder(options: BulkWalkOptionsV1): BulkWalkResult
     }
     if (!isPathInsideRoot(approvedReal, full) && !isPathInsideRoot(approvedRoot, full)) {
       skipped.push({ absolutePath: full, relativePath: relFromFolder, reason: "escape" });
+      return;
+    }
+    if (isSecretOrProtectedPath(full) || isSecretOrProtectedPath(basename(full))) {
+      skipped.push({
+        absolutePath: full,
+        relativePath: relFromFolder,
+        reason: "secret-or-protected",
+        detail: "credential/secret pattern",
+      });
       return;
     }
     if (!isSupportedBulkExtension(entryName(full))) {
@@ -425,12 +459,19 @@ export function mimeForBulkExtension(extOrName: string): string {
   if (lower.endsWith(".docx") || lower === ".docx") {
     return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   }
+  if (lower.endsWith(".xlsx") || lower === ".xlsx") {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (lower.endsWith(".xls") || lower === ".xls") return "application/vnd.ms-excel";
+  if (lower.endsWith(".pptx") || lower === ".pptx") {
+    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  }
   return "text/plain";
 }
 
 export function kindForBulkFile(name: string, mimeType: string): "document" | "image" | "spreadsheet" | "other" {
   if (mimeType.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(name)) return "image";
   if (/\.(csv|xlsx?)$/i.test(name)) return "spreadsheet";
-  if (/\.(txt|md|pdf|docx|json|log)$/i.test(name)) return "document";
+  if (/\.(txt|md|pdf|docx|json|log|pptx)$/i.test(name)) return "document";
   return "other";
 }
