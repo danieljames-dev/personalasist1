@@ -177,14 +177,40 @@ export interface ValueLedgerEntryV1 {
   ownerInterventionRequired: boolean;
   correctionRequired: boolean;
   estimateKind: ValueEstimateKindV1;
+  /** Required non-empty for estimateKind=measured; empty for unknown/estimated. */
+  evidenceIds: string[];
   notes: string;
   at: IsoTimestamp;
 }
 
+/**
+ * UNKNOWN is a legitimate result.
+ * ESTIMATED must never silently become MEASURED.
+ * MEASURED financial/outcome claims require supporting evidence ids.
+ */
 export function buildValueLedgerEntry(
   input: Record<string, unknown>,
   ctx: { id: OpaqueId; now: IsoTimestamp; workspace: string },
 ): ValueLedgerEntryV1 {
+  const requested = (["estimated", "unknown", "measured"] as const).includes(
+    input.estimateKind as ValueEstimateKindV1,
+  )
+    ? (input.estimateKind as ValueEstimateKindV1)
+    : "estimated";
+  const evidenceIds = Array.isArray(input.evidenceIds)
+    ? input.evidenceIds.map((x) => String(x).slice(0, 200)).filter(Boolean).slice(0, 40)
+    : typeof input.evidenceId === "string" && input.evidenceId
+      ? [String(input.evidenceId).slice(0, 200)]
+      : [];
+
+  let estimateKind = requested;
+  let notes = String(input.notes ?? "").slice(0, 2000);
+  // Hard rule: measured without evidence demotes to estimated (never silent measured).
+  if (estimateKind === "measured" && evidenceIds.length === 0) {
+    estimateKind = "estimated";
+    notes = `${notes} [demoted measured→estimated: no evidenceIds]`.trim().slice(0, 2000);
+  }
+
   return {
     id: ctx.id,
     workspace: ctx.workspace,
@@ -203,12 +229,53 @@ export function buildValueLedgerEntry(
     riskPrevented: String(input.riskPrevented ?? "").slice(0, 500),
     ownerInterventionRequired: input.ownerInterventionRequired === true,
     correctionRequired: input.correctionRequired === true,
-    estimateKind: (["estimated", "unknown", "measured"] as const).includes(
-      input.estimateKind as ValueEstimateKindV1,
-    )
-      ? (input.estimateKind as ValueEstimateKindV1)
-      : "estimated",
-    notes: String(input.notes ?? "").slice(0, 2000),
+    estimateKind,
+    evidenceIds,
+    notes,
     at: ctx.now,
   };
+}
+
+/** Promote estimated → measured only when evidence is supplied (never silent). */
+export function promoteToMeasured(
+  entry: ValueLedgerEntryV1,
+  evidenceIds: string[],
+  now: IsoTimestamp,
+): ValueLedgerEntryV1 {
+  const ids = evidenceIds.map((x) => String(x).slice(0, 200)).filter(Boolean).slice(0, 40);
+  if (!ids.length) {
+    return {
+      ...entry,
+      notes: `${entry.notes} [promote refused: empty evidence]`.slice(0, 2000),
+      at: now,
+    };
+  }
+  if (entry.estimateKind === "unknown" && entry.revenueInfluenced == null && entry.timeSavedMinutes == null) {
+    // unknown stays unknown until there is something to measure
+    return {
+      ...entry,
+      estimateKind: "measured",
+      evidenceIds: ids,
+      notes: `${entry.notes} [promoted unknown→measured with evidence]`.slice(0, 2000),
+      at: now,
+    };
+  }
+  return {
+    ...entry,
+    estimateKind: "measured",
+    evidenceIds: ids,
+    notes: `${entry.notes} [promoted to measured]`.slice(0, 2000),
+    at: now,
+  };
+}
+
+export function assertValueLedgerInvariants(entry: ValueLedgerEntryV1): string[] {
+  const errors: string[] = [];
+  if (entry.estimateKind === "measured" && (!entry.evidenceIds || entry.evidenceIds.length === 0)) {
+    errors.push("MEASURED requires evidenceIds");
+  }
+  if (entry.estimateKind === "unknown") {
+    // UNKNOWN is legitimate even with null metrics
+  }
+  return errors;
 }

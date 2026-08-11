@@ -1,6 +1,8 @@
 /**
  * Source trust hierarchy, conflict detection, and lightweight temporal staleness.
  * Keep simple — explainable, not overfitted.
+ *
+ * Trust is active policy for current-fact selection, not display-only metadata.
  */
 import type { TemporalFactV1 } from "./executive-context.js";
 
@@ -27,8 +29,19 @@ const TIER_RANK: Record<SourceTrustTierV1, number> = {
   inference: 20,
 };
 
+/** Minimum trust rank that may override owner_direct without Owner review. */
+export const OWNER_DIRECT_RANK = TIER_RANK.owner_direct;
+
 export function rankSourceTrust(tier: SourceTrustTierV1): number {
   return TIER_RANK[tier] ?? 20;
+}
+
+export function factTrustTier(fact: TemporalFactV1): SourceTrustTierV1 {
+  return classifySourceRef(fact.provenance?.sourceRef ?? "", fact.provenance?.sourceType);
+}
+
+export function factTrustRank(fact: TemporalFactV1): number {
+  return rankSourceTrust(factTrustTier(fact));
 }
 
 export function classifySourceRef(sourceRef: string, sourceType?: string): SourceTrustTierV1 {
@@ -73,12 +86,105 @@ export function maxAgeDaysForCategory(category: string): number {
 }
 
 export function isStaleFact(fact: TemporalFactV1, nowIso: string): boolean {
-  if (fact.temporalStatus === "SUPERSEDED" || fact.temporalStatus === "HISTORICAL") return true;
+  if (
+    fact.temporalStatus === "SUPERSEDED" ||
+    fact.temporalStatus === "HISTORICAL" ||
+    fact.temporalStatus === "INVALIDATED"
+  ) {
+    return true;
+  }
+  // Explicit validity end (even without a replacement fact)
+  if (fact.validUntil && fact.validUntil < nowIso) return true;
+  if (fact.lineage?.lineageStale === true) return true;
   const maxDays = maxAgeDaysForCategory(fact.category);
   const anchor = fact.lastConfirmedAt || fact.observedAt || fact.createdAt;
   const ageMs = Date.parse(nowIso) - Date.parse(anchor);
   if (!Number.isFinite(ageMs)) return false;
   return ageMs > maxDays * 86400000;
+}
+
+/**
+ * Interval-aware "is this fact assertable as current truth right now?"
+ * Does NOT use category freshness alone — use isStaleFact for reconfirm policy.
+ */
+export function isFactCurrentlyValid(fact: TemporalFactV1, nowIso: string): boolean {
+  if (fact.temporalStatus === "SUPERSEDED" || fact.temporalStatus === "INVALIDATED") return false;
+  if (fact.temporalStatus === "HISTORICAL") return false;
+  if (fact.invalidatedAt) return false;
+  if (fact.validFrom && fact.validFrom > nowIso) return false;
+  if (fact.validUntil && fact.validUntil < nowIso) return false;
+  if (fact.lineage?.lineageStale === true) return false;
+  return fact.temporalStatus === "CURRENT" || fact.temporalStatus === "UNCERTAIN";
+}
+
+/**
+ * Active trust policy: low-trust imported/researched content must not silently
+ * become owner-direct-equivalent truth when a higher-trust statement exists.
+ *
+ * Selects at most one "current" fact per (workspace, title) key using:
+ * 1) validity window / status
+ * 2) trust rank (owner wins over import/third_party/inference)
+ * 3) freshness (lastConfirmed/observed)
+ * 4) confidence as weak tie-breaker
+ */
+export function selectCurrentFacts(
+  facts: readonly TemporalFactV1[],
+  nowIso: string,
+  opts?: { workspace?: string; minTrustRank?: number; includeUncertain?: boolean },
+): TemporalFactV1[] {
+  const minTrust = opts?.minTrustRank ?? 0;
+  const includeUncertain = opts?.includeUncertain !== false;
+  const candidates = facts.filter((f) => {
+    if (opts?.workspace && f.workspace !== opts.workspace) return false;
+    if (!isFactCurrentlyValid(f, nowIso)) return false;
+    if (f.temporalStatus === "UNCERTAIN" && !includeUncertain) return false;
+    if (isStaleFact(f, nowIso) && f.temporalStatus !== "UNCERTAIN") return false;
+    if (factTrustRank(f) < minTrust) return false;
+    return true;
+  });
+
+  const byKey = new Map<string, TemporalFactV1>();
+  for (const f of candidates) {
+    const key = `${f.workspace}::${f.title.toLowerCase()}`;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, f);
+      continue;
+    }
+    byKey.set(key, preferFact(prev, f, nowIso));
+  }
+  return [...byKey.values()];
+}
+
+/** Prefer higher trust, then fresher, then higher confidence. Owner never loses to low-trust import. */
+export function preferFact(a: TemporalFactV1, b: TemporalFactV1, nowIso: string): TemporalFactV1 {
+  const ta = factTrustRank(a);
+  const tb = factTrustRank(b);
+  // Strong veto: inference/third_party cannot override owner_direct / physical
+  if (ta >= 90 && tb < 60) return a;
+  if (tb >= 90 && ta < 60) return b;
+  if (tb !== ta) return tb > ta ? b : a;
+  const fa = a.lastConfirmedAt || a.observedAt || a.createdAt;
+  const fb = b.lastConfirmedAt || b.observedAt || b.createdAt;
+  if (fb !== fa) return fb > fa ? b : a;
+  if (b.confidence !== a.confidence) return b.confidence > a.confidence ? b : a;
+  // Prefer non-stale
+  const sa = isStaleFact(a, nowIso);
+  const sb = isStaleFact(b, nowIso);
+  if (sa !== sb) return sa ? b : a;
+  return b.updatedAt >= a.updatedAt ? b : a;
+}
+
+/**
+ * Can candidate fact replace existing current fact without Owner review?
+ * Low-trust import never auto-overrides owner_direct.
+ */
+export function mayAutoOverride(existing: TemporalFactV1, candidate: TemporalFactV1): boolean {
+  const te = factTrustRank(existing);
+  const tc = factTrustRank(candidate);
+  if (te >= OWNER_DIRECT_RANK - 5 && tc < 60) return false;
+  if (tc + 10 < te) return false;
+  return tc > te || (tc >= te && (candidate.updatedAt || "") >= (existing.updatedAt || ""));
 }
 
 export interface FactConflictV1 {
@@ -93,12 +199,17 @@ export interface FactConflictV1 {
 
 /**
  * Detect same-title conflicts in same workspace; prefer higher trust / newer Owner statements.
+ * Low-trust imports never auto-supersede owner_direct / physical_observation.
  */
 export function detectFactConflicts(
   facts: readonly TemporalFactV1[],
   nowIso: string,
 ): FactConflictV1[] {
-  const current = facts.filter((f) => f.temporalStatus === "CURRENT" || f.temporalStatus === "UNCERTAIN");
+  const current = facts.filter(
+    (f) =>
+      (f.temporalStatus === "CURRENT" || f.temporalStatus === "UNCERTAIN") &&
+      isFactCurrentlyValid(f, nowIso),
+  );
   const byKey = new Map<string, TemporalFactV1[]>();
   for (const f of current) {
     const key = `${f.workspace}::${f.title.toLowerCase()}`;
@@ -109,24 +220,31 @@ export function detectFactConflicts(
   const conflicts: FactConflictV1[] = [];
   for (const [, group] of byKey) {
     if (group.length < 2) continue;
-    const sorted = [...group].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const newer = sorted[0]!;
-    for (const older of sorted.slice(1)) {
-      if (older.content.trim() === newer.content.trim()) continue;
-      const newerTrust = rankSourceTrust(classifySourceRef(newer.provenance.sourceRef, newer.provenance.sourceType));
-      const olderTrust = rankSourceTrust(classifySourceRef(older.provenance.sourceRef, older.provenance.sourceType));
+    const sorted = [...group].sort((a, b) => {
+      const winner = preferFact(a, b, nowIso);
+      return winner.id === b.id ? 1 : -1;
+    });
+    // Prefer highest trust+fresh as "newer" authority
+    const preferred = sorted.reduce((acc, f) => preferFact(acc, f, nowIso));
+    for (const other of group) {
+      if (other.id === preferred.id) continue;
+      if (other.content.trim() === preferred.content.trim()) continue;
+      const preferredTrust = factTrustRank(preferred);
+      const otherTrust = factTrustRank(other);
       let resolution: "supersede_older" | "review" = "review";
       let reason = "Similar authority — Owner review.";
-      if (newerTrust > olderTrust + 10 || (newerTrust >= olderTrust && newer.updatedAt > older.updatedAt)) {
+      if (mayAutoOverride(other, preferred)) {
         resolution = "supersede_older";
-        reason = `Newer higher/equal trust (${newerTrust} vs ${olderTrust}) at ${newer.updatedAt}.`;
+        reason = `Higher/equal trust (${preferredTrust} vs ${otherTrust}) preferred at ${preferred.updatedAt}.`;
+      } else if (otherTrust >= 90 && preferredTrust < 60) {
+        reason = `Low-trust candidate cannot override owner/physical (${preferredTrust} vs ${otherTrust}).`;
       }
       conflicts.push({
-        olderId: older.id,
-        newerId: newer.id,
-        title: newer.title,
-        olderContent: older.content.slice(0, 200),
-        newerContent: newer.content.slice(0, 200),
+        olderId: other.id,
+        newerId: preferred.id,
+        title: preferred.title,
+        olderContent: other.content.slice(0, 200),
+        newerContent: preferred.content.slice(0, 200),
         resolution,
         reason,
       });

@@ -197,7 +197,17 @@ export function ensureBindingForWorkspace(
 
 // ─── Temporal facts ─────────────────────────────────────────────────────────
 
-export type TemporalStatusV1 = "CURRENT" | "HISTORICAL" | "SUPERSEDED" | "UNCERTAIN";
+export type TemporalStatusV1 = "CURRENT" | "HISTORICAL" | "SUPERSEDED" | "UNCERTAIN" | "INVALIDATED";
+
+/** Explicit lineage edge: this fact was derived from other fact/evidence ids. */
+export interface FactLineageV1 {
+  /** Ids of TemporalFact / evidence records this claim depends on. */
+  derivedFrom: OpaqueId[];
+  /** Free-form evidence refs (paths, job ids, source URLs) when not fact ids. */
+  dependsOnEvidence: string[];
+  /** True when any upstream was superseded/invalidated and this has not been revalidated. */
+  lineageStale: boolean;
+}
 
 export interface TemporalFactV1 {
   id: OpaqueId;
@@ -209,13 +219,41 @@ export interface TemporalFactV1 {
   confidence: number;
   temporalStatus: TemporalStatusV1;
   observedAt: IsoTimestamp;
+  /** Inclusive start of asserted validity window (null = unknown start). */
   validFrom: IsoTimestamp | null;
+  /**
+   * Inclusive end of asserted validity window.
+   * null = open-ended until superseded, invalidated, or freshness policy marks stale.
+   * Use for facts that expire without a replacement (offers, inventory, temporary preferences).
+   */
+  validUntil: IsoTimestamp | null;
   lastConfirmedAt: IsoTimestamp | null;
   supersededAt: IsoTimestamp | null;
   supersededBy: OpaqueId | null;
+  /** Set when fact is explicitly voided without a replacement id. */
+  invalidatedAt: IsoTimestamp | null;
+  /** Why invalidated (owner correction, poison reject, expiry without replacement). */
+  invalidationReason: string | null;
+  lineage: FactLineageV1;
   provenance: ProvenanceV1;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+}
+
+function parseLineage(input: Record<string, unknown>): FactLineageV1 {
+  const derivedFrom = Array.isArray(input.derivedFrom)
+    ? input.derivedFrom.map((x) => String(x).slice(0, 120)).filter(Boolean).slice(0, 40)
+    : typeof input.derivedFrom === "string" && input.derivedFrom
+      ? [String(input.derivedFrom).slice(0, 120)]
+      : [];
+  const dependsOnEvidence = Array.isArray(input.dependsOnEvidence)
+    ? input.dependsOnEvidence.map((x) => String(x).slice(0, 500)).filter(Boolean).slice(0, 40)
+    : [];
+  return {
+    derivedFrom,
+    dependsOnEvidence,
+    lineageStale: input.lineageStale === true,
+  };
 }
 
 export function buildTemporalFact(
@@ -228,6 +266,7 @@ export function buildTemporalFact(
   const visibility = VISIBILITY_CLASSES.includes(input.visibility as VisibilityClassV1)
     ? (input.visibility as VisibilityClassV1)
     : "WORKSPACE_ONLY";
+  const statuses = ["CURRENT", "HISTORICAL", "SUPERSEDED", "UNCERTAIN", "INVALIDATED"] as const;
   return {
     id: ctx.id,
     workspace: ctx.workspace,
@@ -236,16 +275,18 @@ export function buildTemporalFact(
     title,
     content,
     confidence: Math.min(100, Math.max(0, Number(input.confidence ?? 80) || 80)),
-    temporalStatus: (["CURRENT", "HISTORICAL", "SUPERSEDED", "UNCERTAIN"] as const).includes(
-      input.temporalStatus as TemporalStatusV1,
-    )
+    temporalStatus: statuses.includes(input.temporalStatus as (typeof statuses)[number])
       ? (input.temporalStatus as TemporalStatusV1)
       : "CURRENT",
     observedAt: String(input.observedAt ?? ctx.now),
     validFrom: input.validFrom ? String(input.validFrom) : ctx.now,
+    validUntil: input.validUntil ? String(input.validUntil) : null,
     lastConfirmedAt: input.lastConfirmedAt ? String(input.lastConfirmedAt) : ctx.now,
     supersededAt: null,
     supersededBy: null,
+    invalidatedAt: null,
+    invalidationReason: null,
+    lineage: parseLineage(input),
     provenance: {
       sourceType: "owner",
       sourceRef: String(input.sourceRef ?? "temporal.fact").slice(0, 500),
@@ -266,7 +307,68 @@ export function supersedeTemporalFact(
     temporalStatus: "SUPERSEDED",
     supersededAt: now,
     supersededBy: replacementId,
+    // Close the validity window when replaced so open-ended CURRENT cannot linger.
+    validUntil: fact.validUntil && fact.validUntil < now ? fact.validUntil : now,
     updatedAt: now,
+  };
+}
+
+/** Explicitly end a fact with no replacement (expires / void / poison reject). */
+export function invalidateTemporalFact(
+  fact: TemporalFactV1,
+  now: IsoTimestamp,
+  reason: string,
+): TemporalFactV1 {
+  return {
+    ...fact,
+    temporalStatus: "INVALIDATED",
+    invalidatedAt: now,
+    invalidationReason: reason.slice(0, 500),
+    validUntil: fact.validUntil && fact.validUntil < now ? fact.validUntil : now,
+    updatedAt: now,
+  };
+}
+
+/** Mark derived facts stale when an upstream id is superseded or invalidated. */
+export function markDerivedLineageStale(
+  facts: readonly TemporalFactV1[],
+  upstreamId: OpaqueId,
+  now: IsoTimestamp,
+): TemporalFactV1[] {
+  return facts.map((f) => {
+    if (!f.lineage?.derivedFrom?.includes(upstreamId)) return f;
+    if (f.temporalStatus === "SUPERSEDED" || f.temporalStatus === "INVALIDATED") return f;
+    return {
+      ...f,
+      temporalStatus: f.temporalStatus === "CURRENT" ? "UNCERTAIN" : f.temporalStatus,
+      lineage: { ...f.lineage, lineageStale: true },
+      updatedAt: now,
+    };
+  });
+}
+
+/** Normalize legacy facts loaded from disk (pre-validUntil / pre-lineage). */
+export function normalizeTemporalFact(raw: TemporalFactV1 | Record<string, unknown>): TemporalFactV1 {
+  const f = raw as TemporalFactV1;
+  const lineage: FactLineageV1 =
+    f.lineage && typeof f.lineage === "object"
+      ? {
+          derivedFrom: Array.isArray(f.lineage.derivedFrom)
+            ? f.lineage.derivedFrom.map(String).slice(0, 40)
+            : [],
+          dependsOnEvidence: Array.isArray(f.lineage.dependsOnEvidence)
+            ? f.lineage.dependsOnEvidence.map(String).slice(0, 40)
+            : [],
+          lineageStale: f.lineage.lineageStale === true,
+        }
+      : { derivedFrom: [], dependsOnEvidence: [], lineageStale: false };
+  return {
+    ...f,
+    validUntil: f.validUntil ?? null,
+    invalidatedAt: f.invalidatedAt ?? null,
+    invalidationReason: f.invalidationReason ?? null,
+    lineage,
+    temporalStatus: f.temporalStatus === ("INVALIDATED" as TemporalStatusV1) ? "INVALIDATED" : f.temporalStatus,
   };
 }
 

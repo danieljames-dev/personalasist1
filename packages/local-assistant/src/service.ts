@@ -123,6 +123,8 @@ import {
   buildGraphEdge,
   buildTemporalFact,
   ensureBindingForWorkspace,
+  invalidateTemporalFact,
+  markDerivedLineageStale,
   mayUseAcrossContexts,
   resolveContextSwitch,
   supersedeTemporalFact,
@@ -171,6 +173,10 @@ import {
   type AutonomyJobV1,
   type ExecutiveCycleResultV1,
 } from "./executive-cycle.js";
+import {
+  budgetInterruptions,
+  DEFAULT_ATTENTION_BUDGET,
+} from "./attention-budget.js";
 import {
   applyOnlineListings,
   buildDealershipContext,
@@ -4055,6 +4061,26 @@ export class AionAssistantV1 {
       draft.executive.commitments = draft.executive.commitments.map((c) => refreshCommitmentStatus(c, now));
       const commitmentsRefreshed = draft.executive.commitments.filter((c) => c.status === "overdue" || c.status === "due_soon").length;
 
+      // Expire facts past validUntil with no replacement → INVALIDATED (not forever-current)
+      let expired = 0;
+      const expiredIds: string[] = [];
+      draft.executive.temporalFacts = draft.executive.temporalFacts.map((f) => {
+        if (
+          (f.temporalStatus === "CURRENT" || f.temporalStatus === "UNCERTAIN") &&
+          f.validUntil &&
+          f.validUntil < now
+        ) {
+          expired += 1;
+          expiredIds.push(f.id);
+          return invalidateTemporalFact(f, now, "validUntil elapsed without replacement");
+        }
+        return f;
+      });
+      for (const id of expiredIds) {
+        draft.executive.temporalFacts = markDerivedLineageStale(draft.executive.temporalFacts, id, now);
+      }
+      if (expired) notes.push(`Invalidated ${expired} fact(s) past validUntil.`);
+
       // Flag stale temporal facts as UNCERTAIN (do not delete history)
       draft.executive.temporalFacts = draft.executive.temporalFacts.map((f) => {
         if (f.temporalStatus === "CURRENT" && isStaleFact(f, now)) {
@@ -4065,12 +4091,17 @@ export class AionAssistantV1 {
       });
       if (staleFacts) notes.push(`Marked ${staleFacts} fact(s) UNCERTAIN (stale by type).`);
 
-      // Conflicts
+      // Conflicts (trust-aware; low-trust never auto-overrides owner)
       const conflicts = detectFactConflicts(draft.executive.temporalFacts, now);
       for (const c of conflicts) {
         if (c.resolution === "supersede_older") {
           draft.executive.temporalFacts = draft.executive.temporalFacts.map((f) =>
             f.id === c.olderId ? supersedeTemporalFact(f, c.newerId, now) : f,
+          );
+          draft.executive.temporalFacts = markDerivedLineageStale(
+            draft.executive.temporalFacts,
+            c.olderId,
+            now,
           );
           conflictsResolved += 1;
         } else {
@@ -4174,9 +4205,20 @@ export class AionAssistantV1 {
     const completedNotes: string[] = [];
     const handling: string[] = [];
     let researchUsed = 0;
-    let interruptions = 0;
+    // Collect interruption proposals from all emitters; apply ONE global budget at end.
+    const interruptionProposals: Array<{
+      level: "IMMEDIATE" | "NEXT_BRIEFING" | "TODAY" | "WEEKLY" | "SILENT_LOG";
+      message: string;
+      source: string;
+      workspace: string;
+    }> = [];
 
     for (const job of jobs) {
+      // Progress around WAITING / OWNER_REQUIRED — never freeze the cycle on one blocked job.
+      if (job.state === "WAITING") {
+        result.audit.push(`Skip WAITING job ${job.capability}: ${job.reason.slice(0, 80)}`);
+        continue;
+      }
       if (isExternalGatedCapability(job.capability)) {
         result.unauthorizedExternalAttempts += 1;
         result.audit.push(`Blocked gated capability: ${job.capability}`);
@@ -4185,12 +4227,12 @@ export class AionAssistantV1 {
       if (job.state === "OWNER_REQUIRED") {
         result.jobsOwnerRequired += 1;
         result.ownerMustDo.push(`[${job.workspace}] ${job.reason}`);
-        if (job.interruption === "IMMEDIATE" || job.interruption === "TODAY") {
-          if (interruptions < budget.maxOwnerInterruptionsPerCycle) {
-            result.interruptions.push({ level: job.interruption, message: job.reason });
-            interruptions += 1;
-          }
-        }
+        interruptionProposals.push({
+          level: job.interruption,
+          message: job.reason,
+          source: `job.${job.capability}`,
+          workspace: job.workspace,
+        });
         continue;
       }
       if (opts.dryRun) {
@@ -4216,12 +4258,23 @@ export class AionAssistantV1 {
           result.jobsCompleted += 1;
           completedNotes.push(`${running.capability}: ${outcome.detail.slice(0, 120)}`);
           if (running.interruption === "SILENT_LOG") result.silentLogs.push(running.reason);
-          else if (running.interruption === "NEXT_BRIEFING" || running.interruption === "TODAY") {
-            result.interruptions.push({ level: running.interruption, message: running.reason });
+          else {
+            interruptionProposals.push({
+              level: running.interruption,
+              message: running.reason,
+              source: `job.${running.capability}`,
+              workspace: running.workspace,
+            });
           }
         } else if (verified.state === "OWNER_REQUIRED") {
           result.jobsOwnerRequired += 1;
           result.ownerMustDo.push(running.reason);
+          interruptionProposals.push({
+            level: running.interruption,
+            message: running.reason,
+            source: `job.${running.capability}`,
+            workspace: running.workspace,
+          });
         } else {
           result.jobsFailed += 1;
           if (canRetry(running, verified.failureClass || "UNSUPPORTED")) {
@@ -4255,10 +4308,55 @@ export class AionAssistantV1 {
       });
     }
 
-    // Refresh attention for owner board
+    // Refresh attention for owner board — also budgeted through global delivery
     const board = await this.attentionBoard();
+    for (const item of board.ownerMustDo.slice(0, 8)) {
+      const level =
+        item.horizon === "NOW" ? "IMMEDIATE" : item.horizon === "TODAY" ? "TODAY" : "NEXT_BRIEFING";
+      interruptionProposals.push({
+        level,
+        message: `[${item.contextLabel}] ${item.title}`,
+        source: "attention.engine",
+        workspace: item.workspace,
+      });
+    }
+    for (const opp of (exec.opportunities ?? []).slice(0, 5)) {
+      interruptionProposals.push({
+        level: opp.urgency >= 80 ? "TODAY" : "NEXT_BRIEFING",
+        message: `Opportunity: ${opp.title}`,
+        source: "opportunity.radar",
+        workspace: opp.workspace || "work",
+      });
+    }
+
+    const attnCfg = exec.attentionBudgetConfig ?? { ...DEFAULT_ATTENTION_BUDGET };
+    // Align cycle cap with resource budget
+    attnCfg.maxPerCycle = Math.min(attnCfg.maxPerCycle, budget.maxOwnerInterruptionsPerCycle);
+    const budgeted = budgetInterruptions(
+      interruptionProposals,
+      attnCfg,
+      now,
+      exec.attentionBudgetState ?? null,
+    );
+    result.interruptions = budgeted.interruptions;
+    result.silentLogs = [...result.silentLogs, ...budgeted.silentLogs].slice(0, 50);
+    if (budgeted.suppressed > 0) {
+      result.audit.push(`Attention budget suppressed/downgraded ${budgeted.suppressed} delivery(ies).`);
+    }
+    await this.mutate((draft) => {
+      if (!draft.executive) draft.executive = emptyExecutiveState(now);
+      draft.executive.attentionBudgetState = budgeted.state;
+      draft.executive.attentionBudgetConfig = attnCfg;
+      return null;
+    });
+
     result.ownerMustDo = [
-      ...new Set([...result.ownerMustDo, ...board.ownerMustDo.slice(0, 5).map((i) => `[${i.contextLabel}] ${i.title}`)]),
+      ...new Set([
+        ...result.ownerMustDo,
+        ...budgeted.interruptions
+          .filter((i) => i.level === "IMMEDIATE" || i.level === "TODAY")
+          .map((i) => i.message),
+      ]),
     ].slice(0, 12);
     result.aionCompleted = completedNotes;
     result.aionHandling = handling.length

@@ -45,6 +45,8 @@ export * from "./import-workspace-map.js";
 export * from "./commitments.js";
 export * from "./source-trust.js";
 export * from "./executive-cycle.js";
+export * from "./attention-budget.js";
+export * from "./entity-resolution.js";
 export * from "./access.js";
 export * from "./writer-authority.js";
 export * from "./owner-authority-v2.js";

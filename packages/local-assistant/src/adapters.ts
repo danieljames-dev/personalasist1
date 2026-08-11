@@ -166,6 +166,26 @@ export function createEmptyStateV1(): AssistantStateV1 {
         maxDecompositionItems: 6,
         maxOwnerInterruptionsPerCycle: 3,
       },
+      attentionBudgetConfig: {
+        maxImmediatePerDay: 5,
+        maxTodaySurfaced: 8,
+        maxNextBriefing: 10,
+        maxWeekly: 15,
+        maxPerCycle: 3,
+      },
+      attentionBudgetState: {
+        dayKey: GENESIS.slice(0, 10),
+        immediateCount: 0,
+        todayCount: 0,
+        briefingCount: 0,
+        weeklyCount: 0,
+        cycleCount: 0,
+        suppressed: 0,
+        delivered: [],
+        log: [],
+      },
+      entityMergeProposals: [],
+      entityUnmerges: [],
       lastBriefingAt: null,
       lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
@@ -459,6 +479,26 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
         maxDecompositionItems: 6,
         maxOwnerInterruptionsPerCycle: 3,
       },
+      attentionBudgetConfig: {
+        maxImmediatePerDay: 5,
+        maxTodaySurfaced: 8,
+        maxNextBriefing: 10,
+        maxWeekly: 15,
+        maxPerCycle: 3,
+      },
+      attentionBudgetState: {
+        dayKey: GENESIS.slice(0, 10),
+        immediateCount: 0,
+        todayCount: 0,
+        briefingCount: 0,
+        weeklyCount: 0,
+        cycleCount: 0,
+        suppressed: 0,
+        delivered: [],
+        log: [],
+      },
+      entityMergeProposals: [],
+      entityUnmerges: [],
       lastBriefingAt: null,
       lastDailyMaintenanceAt: null,
       lastEndOfDayAt: null,
@@ -475,9 +515,36 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     }
     if (!Array.isArray(ak.executive.context.bindings)) ak.executive.context.bindings = [];
     if (!Array.isArray(ak.executive.temporalFacts)) ak.executive.temporalFacts = [];
+    // Normalize legacy temporal facts (validUntil / lineage / invalidatedAt)
+    ak.executive.temporalFacts = ak.executive.temporalFacts.map((raw) => ({
+      ...raw,
+      validUntil: raw.validUntil ?? null,
+      invalidatedAt: raw.invalidatedAt ?? null,
+      invalidationReason: raw.invalidationReason ?? null,
+      lineage:
+        raw.lineage && typeof raw.lineage === "object"
+          ? {
+              derivedFrom: Array.isArray(raw.lineage.derivedFrom) ? raw.lineage.derivedFrom : [],
+              dependsOnEvidence: Array.isArray(raw.lineage.dependsOnEvidence)
+                ? raw.lineage.dependsOnEvidence
+                : [],
+              lineageStale: raw.lineage.lineageStale === true,
+            }
+          : { derivedFrom: [], dependsOnEvidence: [], lineageStale: false },
+    }));
     if (!Array.isArray(ak.executive.graphEdges)) ak.executive.graphEdges = [];
     if (!Array.isArray(ak.executive.opportunities)) ak.executive.opportunities = [];
     if (!Array.isArray(ak.executive.valueLedger)) ak.executive.valueLedger = [];
+    ak.executive.valueLedger = ak.executive.valueLedger.map((v) => {
+      const evidenceIds = Array.isArray(v.evidenceIds) ? v.evidenceIds : [];
+      const kind = v.estimateKind ?? "estimated";
+      return {
+        ...v,
+        evidenceIds,
+        estimateKind:
+          kind === "measured" && evidenceIds.length === 0 ? ("estimated" as const) : kind,
+      };
+    });
     if (!Array.isArray(ak.executive.captures)) ak.executive.captures = [];
     if (!Array.isArray(ak.executive.brandDna)) ak.executive.brandDna = [];
     if (!Array.isArray(ak.executive.importWorkspaceCorrections)) ak.executive.importWorkspaceCorrections = [];
@@ -498,6 +565,30 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
         maxOwnerInterruptionsPerCycle: 3,
       };
     }
+    if (!ak.executive.attentionBudgetConfig || typeof ak.executive.attentionBudgetConfig !== "object") {
+      ak.executive.attentionBudgetConfig = {
+        maxImmediatePerDay: 5,
+        maxTodaySurfaced: 8,
+        maxNextBriefing: 10,
+        maxWeekly: 15,
+        maxPerCycle: 3,
+      };
+    }
+    if (!ak.executive.attentionBudgetState || typeof ak.executive.attentionBudgetState !== "object") {
+      ak.executive.attentionBudgetState = {
+        dayKey: GENESIS.slice(0, 10),
+        immediateCount: 0,
+        todayCount: 0,
+        briefingCount: 0,
+        weeklyCount: 0,
+        cycleCount: 0,
+        suppressed: 0,
+        delivered: [],
+        log: [],
+      };
+    }
+    if (!Array.isArray(ak.executive.entityMergeProposals)) ak.executive.entityMergeProposals = [];
+    if (!Array.isArray(ak.executive.entityUnmerges)) ak.executive.entityUnmerges = [];
     if (ak.executive.lastSnapshotSig === undefined) ak.executive.lastSnapshotSig = null;
     if (ak.executive.lastCycleResult === undefined) ak.executive.lastCycleResult = null;
     if (ak.executive.lastBriefingAt === undefined) ak.executive.lastBriefingAt = null;

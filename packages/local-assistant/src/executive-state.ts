@@ -19,6 +19,9 @@ import type {
   ResourceBudgetV1,
 } from "./executive-cycle.js";
 import { DEFAULT_RESOURCE_BUDGET } from "./executive-cycle.js";
+import type { AttentionBudgetConfigV1, AttentionBudgetStateV1 } from "./attention-budget.js";
+import { DEFAULT_ATTENTION_BUDGET, emptyAttentionBudgetState } from "./attention-budget.js";
+import type { EntityMergeProposalV1, EntityUnmergeRecordV1 } from "./entity-resolution.js";
 
 export interface IdentityResolutionV1 {
   /** Lowercase first name or alias key */
@@ -79,6 +82,12 @@ export interface ExecutiveStateV1 {
   lastCycleResult: ExecutiveCycleResultV1 | null;
   cycleHistory: ExecutiveCycleResultV1[];
   resourceBudget: ResourceBudgetV1;
+  /** Global Owner delivery budget shared by all proactive emitters. */
+  attentionBudgetConfig: AttentionBudgetConfigV1;
+  attentionBudgetState: AttentionBudgetStateV1;
+  /** Merge proposals only — never auto-applied. */
+  entityMergeProposals: EntityMergeProposalV1[];
+  entityUnmerges: EntityUnmergeRecordV1[];
   lastBriefingAt: IsoTimestamp | null;
   lastDailyMaintenanceAt: IsoTimestamp | null;
   lastEndOfDayAt: IsoTimestamp | null;
@@ -103,6 +112,10 @@ export function emptyExecutiveState(now: IsoTimestamp = "1970-01-01T00:00:00.000
     lastCycleResult: null,
     cycleHistory: [],
     resourceBudget: { ...DEFAULT_RESOURCE_BUDGET },
+    attentionBudgetConfig: { ...DEFAULT_ATTENTION_BUDGET },
+    attentionBudgetState: emptyAttentionBudgetState(now),
+    entityMergeProposals: [],
+    entityUnmerges: [],
     lastBriefingAt: null,
     lastDailyMaintenanceAt: null,
     lastEndOfDayAt: null,
