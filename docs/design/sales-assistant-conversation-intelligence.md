@@ -30,6 +30,39 @@ additive fields.
 
 ---
 
+### Component audit — verified against `26f3e35`
+
+Every row below was read in source. The pattern is consistent: the pieces exist, and what is missing
+is the wiring between them.
+
+| Capability | Exists? | Where | Reuse verdict |
+|---|---|---|---|
+| Relationships / customers / prospects | **Yes** | `RelationshipV1` (`contracts.ts:352`) with `lifecycle`, `interests`, `objections`, `followUps`, `interactions` | Reuse. Interactions and follow-ups already live on the record |
+| Interactions | **Yes** | `RelationshipInteractionV1` | Reuse as the durable per-customer timeline |
+| Commitments | **Yes** | `CommitmentV1` (`commitments.ts:14`) + `extractCommitmentCandidates()` | Reuse |
+| Commitment actor distinction | **Yes, already built** | `CommitmentActorV1 = "owner" \| "other" \| "uncertain"` and `ExtractedCommitmentV1` with `interpersonal` + `reason` (`connectors/gmail-connector.ts:207`) | **Reuse and generalise.** The "did the Owner promise, or the customer, or is it unclear" judgement is written and applied to email already; transcripts need the same extractor, not a new one |
+| Gmail threads | **Partial** | `GmailConnectorConfigV1`, `GmailRelevanceV1`, message fixtures | Reuse relevance + commitment extraction; there is no durable thread entity, and this design does not need one |
+| Tasks | **Yes** | `TaskV1` (`contracts.ts`) | Reuse for `CREATE_TASK` proposals |
+| Email drafts | **Yes** | `EmailDraftV1`, never auto-sent | Reuse; the DRAFT-ONLY discipline is the precedent for CRM proposals |
+| Vehicle inventory | **Yes** | `VehicleRecordV1` with `govVinFacts`, `recallAssessment`, `priceHistory`, presence/temporal state | Reuse |
+| Customer interests | **Yes but thin** | `RelationshipInterestV1` — free-text description | Insufficient for matching; superseded by `customer-need:*` temporal facts (§2). Keep the existing field as Owner-authored shorthand |
+| Workspaces | **Yes** | `settings.activeWorkspace`, per-record `workspace` | Reuse. Note the active-workspace filter currently hides other workspaces from lookup |
+| Provenance / source refs | **Yes** | `ProvenanceV1` + `source-trust.ts` 9-tier ladder + `classifySourceRef` | Reuse unchanged |
+| Corrections | **Yes** | `OwnerKnowledgeCorrectionV1`, `applyOwnerPhotoCorrection` pattern | Reuse the pattern: correct forward, never erase the original |
+| **Action authority** | **Yes, and stronger than expected** | `authority-envelope.ts` — `AuthorityEnvelopeV1`, `ExternalActionKindV1`, `ExternalActionRecordV1`, `evaluateExternalGate()` returning `{allowed:false, class: KILL\|POLICY\|SPEND\|DEPENDENCY\|AMBIGUITY}`, plus `writer-authority.ts` (`WRITER \| READ_ONLY \| REVOKED`) and `owner-authority-v2.ts` | **Reuse. Do not build a second authority system.** Tekion and Informativ become new `ExternalActionKindV1` values gated by the existing evaluator, with every attempt landing in the existing `ExternalActionRecordV1` log — including `blocked` and `owner_required` outcomes |
+| Drafts / never-auto-send | **Yes** | `emailSendSafetyCheck`, `EMAILS_SENT = 0` discipline | Reuse as the model for CRM writes |
+
+Two things this audit changes about the design:
+
+1. **Commitment extraction is not new work.** The Gmail connector already decides actor and whether
+   language is a real interpersonal obligation. Transcripts should feed that same extractor; a second
+   implementation would drift and produce two different answers about the same promise.
+2. **The authority boundary is not new work either.** `evaluateExternalGate` already returns a
+   refusal *class*, and `ExternalActionRecordV1` already records blocked and owner-required outcomes
+   with evidence. The Tekion/Informativ tiers in §6–§7 are new *kinds* passed to an existing gate —
+   not a parallel permission model. This matters: a second authority system is how a "no" in one
+   place becomes a "yes" in another.
+
 ## CURRENT_AION_COMPONENTS_REUSED
 
 - **`TemporalFactV1` + `source-trust.ts`** — customer needs and preferences. The supersession and
@@ -57,9 +90,15 @@ additive fields.
 - Do **not** create a second customer entity. `RelationshipV1` is the customer.
 - Do **not** add a vector store, graph database, or new agent framework for any of this.
 
-## NEW_CONTRACTS_REQUIRED
+- **Do not build a second authority system.** `evaluateExternalGate` + `ExternalActionKindV1` +
+  `ExternalActionRecordV1` already gate and log external effects with typed refusals. Tekion and
+  Informativ are new *kinds*, not a new model.
+- **Do not write a second commitment extractor.** `ExtractedCommitmentV1` + `CommitmentActorV1`
+  already judge actor and interpersonal-obligation language for email.
 
-Three, plus two additive fields.
+## NEW_STRUCTURES_ACTUALLY_REQUIRED
+
+Three contracts, plus two additive fields. Everything else is reuse.
 
 1. `ConversationEventV1` — the evidence envelope (§1)
 2. `IdentityResolutionV1` — how an event attaches to a customer (§4)
@@ -377,6 +416,96 @@ beyond the current observed listing.
 
 ---
 
+## CALL_TRANSCRIPTION_BOUNDARY
+
+Ingestion is **modality-neutral**: everything below produces the same `ConversationEventV1`. That is
+the point — the intelligence layer must never learn where audio came from, or each new capture path
+becomes a new code path through the customer model.
+
+```
+audio (any source) → transcript → segments → facts / commitments / proposals
+```
+
+The capture paths differ enormously in what they actually permit, and conflating them is how a
+roadmap promises something the platform will never allow.
+
+### TECHNICALLY AVAILABLE now
+
+| Path | Reality |
+|---|---|
+| Recorded audio file uploaded from the phone or laptop | Works today through the existing Chat attachment path. Needs a speech-to-text provider; the local-vision precedent (Ollama, localhost-only, USD 0) applies directly |
+| Laptop-side meeting/VoIP audio | Available when the Owner controls the calling application and system audio capture |
+| In-person note dictated after the fact | Already possible — voice input exists in the Chat composer and feeds the same pipeline |
+| Email | Already live via the Gmail connector, including commitment extraction |
+
+### REQUIRES A CONTROLLED CALLING PATH
+
+| Path | Reality |
+|---|---|
+| **iOS cellular call audio** | **Not available to third-party apps.** iOS gives no API for tapping an in-progress cellular call. No amount of AION engineering changes this, and any plan that assumes it will fail at contact with the platform |
+| Live cellular transcription | Only via a **controlled calling path** — a VoIP or business line the Owner places and receives calls through, where the audio belongs to the application rather than the carrier |
+| Two-party recording consent | A legal precondition, not a feature flag. Florida is an all-party-consent state; a dealership call typically involves a customer who has not consented |
+
+**The honest conclusion: live cellular call transcription is not an AION engineering task. It is a
+telephony decision** — adopt a VoIP/business line, or do not have this feature. Everything else in
+this design works without it, which is why the pipeline is defined modality-neutrally: post-call
+upload delivers most of the value and is available immediately.
+
+### Future live copilot — architecture only
+
+```
+audio stream → partial transcript → customer context lookup → quiet suggestion → final grounded summary
+```
+
+Three constraints that should be settled before any of it is built:
+
+1. **Partial transcript is never durable.** Only the final transcript produces facts or commitments.
+   A mid-sentence "under thirty" that resolves to "under thirty-five" must never reach the customer
+   record — an interim hypothesis is not evidence.
+2. **Suggestions are read-only and silent.** During a live call AION may surface what it already
+   knows; it may not write, send, or propose an external action. The Owner is talking to a person and
+   cannot adjudicate a permission prompt.
+3. **The summary is reviewed after the call, not accepted during it.** The existing DRAFT-ONLY
+   discipline applies unchanged.
+
+Latency targets matter only for suggestions (sub-second to be useful, and useless if wrong), and not
+at all for the durable path — which should be unhurried and correct.
+
+## TOP_10_IMPLEMENTATION_STEPS_LATER
+
+Ordered so each step is independently useful and independently reversible. Steps 1–4 deliver a
+working product with **no** call recording, no Tekion, and no new authority.
+
+1. **Extract intent handlers out of `service.ts`** before anything else. It is ~11,000 lines with a
+   ~2,000-line `assistantPrompt` and two executors editing it concurrently. Every step below adds to
+   it otherwise.
+2. **Add `TemporalFactV1.subjectRef`** (optional, defaulted forward). Nothing else can be
+   per-customer until facts can name their subject. No migration.
+3. **Add `customer-need:*` fact writing from Owner-typed notes.** No transcription, no audio — the
+   Owner says *"Sarah needs under 35, no hybrid"* and it becomes superseding facts. This proves the
+   needs model against real use before any capture path exists.
+4. **Extend `matchCustomerToVehicles()` to read those facts**, with hard requirements disqualifying
+   rather than down-ranking. Now *"Which cars fit Sarah?"* works, on inventory that already exists.
+5. **Add the read models** (`CallPrepView`, `WaitingOnOwnerView`, `NeedsHistoryView`, …) as pure
+   functions over existing state. This is where the Owner feels the product.
+6. **Add `ConversationEventV1`** with the manual paths only — `OWNER_NOTE`, `IN_PERSON_NOTE`, and
+   Gmail — routing through the *existing* `ExtractedCommitmentV1` extractor rather than a new one.
+7. **Add speech-to-text for uploaded recordings**, localhost-only, USD 0, following the Ollama
+   precedent. Still no live capture, no cellular audio.
+8. **Add `IdentityResolutionV1`**, mirroring `photo-vehicle-match`. Unresolved events are stored
+   unattached and surfaced for Owner resolution.
+9. **Add `CrmActionProposalV1` in propose-only mode** — proposals generated, reviewed, and marked
+   `APPROVED`, with **no executor**. The Owner performs the action manually. This validates proposal
+   quality before any automation exists, and is the cheapest possible way to discover that the
+   proposals are wrong.
+10. **Only then**, a browser executor for `ADD_NOTE` / `CREATE_TASK` alone, gated through
+    `evaluateExternalGate` with new `ExternalActionKindV1` values, idempotency keys, and preconditions
+    re-checked at execution. Informativ-class actions remain unimplemented.
+
+Steps 9 and 10 are deliberately separated. A proposal layer with no executor is safe and immediately
+informative; the executor is the only step that can act on the world, and it should be reached last
+and narrowest.
+
 ## MIGRATION_IMPACT
 
 **None required.** All three new contracts are new collections; both field additions are optional and
@@ -427,5 +556,8 @@ to whoever holds integrator authority, not to a feature branch.
 6. Does the dealership have a policy on AI-assisted CRM entry that constrains any of this?
 7. What happens to derived facts when the Owner deletes a conversation — cascade, or orphan with
    provenance retained?
-8. Should reverse matching ("who might want this Camry?") be proactive, given it could generate
+8. **Is a VoIP or business calling line acceptable to the dealership?** iOS cannot tap cellular call
+   audio at all, so this single answer decides whether live call transcription is ever possible —
+   it is a telephony decision, not an engineering one.
+9. Should reverse matching ("who might want this Camry?") be proactive, given it could generate
    outreach pressure the Owner has not asked for?
