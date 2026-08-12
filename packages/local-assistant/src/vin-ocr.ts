@@ -134,12 +134,52 @@ export function scoreVinCandidate(
 }
 
 /**
+ * Modern VINs mix letters and digits. Pure-letter / near-letter garbage from
+ * classical OCR on glass reflections can still pass check digit by chance —
+ * reject those before they become identity claims.
+ */
+export function isPlausibleVinCharset(vin: string): boolean {
+  const v = normalizeVinCandidate(vin);
+  if (v.length !== 17) return false;
+  const digits = (v.match(/\d/g) ?? []).length;
+  const letters = (v.match(/[A-Z]/g) ?? []).length;
+  // Real passenger/light-truck VINs almost always mix both (WMI + year + serial).
+  if (digits < 4 || letters < 4) return false;
+  // Extreme repetition (beyond single-char placeholder already rejected upstream).
+  const unique = new Set(v.split("")).size;
+  if (unique < 5) return false;
+  return true;
+}
+
+/** High symbol/noise OCR is not trustworthy enough for silent HIGH_CONFIDENCE. */
+export function isNoisyOcrText(text: string): boolean {
+  const t = String(text ?? "");
+  if (!t.trim()) return true;
+  const compact = t.replace(/\s+/g, "");
+  if (compact.length < 8) return false;
+  const alnum = (compact.match(/[A-Za-z0-9]/g) ?? []).length;
+  const punct = compact.length - alnum;
+  const ratio = alnum / compact.length;
+  // Classical OCR on glass reflections: low alnum ratio and/or heavy punctuation density.
+  if (ratio < 0.62) return true;
+  if (punct >= 10 && punct / compact.length >= 0.18) return true;
+  // Many short broken tokens is also a noise signature.
+  const tokens = t.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 12) {
+    const short = tokens.filter((w) => w.replace(/[^A-Za-z0-9]/g, "").length <= 2).length;
+    if (short / tokens.length >= 0.45) return true;
+  }
+  return false;
+}
+
+/**
  * Build ranked VIN candidates from free OCR/vision text.
  * Only promotes valid (check digit) candidates to high confidence.
  */
 export function proposeVinsFromOcrText(text: string): VinOcrCandidateV1[] {
   const raw = String(text ?? "");
-  const direct = extractVinCandidatesFromText(raw);
+  const noisy = isNoisyOcrText(raw);
+  const direct = extractVinCandidatesFromText(raw).filter(isPlausibleVinCharset);
   // Also grab near-17 alphanumerics that may include illegal OCR chars
   const loose = raw.toUpperCase().match(/[A-Z0-9IOQ]{15,20}/g) ?? [];
   const seeds = uniqueStrings([
@@ -160,10 +200,19 @@ export function proposeVinsFromOcrText(text: string): VinOcrCandidateV1[] {
 
     for (const v of variants) {
       if (v.length !== 17 || seen.has(v)) continue;
+      if (!isPlausibleVinCharset(v)) continue;
       seen.add(v);
       const fromCorrection = v !== normalizeVinCandidate(seed) || /[IOQ]/.test(seed);
       const rawHit = direct.includes(v);
-      const c = scoreVinCandidate(v, { fromCorrection, rawHit });
+      // Noisy reflection OCR: never treat as a silent direct high-confidence read.
+      const c = scoreVinCandidate(v, {
+        fromCorrection: fromCorrection || (noisy && !rawHit),
+        rawHit: rawHit && !noisy,
+      });
+      if (noisy && c.valid) {
+        c.confidence = Math.min(c.confidence, 72);
+        c.source = c.source === "direct" ? "partial" : c.source;
+      }
       // Prefer valid only in shortlist; keep top invalid for feedback
       if (c.valid || c.confidence >= 30) scored.push(c);
     }

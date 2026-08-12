@@ -9,7 +9,9 @@ import {
   cropPngToRegion,
   decodeSimplePng,
   encodeRgbaPng,
+  isNonOcrVisionText,
   ownerFacingExtractionMessage,
+  parseVisionBoxRegion,
   VIN_IDENTITY_ONLY_PROMPT,
   VIN_STICKER_FOCUS_PROMPT,
   vinIdentityCropRegions,
@@ -129,4 +131,26 @@ test("valid VIN is NONE failure kind", () => {
     }),
     "NONE",
   );
+});
+
+test("REAL_STICKER_DOCUMENT_DETECTION: vision detect-box parses to crop region", () => {
+  // Production moondream sometimes returns coordinate boxes instead of characters.
+  const region = parseVisionBoxRegion("ids = [0.42, 0.3, 0.59, 0.44]");
+  assert.ok(region);
+  assert.equal(region!.name, "vision-detect-box");
+  assert.ok(region!.w > 0.1 && region!.h > 0.1);
+  assert.ok(region!.x + region!.w <= 1.05);
+});
+
+test("non-OCR vision garbage is detected (coords, bangs, meta-refusal)", () => {
+  assert.equal(isNonOcrVisionText("!!!"), true);
+  assert.equal(isNonOcrVisionText("ids = [0.42, 0.3, 0.59, 0.44]"), true);
+  assert.equal(isNonOcrVisionText("I am an AI language model and cannot see images"), true);
+  assert.equal(isNonOcrVisionText("VIN JTDACAAJ8T3051788 on the sticker"), false);
+});
+
+test("identity regions include document-core and vin-strip", () => {
+  const names = vinIdentityCropRegions().map((r) => r.name);
+  assert.ok(names.includes("document-core"));
+  assert.ok(names.includes("vin-strip"));
 });

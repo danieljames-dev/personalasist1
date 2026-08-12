@@ -31,9 +31,14 @@ export function vinIdentityCropRegions(): ImageCropRegionV1[] {
   return [
     // Window stickers (Monroney) typically fill the center of a phone photo of the glass.
     { name: "center-document", x: 0.08, y: 0.08, w: 0.84, h: 0.84 },
+    // Slightly tighter document core (reduces dashboard/glass margin).
+    { name: "document-core", x: 0.12, y: 0.12, w: 0.76, h: 0.72 },
     { name: "top-band", x: 0, y: 0, w: 1, h: 0.4 },
+    // VIN line is often a narrow strip under the header / near the barcode.
+    { name: "vin-strip", x: 0.05, y: 0.12, w: 0.9, h: 0.18 },
     { name: "vin-upper-left", x: 0.04, y: 0.06, w: 0.55, h: 0.32 },
     { name: "vin-top-center", x: 0.15, y: 0.05, w: 0.7, h: 0.28 },
+    { name: "vin-mid-left", x: 0.02, y: 0.18, w: 0.6, h: 0.28 },
     { name: "center-band", x: 0.05, y: 0.3, w: 0.9, h: 0.4 },
     { name: "bottom-band", x: 0, y: 0.55, w: 1, h: 0.45 },
     { name: "price-lower", x: 0.05, y: 0.55, w: 0.9, h: 0.4 },
@@ -249,37 +254,74 @@ export function decodeJpegRgba(bytes: Buffer): PngInfoV1 | null {
 }
 
 /**
+ * Crop RGBA at full resolution, then optionally downscale the *crop* (not the whole page).
+ * Downscaling the full phone photo first destroys VIN character pixels on dense stickers.
+ */
+export function cropRgbaRegionThenScale(
+  width: number,
+  height: number,
+  rgba: Buffer,
+  region: ImageCropRegionV1,
+  opts: { maxEdge?: number; contrast?: boolean } = {},
+): Buffer | null {
+  const maxEdge = opts.maxEdge ?? 2048;
+  const x0 = Math.max(0, Math.min(width - 1, Math.floor(region.x * width)));
+  const y0 = Math.max(0, Math.min(height - 1, Math.floor(region.y * height)));
+  const cw = Math.max(8, Math.min(width - x0, Math.floor(region.w * width)));
+  const ch = Math.max(8, Math.min(height - y0, Math.floor(region.h * height)));
+  if (cw < 8 || ch < 8) return null;
+  let out: Buffer = Buffer.alloc(cw * ch * 4);
+  for (let y = 0; y < ch; y++) {
+    const src = ((y0 + y) * width + x0) * 4;
+    rgba.copy(out, y * cw * 4, src, src + cw * 4);
+  }
+  let ow = cw;
+  let oh = ch;
+  if (ow > maxEdge || oh > maxEdge) {
+    const scale = maxEdge / Math.max(ow, oh);
+    const nw = Math.max(8, Math.floor(ow * scale));
+    const nh = Math.max(8, Math.floor(oh * scale));
+    out = Buffer.from(scaleRgbaNearest(out, ow, oh, nw, nh));
+    ow = nw;
+    oh = nh;
+  }
+  if (opts.contrast) {
+    out = Buffer.from(contrastStretchRgba(out));
+  }
+  return encodeRgbaPng(ow, oh, out);
+}
+
+/**
  * Crop JPEG/PNG bytes to a region and return PNG for vision models.
  * Phone Chat uploads are almost always JPEG — PNG-only crops previously skipped the entire fallback.
+ *
+ * Important: crop at native resolution first, then downscale the crop. Scaling the whole
+ * 12MP phone frame before cropping is what made dense sticker VINs unreadable.
  */
 export function cropImageToRegion(
   bytes: Buffer,
   region: ImageCropRegionV1,
   mimeHint = "",
+  opts: { maxEdge?: number; contrast?: boolean } = {},
 ): Buffer | null {
   const mime = mimeHint.toLowerCase();
   const isPng = mime.includes("png") || (bytes[0] === 0x89 && bytes[1] === 0x50);
   const isJpeg = mime.includes("jpeg") || mime.includes("jpg") || (bytes[0] === 0xff && bytes[1] === 0xd8);
-  if (isPng) return cropPngToRegion(bytes, region);
+  if (isPng) {
+    const decoded = decodeSimplePng(bytes);
+    if (!decoded) return cropPngToRegion(bytes, region);
+    return cropRgbaRegionThenScale(decoded.width, decoded.height, decoded.rgba, region, opts);
+  }
   if (isJpeg) {
     const decoded = decodeJpegRgba(bytes);
     if (!decoded) return null;
-    // Downsample very large phone images before crop fan-out (keeps Ollama payloads reasonable).
-    const maxEdge = 1600;
-    if (decoded.width > maxEdge || decoded.height > maxEdge) {
-      const scale = maxEdge / Math.max(decoded.width, decoded.height);
-      const nw = Math.max(8, Math.floor(decoded.width * scale));
-      const nh = Math.max(8, Math.floor(decoded.height * scale));
-      const scaled = scaleRgbaNearest(decoded.rgba, decoded.width, decoded.height, nw, nh);
-      return cropRgbaToPng(nw, nh, scaled, region);
-    }
-    return cropRgbaToPng(decoded.width, decoded.height, decoded.rgba, region);
+    return cropRgbaRegionThenScale(decoded.width, decoded.height, decoded.rgba, region, opts);
   }
   // Try PNG then JPEG signatures as last resort.
-  return cropPngToRegion(bytes, region) ?? (() => {
-    const d = decodeJpegRgba(bytes);
-    return d ? cropRgbaToPng(d.width, d.height, d.rgba, region) : null;
-  })();
+  const asPng = decodeSimplePng(bytes);
+  if (asPng) return cropRgbaRegionThenScale(asPng.width, asPng.height, asPng.rgba, region, opts);
+  const asJpeg = decodeJpegRgba(bytes);
+  return asJpeg ? cropRgbaRegionThenScale(asJpeg.width, asJpeg.height, asJpeg.rgba, region, opts) : null;
 }
 
 function scaleRgbaNearest(
@@ -303,6 +345,80 @@ function scaleRgbaNearest(
     }
   }
   return out;
+}
+
+/** Simple per-channel contrast stretch (deterministic, no external CV). */
+export function contrastStretchRgba(rgba: Buffer): Buffer {
+  let min = 255;
+  let max = 0;
+  for (let i = 0; i < rgba.length; i += 4) {
+    const y = Math.round(0.299 * rgba[i]! + 0.587 * rgba[i + 1]! + 0.114 * rgba[i + 2]!);
+    if (y < min) min = y;
+    if (y > max) max = y;
+  }
+  const range = Math.max(1, max - min);
+  const out = Buffer.alloc(rgba.length);
+  for (let i = 0; i < rgba.length; i += 4) {
+    const y = Math.round(0.299 * rgba[i]! + 0.587 * rgba[i + 1]! + 0.114 * rgba[i + 2]!);
+    const stretched = Math.max(0, Math.min(255, Math.round(((y - min) * 255) / range)));
+    out[i] = stretched;
+    out[i + 1] = stretched;
+    out[i + 2] = stretched;
+    out[i + 3] = rgba[i + 3]!;
+  }
+  return out;
+}
+
+/**
+ * True when vision output is not usable OCR (coords, empty noise, model meta-talk).
+ * Used so garbage full-frame replies do not block crop / tesseract fallbacks.
+ */
+export function isNonOcrVisionText(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return true;
+  if (t.length < 4) return true;
+  // moondream sometimes returns detection-style boxes instead of characters
+  if (/ids\s*=\s*\[/.test(t)) return true;
+  if (/^\s*\[?\s*0?\.\d+\s*,\s*0?\.\d+\s*,\s*0?\.\d+\s*,\s*0?\.\d+\s*\]?\s*$/.test(t)) return true;
+  if (/^!+$/.test(t) || /^[.\s]+$/.test(t)) return true;
+  // model refuses / cannot see (not character evidence)
+  if (/\b(unable to (see|view|read)|cannot (see|view|provide)|i am an ai)\b/i.test(t) && !/[A-HJ-NPR-Z0-9]{11,}/i.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+/** Parse optional [x1,y1,x2,y2] or [x,y,w,h] fractions from vision detect-style output. */
+export function parseVisionBoxRegion(text: string): ImageCropRegionV1 | null {
+  const m = String(text || "").match(/ids\s*=\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]/i)
+    ?? String(text || "").match(/\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]/);
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  const c = Number(m[3]);
+  const d = Number(m[4]);
+  if (![a, b, c, d].every((n) => Number.isFinite(n) && n >= 0 && n <= 1.5)) return null;
+  // Prefer x1,y1,x2,y2 when c>a and d>b
+  if (c > a && d > b && c <= 1.05 && d <= 1.05) {
+    const pad = 0.02;
+    const x = Math.max(0, a - pad);
+    const y = Math.max(0, b - pad);
+    const w = Math.min(1 - x, c - a + 2 * pad);
+    const h = Math.min(1 - y, d - b + 2 * pad);
+    if (w < 0.05 || h < 0.05) return null;
+    return { name: "vision-detect-box", x, y, w, h };
+  }
+  // Else treat as x,y,w,h
+  if (c > 0.05 && d > 0.05 && a + c <= 1.2 && b + d <= 1.2) {
+    return {
+      name: "vision-detect-box",
+      x: Math.max(0, Math.min(0.95, a)),
+      y: Math.max(0, Math.min(0.95, b)),
+      w: Math.min(1, c),
+      h: Math.min(1, d),
+    };
+  }
+  return null;
 }
 
 /**

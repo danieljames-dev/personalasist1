@@ -126,6 +126,8 @@ import {
 } from "./photo-vehicle-match.js";
 import {
   cropImageToRegion,
+  isNonOcrVisionText,
+  parseVisionBoxRegion,
   VIN_IDENTITY_ONLY_PROMPT,
   VIN_STICKER_FOCUS_PROMPT,
   STICKER_PRICE_FOCUS_PROMPT,
@@ -5565,6 +5567,9 @@ export class AionAssistantV1 {
       byteLength = bytes.byteLength;
     }
 
+    /** Last raw vision string (may be detect-box garbage); used only for region hints. */
+    let lastVisionRaw = "";
+
     const runVision = async (img: Buffer, prompt: string, passName: string, mimeType: string) => {
       const vision = await extractImageWithLocalVision({
         filename: input.filename || "vin.jpg",
@@ -5575,8 +5580,11 @@ export class AionAssistantV1 {
         timeoutMs: 60_000,
       });
       extractionPasses.push(passName);
-      if (vision.extractedText?.trim() && vision.code === "READY") {
-        text = vision.extractedText.trim();
+      const raw = String(vision.extractedText ?? "").trim();
+      if (raw) lastVisionRaw = raw;
+      // Detection boxes / "!!!" / meta-refusals are not OCR evidence — keep falling back.
+      if (vision.code === "READY" && raw && !isNonOcrVisionText(raw)) {
+        text = raw;
         provider = vision.provider || "ollama-vision";
         extractionOk = true;
         return true;
@@ -5586,17 +5594,13 @@ export class AionAssistantV1 {
         extractionOk = false;
       } else {
         provider = vision.provider || "vision-empty";
-        extractionOk = false;
+        // Keep extractionOk false when only garbage was returned.
+        if (!text || isNonOcrVisionText(text)) extractionOk = false;
       }
       return false;
     };
 
-    if (!text && bytes && !input.offline) {
-      await runVision(bytes, VIN_VISION_PROMPT, "full-frame", input.mimeType || "image/jpeg");
-    }
-
-    // Optional tesseract.js (installed at monorepo root when available)
-    if (!text && bytes) {
+    const runTesseract = async (img: Buffer, passName: string): Promise<boolean> => {
       try {
         const tessPath = "tesseract.js";
         const tess = await import(tessPath) as {
@@ -5605,27 +5609,36 @@ export class AionAssistantV1 {
             terminate: () => Promise<void>;
           }>;
         };
-        if (typeof tess.createWorker === "function") {
-          const worker = await tess.createWorker("eng");
-          try {
-            const result = await worker.recognize(bytes);
-            text = String(result?.data?.text ?? "").trim();
-            if (text) {
-              provider = "tesseract.js";
-              extractionOk = true;
-              extractionPasses.push("tesseract-full");
-            }
-          } finally {
-            await worker.terminate();
-          }
+        if (typeof tess.createWorker !== "function") return false;
+        const worker = await tess.createWorker("eng");
+        try {
+          const result = await worker.recognize(img);
+          const tessText = String(result?.data?.text ?? "").trim();
+          extractionPasses.push(passName);
+          if (!tessText || isNonOcrVisionText(tessText)) return false;
+          text = tessText;
+          provider = "tesseract.js";
+          extractionOk = true;
+          return true;
+        } finally {
+          await worker.terminate();
         }
       } catch {
-        /* tesseract optional */
+        return false;
       }
+    };
+
+    if (!text && bytes && !input.offline) {
+      await runVision(bytes, VIN_VISION_PROMPT, "full-frame", input.mimeType || "image/jpeg");
+    }
+
+    // Optional tesseract.js full-frame only when vision produced nothing usable.
+    if (bytes && (!text || isNonOcrVisionText(text))) {
+      await runTesseract(bytes, "tesseract-full");
     }
 
     let ocr = buildVinOcrResult({
-      extractedText: text,
+      extractedText: isNonOcrVisionText(text) ? "" : text,
       provider,
       ...(byteLength ? { byteLength } : {}),
       ...(extractionOk === undefined ? {} : { extractionOk }),
@@ -5633,8 +5646,8 @@ export class AionAssistantV1 {
 
     /*
      * Sticker fallback: dense multi-field stickers often fail full-frame.
-     * Identity-first: VIN-only prompt, then JPEG/PNG identity-band crops.
-     * Phone Chat uploads are almost always JPEG — cropImageToRegion (not PNG-only).
+     * Identity-first: VIN-only prompt, then full-res JPEG/PNG identity-band crops
+     * (crop-then-scale), contrast crops, and tesseract on those crops.
      * Goal is identity (VIN), then inventory match — not full-sticker OCR.
      */
     if (
@@ -5663,24 +5676,49 @@ export class AionAssistantV1 {
           });
         }
       }
+
+      // If any pass returned a detect-style box, try that region first (full-res crop).
+      const detectRegion = parseVisionBoxRegion(lastVisionRaw);
+      const allRegions = detectRegion
+        ? [detectRegion, ...vinIdentityCropRegions()]
+        : vinIdentityCropRegions();
+      // Bound fan-out: vision is slow; prefer identity bands, then classical OCR.
+      const visionRegions = allRegions
+        .filter((r) => !r.name.includes("price") && !r.name.startsWith("lower-"))
+        .slice(0, 6);
+      const tessRegions = allRegions.slice(0, 10);
+
       if (ocr.status === "VIN_OCR_FAILED") {
-        for (const region of vinIdentityCropRegions()) {
+        for (const region of visionRegions) {
           const cropped = cropImageToRegion(bytes, region, mime);
           if (!cropped) continue;
-          // Identity-first on most crops; price region uses a price prompt (still not full OCR).
-          const firstPrompt = region.name.includes("price")
-            ? STICKER_PRICE_FOCUS_PROMPT
-            : VIN_IDENTITY_ONLY_PROMPT;
-          const prompts: Array<{ prompt: string; pass: string }> = [
-            { prompt: firstPrompt, pass: `crop:${region.name}` },
-            { prompt: VIN_STICKER_FOCUS_PROMPT, pass: `crop:${region.name}:focus` },
+          if (await runVision(cropped, VIN_IDENTITY_ONLY_PROMPT, `crop:${region.name}`, "image/png")) {
+            ocr = buildVinOcrResult({
+              extractedText: text,
+              provider: `${provider}+crop:${region.name}`,
+              ...(byteLength ? { byteLength } : {}),
+              extractionOk: true,
+            });
+            if (ocr.status !== "VIN_OCR_FAILED") break;
+          }
+        }
+      }
+
+      // Classical OCR on full-res crops — measured stronger than moondream on dense print noise.
+      if (ocr.status === "VIN_OCR_FAILED") {
+        for (const region of tessRegions) {
+          const variants: Array<{ label: string; opts?: { contrast?: boolean } }> = [
+            { label: region.name },
+            { label: `${region.name}:contrast`, opts: { contrast: true } },
           ];
           let resolved = false;
-          for (const step of prompts) {
-            if (await runVision(cropped, step.prompt, step.pass, "image/png")) {
+          for (const v of variants) {
+            const cropped = cropImageToRegion(bytes, region, mime, v.opts ?? {});
+            if (!cropped) continue;
+            if (await runTesseract(cropped, `tesseract:${v.label}`)) {
               ocr = buildVinOcrResult({
                 extractedText: text,
-                provider: `${provider}+${step.pass}`,
+                provider: `tesseract:${v.label}`,
                 ...(byteLength ? { byteLength } : {}),
                 extractionOk: true,
               });
@@ -5693,15 +5731,32 @@ export class AionAssistantV1 {
           if (resolved) break;
         }
       }
+
+      // Optional price-region vision only after identity still failed (cheap extra signal for sticker fields).
+      if (ocr.status === "VIN_OCR_FAILED") {
+        const priceRegion = allRegions.find((r) => r.name.includes("price"));
+        if (priceRegion) {
+          const cropped = cropImageToRegion(bytes, priceRegion, mime);
+          if (cropped) {
+            await runVision(cropped, STICKER_PRICE_FOCUS_PROMPT, `crop:${priceRegion.name}`, "image/png");
+            ocr = buildVinOcrResult({
+              extractedText: isNonOcrVisionText(text) ? "" : text,
+              provider,
+              ...(byteLength ? { byteLength } : {}),
+              ...(extractionOk === undefined ? {} : { extractionOk }),
+            });
+          }
+        }
+      }
     }
 
     // Rebuild once more so failureKind/qualityFeedback reflect final text + byteLength.
     if (ocr.status === "VIN_OCR_FAILED") {
       ocr = buildVinOcrResult({
-        extractedText: text,
+        extractedText: isNonOcrVisionText(text) ? "" : text,
         provider,
         ...(byteLength ? { byteLength } : {}),
-        ...(extractionOk === undefined ? {} : { extractionOk }),
+        extractionOk: false,
       });
     }
 
