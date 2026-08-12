@@ -42,7 +42,7 @@ test("O/0 confusion can recover valid VIN", () => {
 test("invalid OCR text fails gracefully with quality tips", () => {
   const r = buildVinOcrResult({ extractedText: "blurry photo of dashboard", provider: "fixture" });
   assert.equal(r.status, "VIN_OCR_FAILED");
-  assert.ok(r.qualityFeedback.some((t) => /closer|glare|retake|uncertain|readable/i.test(t)));
+  assert.ok(r.qualityFeedback.some((t) => /closer|glare|retake|uncertain|readable|VIN/i.test(t)));
 });
 
 test("empty text quality feedback is actionable", () => {
@@ -50,6 +50,32 @@ test("empty text quality feedback is actionable", () => {
   assert.equal(r.status, "VIN_OCR_FAILED");
   assert.ok(r.qualityFeedback.length >= 2);
   assert.ok(r.qualityFeedback.some((t) => /closer|glare|straight/i.test(t)));
+});
+
+test("REAL_STICKER_FAILURE_WORDING: large phone photo does not demand retake", () => {
+  const r = buildVinOcrResult({
+    extractedText: "yes",
+    provider: "ollama:moondream",
+    byteLength: 2_641_019,
+    extractionOk: true,
+  });
+  assert.equal(r.status, "VIN_OCR_FAILED");
+  assert.equal(r.failureKind, "DENSE_TEXT_LIMITATION");
+  assert.match(r.message, /model|dense|sticker|limitation/i);
+  assert.doesNotMatch(r.message, /retake photo/i);
+  assert.ok(r.qualityFeedback.every((t) => !/retake photo|clearer picture/i.test(t)));
+  assert.ok(r.qualityFeedback.some((t) => /type the.*VIN|model limitation|dense/i.test(t)));
+});
+
+test("large empty extraction is model failure not Owner photography", () => {
+  const r = buildVinOcrResult({
+    extractedText: "",
+    provider: "vision-empty",
+    byteLength: 3_000_000,
+    extractionOk: false,
+  });
+  assert.equal(r.failureKind, "MODEL_EXTRACTION_FAILURE");
+  assert.doesNotMatch(r.message, /retake photo/i);
 });
 
 test("stock sticker fields extracted without fabrication", () => {
@@ -60,6 +86,8 @@ test("stock sticker fields extracted without fabrication", () => {
   assert.equal(f.model, "Tacoma");
   assert.ok(f.price === 38990);
   assert.equal(f.mileage, 12);
+  const total = extractStickerFields("Total Suggested Retail Price: $53,378");
+  assert.equal(total.price, 53378);
   const empty = extractStickerFields("no useful data here");
   assert.equal(empty.stockNumber, null);
   assert.equal(empty.price, null);

@@ -125,9 +125,12 @@ import {
   type PhotoVehicleContextV1,
 } from "./photo-vehicle-match.js";
 import {
-  cropPngToRegion,
+  cropImageToRegion,
+  VIN_IDENTITY_ONLY_PROMPT,
   VIN_STICKER_FOCUS_PROMPT,
+  STICKER_PRICE_FOCUS_PROMPT,
   vinIdentityCropRegions,
+  ownerFacingExtractionMessage,
 } from "./image-region.js";
 import {
   buildVehicleTalkingPoints,
@@ -5629,9 +5632,10 @@ export class AionAssistantV1 {
     });
 
     /*
-     * Sticker fallback: dense multi-field stickers often return empty or no VIN on full-frame.
-     * Do not pull another model — try a focused prompt, then identity-band crops (PNG only).
-     * Goal is identity (VIN / stock), not every sticker field.
+     * Sticker fallback: dense multi-field stickers often fail full-frame.
+     * Identity-first: VIN-only prompt, then JPEG/PNG identity-band crops.
+     * Phone Chat uploads are almost always JPEG — cropImageToRegion (not PNG-only).
+     * Goal is identity (VIN), then inventory match — not full-sticker OCR.
      */
     if (
       !input.offline
@@ -5639,29 +5643,66 @@ export class AionAssistantV1 {
       && bytes
       && ocr.status === "VIN_OCR_FAILED"
     ) {
-      if (await runVision(bytes, VIN_STICKER_FOCUS_PROMPT, "sticker-focus-full", input.mimeType || "image/jpeg")) {
+      const mime = input.mimeType || "image/jpeg";
+      // Identity-first full-frame (short VIN-only prompt).
+      if (await runVision(bytes, VIN_IDENTITY_ONLY_PROMPT, "vin-identity-full", mime)) {
         ocr = buildVinOcrResult({
           extractedText: text,
-          provider: `${provider}+sticker-focus`,
+          provider: `${provider}+vin-identity`,
           ...(byteLength ? { byteLength } : {}),
           extractionOk: true,
         });
       }
       if (ocr.status === "VIN_OCR_FAILED") {
-        for (const region of vinIdentityCropRegions()) {
-          const cropped = cropPngToRegion(bytes, region);
-          if (!cropped) continue;
-          if (await runVision(cropped, VIN_STICKER_FOCUS_PROMPT, `crop:${region.name}`, "image/png")) {
-            ocr = buildVinOcrResult({
-              extractedText: text,
-              provider: `${provider}+crop:${region.name}`,
-              ...(byteLength ? { byteLength } : {}),
-              extractionOk: true,
-            });
-            if (ocr.status !== "VIN_OCR_FAILED") break;
-          }
+        if (await runVision(bytes, VIN_STICKER_FOCUS_PROMPT, "sticker-focus-full", mime)) {
+          ocr = buildVinOcrResult({
+            extractedText: text,
+            provider: `${provider}+sticker-focus`,
+            ...(byteLength ? { byteLength } : {}),
+            extractionOk: true,
+          });
         }
       }
+      if (ocr.status === "VIN_OCR_FAILED") {
+        for (const region of vinIdentityCropRegions()) {
+          const cropped = cropImageToRegion(bytes, region, mime);
+          if (!cropped) continue;
+          // Identity-first on most crops; price region uses a price prompt (still not full OCR).
+          const firstPrompt = region.name.includes("price")
+            ? STICKER_PRICE_FOCUS_PROMPT
+            : VIN_IDENTITY_ONLY_PROMPT;
+          const prompts: Array<{ prompt: string; pass: string }> = [
+            { prompt: firstPrompt, pass: `crop:${region.name}` },
+            { prompt: VIN_STICKER_FOCUS_PROMPT, pass: `crop:${region.name}:focus` },
+          ];
+          let resolved = false;
+          for (const step of prompts) {
+            if (await runVision(cropped, step.prompt, step.pass, "image/png")) {
+              ocr = buildVinOcrResult({
+                extractedText: text,
+                provider: `${provider}+${step.pass}`,
+                ...(byteLength ? { byteLength } : {}),
+                extractionOk: true,
+              });
+              if (ocr.status !== "VIN_OCR_FAILED") {
+                resolved = true;
+                break;
+              }
+            }
+          }
+          if (resolved) break;
+        }
+      }
+    }
+
+    // Rebuild once more so failureKind/qualityFeedback reflect final text + byteLength.
+    if (ocr.status === "VIN_OCR_FAILED") {
+      ocr = buildVinOcrResult({
+        extractedText: text,
+        provider,
+        ...(byteLength ? { byteLength } : {}),
+        ...(extractionOk === undefined ? {} : { extractionOk }),
+      });
     }
 
     return {
@@ -5773,13 +5814,32 @@ export class AionAssistantV1 {
 
     if (matched) {
       const name = [matched.year, matched.make, matched.model, matched.trim].filter(Boolean).join(" ");
+      // Identity-first success: VIN matched inventory even if full sticker OCR was incomplete.
+      lines.push(`I identified the vehicle from the VIN.`);
       lines.push(name || "Vehicle identified");
       lines.push(`VIN ${link.vin}${matched.stockNumber ? ` · Stock ${matched.stockNumber}` : ""}`);
       lines.push("");
       for (const line of vinDetailLines(matched, input.text)) lines.push(line.text);
       const recall = describeRecallStatus(matched.recallAssessment);
       if (recall) { lines.push(""); lines.push(recall); }
+      if (ocr.sticker.price) {
+        lines.push("");
+        lines.push(`Sticker price signal (from photo text): $${ocr.sticker.price.toLocaleString("en-US")}`);
+      }
+      if (ocr.extractedText && ocr.extractedText.length < 80) {
+        lines.push("");
+        lines.push("I wasn't able to reliably read every small-print sticker field — inventory and VIN decode are the source of truth for this answer.");
+      }
       sources.push({ type: "vehicle", id: matched.id, label: name || matched.id });
+    } else if (link.state === "VALID_VIN_NOT_IN_CURRENT_INVENTORY" && link.vin) {
+      lines.push(`I found VIN ${link.vin} and validated it, but it is not in current AION inventory.`);
+      lines.push(link.message);
+    } else if (link.state === "NO_VIN_FOUND") {
+      // Prefer failure-kind wording over "retake" when photo is large/usable.
+      const kindMsg = ocr.failureKind && ocr.failureKind !== "NONE"
+        ? ownerFacingExtractionMessage(ocr.failureKind)
+        : "";
+      lines.push(kindMsg || link.message || ocr.message);
     } else {
       lines.push(link.message);
     }
@@ -5791,7 +5851,11 @@ export class AionAssistantV1 {
     }
     if (!matched && ocr.qualityFeedback.length) {
       lines.push("");
-      for (const tip of ocr.qualityFeedback.slice(0, 3)) lines.push(tip);
+      for (const tip of ocr.qualityFeedback.slice(0, 3)) {
+        // Avoid duplicating the primary failure sentence already pushed above.
+        if (lines.some((l) => l === tip)) continue;
+        lines.push(tip);
+      }
     }
 
     return {
@@ -5810,6 +5874,8 @@ export class AionAssistantV1 {
         vehicleRef: link.vehicleRef,
         conversationId: input.conversationId ?? null,
         processingState: matched ? "IDENTIFIED" : link.state,
+        failureKind: ocr.failureKind,
+        extractionPasses: ocr.extractionPasses ?? [],
       },
     };
   }

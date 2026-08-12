@@ -6,7 +6,10 @@
  * not a second model. When crop is impossible (e.g. JPEG without a decoder), callers
  * still get a focused second prompt on the full image.
  */
+import { createRequire } from "node:module";
 import { deflateSync, inflateSync } from "node:zlib";
+
+const require = createRequire(import.meta.url);
 
 export interface ImageCropRegionV1 {
   name: string;
@@ -26,17 +29,30 @@ export interface ImageCropRegionV1 {
  */
 export function vinIdentityCropRegions(): ImageCropRegionV1[] {
   return [
-    { name: "bottom-band", x: 0, y: 0.55, w: 1, h: 0.45 },
+    // Window stickers (Monroney) typically fill the center of a phone photo of the glass.
+    { name: "center-document", x: 0.08, y: 0.08, w: 0.84, h: 0.84 },
     { name: "top-band", x: 0, y: 0, w: 1, h: 0.4 },
+    { name: "vin-upper-left", x: 0.04, y: 0.06, w: 0.55, h: 0.32 },
+    { name: "vin-top-center", x: 0.15, y: 0.05, w: 0.7, h: 0.28 },
     { name: "center-band", x: 0.05, y: 0.3, w: 0.9, h: 0.4 },
+    { name: "bottom-band", x: 0, y: 0.55, w: 1, h: 0.45 },
+    { name: "price-lower", x: 0.05, y: 0.55, w: 0.9, h: 0.4 },
     { name: "lower-left", x: 0, y: 0.5, w: 0.55, h: 0.5 },
     { name: "lower-right", x: 0.45, y: 0.5, w: 0.55, h: 0.5 },
   ];
 }
 
+/** Identity-first: VIN only — do not OCR every sticker field. */
+export const VIN_IDENTITY_ONLY_PROMPT =
+  "Read only the VIN (17 characters) from this vehicle window sticker. Quote the VIN exactly as printed. If you cannot read all 17 characters, say so.";
+
 /** Short second-pass prompt: identity fields only, no full-sticker OCR. */
 export const VIN_STICKER_FOCUS_PROMPT =
   "Read the VIN (17 characters) and any stock number. Quote only those values exactly.";
+
+/** Price/total fields after identity is known. */
+export const STICKER_PRICE_FOCUS_PROMPT =
+  "Read the Total Suggested Retail Price and MSRP numbers from this window sticker. Quote dollar amounts exactly.";
 
 export interface PngInfoV1 {
   width: number;
@@ -181,7 +197,15 @@ export function encodeRgbaPng(width: number, height: number, rgba: Buffer): Buff
 export function cropPngToRegion(pngBytes: Buffer, region: ImageCropRegionV1): Buffer | null {
   const decoded = decodeSimplePng(pngBytes);
   if (!decoded) return null;
-  const { width, height, rgba } = decoded;
+  return cropRgbaToPng(decoded.width, decoded.height, decoded.rgba, region);
+}
+
+function cropRgbaToPng(
+  width: number,
+  height: number,
+  rgba: Buffer,
+  region: ImageCropRegionV1,
+): Buffer | null {
   const x0 = Math.max(0, Math.min(width - 1, Math.floor(region.x * width)));
   const y0 = Math.max(0, Math.min(height - 1, Math.floor(region.y * height)));
   const cw = Math.max(8, Math.min(width - x0, Math.floor(region.w * width)));
@@ -193,4 +217,139 @@ export function cropPngToRegion(pngBytes: Buffer, region: ImageCropRegionV1): Bu
     rgba.copy(out, y * cw * 4, src, src + cw * 4);
   }
   return encodeRgbaPng(cw, ch, out);
+}
+
+/**
+ * Decode JPEG via jpeg-js (phone photos). Returns null when decode fails or image is huge.
+ * Caps decode to 4096 on the long edge by sampling for crop safety / RAM.
+ */
+export function decodeJpegRgba(bytes: Buffer): PngInfoV1 | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  try {
+    // Dynamic import path works after build; sync require-style via createRequire for crop hot path.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const jpeg = require("jpeg-js") as {
+      decode: (b: Buffer, opts?: { maxMemoryUsageInMB?: number; useTArray?: boolean }) => {
+        width: number;
+        height: number;
+        data: Buffer | Uint8Array;
+      };
+    };
+    const decoded = jpeg.decode(bytes, { maxMemoryUsageInMB: 256, useTArray: true });
+    if (!decoded?.width || !decoded?.height || !decoded.data) return null;
+    if (decoded.width < 8 || decoded.height < 8) return null;
+    if (decoded.width > 8192 || decoded.height > 8192) return null;
+    const rgba = Buffer.from(decoded.data.buffer, decoded.data.byteOffset, decoded.data.byteLength);
+    // jpeg-js outputs RGBA already when useTArray
+    if (rgba.length < decoded.width * decoded.height * 4) return null;
+    return { width: decoded.width, height: decoded.height, rgba };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Crop JPEG/PNG bytes to a region and return PNG for vision models.
+ * Phone Chat uploads are almost always JPEG — PNG-only crops previously skipped the entire fallback.
+ */
+export function cropImageToRegion(
+  bytes: Buffer,
+  region: ImageCropRegionV1,
+  mimeHint = "",
+): Buffer | null {
+  const mime = mimeHint.toLowerCase();
+  const isPng = mime.includes("png") || (bytes[0] === 0x89 && bytes[1] === 0x50);
+  const isJpeg = mime.includes("jpeg") || mime.includes("jpg") || (bytes[0] === 0xff && bytes[1] === 0xd8);
+  if (isPng) return cropPngToRegion(bytes, region);
+  if (isJpeg) {
+    const decoded = decodeJpegRgba(bytes);
+    if (!decoded) return null;
+    // Downsample very large phone images before crop fan-out (keeps Ollama payloads reasonable).
+    const maxEdge = 1600;
+    if (decoded.width > maxEdge || decoded.height > maxEdge) {
+      const scale = maxEdge / Math.max(decoded.width, decoded.height);
+      const nw = Math.max(8, Math.floor(decoded.width * scale));
+      const nh = Math.max(8, Math.floor(decoded.height * scale));
+      const scaled = scaleRgbaNearest(decoded.rgba, decoded.width, decoded.height, nw, nh);
+      return cropRgbaToPng(nw, nh, scaled, region);
+    }
+    return cropRgbaToPng(decoded.width, decoded.height, decoded.rgba, region);
+  }
+  // Try PNG then JPEG signatures as last resort.
+  return cropPngToRegion(bytes, region) ?? (() => {
+    const d = decodeJpegRgba(bytes);
+    return d ? cropRgbaToPng(d.width, d.height, d.rgba, region) : null;
+  })();
+}
+
+function scaleRgbaNearest(
+  rgba: Buffer,
+  sw: number,
+  sh: number,
+  dw: number,
+  dh: number,
+): Buffer {
+  const out = Buffer.alloc(dw * dh * 4);
+  for (let y = 0; y < dh; y++) {
+    const sy = Math.min(sh - 1, Math.floor((y * sh) / dh));
+    for (let x = 0; x < dw; x++) {
+      const sx = Math.min(sw - 1, Math.floor((x * sw) / dw));
+      const si = (sy * sw + sx) * 4;
+      const di = (y * dw + x) * 4;
+      out[di] = rgba[si]!;
+      out[di + 1] = rgba[si + 1]!;
+      out[di + 2] = rgba[si + 2]!;
+      out[di + 3] = rgba[si + 3]!;
+    }
+  }
+  return out;
+}
+
+/**
+ * Classify extraction failure for Owner-facing wording.
+ * A large, high-byte phone photo that yields garbage text is a model limit — not "unclear photo".
+ */
+export type ExtractionFailureKindV1 =
+  | "IMAGE_QUALITY_FAILURE"
+  | "MODEL_EXTRACTION_FAILURE"
+  | "DENSE_TEXT_LIMITATION"
+  | "NO_DOCUMENT_FOUND"
+  | "VIN_NOT_FOUND"
+  | "NONE";
+
+export function classifyExtractionFailure(input: {
+  byteLength: number;
+  extractedText: string;
+  extractionOk: boolean;
+  hasValidVin: boolean;
+}): ExtractionFailureKindV1 {
+  if (input.hasValidVin) return "NONE";
+  const text = String(input.extractedText || "").trim();
+  const large = input.byteLength >= 200_000;
+  if (!input.extractionOk && !text) {
+    return large ? "MODEL_EXTRACTION_FAILURE" : "IMAGE_QUALITY_FAILURE";
+  }
+  if (!text) return large ? "MODEL_EXTRACTION_FAILURE" : "IMAGE_QUALITY_FAILURE";
+  // Garbage short model output on a large image = dense-text / model limit, not Owner error.
+  if (large && text.length < 40) return "DENSE_TEXT_LIMITATION";
+  if (large && !/[A-HJ-NPR-Z0-9]{11,}/i.test(text)) return "DENSE_TEXT_LIMITATION";
+  if (!/[A-HJ-NPR-Z0-9]{11,}/i.test(text)) return "VIN_NOT_FOUND";
+  return "VIN_NOT_FOUND";
+}
+
+export function ownerFacingExtractionMessage(kind: ExtractionFailureKindV1): string {
+  switch (kind) {
+    case "DENSE_TEXT_LIMITATION":
+      return "I can see the window sticker, but the local vision model could not reliably read the small dense text. This is a model limitation, not a problem with your photo quality.";
+    case "MODEL_EXTRACTION_FAILURE":
+      return "I received the photo, but the local vision reader failed to extract usable text. Your image may still be fine — the on-device model is limited on dense stickers.";
+    case "IMAGE_QUALITY_FAILURE":
+      return "I could not find readable VIN characters. If the plate or sticker is small in the frame, move closer and shoot straight-on without glare.";
+    case "NO_DOCUMENT_FOUND":
+      return "I did not detect a VIN plate or window sticker in this photo.";
+    case "VIN_NOT_FOUND":
+      return "I could not extract a valid 17-character VIN from this image. If this is a window sticker, I can still try again after you type the VIN, or attach a closer crop of the VIN line.";
+    default:
+      return "";
+  }
 }

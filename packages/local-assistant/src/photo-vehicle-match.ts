@@ -84,7 +84,12 @@ export function matchPhotoToVehicle(input: {
 
   const best = ocr.best;
   if (!best || ocr.candidates.length === 0) {
-    return none("NO_VIN_FOUND", "No VIN could be read from this image. Retake closer, straight on, with the plate filling the frame.", ocr.qualityFeedback);
+    // Prefer OCR failure-kind wording (dense-text / model limit) over always blaming photography.
+    const primary =
+      ocr.qualityFeedback[0]
+      || ocr.message
+      || "No VIN could be read from this image.";
+    return none("NO_VIN_FOUND", primary, ocr.qualityFeedback);
   }
 
   // A read that never passed validation is not an identity claim.

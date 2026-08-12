@@ -127,6 +127,20 @@ test("a generic exterior photo claims no VIN", () => {
   assert.equal(link.matchMethod, "NONE");
 });
 
+test("REAL_STICKER dense failure does not tell Owner the photo is unclear", () => {
+  const ocr = buildVinOcrResult({
+    extractedText: "yes",
+    provider: "ollama:moondream",
+    byteLength: 2_641_019,
+    extractionOk: true,
+  });
+  const link = matchPhotoToVehicle({ ocr, vehicles: [LIVE] });
+  assert.equal(link.state, "NO_VIN_FOUND");
+  assert.equal(link.vehicleRef, null);
+  assert.match(link.message, /model|dense|sticker|limitation|type the/i);
+  assert.doesNotMatch(link.message, /retake closer|fill the frame|unclear/i);
+});
+
 test("Owner correction repoints the link and records provenance without erasing the original read", () => {
   const ocr = buildVinOcrResult({ extractedText: `VIN ${LIVE_VIN}`, provider: "ollama:moondream", extractionOk: true });
   const link = matchPhotoToVehicle({ ocr, vehicles: [LIVE] });

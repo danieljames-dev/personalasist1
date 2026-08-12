@@ -11,6 +11,11 @@ import {
   validateVin,
   type VinValidationResultV1,
 } from "./vehicle-inventory.js";
+import {
+  classifyExtractionFailure,
+  ownerFacingExtractionMessage,
+  type ExtractionFailureKindV1,
+} from "./image-region.js";
 
 export type VinOcrStatusV1 =
   | "VIN_OCR_HIGH_CONFIDENCE"
@@ -48,6 +53,11 @@ export interface VinOcrResultV1 {
   qualityFeedback: string[];
   provider: string;
   message: string;
+  /**
+   * Why extraction failed (or NONE). Separates Owner photography problems from
+   * dense-text / local-model limits so Chat never blames a usable photo.
+   */
+  failureKind: ExtractionFailureKindV1;
 }
 
 /** Common OCR confusions — applied only as candidate generators, never silent mutation of Owner input. */
@@ -195,7 +205,7 @@ export function extractStickerFields(text: string): StickerFieldsV1 {
   if (trim) signals.push(`trim:${trim}`);
 
   const priceRaw =
-    t.match(/(?:price|msrp|internet|selling)\s*[:$]?\s*\$?\s*([\d,]{4,7})/i)?.[1] ??
+    t.match(/(?:total\s+suggested\s+retail\s+price|total\s+msrp|msrp|internet|selling|price)\s*[:$]?\s*\$?\s*([\d,]{4,7})/i)?.[1] ??
     t.match(/\$\s*([\d,]{4,7})/)?.[1] ??
     null;
   const price = priceRaw ? Number(priceRaw.replace(/,/g, "")) : null;
@@ -223,6 +233,8 @@ export function qualityFeedbackForOcr(input: {
   candidates: VinOcrCandidateV1[];
   status: VinOcrStatusV1;
   byteLength?: number;
+  extractionOk?: boolean;
+  failureKind?: ExtractionFailureKindV1;
 }): string[] {
   const tips: string[] = [];
   const t = input.text || "";
@@ -230,17 +242,45 @@ export function qualityFeedbackForOcr(input: {
     tips.push("VIN candidate looks valid — confirm or SAVE · NEXT.");
     return tips;
   }
+
+  const hasValid = input.candidates.some((c) => c.valid);
+  const kind =
+    input.failureKind
+    ?? classifyExtractionFailure({
+      byteLength: input.byteLength ?? 0,
+      extractedText: t,
+      extractionOk: input.extractionOk !== false,
+      hasValidVin: hasValid,
+    });
+
+  // Large phone photos that still fail are model/dense-text limits — do not demand a retake.
+  if (kind === "DENSE_TEXT_LIMITATION" || kind === "MODEL_EXTRACTION_FAILURE") {
+    const ownerMsg = ownerFacingExtractionMessage(kind);
+    if (ownerMsg) tips.push(ownerMsg);
+    tips.push("You can type the 17-character VIN if you have it — AION will match inventory from that.");
+    if (input.candidates.some((c) => c.validation.code === "CHECK_DIGIT_FAIL")) {
+      tips.push("A 17-character string failed the VIN check digit — type the VIN carefully if retrying.");
+    }
+    return tips.slice(0, 6);
+  }
+
+  if (kind === "VIN_NOT_FOUND" && (input.byteLength ?? 0) >= 200_000) {
+    tips.push(ownerFacingExtractionMessage("VIN_NOT_FOUND"));
+    tips.push("Optional: type the VIN, or attach a closer crop of the VIN line only.");
+    return tips.slice(0, 6);
+  }
+
   if (!t.trim()) {
     tips.push("No readable text found. Move closer to the VIN plate or stock sticker.");
     tips.push("Reduce windshield glare; shoot straight-on, not at an angle.");
     tips.push("Fill the frame with the VIN characters; avoid motion blur.");
     return tips;
   }
-  if (t.length < 20) {
-    tips.push("Only a little text was readable. Move closer and retake straight-on.");
+  if (t.length < 20 && (input.byteLength ?? 0) < 200_000) {
+    tips.push("Only a little text was readable. Move closer and shoot straight-on if the plate is small in frame.");
   }
   const partial = t.toUpperCase().match(/[A-Z0-9IOQ]{10,16}/g);
-  if (partial?.length && !input.candidates.some((c) => c.valid)) {
+  if (partial?.length && !hasValid) {
     tips.push("VIN appears partly obscured or cut off — reframe so all 17 characters are visible.");
   }
   if (/[IOQ]/.test(t.toUpperCase()) && input.candidates.some((c) => c.source === "corrected" && c.valid)) {
@@ -253,7 +293,7 @@ export function qualityFeedbackForOcr(input: {
     tips.push("Image is small/compressed — use the phone camera at full resolution if possible.");
   }
   if (!tips.length) {
-    tips.push("VIN uncertain. Retake photo or type the VIN in the large field.");
+    tips.push(ownerFacingExtractionMessage(kind) || "VIN uncertain. Type the VIN if you have it.");
   }
   return tips.slice(0, 6);
 }
@@ -295,11 +335,20 @@ export function buildVinOcrResult(input: {
     status = "VIN_OCR_CONFIRM_REQUIRED";
   }
 
+  const failureKind = classifyExtractionFailure({
+    byteLength: input.byteLength ?? 0,
+    extractedText: text,
+    extractionOk: !failed,
+    hasValidVin: Boolean(best?.valid),
+  });
+
   const qualityFeedback = qualityFeedbackForOcr({
     text,
     candidates,
     status,
+    failureKind,
     ...(input.byteLength !== undefined ? { byteLength: input.byteLength } : {}),
+    ...(input.extractionOk === undefined ? {} : { extractionOk: input.extractionOk }),
   });
 
   const message =
@@ -308,8 +357,10 @@ export function buildVinOcrResult(input: {
       : status === "VIN_OCR_CONFIRM_REQUIRED"
         ? best?.valid
           ? `VIN candidate ${best.vin} — confirm or edit (confidence ${best.confidence}%).`
-          : "VIN uncertain — confirm, edit, or retake photo."
-        : "VIN OCR failed — retake photo or enter VIN manually.";
+          : "VIN uncertain — confirm or type the characters you can see."
+        : failureKind === "DENSE_TEXT_LIMITATION" || failureKind === "MODEL_EXTRACTION_FAILURE"
+          ? ownerFacingExtractionMessage(failureKind)
+          : ownerFacingExtractionMessage(failureKind) || "VIN OCR failed — type the VIN if you have it.";
 
   return {
     status,
@@ -320,6 +371,7 @@ export function buildVinOcrResult(input: {
     qualityFeedback,
     provider: input.provider,
     message,
+    failureKind,
   };
 }
 

@@ -294,6 +294,7 @@ test("ambiguous multi-valid VIN candidates never auto-link", () => {
       qualityFeedback: [],
       provider: "fixture",
       message: "confirm",
+      failureKind: "NONE",
     },
     vehicles: [liveVehicle()],
   });

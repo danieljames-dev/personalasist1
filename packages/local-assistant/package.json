@@ -12,7 +12,10 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
@@ -20,6 +23,11 @@
     "test": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\" \"test/**/*.test.mjs\"",
     "test:architecture": "npm run build && node --test --test-reporter=tap \"test/architecture-boundary.test.mjs\""
   },
-  "engines": { "node": ">=22" },
-  "license": "UNLICENSED"
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "jpeg-js": "^0.4.4"
+  }
 }
