@@ -1051,7 +1051,11 @@ export async function createAionServer(options = {}) {
         dealershipName: input.dealershipName || input.name,
         useFixture: input.useFixture === true,
         fixtureVins: Array.isArray(input.fixtureVins) ? input.fixtureVins : undefined,
+        scope: input.scope === "new" || input.scope === "used" || input.scope === "all" ? input.scope : undefined,
+        maxPagesPerUrl: Number.isFinite(Number(input.maxPagesPerUrl)) ? Number(input.maxPagesPerUrl) : undefined,
+        pageDelayMs: Number.isFinite(Number(input.pageDelayMs)) ? Number(input.pageDelayMs) : undefined,
       });
+      case "inventory.coverage": return service.inventoryCoverageReport();
       case "inventory.walk.start": return service.startInventoryWalk(String(input.note ?? ""));
       case "inventory.walk.active": return { walk: await service.activeInventoryWalk() };
       case "inventory.walk.observe": return service.recordWalkObservation({

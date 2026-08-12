@@ -98,17 +98,21 @@ test("duplicate VIN online refresh keeps one vehicle and price history", () => {
     { id: nextId("listing"), now, sourceUrl: "https://example.com/a", sourceType: "fixture" },
   );
   let state = emptyVehicleInventoryState();
-  state = applyOnlineListings(state, dealer, [l1], now, nextId);
+  let applied = applyOnlineListings(state, dealer, [l1], now, nextId);
+  state = applied.state;
   assert.equal(state.vehicles.length, 1);
+  assert.equal(applied.temporal.newlySeen, 1);
   const l2 = listingFromPartial(
     { vin, stockNumber: "L1", year: 2025, make: "Toyota", model: "Camry", advertisedPrice: 29500 },
     { id: nextId("listing"), now: later, sourceUrl: "https://example.com/b", sourceType: "fixture" },
   );
-  state = applyOnlineListings(state, dealer, [l2], later, nextId);
+  applied = applyOnlineListings(state, dealer, [l2], later, nextId);
+  state = applied.state;
   assert.equal(state.vehicles.length, 1);
   assert.equal(state.vehicles[0]!.priceHistory.length, 2);
   assert.equal(state.vehicles[0]!.priceHistory[0]!.advertisedPrice, 29500);
   assert.equal(state.vehicles[0]!.vin, vin);
+  assert.equal(applied.temporal.priceChanged, 1);
 });
 
 test("online-only vs physical-only matching", () => {

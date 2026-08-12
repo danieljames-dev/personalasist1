@@ -22,6 +22,13 @@ export interface DealershipInventoryRefreshResultV1 {
   mode: "live" | "fixture" | "partial";
   message: string;
   truncated: boolean;
+  /** Pages actually fetched this run. */
+  pagesFetched: number;
+  /** Distinct VINs in the listing batch. */
+  uniqueVins: number;
+  /** Optional total count reported by the dealer site (when parseable). */
+  dealerReportedTotal: number | null;
+  scope: "new" | "used" | "all";
 }
 
 export interface DealershipConnectorProfileV1 {
@@ -399,6 +406,36 @@ export function findNextPageUrl(html: string, baseUrl: string): string | null {
   return null;
 }
 
+/**
+ * Best-effort parse of dealer-reported inventory totals from SRP HTML.
+ * Prefer structured totalCount fields; ignore tiny numbers that are often UI chrome
+ * (e.g. "90" from unrelated copy when hundreds of listings exist).
+ */
+export function parseDealerReportedTotal(html: string): number | null {
+  const text = String(html ?? "");
+  const candidates: number[] = [];
+  const structured = [
+    /"totalCount"\s*:\s*(\d{1,5})/gi,
+    /"resultCount"\s*:\s*(\d{1,5})/gi,
+    /"inventoryCount"\s*:\s*(\d{1,5})/gi,
+    /data-total(?:-count)?=["']?(\d{1,5})/gi,
+  ];
+  for (const p of structured) {
+    for (const m of text.matchAll(p)) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n >= 12 && n < 50_000) candidates.push(n);
+    }
+  }
+  // Visible "Showing X of Y" / "Y vehicles" phrasing — require larger floor.
+  for (const m of text.matchAll(/\bof\s+(\d{2,5})\s*(?:vehicles?|results?|matches?)\b/gi)) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 24 && n < 50_000) candidates.push(n);
+  }
+  if (!candidates.length) return null;
+  // Prefer the largest plausible structured count (dealer SRPs sometimes emit multiple).
+  return Math.max(...candidates);
+}
+
 export async function refreshDealershipPublicInventory(input: {
   dealership: DealershipContextV1;
   now: string;
@@ -408,20 +445,33 @@ export async function refreshDealershipPublicInventory(input: {
   useFixture?: boolean;
   fixtureVins?: string[];
   maxBytesPerPage?: number;
-  /** Upper bound on paginated public pages per starting URL. */
+  /** Upper bound on paginated public pages per starting URL. Default 12; expansion stages raise this. */
   maxPagesPerUrl?: number;
   /** Courtesy delay between paginated public requests. */
   pageDelayMs?: number;
+  /**
+   * Which inventory feed to crawl.
+   * - new: searchnew only
+   * - used: searchused only
+   * - all: new + used (+ profile extras)
+   */
+  scope?: "new" | "used" | "all";
 }): Promise<DealershipInventoryRefreshResultV1> {
   const fetchImpl = input.fetchImpl ?? fetch;
   const maxBytes = input.maxBytesPerPage ?? 1_500_000;
+  const scope = input.scope ?? "all";
   const profile = dealershipProfileFor(input.dealership.slug) ?? dealershipProfileFor(input.dealership.name);
-  const urls = [
-    input.dealership.inventoryNewUrl,
-    input.dealership.inventoryUsedUrl,
-    ...(profile?.inventoryUrls ?? []),
-  ].filter(Boolean);
-  const uniqueUrls = [...new Set(urls)];
+  const urls: string[] = [];
+  if (scope === "new" || scope === "all") {
+    if (input.dealership.inventoryNewUrl) urls.push(input.dealership.inventoryNewUrl);
+  }
+  if (scope === "used" || scope === "all") {
+    if (input.dealership.inventoryUsedUrl) urls.push(input.dealership.inventoryUsedUrl);
+  }
+  if (scope === "all") {
+    for (const u of profile?.inventoryUrls ?? []) urls.push(u);
+  }
+  const uniqueUrls = [...new Set(urls.filter(Boolean))];
 
   if (input.useFixture) {
     const vins = input.fixtureVins ?? [];
@@ -435,6 +485,10 @@ export async function refreshDealershipPublicInventory(input: {
       mode: "fixture",
       message: `Fixture inventory: ${listings.length} listing(s). Not live dealership data.`,
       truncated: false,
+      pagesFetched: 0,
+      uniqueVins: listings.filter((l) => l.vin).length,
+      dealerReportedTotal: null,
+      scope,
     };
   }
 
@@ -442,8 +496,12 @@ export async function refreshDealershipPublicInventory(input: {
   const fetched: string[] = [];
   let truncated = false;
   let liveOk = false;
+  let dealerReportedTotal: number | null = null;
+  let pagesFetched = 0;
 
-  const maxPagesPerUrl = Math.max(1, input.maxPagesPerUrl ?? 12);
+  // Expansion stages raise this; the default remains the conservative pilot cap.
+  // Hard ceiling 250 keeps a runaway crawl from hammering a dealer host.
+  const maxPagesPerUrl = Math.max(1, Math.min(input.maxPagesPerUrl ?? 12, 250));
   const pageDelayMs = input.pageDelayMs ?? 1_200;
   const visited = new Set<string>();
 
@@ -472,13 +530,18 @@ export async function refreshDealershipPublicInventory(input: {
         if (visited.has(landedUrl) && landedUrl !== url) break;
         visited.add(landedUrl);
         fetched.push(landedUrl);
+        pagesFetched += 1;
+        if (dealerReportedTotal == null) {
+          const reported = parseDealerReportedTotal(text);
+          if (reported != null) dealerReportedTotal = reported;
+        }
         const condition: "new" | "used" | "unknown" = /used/i.test(landedUrl)
           ? "used"
           : /new/i.test(landedUrl)
             ? "new"
             : "unknown";
         const parsed = parsePublicInventoryHtml(text, landedUrl, input.now, input.nextId, condition);
-        const have = new Set(all.map((l) => l.vin).filter(Boolean));
+        const have = new Set(all.map((l) => l.vin).filter(Boolean) as string[]);
         let added = 0;
         for (const l of parsed) {
           if (l.vin && have.has(l.vin)) continue;
@@ -501,6 +564,8 @@ export async function refreshDealershipPublicInventory(input: {
     }
   }
 
+  const uniqueVins = new Set(all.map((l) => l.vin).filter(Boolean)).size;
+
   if (!liveOk && all.length === 0) {
     return {
       dealershipSlug: input.dealership.slug,
@@ -512,6 +577,10 @@ export async function refreshDealershipPublicInventory(input: {
       message:
         "Could not parse live public inventory from dealer pages (blocked, empty, or JS-only). Use fixture seed for demos or retry; never invent vehicles.",
       truncated,
+      pagesFetched,
+      uniqueVins: 0,
+      dealerReportedTotal,
+      scope,
     };
   }
 
@@ -520,9 +589,16 @@ export async function refreshDealershipPublicInventory(input: {
     dealershipName: input.dealership.name,
     retrievedAt: input.now,
     sourceUrls: fetched.length ? fetched : uniqueUrls,
-    listings: all.slice(0, 2000),
+    listings: all.slice(0, 5000),
     mode: liveOk ? "live" : "partial",
-    message: `Public inventory refresh: ${all.length} listing(s) from ${fetched.length || uniqueUrls.length} URL(s). Online listing ≠ physically on lot.`,
+    message:
+      `Public inventory refresh (${scope}): ${all.length} listing(s), ${uniqueVins} unique VIN(s), `
+      + `${pagesFetched} page(s). Online listing ≠ physically on lot.`
+      + (dealerReportedTotal != null ? ` Dealer-reported total hint: ${dealerReportedTotal}.` : ""),
     truncated,
+    pagesFetched,
+    uniqueVins,
+    dealerReportedTotal,
+    scope,
   };
 }
