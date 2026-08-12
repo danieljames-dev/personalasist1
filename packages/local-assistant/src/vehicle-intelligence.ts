@@ -5,6 +5,8 @@
 import type { RelationshipV1 } from "./contracts.js";
 import type { VehicleRecordV1, VehiclePresenceStatusV1 } from "./vehicle-inventory.js";
 import { normalizeVinCandidate, validateVin, queryVehicles } from "./vehicle-inventory.js";
+import { findModelKnowledge, findTrimsInText, modelKnowledgeLines, asksGenericTrimLadder, TOYOTA_GENERIC_TRIM_LADDER } from "./toyota-model-knowledge.js";
+import { describeRecallStatus } from "./recall-intelligence.js";
 
 export type VehicleKnowledgeClassV1 =
   | "LIVE_DEALER_INVENTORY"
@@ -175,9 +177,28 @@ export function answerVehicleQuery(input: {
     ? `Inventory refresh is ${fresh.lastRefresh ? `last at ${fresh.lastRefresh.slice(0, 16)} (age ~${fresh.ageHours?.toFixed(1)}h)` : "missing"} — treat ONLINE_LISTED as possibly stale until refreshed.`
     : null;
 
-  // Trim comparison — general knowledge, not inventory
-  if (/\b(le|se|xle|xse)\b.*\b(le|se|xle|xse)\b/i.test(q) || /\btrim\b/i.test(q) && /\bcamry\b/i.test(q) || /difference between/i.test(q)) {
-    lines.push(...TOYOTA_CAMRY_TRIM_KNOWLEDGE);
+  // Trim / model knowledge — general orientation, never a claim about a specific car.
+  const asksAboutTrims =
+    /\bdifference between\b/i.test(q) ||
+    /\btrims?\b/i.test(q) ||
+    /\bcompare\b.*\b(trim|le|se|xle|xse|sr5|trd|limited|platinum)\b/i.test(q) ||
+    /\bwhich (trims?|ones?)\b.*\b(hybrid|sport|off[- ]?road|comfort|luxury)\b/i.test(q) ||
+    /\b(le|se|xle|xse)\b.*\b(le|se|xle|xse)\b/i.test(q);
+  if (asksAboutTrims) {
+    const known = findModelKnowledge(q);
+    if (known) {
+      lines.push(...modelKnowledgeLines(known, findTrimsInText(known, q)));
+    } else {
+      // Camry remains the fallback only because it is the historical default, not because the
+      // question was about a Camry — say so rather than implying we understood the model.
+      // Shared badges with no model named: explain the pattern rather than assuming a model.
+      lines.push(...(asksGenericTrimLadder(q)
+        ? TOYOTA_GENERIC_TRIM_LADDER
+        : [{
+            class: "INFERENCE" as const,
+            text: "No specific Toyota model was recognised in that question. Name the model (Corolla, Camry, Tacoma, RAV4, Tundra, Corolla Cross, Highlander) for trim guidance.",
+          }]));
+    }
     lines.push({
       class: "INFERENCE",
       text: "Installed options on a specific car require VIN, stock sticker, or dealer listing fields — not trim-name alone.",
@@ -268,6 +289,11 @@ export function answerVehicleQuery(input: {
         text: "No matching vehicle record in local inventory for this VIN. Run inventory.refresh, walk observe, or NHTSA decode.",
       });
       pool = [];
+    }
+
+    // A VIN question deserves the full grounded picture, grouped by where each fact came from.
+    if (pool.length === 1) {
+      lines.push(...vinDetailLines(pool[0]!, q));
     }
   }
 
@@ -466,4 +492,84 @@ export function formatCustomerMatches(matches: readonly CustomerVehicleMatchV1[]
         .join("\n");
     })
     .join("\n");
+}
+
+/**
+ * Everything grounded about one specific vehicle, grouped by source.
+ *
+ * A salesperson standing in front of a customer needs to know which claims they can make and which
+ * they cannot. Dealer listing, government decode and recall campaigns are shown as separate
+ * groups; general trim knowledge is deliberately excluded here because this question is about *this
+ * car*, and mixing the two is exactly how a generic feature becomes a promise.
+ *
+ * The unknowns list is derived from what this vehicle is actually missing, not a fixed checklist —
+ * printing "installed packages: unknown" against every car trains people to ignore it.
+ */
+export function vinDetailLines(v: VehicleRecordV1, question = ""): VehicleAnswerLineV1[] {
+  const q = String(question).toLowerCase();
+  const wantsKnown = /\bknow for sure\b|\bwhat do we know\b|\bconfirmed\b/.test(q);
+  const wantsUnknown = /\bunknown\b|\bwhat.s not\b|\bwhat is not\b|\bmissing\b/.test(q);
+  const wantsRecall = /\brecall/.test(q);
+  const wantsAll = !wantsKnown && !wantsUnknown && !wantsRecall;
+
+  const lines: VehicleAnswerLineV1[] = [];
+  const g = v.govVinFacts;
+  const src = v.detailUrl || v.listingUrl || "vehicleInventory";
+
+  if (wantsAll || wantsKnown) {
+    const dealer: string[] = [];
+    const price = latestPrice(v);
+    if (v.year || v.make || v.model) dealer.push([v.year, v.make, v.model, v.trim].filter(Boolean).join(" "));
+    if (v.condition) dealer.push(`condition listed as ${v.condition}`);
+    if (price != null) dealer.push(`advertised $${price.toLocaleString()}`);
+    if (v.stockNumber) dealer.push(`stock ${v.stockNumber}`);
+    if (v.exteriorColor) dealer.push(`exterior ${v.exteriorColor}`);
+    if (v.interiorColor) dealer.push(`interior ${v.interiorColor}`);
+    if (v.mileage != null) dealer.push(`${v.mileage.toLocaleString()} miles`);
+    dealer.push(`listing status ${v.presenceStatus}`);
+    if (dealer.length) {
+      lines.push({ class: vehicleSourceClass(v), text: `Dealer listing — ${dealer.join(" · ")}`, source: src });
+    }
+
+    if (g && g.status === "DECODED") {
+      const gov = [
+        g.bodyClass ? `body ${g.bodyClass}` : null,
+        g.driveType ? `drive ${g.driveType}` : null,
+        g.fuelType ? `fuel ${g.fuelType}` : null,
+        g.electrification ? `electrification ${g.electrification}` : null,
+        g.engineCylinders ? `${g.engineCylinders}-cyl` : null,
+        g.displacementL ? `${g.displacementL}L` : null,
+        g.engineConfiguration || null,
+        g.transmission ? `transmission ${g.transmission}` : null,
+        g.plantCountry ? `built ${[g.plantCity, g.plantCountry].filter(Boolean).join(", ")}` : null,
+      ].filter(Boolean);
+      if (gov.length) {
+        lines.push({ class: "GOVERNMENT_VIN_FACT", text: `Government VIN decode — ${gov.join(" · ")}`, source: g.source });
+      }
+      for (const conflict of g.conflictsWithListing) {
+        lines.push({ class: "GOVERNMENT_VIN_FACT", text: `Conflict to resolve — ${conflict}`, source: g.source });
+      }
+    } else if (g && g.status !== "NOT_CHECKED") {
+      lines.push({ class: "INFERENCE", text: `Government VIN decode unavailable (${g.status}).`, source: g.source });
+    }
+  }
+
+  if (wantsAll || wantsRecall) {
+    lines.push({ class: "GOVERNMENT_VIN_FACT", text: describeRecallStatus(v.recallAssessment), source: v.recallAssessment?.source || "recall" });
+  }
+
+  if (wantsAll || wantsUnknown) {
+    const unknown: string[] = [];
+    if (latestPrice(v) == null) unknown.push("advertised price (never published on an observed listing)");
+    if (!v.stockNumber) unknown.push("stock number");
+    if (!v.exteriorColor) unknown.push("exterior colour");
+    if (v.mileage == null) unknown.push("mileage");
+    if (!g || g.status !== "DECODED") unknown.push("government VIN decode");
+    unknown.push("installed packages and optional equipment — no source here establishes them");
+    if (v.presenceStatus !== "PHYSICALLY_VERIFIED") unknown.push("physical presence on the lot (listing observed online only)");
+    unknown.push("VIN-specific open-recall status");
+    lines.push({ class: "INFERENCE", text: `Not established — ${unknown.join("; ")}.` });
+  }
+
+  return lines;
 }

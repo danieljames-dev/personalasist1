@@ -140,6 +140,10 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\b(new|used|certified)\b[^?]{0,30}\b(inventory|vehicles?|cars?|trucks?)\b/i,
       /\bwhat (came in|arrived|is new)\b[^?]{0,30}\b(recently|today|this week)\b/i,
       /\bno longer (online|listed|available)\b/i,
+      // Trim questions arrive as "difference between X and Y" with no category word at all.
+      /\bdifference between\b[^?]{0,60}\b(le|se|xle|xse|sr5?|trd|limited|platinum|capstone|adventure|nightshade|woodland|trailhunter|1794)\b/i,
+      /\b(what|which)\b[^?]{0,30}\btrims?\b/i,
+      /\bwhich trims?\b[^?]{0,30}\b(are|have)\b/i,
       /\bdecode (this )?vin\b/i,
       /\bwhat car is this\b/i,
       /\b(verify|verified) (today|this morning|on the lot)\b/i,
