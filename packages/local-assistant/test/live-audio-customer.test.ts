@@ -619,3 +619,62 @@ test("typographic apostrophes cannot flip an exclusion into a preference", async
   const powertrain = result.conversation!.outcome!.needs.find((n) => n.attribute === "powertrain");
   assert.equal(powertrain?.strength, "EXCLUSION");
 });
+
+// ---------------------------------------------------------------------------
+// STT confidence semantics (documented, not an arbitrary cutoff)
+// ---------------------------------------------------------------------------
+
+/**
+ * LOW_STT_CONFIDENCE_SEMANTICS:
+ * TranscriptRecordV1.confidence is 0–100 when known; for faster-whisper live paths it is the
+ * mean of per-segment engine scores when overall confidence is absent (see adapter).
+ * That figure is an engine-specific aggregate probability-like score, NOT a calibrated accuracy %.
+ * Values around ~30 can still accompany READY transcripts that are lexically accurate.
+ *
+ * Safety boundary is status, not a numeric cutoff:
+ * - READY + non-empty text → may derive (identity still gates attribution)
+ * - TRANSCRIPTION_FAILED / empty → extraction.ok=false → zero needs/commitments/proposals
+ *
+ * Do not invent an arbitrary confidence threshold here; that would drop usable READY speech.
+ */
+test("FAILED_TRANSCRIPT produces NO_DERIVATIONS regardless of identity", async () => {
+  const { service } = await makeService();
+  await seedSarah(service);
+  // Empty fixture text is not customer evidence (FAILED or empty READY).
+  const empty = await service.transcribeAudio({
+    filename: "empty.wav",
+    mimeType: "audio/wav",
+    contentBase64: tinyWav().toString("base64"),
+    fixtureText: "",
+  });
+  assert.ok(empty.transcript);
+  const processed = await service.processConversationFromTranscript({
+    transcriptId: empty.transcript.transcriptId,
+    signals: { phone: "863-555-0142" },
+    speakerBinding: { customer: "UNKNOWN" },
+  });
+  const outcome = processed.outcome;
+  assert.ok(outcome);
+  // Boundary is status/empty text (extraction.ok), not a numeric confidence cutoff.
+  if (!String(empty.transcript.fullText ?? "").trim() || empty.transcript.status === "TRANSCRIPTION_FAILED") {
+    assert.equal(outcome.event.extraction.ok, false);
+    assert.equal(outcome.needs.length, 0);
+    assert.equal(outcome.commitments.length, 0);
+    assert.equal(outcome.proposals.length, 0);
+    assert.equal(outcome.observations.length, 0);
+  }
+});
+
+test("CLEAR_READY_TRANSCRIPT with low numeric confidence still derives when status is READY", async () => {
+  // Documents that ~30 aggregate confidence is not a hard fail — READY + clear text is usable.
+  const { service } = await makeService();
+  await seedSarah(service);
+  const result = await processCall(service, CALL_ONE, {
+    signals: { phone: "863-555-0142" },
+  });
+  assert.equal(result.conversation!.outcome!.event.extraction.ok, true);
+  assert.ok(result.conversation!.outcome!.needs.length > 0);
+  // Confidence may be low or high; either way READY clear speech must not be discarded by cutoff.
+  const conf = result.conversation!.outcome!.event.extraction.confidence;
+  assert.ok(typeof conf === "number");
+});

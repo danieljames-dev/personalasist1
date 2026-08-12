@@ -22,6 +22,7 @@ import {
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { extractVinCandidatesFromText, validateVin } from "../vehicle-inventory.js";
 
 export interface StickerOcrLineV1 {
   text: string;
@@ -84,6 +85,23 @@ export function easyOcrVinPriorityRegions(): StickerOcrRegionFracV1[] {
 /** True when text already contains a contiguous 17-char VIN charset run. */
 export function textHasVinCharsetRun(text: string): boolean {
   return /[A-HJ-NPR-Z0-9]{17}/.test(String(text ?? "").toUpperCase());
+}
+
+/**
+ * True when OCR text contains at least one check-digit-valid VIN.
+ * Charset-shaped 17-char strings alone are NOT enough — they must pass validateVin.
+ */
+export function textHasCheckDigitValidVin(text: string): boolean {
+  return extractVinCandidatesFromText(text).some((v) => validateVin(v).valid);
+}
+
+/**
+ * VIN-band early-stop may surface a 17-char *looking* string that later fails validation.
+ * Full-page fallback must still run so a later image-derived valid VIN can win.
+ */
+export function bandResultNeedsFullPageFallback(result: StickerOcrResultV1): boolean {
+  if (result.strategy !== "vin-band") return false;
+  return !textHasCheckDigitValidVin(result.fullText);
 }
 
 function runProcess(
@@ -349,37 +367,27 @@ export async function runEasyOcrOnImageBytes(
 
     const regions = opts.fullPageOnly ? [] : easyOcrVinPriorityRegions();
     const timeoutMs = opts.timeoutMs ?? 180_000;
-    const resp = await enqueueWorker(() =>
-      workerRequest(
-        {
-          cmd: "ocr",
-          imagePath: imgPath,
-          regions,
-          stopOnVin: true,
-        },
-        timeoutMs,
-      ),
-    );
+    const first = await requestOcrParsed(imgPath, regions, timeoutMs);
+    if (!first) return null;
 
-    if (!resp.ok || !resp.result) return null;
-    const parsed = resp.result as StickerOcrResultV1;
-    if (!parsed || !Array.isArray(parsed.lines)) return null;
-    const out: StickerOcrResultV1 = {
-      engine: "easyocr",
-      orientedWidth: Number(parsed.orientedWidth) || 0,
-      orientedHeight: Number(parsed.orientedHeight) || 0,
-      exifOrientation: (parsed.exifOrientation as number | null) ?? null,
-      lines: parsed.lines,
-      fullText: String(parsed.fullText ?? ""),
-      latencyMs: Number(parsed.latencyMs) || 0,
-    };
-    if (parsed.ocrMs !== undefined) out.ocrMs = Number(parsed.ocrMs);
-    if (parsed.readerLoadMs !== undefined) out.readerLoadMs = Number(parsed.readerLoadMs);
-    if (parsed.sourceRegion) out.sourceRegion = String(parsed.sourceRegion);
-    if (parsed.strategy) out.strategy = parsed.strategy;
-    if (parsed.attempts) out.attempts = parsed.attempts;
-    if (parsed.warm !== undefined) out.warm = Boolean(parsed.warm);
-    return out;
+    // Critical: charset-shaped band hits that fail check digit / structure must not freeze recovery.
+    if (!opts.fullPageOnly && bandResultNeedsFullPageFallback(first)) {
+      const full = await requestOcrParsed(imgPath, [], timeoutMs);
+      if (full) {
+        const mergedAttempts = [...(first.attempts ?? []), ...(full.attempts ?? [])];
+        const preferFull = textHasCheckDigitValidVin(full.fullText) || !textHasCheckDigitValidVin(first.fullText);
+        const chosen = preferFull ? full : first;
+        const merged: StickerOcrResultV1 = {
+          ...chosen,
+          attempts: mergedAttempts,
+          latencyMs: (first.latencyMs || 0) + (full.latencyMs || 0),
+        };
+        if (preferFull) merged.strategy = "full-page";
+        else if (first.strategy) merged.strategy = first.strategy;
+        return merged;
+      }
+    }
+    return first;
   } catch {
     return runEasyOcrOneshot(bytes, opts);
   } finally {
@@ -389,6 +397,43 @@ export async function runEasyOcrOnImageBytes(
       /* */
     }
   }
+}
+
+async function requestOcrParsed(
+  imgPath: string,
+  regions: StickerOcrRegionFracV1[],
+  timeoutMs: number,
+): Promise<StickerOcrResultV1 | null> {
+  const resp = await enqueueWorker(() =>
+    workerRequest(
+      {
+        cmd: "ocr",
+        imagePath: imgPath,
+        regions,
+        stopOnVin: regions.length > 0,
+      },
+      timeoutMs,
+    ),
+  );
+  if (!resp.ok || !resp.result) return null;
+  const parsed = resp.result as StickerOcrResultV1;
+  if (!parsed || !Array.isArray(parsed.lines)) return null;
+  const out: StickerOcrResultV1 = {
+    engine: "easyocr",
+    orientedWidth: Number(parsed.orientedWidth) || 0,
+    orientedHeight: Number(parsed.orientedHeight) || 0,
+    exifOrientation: (parsed.exifOrientation as number | null) ?? null,
+    lines: parsed.lines,
+    fullText: String(parsed.fullText ?? ""),
+    latencyMs: Number(parsed.latencyMs) || 0,
+  };
+  if (parsed.ocrMs !== undefined) out.ocrMs = Number(parsed.ocrMs);
+  if (parsed.readerLoadMs !== undefined) out.readerLoadMs = Number(parsed.readerLoadMs);
+  if (parsed.sourceRegion) out.sourceRegion = String(parsed.sourceRegion);
+  if (parsed.strategy) out.strategy = parsed.strategy;
+  if (parsed.attempts) out.attempts = parsed.attempts;
+  if (parsed.warm !== undefined) out.warm = Boolean(parsed.warm);
+  return out;
 }
 
 /** Legacy oneshot process path (cold Reader every call) — fallback / measurement. */

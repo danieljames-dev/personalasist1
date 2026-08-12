@@ -6,8 +6,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  bandResultNeedsFullPageFallback,
   easyOcrVinPriorityRegions,
+  textHasCheckDigitValidVin,
   textHasVinCharsetRun,
+  type StickerOcrResultV1,
 } from "../src/connectors/sticker-ocr.js";
 
 test("VIN priority regions are bounded and ordered", () => {
@@ -35,4 +38,36 @@ test("textHasVinCharsetRun detects contiguous 17-char VIN-shaped runs only", () 
   assert.equal(textHasVinCharsetRun("ABCDEFGHIJKLMNOPQ"), false);
   // Valid VIN charset (no I/O/Q) still only early-stops; check-digit is separate.
   assert.equal(textHasVinCharsetRun("ABCDEFGHJKLMNPRST"), true);
+});
+
+test("VIN_BAND_FALSE_CANDIDATE_RECOVERY: charset-shaped invalid VIN forces full-page fallback", () => {
+  // 17 charset-legal chars that fail check digit — band must not freeze recovery.
+  const falseShape = "JTDACAAJBT3051788"; // B not 8; check digit fails / may be illegal path
+  assert.equal(textHasVinCharsetRun(`VIN ${falseShape}`), true);
+  // Even when shape matches, check-digit validity is required to accept band short-circuit.
+  const real = "JTDACAAJ8T3051788";
+  assert.equal(textHasCheckDigitValidVin(`VIN ${real}`), true);
+
+  const bandOnlyFalse: StickerOcrResultV1 = {
+    engine: "easyocr",
+    orientedWidth: 1000,
+    orientedHeight: 800,
+    exifOrientation: 1,
+    lines: [{ text: falseShape, confidence: 0.9, box: null }],
+    fullText: `noise ${falseShape} more`,
+    latencyMs: 100,
+    strategy: "vin-band",
+    sourceRegion: "vin-mid-band",
+  };
+  assert.equal(bandResultNeedsFullPageFallback(bandOnlyFalse), true);
+
+  const bandValid: StickerOcrResultV1 = {
+    ...bandOnlyFalse,
+    fullText: `VIN: ${real}`,
+    lines: [{ text: real, confidence: 0.9, box: null }],
+  };
+  assert.equal(bandResultNeedsFullPageFallback(bandValid), false);
+
+  const fullPage: StickerOcrResultV1 = { ...bandOnlyFalse, strategy: "full-page" };
+  assert.equal(bandResultNeedsFullPageFallback(fullPage), false);
 });
