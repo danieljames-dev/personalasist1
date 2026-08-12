@@ -128,11 +128,20 @@ export function proposeCommitments(input: {
     });
   };
 
-  // Speaker attribution beats grammar when we know who was talking.
-  if (input.segment.speaker === "OWNER") consider("OWNER_PROMISED", owner);
-  else if (input.segment.speaker === "CUSTOMER") consider("CUSTOMER_PROMISED", owner);
-  else consider("OWNER_PROMISED", owner);
-  consider(input.segment.speaker === "OWNER" ? "CUSTOMER_PROMISED" : "OWNER_PROMISED", customer);
+  // Speaker attribution beats grammar when we know who was talking — and when we do not, nothing is
+  // attributed to a party. Diarisation yields SPEAKER_1/SPEAKER_2, not roles, so treating
+  // first-person speech as the Owner's would drop a customer's promise into the Owner's follow-up
+  // queue, or lose an Owner promise entirely. The candidate is still surfaced, just not as anyone's.
+  if (input.segment.speaker === "OWNER") {
+    consider("OWNER_PROMISED", owner);
+    consider("CUSTOMER_PROMISED", customer);
+  } else if (input.segment.speaker === "CUSTOMER") {
+    consider("CUSTOMER_PROMISED", owner);
+    consider("OWNER_PROMISED", customer);
+  } else {
+    consider("UNCERTAIN", owner);
+    consider("UNCERTAIN", customer);
+  }
 
   return out;
 }

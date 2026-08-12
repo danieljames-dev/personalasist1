@@ -151,6 +151,28 @@ export function isPlausibleVinCharset(vin: string): boolean {
   return true;
 }
 
+/**
+ * True when `vin` appears in OCR text as a contiguous/near-contiguous observation
+ * (spaces/hyphens between characters allowed). Rejects candidates assembled by
+ * concatenating unrelated short tokens across a noisy page (Tesseract false-valid VINs).
+ */
+export function isContiguousVinObservation(text: string, vin: string): boolean {
+  const v = normalizeVinCandidate(vin);
+  if (v.length !== 17) return false;
+  const upper = String(text ?? "").toUpperCase();
+  if (upper.includes(v)) return true;
+  // Allow single separators between characters (common OCR spacing).
+  const pattern = v
+    .split("")
+    .map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[\\s\\-._]?");
+  try {
+    return new RegExp(pattern).test(upper);
+  } catch {
+    return false;
+  }
+}
+
 /** High symbol/noise OCR is not trustworthy enough for silent HIGH_CONFIDENCE. */
 export function isNoisyOcrText(text: string): boolean {
   const t = String(text ?? "");
@@ -201,6 +223,8 @@ export function proposeVinsFromOcrText(text: string): VinOcrCandidateV1[] {
     for (const v of variants) {
       if (v.length !== 17 || seen.has(v)) continue;
       if (!isPlausibleVinCharset(v)) continue;
+      // Must be observed contiguously in the OCR page — not stitched from scatter.
+      if (!isContiguousVinObservation(raw, v) && !isContiguousVinObservation(raw, seed)) continue;
       seen.add(v);
       const fromCorrection = v !== normalizeVinCandidate(seed) || /[IOQ]/.test(seed);
       const rawHit = direct.includes(v);
@@ -225,6 +249,50 @@ export function proposeVinsFromOcrText(text: string): VinOcrCandidateV1[] {
   return scored.slice(0, 12);
 }
 
+/**
+ * Parse a money blob from dense sticker OCR.
+ * Handles clean "$50,955.00" and garbled forms like "553.378.00" where `$` became `5`.
+ * Returns whole-dollar amounts only; never invents a price without digit evidence.
+ */
+export function parseStickerMoneyBlob(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  let s = String(raw).trim().replace(/^[Ss$]+/, "");
+  // Keep digits and separators only.
+  s = s.replace(/[^\d.,]/g, "");
+  if (!s) return null;
+
+  // Digits-only path (handles 553.378.00 → 55337800).
+  const digits = s.replace(/\D/g, "");
+  if (digits.length < 4 || digits.length > 10) return null;
+
+  const candidates: number[] = [];
+  const pushIfRetail = (n: number) => {
+    if (Number.isFinite(n) && n >= 5_000 && n <= 500_000) candidates.push(Math.round(n));
+  };
+
+  // Standard: last two digits are cents.
+  if (digits.length >= 6) {
+    pushIfRetail(Number(digits.slice(0, -2)));
+  }
+  pushIfRetail(Number(digits));
+
+  // OCR: leading extra "5" from "$" before a 5-digit price (e.g. $53,378 → 553378).
+  if (digits.length >= 6 && digits.startsWith("5")) {
+    const withoutDollarGhost = digits.slice(1);
+    if (withoutDollarGhost.length >= 6) {
+      pushIfRetail(Number(withoutDollarGhost.slice(0, -2)));
+    }
+    pushIfRetail(Number(withoutDollarGhost.length >= 3 && withoutDollarGhost.endsWith("00")
+      ? withoutDollarGhost.slice(0, -2)
+      : withoutDollarGhost));
+  }
+
+  // Prefer 5-digit retail totals in the common new-vehicle band when multiple parse.
+  const fiveDigit = candidates.filter((n) => n >= 20_000 && n <= 99_999);
+  if (fiveDigit.length) return fiveDigit[0]!;
+  return candidates[0] ?? null;
+}
+
 export function extractStickerFields(text: string): StickerFieldsV1 {
   const t = String(text ?? "");
   const signals: string[] = [];
@@ -242,9 +310,10 @@ export function extractStickerFields(text: string): StickerFieldsV1 {
     t.match(/\b(Toyota|Honda|Ford|Chevrolet|Chevy|Nissan|Hyundai|Kia|BMW|Mercedes|GMC|Ram|Jeep)\b/i)?.[1] ?? null;
   if (make) signals.push(`make:${make}`);
 
+  // Prefer multi-word model names before bare "Crown".
   const model =
     t.match(
-      /\b(Camry|Tacoma|Highlander|RAV4|Corolla|Tundra|4Runner|Sienna|Prius|Sequoia|Crown|Venza|Grand Highlander)\b/i,
+      /\b(Grand Highlander|Crown Signia|Camry|Tacoma|Highlander|RAV4|Corolla|Tundra|4Runner|Sienna|Prius|Sequoia|Crown|Venza|Signia)\b/i,
     )?.[1] ?? null;
   if (model) signals.push(`model:${model}`);
 
@@ -253,12 +322,24 @@ export function extractStickerFields(text: string): StickerFieldsV1 {
     null;
   if (trim) signals.push(`trim:${trim}`);
 
-  const priceRaw =
-    t.match(/(?:total\s+suggested\s+retail\s+price|total\s+msrp|msrp|internet|selling|price)\s*[:$]?\s*\$?\s*([\d,]{4,7})/i)?.[1] ??
+  // Prefer total suggested retail / total MSRP over the first bare $ amount on a dense sticker.
+  // EasyOCR often turns "$53,378.00" into "553.378.00" ($→5, comma→dot) — recover those forms.
+  const totalBlob =
+    t.match(
+      /(?:total\s+suggested\s+retail\s+price|total\s+msrp)\s*[:\s$]*\$?\s*([Ss5$]?[\d.,]{4,14})/i,
+    )?.[1] ?? null;
+  const msrpBlob =
+    t.match(
+      /(?:manufacturer'?s\s+suggested\s+retail\s+price|base\s+manufacturer'?s\s+suggested\s+retail\s+price|msrp|internet|selling\s+price)\s*[:\s$]*\$?\s*([Ss5$]?[\d.,]{4,14})/i,
+    )?.[1] ??
     t.match(/\$\s*([\d,]{4,7})/)?.[1] ??
     null;
-  const price = priceRaw ? Number(priceRaw.replace(/,/g, "")) : null;
+  const totalPrice = parseStickerMoneyBlob(totalBlob);
+  const msrpPrice = parseStickerMoneyBlob(msrpBlob);
+  const price = totalPrice ?? msrpPrice;
   if (price) signals.push(`price:${price}`);
+  if (totalPrice) signals.push(`totalSuggestedRetail:${totalPrice}`);
+  if (msrpPrice && msrpPrice !== totalPrice) signals.push(`msrpCandidate:${msrpPrice}`);
 
   const milesRaw =
     t.match(/(?:miles|mileage|odometer)\s*[:#]?\s*([\d,]{1,7})/i)?.[1] ?? null;

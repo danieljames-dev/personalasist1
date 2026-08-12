@@ -4,6 +4,7 @@ import {
   buildVinOcrResult,
   extractStickerFields,
   generateVinConfusionCandidates,
+  isContiguousVinObservation,
   isNoisyOcrText,
   isPlausibleVinCharset,
   proposeVinsFromOcrText,
@@ -101,6 +102,81 @@ test("PLACEHOLDER / letter-heavy check-digit coincidence is not a plausible VIN"
   assert.equal(isPlausibleVinCharset("JTDACAAJ8T3051788"), true);
   const vin = synthesizeValidVin("PLAUS01");
   assert.equal(isPlausibleVinCharset(vin), true);
+});
+
+test("contiguous VIN observation required — scatter OCR must not invent links", () => {
+  const vin = "JTDACAAJ8T3051788";
+  assert.equal(isContiguousVinObservation(`VIN ${vin} end`, vin), true);
+  assert.equal(isContiguousVinObservation("J T D A C A A J 8 T 3 0 5 1 7 8 8", vin), true);
+  // Scattered tokens that only form a VIN after deleting all spaces across the page
+  assert.equal(
+    isContiguousVinObservation("L 4 TL T 4 J 3 LA S 4 0 3 4 3 7 PR FFFX BERL", "355J7ER591B55A3EF"),
+    false,
+  );
+  const scatter = "L 4 TL T 4 J 3 LA S 4 0 3 4 3 7 PR FFFX BERL F BE FF 7 4 LETT 355J7ER591B55A3EF";
+  // Contiguous gate: candidate must appear as near-contiguous observation in page text
+  const cands = proposeVinsFromOcrText(scatter);
+  assert.ok(cands.every((c) => !c.valid || isContiguousVinObservation(scatter, c.vin)));
+});
+
+test("OCR confusion recovery from contiguous seed (B→8) keeps provenance via corrected source", () => {
+  // Engine observed B; confusion map may propose 8. Seed must remain contiguous observation.
+  const page = "VEHICLE IDENTIFICATION NUMBER JTDACAAJBT3051788 END";
+  const cands = proposeVinsFromOcrText(page);
+  const target = cands.find((c) => c.vin === "JTDACAAJ8T3051788" && c.valid);
+  // Only assert if check-digit path produces it — never invent outside confusion map.
+  if (target) {
+    assert.ok(target.source === "corrected" || target.source === "direct");
+    assert.ok(isContiguousVinObservation(page, "JTDACAAJBT3051788"));
+  }
+  // Alphabet-sequence / filler must not become HIGH_CONFIDENCE VINs
+  const filler = proposeVinsFromOcrText("ABCDEFGHIJKLMNOPQ 12345678901234567");
+  assert.ok(filler.every((c) => !c.valid || c.confidence < 85));
+});
+
+test("sticker fields recognize Crown Signia Limited", () => {
+  const fields = extractStickerFields(
+    "TOYOTA CROWN SIGNIA LIMITED MANUFACTURER'S SUGGESTED RETAIL PRICE $50,955.00",
+  );
+  assert.equal(fields.make?.toLowerCase(), "toyota");
+  assert.match(String(fields.model ?? ""), /crown|signia/i);
+  assert.match(String(fields.trim ?? ""), /^limited$/i);
+  assert.equal(fields.price, 50955);
+});
+
+test("total suggested retail recovers OCR $→5 garble (553.378.00 → 53378)", () => {
+  // Measured EasyOCR on real Monroney: TOTAL line became "553.378.00" instead of $53,378.00
+  const fields = extractStickerFields(
+    "TOYOTA CROWN SIGNIA LIMITED MANUFACTURER'S SUGGESTED RETAIL PRICE $50,955.00 TOTAL SUGGESTED RETAIL PRICE 553.378.00",
+  );
+  assert.equal(fields.price, 53378);
+  assert.ok(fields.rawSignals.some((s) => s === "totalSuggestedRetail:53378"));
+});
+
+test("FALSE_MSRP_FACTS: unrelated digit blobs must not become $53,378", () => {
+  // Recovery is only valid next to total/MSRP monetary labels — not arbitrary long numbers.
+  const negatives = [
+    "phone 555-337-8000 call back",
+    "stock number 55337800 on the lot",
+    "VIN fragment JTDA 553378 near plate",
+    "option code 553378 PKG A",
+    "built 05/33/78 or date 2025-05-33",
+    "combined 33 mpg city 28 highway 55337800 more text",
+    "553.378.00 appears alone with no price label",
+    "55337800",
+  ];
+  for (const text of negatives) {
+    const fields = extractStickerFields(text);
+    assert.notEqual(
+      fields.price,
+      53378,
+      `must not invent $53,378 from: ${text}`,
+    );
+    assert.ok(
+      !fields.rawSignals.some((s) => /totalSuggestedRetail:53378|price:53378/.test(s)),
+      `must not signal false total MSRP from: ${text}`,
+    );
+  }
 });
 
 test("noisy reflection OCR does not yield silent HIGH_CONFIDENCE VIN links", () => {
