@@ -210,13 +210,76 @@ export function answerVehicleQuery(input: {
   const preferLive = pool.some((v) => !isFixtureVehicle(v));
   if (preferLive) pool = pool.filter((v) => !isFixtureVehicle(v));
 
-  // Presence / sold
-  if (/\bno longer available|sold|gone\b/i.test(ql)) {
-    pool = pool.filter((v) =>
-      v.presenceStatus === "NO_LONGER_FOUND_ONLINE" ||
-      (v.statusHistory ?? []).some((s) => s.status === "NO_LONGER_FOUND_ONLINE" || /sold|removed/i.test(s.note || "")),
+  // Coverage / counts — answer from stored live-ish inventory only.
+  if (
+    /\bhow many\b/i.test(ql) ||
+    /\bhow much (of )?(the )?(dealer )?inventory\b/i.test(ql) ||
+    /\bwhat (vehicles|cars|inventory) do we have\b/i.test(ql) ||
+    /\bcoverage\b/i.test(ql)
+  ) {
+    const live = pool.filter((v) =>
+      v.presenceStatus === "ONLINE_LISTED" ||
+      v.presenceStatus === "PHYSICALLY_VERIFIED" ||
+      v.presenceStatus === "NOT_VERIFIED",
     );
-  } else if (/\brecently|came in|new arrivals?\b/i.test(ql)) {
+    const nNew = live.filter((v) => v.condition === "new").length;
+    const nUsed = live.filter((v) => v.condition === "used" || v.condition === "cpo").length;
+    const wantsNewOnly = /\bnew\b/i.test(ql) && !/\bused\b/i.test(ql);
+    const wantsUsedOnly = /\bused\b/i.test(ql) && !/\bnew\b/i.test(ql);
+    if (wantsNewOnly) {
+      lines.push({
+        class: "LIVE_DEALER_INVENTORY",
+        text: `AION has ${nNew} new vehicle(s) in current live-ish inventory (public listing or walk evidence).`,
+      });
+      pool = live.filter((v) => v.condition === "new").slice(0, 25);
+    } else if (wantsUsedOnly) {
+      lines.push({
+        class: "LIVE_DEALER_INVENTORY",
+        text: `AION has ${nUsed} used/CPO vehicle(s) in current live-ish inventory.`,
+      });
+      pool = live.filter((v) => v.condition === "used" || v.condition === "cpo").slice(0, 25);
+    } else {
+      lines.push({
+        class: "LIVE_DEALER_INVENTORY",
+        text: `AION live-ish inventory: ${live.length} vehicle(s) (${nNew} new, ${nUsed} used/CPO). This is AION coverage, not a claim of complete dealer lot coverage.`,
+      });
+      pool = live.slice(0, 25);
+    }
+  }
+
+  // Presence / temporal
+  if (/\bno longer available|disappeared|gone from online|what disappeared\b/i.test(ql)) {
+    // Not labeled sold — NO_LONGER_FOUND_ONLINE only.
+    pool = pool.filter((v) => v.presenceStatus === "NO_LONGER_FOUND_ONLINE");
+    lines.push({
+      class: "INFERENCE",
+      text: "These units are no longer found on the public dealer feed. That is not a sale confirmation.",
+    });
+  } else if (/\bsold\b/i.test(ql) && !/unsold/i.test(ql)) {
+    pool = pool.filter((v) =>
+      (v.statusHistory ?? []).some((s) => /sold/i.test(s.note || "")),
+    );
+    if (!pool.length) {
+      lines.push({
+        class: "INFERENCE",
+        text: "AION does not mark units SOLD from a missing online listing alone. No stronger sale evidence is stored for that filter.",
+      });
+    }
+  } else if (/\b(changed price|price change|what changed price)\b/i.test(ql)) {
+    pool = pool
+      .filter((v) => (v.priceHistory?.length ?? 0) >= 2)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .slice(0, 20);
+  } else if (/\b(arrived recently|came in|new arrivals?|what came in)\b/i.test(ql)) {
+    pool = pool
+      .filter((v) =>
+        v.presenceStatus === "ONLINE_LISTED" ||
+        v.presenceStatus === "PHYSICALLY_VERIFIED" ||
+        v.presenceStatus === "NOT_VERIFIED",
+      )
+      .sort((a, b) => String(b.createdAt || b.lastOnlineAt || "").localeCompare(String(a.createdAt || a.lastOnlineAt || "")))
+      .slice(0, 15);
+  } else if (/\brecently\b/i.test(ql)) {
     pool = pool
       .filter((v) => v.lastOnlineAt || v.createdAt)
       .sort((a, b) => String(b.lastOnlineAt || b.createdAt).localeCompare(String(a.lastOnlineAt || a.createdAt)))

@@ -138,22 +138,61 @@ test("price history records observed prices, never the act of looking", async ()
   const nextId = (k: string) => `${k}-${++n}`;
   let st = emptyVehicleInventoryState();
 
-  st = applyOnlineListings(st, dealership, listing(29640, now), now, nextId);
+  st = applyOnlineListings(st, dealership, listing(29640, now), now, nextId).state;
   assert.equal(st.vehicles[0]!.priceHistory.length, 1);
   assert.equal(st.vehicles[0]!.priceHistory[0]!.advertisedPrice, 29640);
 
   // A later page with no published price must NOT append a null observation.
-  st = applyOnlineListings(st, dealership, listing(null, "2026-08-12T03:00:00.000Z"), "2026-08-12T03:00:00.000Z", nextId);
+  st = applyOnlineListings(st, dealership, listing(null, "2026-08-12T03:00:00.000Z"), "2026-08-12T03:00:00.000Z", nextId).state;
   assert.equal(st.vehicles[0]!.priceHistory.length, 1, "price-absent refresh must not grow history");
   assert.equal(st.vehicles[0]!.priceHistory[0]!.advertisedPrice, 29640, "the known price survives");
 
   // The same price again must not bloat history.
-  st = applyOnlineListings(st, dealership, listing(29640, "2026-08-12T04:00:00.000Z"), "2026-08-12T04:00:00.000Z", nextId);
+  st = applyOnlineListings(st, dealership, listing(29640, "2026-08-12T04:00:00.000Z"), "2026-08-12T04:00:00.000Z", nextId).state;
   assert.equal(st.vehicles[0]!.priceHistory.length, 1, "identical price must not append");
 
   // A genuine price change is preserved as history.
-  st = applyOnlineListings(st, dealership, listing(27995, "2026-08-12T05:00:00.000Z"), "2026-08-12T05:00:00.000Z", nextId);
+  const changed = applyOnlineListings(st, dealership, listing(27995, "2026-08-12T05:00:00.000Z"), "2026-08-12T05:00:00.000Z", nextId);
+  st = changed.state;
   assert.equal(st.vehicles[0]!.priceHistory.length, 2, "changed price appends");
   assert.equal(st.vehicles[0]!.priceHistory[0]!.advertisedPrice, 27995, "newest first");
   assert.equal(st.vehicles[0]!.priceHistory[1]!.advertisedPrice, 29640, "older price preserved");
+  assert.equal(changed.temporal.priceChanged, 1);
+});
+
+test("scoped used refresh does not mark new inventory as missing", async () => {
+  const { applyOnlineListings, emptyVehicleInventoryState, listingFromPartial, buildDealershipContext } =
+    await import("../src/vehicle-inventory.js");
+  const now = "2026-08-12T02:00:00.000Z";
+  const dealer = buildDealershipContext(
+    { name: "Lakeland Toyota", slug: "lakeland-toyota", isCurrent: true },
+    { id: "d1", now },
+  );
+  let n = 0;
+  const nextId = (k: string) => `${k}-${++n}`;
+  let st = emptyVehicleInventoryState();
+  const newListing = listingFromPartial(
+    { vin: "4T1G11AK2PU131060", year: 2026, make: "Toyota", model: "Camry", condition: "new", advertisedPrice: 30000 },
+    { id: nextId("listing"), now, sourceUrl: "https://www.lakelandtoyota.com/searchnew.aspx", sourceType: "public-dealer-site" },
+  );
+  st = applyOnlineListings(st, dealer, [newListing], now, nextId, { conditionScope: "new" }).state;
+  assert.equal(st.vehicles[0]!.condition, "new");
+
+  // Used-only batch with a different VIN must not wipe the new car.
+  const usedListing = listingFromPartial(
+    { vin: "5YFB4MDE5TP490001", year: 2022, make: "Toyota", model: "Corolla", condition: "used", advertisedPrice: 18000 },
+    { id: nextId("listing"), now, sourceUrl: "https://www.lakelandtoyota.com/searchused.aspx", sourceType: "public-dealer-site" },
+  );
+  const usedPass = applyOnlineListings(st, dealer, [usedListing], now, nextId, {
+    conditionScope: "used",
+    reconcileMissing: true,
+  });
+  st = usedPass.state;
+  assert.equal(st.vehicles.length, 2);
+  assert.equal(
+    st.vehicles.find((v) => v.condition === "new")?.presenceStatus,
+    "ONLINE_LISTED",
+    "new inventory must survive a used-only refresh",
+  );
+  assert.equal(usedPass.temporal.noLongerFoundOnline, 0);
 });
