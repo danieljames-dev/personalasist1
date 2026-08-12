@@ -151,6 +151,28 @@ export function isPlausibleVinCharset(vin: string): boolean {
   return true;
 }
 
+/**
+ * True when `vin` appears in OCR text as a contiguous/near-contiguous observation
+ * (spaces/hyphens between characters allowed). Rejects candidates assembled by
+ * concatenating unrelated short tokens across a noisy page (Tesseract false-valid VINs).
+ */
+export function isContiguousVinObservation(text: string, vin: string): boolean {
+  const v = normalizeVinCandidate(vin);
+  if (v.length !== 17) return false;
+  const upper = String(text ?? "").toUpperCase();
+  if (upper.includes(v)) return true;
+  // Allow single separators between characters (common OCR spacing).
+  const pattern = v
+    .split("")
+    .map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[\\s\\-._]?");
+  try {
+    return new RegExp(pattern).test(upper);
+  } catch {
+    return false;
+  }
+}
+
 /** High symbol/noise OCR is not trustworthy enough for silent HIGH_CONFIDENCE. */
 export function isNoisyOcrText(text: string): boolean {
   const t = String(text ?? "");
@@ -201,6 +223,8 @@ export function proposeVinsFromOcrText(text: string): VinOcrCandidateV1[] {
     for (const v of variants) {
       if (v.length !== 17 || seen.has(v)) continue;
       if (!isPlausibleVinCharset(v)) continue;
+      // Must be observed contiguously in the OCR page — not stitched from scatter.
+      if (!isContiguousVinObservation(raw, v) && !isContiguousVinObservation(raw, seed)) continue;
       seen.add(v);
       const fromCorrection = v !== normalizeVinCandidate(seed) || /[IOQ]/.test(seed);
       const rawHit = direct.includes(v);
@@ -242,9 +266,10 @@ export function extractStickerFields(text: string): StickerFieldsV1 {
     t.match(/\b(Toyota|Honda|Ford|Chevrolet|Chevy|Nissan|Hyundai|Kia|BMW|Mercedes|GMC|Ram|Jeep)\b/i)?.[1] ?? null;
   if (make) signals.push(`make:${make}`);
 
+  // Prefer multi-word model names before bare "Crown".
   const model =
     t.match(
-      /\b(Camry|Tacoma|Highlander|RAV4|Corolla|Tundra|4Runner|Sienna|Prius|Sequoia|Crown|Venza|Grand Highlander)\b/i,
+      /\b(Grand Highlander|Crown Signia|Camry|Tacoma|Highlander|RAV4|Corolla|Tundra|4Runner|Sienna|Prius|Sequoia|Crown|Venza|Signia)\b/i,
     )?.[1] ?? null;
   if (model) signals.push(`model:${model}`);
 
@@ -253,8 +278,12 @@ export function extractStickerFields(text: string): StickerFieldsV1 {
     null;
   if (trim) signals.push(`trim:${trim}`);
 
+  // Prefer total suggested retail / total MSRP over the first bare $ amount on a dense sticker.
   const priceRaw =
-    t.match(/(?:total\s+suggested\s+retail\s+price|total\s+msrp|msrp|internet|selling|price)\s*[:$]?\s*\$?\s*([\d,]{4,7})/i)?.[1] ??
+    t.match(
+      /(?:total\s+suggested\s+retail\s+price|total\s+msrp|destination\s*(?:and|&)\s*delivery[^$\d]{0,40})[:\s$]*\$?\s*([\d,]{4,7})/i,
+    )?.[1] ??
+    t.match(/(?:manufacturer'?s\s+suggested\s+retail\s+price|msrp|internet|selling|price)\s*[:$]?\s*\$?\s*([\d,]{4,7})/i)?.[1] ??
     t.match(/\$\s*([\d,]{4,7})/)?.[1] ??
     null;
   const price = priceRaw ? Number(priceRaw.replace(/,/g, "")) : null;

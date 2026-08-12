@@ -134,6 +134,7 @@ import {
   vinIdentityCropRegions,
   ownerFacingExtractionMessage,
 } from "./image-region.js";
+import { orientImageBytesForVision, runEasyOcrOnImageBytes } from "./connectors/sticker-ocr.js";
 import {
   isSupportedAudioType,
   resolveTranscriptionEngineStatus,
@@ -5590,6 +5591,23 @@ export class AionAssistantV1 {
       byteLength = bytes.byteLength;
     }
 
+    // Phone JPEGs often store EXIF orientation 6 (sideways). Moondream/tesseract on unoriented
+    // pixels were the root cause of the real-lot sticker failure — always orient first.
+    let workingMime = input.mimeType || "image/jpeg";
+    if (bytes && !input.offline && !input.extractedText) {
+      try {
+        const oriented = await orientImageBytesForVision(bytes);
+        if (oriented.rotated && oriented.bytes.length) {
+          bytes = oriented.bytes;
+          byteLength = bytes.byteLength;
+          workingMime = "image/jpeg";
+          extractionPasses.push(`exif-orient:${oriented.exifOrientation ?? "?"}`);
+        }
+      } catch {
+        /* keep original bytes */
+      }
+    }
+
     /** Last raw vision string (may be detect-box garbage); used only for region hints. */
     let lastVisionRaw = "";
 
@@ -5651,8 +5669,25 @@ export class AionAssistantV1 {
       }
     };
 
-    if (!text && bytes && !input.offline) {
-      await runVision(bytes, VIN_VISION_PROMPT, "full-frame", input.mimeType || "image/jpeg");
+    // Prefer local EasyOCR (document OCR) on oriented phone photos before small VLMs.
+    // Measured: moondream returns garbage on dense Monroney; EasyOCR reads VIN lines after EXIF fix.
+    if (bytes && !input.offline && (!text || isNonOcrVisionText(text))) {
+      try {
+        const easy = await runEasyOcrOnImageBytes(bytes, { timeoutMs: 180_000 });
+        extractionPasses.push("easyocr");
+        if (easy?.fullText?.trim()) {
+          text = easy.fullText.trim();
+          provider = `easyocr${easy.exifOrientation && easy.exifOrientation !== 1 ? `+orient${easy.exifOrientation}` : ""}`;
+          extractionOk = true;
+          lastVisionRaw = text;
+        }
+      } catch {
+        /* optional */
+      }
+    }
+
+    if ((!text || isNonOcrVisionText(text)) && bytes && !input.offline) {
+      await runVision(bytes, VIN_VISION_PROMPT, "full-frame", workingMime);
     }
 
     // Optional tesseract.js full-frame only when vision produced nothing usable.
@@ -5679,7 +5714,7 @@ export class AionAssistantV1 {
       && bytes
       && ocr.status === "VIN_OCR_FAILED"
     ) {
-      const mime = input.mimeType || "image/jpeg";
+      const mime = workingMime;
       // Identity-first full-frame (short VIN-only prompt).
       if (await runVision(bytes, VIN_IDENTITY_ONLY_PROMPT, "vin-identity-full", mime)) {
         ocr = buildVinOcrResult({
