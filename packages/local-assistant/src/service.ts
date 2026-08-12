@@ -9495,6 +9495,48 @@ export class AionAssistantV1 {
     );
     const sources: Array<{ type: string; id: string; label: string }> = [];
 
+    // Owner natural attention questions must win over morning/executive diagnostic dumps.
+    // "What should I do next?" previously matched the morning-cycle regex (optional "today")
+    // and returned OWNER MUST / quiet-account style framing.
+    {
+      const naturalKindEarly = detectNaturalAttentionKind(text);
+      if (naturalKindEarly) {
+        const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
+        const openTasks = (state.tasks ?? []).filter(
+          (t) => t.workspace === workspaceId && t.state !== "completed" && t.state !== "cancelled",
+        );
+        let waiting: Array<{ person: string; expected: string }> = [];
+        if (naturalKindEarly === "waiting") {
+          const daily = await this.dailyOperatingReport();
+          waiting = daily.waitingOnOthers.map((w) => ({ person: w.person, expected: w.expected }));
+        }
+        const reply = formatNaturalOwnerAttention({
+          kind: naturalKindEarly,
+          overdue: queue.overdue,
+          dueSoon: queue.dueSoon,
+          recentlyQuiet: naturalKindEarly === "call" || naturalKindEarly === "follow_up"
+            ? queue.staleAccounts.map((s) => ({ customer: s.customer }))
+            : [],
+          waiting,
+          openTasks: naturalKindEarly === "today" || naturalKindEarly === "next"
+            ? openTasks.map((t) => ({ title: t.title }))
+            : [],
+        });
+        return {
+          intent: naturalKindEarly === "waiting" ? "WAITING_ON" : route.intent === "LIST_FOLLOWUPS" || route.intent === "WORK_QUEUE" ? route.intent : "GENERAL_ASSISTANT_QUERY",
+          confidence: "high",
+          reply,
+          sources: queue.overdue.slice(0, 5).map((o) => ({
+            type: "follow-up",
+            id: o.customer,
+            label: o.customer,
+          })),
+          action: "owner.natural_attention",
+          data: { naturalKind: naturalKindEarly, queue },
+        };
+      }
+    }
+
     if (route.intent === "IMPORT_STATUS") {
       // Usage metrics is routed here for phrase discovery but served by metrics path
       if (/\busage metrics\b|\bfriction metrics\b|\bhow am i using aion\b/i.test(text)) {
@@ -9703,9 +9745,10 @@ export class AionAssistantV1 {
       };
     }
 
-    // Daily operating / morning executive
+    // Daily operating / morning executive — explicit morning/start-day phrases only.
+    // Bare "what should I do next?" is handled by natural attention above.
     if (
-      /\b(morning (brief|cycle|executive)|start my day|what should i do( today)?|what do i need to do|what needs my attention|what is most important|dealership morning|morning assist|daily (brief|operating|os)|prepare me for today)\b/i.test(
+      /\b(morning (brief|cycle|executive)|start my day|what should i do today\b|dealership morning|morning assist|daily (brief|operating|os)|prepare me for today)\b/i.test(
         text,
       )
     ) {

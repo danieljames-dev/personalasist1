@@ -105,8 +105,19 @@ test("assistantPrompt follow-up / today / waiting natural phrasing", async () =>
     assert.doesNotMatch(answer.reply, /Active brand workspaces/i, q);
     assert.doesNotMatch(answer.reply, /FOLLOW-UP INTELLIGENCE/i, q);
     assert.doesNotMatch(answer.reply, /WAITING ON OTHERS/i, q);
+    assert.doesNotMatch(answer.reply, /OWNER MUST|WHAT ACTUALLY MATTERS TODAY/i, q);
     assert.ok(answer.reply.length > 10, q);
   }
+});
+
+test("what should I do next is natural attention not morning diagnostic dump", async () => {
+  const service = await serviceFixture();
+  await service.updateSettings({ activeWorkspace: "work" });
+  const answer = await service.assistantPrompt("What should I do next?");
+  assert.equal(answer.action, "owner.natural_attention");
+  assert.doesNotMatch(answer.reply, /OWNER MUST/i);
+  assert.doesNotMatch(answer.reply, /Quiet accounts/i);
+  assert.match(answer.reply, /don'?t currently|Open task|Priority|Nothing urgent|grounded next step/i);
 });
 
 test("overdue follow-up surfaces a person to call without diagnostic framing", async () => {
