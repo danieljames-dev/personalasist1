@@ -20,7 +20,8 @@ import type { GpuInfrastructurePortV1, GpuInstanceStateV1, GpuOfferV1 } from "./
 import { emptyActivation, normaliseOffer } from "./gpu.js";
 
 const scrypt = promisify(scryptCallback);
-const MAX_STATE_BYTES = 16 * 1024 * 1024;
+/** Raised for multi-thousand vehicle inventory (was 16 MiB). Still a hard V1 bound — not unbounded growth. */
+const MAX_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 16 * 1024 * 1024;
 const MAX_IMPORT_FILES = 500;
 

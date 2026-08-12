@@ -5014,6 +5014,11 @@ export class AionAssistantV1 {
     dealershipName?: string;
     useFixture?: boolean;
     fixtureVins?: string[];
+    /** new | used | all — scoped crawl so partial runs do not erase the other class. */
+    scope?: "new" | "used" | "all";
+    /** Page cap per starting URL (default 12; expansion stages raise deliberately). */
+    maxPagesPerUrl?: number;
+    pageDelayMs?: number;
   } = {}) {
     let dealer = await this.currentDealership();
     if (!dealer || (opts.dealershipName && /lakeland/i.test(opts.dealershipName))) {
@@ -5029,32 +5034,81 @@ export class AionAssistantV1 {
       ids.push(id);
       return id;
     };
+    const scope = opts.scope ?? "all";
     const result = await refreshDealershipPublicInventory({
       dealership: dealer!,
       now,
       nextId,
       useFixture: opts.useFixture === true,
+      scope,
       ...(opts.fixtureVins ? { fixtureVins: opts.fixtureVins } : {}),
+      ...(opts.maxPagesPerUrl != null ? { maxPagesPerUrl: opts.maxPagesPerUrl } : {}),
+      ...(opts.pageDelayMs != null ? { pageDelayMs: opts.pageDelayMs } : {}),
     });
+    let temporal = null as null | import("./vehicle-inventory.js").InventoryTemporalDeltaV1;
+    let quality = null as null | import("./vehicle-inventory.js").InventoryApplyQualityV1;
     await this.mutate((draft) => {
       if (!draft.vehicleInventory) draft.vehicleInventory = emptyVehicleInventoryState();
-      draft.vehicleInventory = applyOnlineListings(
+      const applied = applyOnlineListings(
         draft.vehicleInventory,
         dealer!,
         result.listings,
         now,
         (kind) => this.ports.ids.next(kind),
+        {
+          conditionScope: scope === "all" ? "all" : scope,
+          reconcileMissing: true,
+        },
       );
+      draft.vehicleInventory = applied.state;
+      temporal = applied.temporal;
+      quality = applied.quality;
       this.activity(
         draft,
         "agent",
         "inventory.refresh",
-        `Public inventory refresh (${result.mode}): ${result.listings.length} listing(s) for ${dealer!.name}`,
+        `Public inventory refresh (${result.mode}/${scope}): ${result.listings.length} listing(s), `
+          + `+${applied.temporal.newlySeen} new, ${applied.temporal.noLongerFoundOnline} no-longer-online for ${dealer!.name}`,
         dealer!.id,
       );
       return draft.vehicleInventory;
     });
-    return result;
+    return { ...result, temporal, quality };
+  }
+
+  /** Coverage + temporal summary for Owner inventory questions (no network). */
+  async inventoryCoverageReport(): Promise<{
+    total: number;
+    liveNew: number;
+    liveUsed: number;
+    noLongerFoundOnline: number;
+    lastRefresh: string | null;
+    reply: string;
+  }> {
+    const inv = this.vehicleInv(await this.snapshot());
+    const live = inv.vehicles.filter(
+      (v) =>
+        v.presenceStatus === "ONLINE_LISTED" ||
+        v.presenceStatus === "PHYSICALLY_VERIFIED" ||
+        v.presenceStatus === "NOT_VERIFIED",
+    );
+    const liveNew = live.filter((v) => v.condition === "new").length;
+    const liveUsed = live.filter((v) => v.condition === "used" || v.condition === "cpo").length;
+    const gone = inv.vehicles.filter((v) => v.presenceStatus === "NO_LONGER_FOUND_ONLINE").length;
+    const lastRefresh = inv.lastInventoryRefresh?.["lakeland-toyota"] ?? null;
+    return {
+      total: live.length,
+      liveNew,
+      liveUsed,
+      noLongerFoundOnline: gone,
+      lastRefresh,
+      reply: [
+        `AION inventory (live-ish): ${live.length} vehicle(s)`,
+        `  New: ${liveNew} · Used/CPO: ${liveUsed}`,
+        gone ? `  No longer found online: ${gone} (not labeled sold)` : "  No longer found online: 0",
+        lastRefresh ? `  Last public refresh: ${lastRefresh}` : "  Last public refresh: never",
+      ].join("\n"),
+    };
   }
 
   async startInventoryWalk(note = ""): Promise<InventoryWalkV1> {
@@ -9990,6 +10044,27 @@ export class AionAssistantV1 {
         sources: people.slice(0, 5).map((p) => ({ type: "customer", id: p.id, label: p.displayName })),
         action: "context.scope",
         data: { workspace: active, count: people.length },
+      };
+    }
+
+    // Temporal inventory questions — before generic "what changed" executive dumps.
+    if (
+      /\bwhat (disappeared|arrived|came in)\b/i.test(text) ||
+      /\b(changed price|price changed|newly listed|came in recently|arrived recently)\b/i.test(text) ||
+      /\bhow much (of )?(the )?(dealer )?inventory\b/i.test(text)
+    ) {
+      const answer = await this.answerVehicleIntelligence(text);
+      return {
+        intent: "VEHICLE_INVENTORY",
+        confidence: "high",
+        reply: answer.reply,
+        sources: answer.vehicles.slice(0, 8).map((v) => ({
+          type: "vehicle",
+          id: v.vin || "unknown",
+          label: [v.year, v.make, v.model, v.trim].filter(Boolean).join(" ") || v.vin || "vehicle",
+        })),
+        action: "vehicle.temporal",
+        data: answer,
       };
     }
 

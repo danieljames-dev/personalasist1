@@ -577,6 +577,69 @@ export function listingFromPartial(
   };
 }
 
+/**
+ * Temporal observation event from a public inventory refresh.
+ * Disappearance is NO_LONGER_FOUND_ONLINE — never auto-labeled SOLD.
+ */
+export type InventoryTemporalEventTypeV1 =
+  | "NEWLY_SEEN"
+  | "STILL_ONLINE"
+  | "NO_LONGER_FOUND_ONLINE"
+  | "PRICE_CHANGED"
+  | "LISTING_CHANGED";
+
+export interface InventoryTemporalEventV1 {
+  type: InventoryTemporalEventTypeV1;
+  vehicleId: string;
+  vin: string | null;
+  detail: string;
+  at: IsoTimestamp;
+}
+
+export interface InventoryTemporalDeltaV1 {
+  newlySeen: number;
+  stillOnline: number;
+  noLongerFoundOnline: number;
+  priceChanged: number;
+  listingChanged: number;
+  events: InventoryTemporalEventV1[];
+}
+
+export interface InventoryApplyQualityV1 {
+  invalidVins: number;
+  missingPrice: number;
+  missingTrim: number;
+  unknownCondition: number;
+  duplicatesInBatch: number;
+}
+
+export interface InventoryApplyResultV1 {
+  state: VehicleInventoryStateV1;
+  temporal: InventoryTemporalDeltaV1;
+  quality: InventoryApplyQualityV1;
+}
+
+export interface ApplyOnlineListingsOptionsV1 {
+  /**
+   * When refreshing only NEW or only USED, do not mark the other condition as missing.
+   * Full-scope refresh (`null`/`all`) reconciles the whole dealership feed.
+   */
+  conditionScope?: "new" | "used" | "all" | null;
+  /** When false, never mark vehicles NO_LONGER_FOUND_ONLINE (partial page batches). */
+  reconcileMissing?: boolean;
+}
+
+function conditionInScope(
+  condition: VehicleRecordV1["condition"] | InventoryListingObservationV1["condition"],
+  scope: ApplyOnlineListingsOptionsV1["conditionScope"],
+): boolean {
+  if (!scope || scope === "all") return true;
+  const c = String(condition ?? "unknown").toLowerCase();
+  if (scope === "new") return c === "new";
+  if (scope === "used") return c === "used" || c === "cpo";
+  return true;
+}
+
 /** Upsert vehicles from a batch of online listings; preserves price/status history. */
 export function applyOnlineListings(
   state: VehicleInventoryStateV1,
@@ -584,14 +647,44 @@ export function applyOnlineListings(
   listings: InventoryListingObservationV1[],
   now: IsoTimestamp,
   nextId: (kind: string) => string,
-): VehicleInventoryStateV1 {
+  options: ApplyOnlineListingsOptionsV1 = {},
+): InventoryApplyResultV1 {
   const vehicles = [...state.vehicles];
   const seenVin = new Set<string>();
   const seenStock = new Set<string>();
+  const temporal: InventoryTemporalDeltaV1 = {
+    newlySeen: 0,
+    stillOnline: 0,
+    noLongerFoundOnline: 0,
+    priceChanged: 0,
+    listingChanged: 0,
+    events: [],
+  };
+  const quality: InventoryApplyQualityV1 = {
+    invalidVins: 0,
+    missingPrice: 0,
+    missingTrim: 0,
+    unknownCondition: 0,
+    duplicatesInBatch: 0,
+  };
+  const batchVins = new Set<string>();
+  const scope = options.conditionScope ?? "all";
+  const reconcileMissing = options.reconcileMissing !== false;
 
   for (const listing of listings) {
-    if (listing.vin) seenVin.add(listing.vin);
+    if (listing.vin) {
+      const v = validateVin(listing.vin);
+      if (!v.valid) quality.invalidVins += 1;
+      if (batchVins.has(listing.vin)) quality.duplicatesInBatch += 1;
+      else batchVins.add(listing.vin);
+      seenVin.add(listing.vin);
+    }
     if (listing.stockNumber) seenStock.add(listing.stockNumber.toUpperCase());
+    if (listing.advertisedPrice == null && listing.msrp == null && listing.dealerPrice == null) {
+      quality.missingPrice += 1;
+    }
+    if (!listing.trim) quality.missingTrim += 1;
+    if (!listing.condition || listing.condition === "unknown") quality.unknownCondition += 1;
 
     let idx = -1;
     if (listing.vin) {
@@ -610,8 +703,9 @@ export function applyOnlineListings(
     }
 
     if (idx < 0) {
+      const id = nextId("vehicle");
       vehicles.unshift({
-        id: nextId("vehicle"),
+        id,
         vin: listing.vin,
         dealershipId: dealership.id,
         dealershipName: dealership.name,
@@ -643,11 +737,20 @@ export function applyOnlineListings(
               }]
             : [],
         statusHistory: [{ at: now, status: "ONLINE_LISTED", note: "First observed online." }],
-        listingObservations: [listing],
+        // Keep only the latest observation — raw scrape blobs dominate state size at inventory scale.
+        listingObservations: [{ ...listing, raw: {} }],
         relationshipIds: [],
         opportunityIds: [],
         createdAt: now,
         updatedAt: now,
+      });
+      temporal.newlySeen += 1;
+      temporal.events.push({
+        type: "NEWLY_SEEN",
+        vehicleId: id,
+        vin: listing.vin,
+        detail: [listing.year, listing.make, listing.model, listing.trim].filter(Boolean).join(" ") || "new listing",
+        at: now,
       });
       continue;
     }
@@ -672,6 +775,12 @@ export function applyOnlineListings(
       (lastGrounded?.advertisedPrice !== listing.advertisedPrice ||
         lastGrounded?.msrp !== listing.msrp ||
         lastGrounded?.dealerPrice !== listing.dealerPrice);
+
+    const listingChanged =
+      (listing.trim && listing.trim !== prev.trim) ||
+      (listing.model && listing.model !== prev.model) ||
+      (listing.condition && listing.condition !== prev.condition) ||
+      (listing.mileage != null && listing.mileage !== prev.mileage);
 
     const priceHistory = priceChanged
       ? [{
@@ -709,39 +818,89 @@ export function applyOnlineListings(
       lastOnlineAt: now,
       priceHistory,
       statusHistory,
-      listingObservations: [listing, ...prev.listingObservations].slice(0, 30),
+      listingObservations: [{ ...listing, raw: {} }, ...prev.listingObservations].slice(0, 5),
       updatedAt: now,
     };
-  }
 
-  // Mark previously online vehicles for this dealership not in this refresh.
-  for (let i = 0; i < vehicles.length; i++) {
-    const v = vehicles[i]!;
-    if (v.dealershipId !== dealership.id && v.dealershipName !== dealership.name) continue;
-    if (v.presenceStatus === "PHYSICALLY_VERIFIED") continue;
-    const still =
-      (v.vin && seenVin.has(v.vin)) ||
-      (v.stockNumber && seenStock.has(v.stockNumber.toUpperCase()));
-    if (!still && v.lastOnlineAt && v.presenceStatus === "ONLINE_LISTED") {
-      const gone: VehicleStatusHistoryEntryV1 = {
+    temporal.stillOnline += 1;
+    temporal.events.push({
+      type: "STILL_ONLINE",
+      vehicleId: prev.id,
+      vin: listing.vin || prev.vin,
+      detail: "Still present on public inventory feed.",
+      at: now,
+    });
+    if (priceChanged) {
+      temporal.priceChanged += 1;
+      temporal.events.push({
+        type: "PRICE_CHANGED",
+        vehicleId: prev.id,
+        vin: listing.vin || prev.vin,
+        detail: `Price observation ${lastGrounded?.advertisedPrice ?? "—"} → ${listing.advertisedPrice ?? "—"}`,
         at: now,
-        status: "NO_LONGER_FOUND_ONLINE",
-        note: "Not present in latest public inventory refresh.",
-      };
-      vehicles[i] = {
-        ...v,
-        presenceStatus: "NO_LONGER_FOUND_ONLINE",
-        statusHistory: [gone, ...v.statusHistory].slice(0, 50),
-        updatedAt: now,
-      };
+      });
+    }
+    if (listingChanged) {
+      temporal.listingChanged += 1;
+      temporal.events.push({
+        type: "LISTING_CHANGED",
+        vehicleId: prev.id,
+        vin: listing.vin || prev.vin,
+        detail: "Listing fields changed (trim/model/condition/mileage).",
+        at: now,
+      });
     }
   }
 
+  // Mark previously online vehicles for this dealership not in this refresh.
+  // Scoped refreshes must not erase the other condition class.
+  if (reconcileMissing) {
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i]!;
+      if (v.dealershipId !== dealership.id && v.dealershipName !== dealership.name) continue;
+      if (v.presenceStatus === "PHYSICALLY_VERIFIED") continue;
+      if (!conditionInScope(v.condition, scope)) continue;
+      const still =
+        (v.vin && seenVin.has(v.vin)) ||
+        (v.stockNumber && seenStock.has(v.stockNumber.toUpperCase()));
+      if (!still && v.lastOnlineAt && v.presenceStatus === "ONLINE_LISTED") {
+        const gone: VehicleStatusHistoryEntryV1 = {
+          at: now,
+          status: "NO_LONGER_FOUND_ONLINE",
+          note: "Not present in latest public inventory refresh. Not labeled sold.",
+        };
+        vehicles[i] = {
+          ...v,
+          presenceStatus: "NO_LONGER_FOUND_ONLINE",
+          statusHistory: [gone, ...v.statusHistory].slice(0, 50),
+          updatedAt: now,
+        };
+        temporal.noLongerFoundOnline += 1;
+        temporal.events.push({
+          type: "NO_LONGER_FOUND_ONLINE",
+          vehicleId: v.id,
+          vin: v.vin,
+          detail: "Missing from scoped public refresh — not sold without stronger evidence.",
+          at: now,
+        });
+      }
+    }
+  }
+
+  // Bound event log size for callers that surface it.
+  temporal.events = temporal.events.slice(0, 200);
+
+  // onlineListings is a recent batch snapshot, not full history — cap aggressively for state size.
+  const slimListings = listings.slice(0, 800).map((l) => ({ ...l, raw: {} }));
   return {
-    ...state,
-    vehicles: vehicles.slice(0, 5000),
-    onlineListings: listings.slice(0, 3000),
-    lastInventoryRefresh: { ...state.lastInventoryRefresh, [dealership.slug]: now },
+    state: {
+      ...state,
+      vehicles: vehicles.slice(0, 5000),
+      onlineListings: slimListings,
+      lastInventoryRefresh: { ...state.lastInventoryRefresh, [dealership.slug]: now },
+    },
+    temporal,
+    quality,
   };
 }
 
