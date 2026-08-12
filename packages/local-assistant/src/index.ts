@@ -65,3 +65,5 @@ export * from "./owner-authority-v2.js";
 export * from "./migration-manifest.js";
 export * from "./cold-restore.js";
 export * from "./control-plane-archive.js";
+export * from "./recovery-package.js";
+export * from "./backup-retention.js";

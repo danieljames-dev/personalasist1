@@ -1463,6 +1463,8 @@ export async function createAionServer(options = {}) {
       case "import.cancel": return service.cancelImport(input.id);
       case "backup.create": return service.createPrivateBackup(absolute(input.destination, "Backup destination"), String(input.passphrase ?? ""));
       case "backup.verify": return service.verifyPrivateBackup(absolute(input.destination, "Backup destination"), String(input.passphrase ?? ""));
+      // Recovery package: passphrase is resolved locally by the service, never supplied over the API.
+      case "backup.recovery": return service.createRecoveryBackup(typeof input.offDiskRoot === "string" ? input.offDiskRoot : null);
       case "career.run": {
         try { const result = await runCareer(repositoryRoot, input); await service.recordCareerActivity(input.command, "success", "No Career content is stored in activity."); return result; }
         catch (error) { if (error?.careerCommand) await service.recordCareerActivity(error.careerCommand, "failed", "The command failed; no Career content is stored."); throw error; }

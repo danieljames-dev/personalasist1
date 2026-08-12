@@ -5654,6 +5654,143 @@ export class AionAssistantV1 {
    * Always writes a verified SHA256 snapshot under private/aion/exports/pre-import-snapshots.
    * If AION_PRIVATE_BACKUP_PASSPHRASE is set (≥12), also creates encrypted .aionbak.
    */
+  /**
+   * Disaster-recovery backup: canonical state plus non-secret continuity sidecars, encrypted with
+   * the existing envelope, then copied to the authorized off-disk root.
+   *
+   * The off-disk copy is a byte copy of the already-encrypted artifact rather than a second
+   * encryption pass, so both locations hold the identical verified ciphertext and the production
+   * backup port keeps its `exports`-scoped containment. Retention is planned but only applied to
+   * the local location here; off-disk pruning stays an Owner decision.
+   */
+  async createRecoveryBackup(offDiskRoot?: string | null): Promise<{
+    ok: boolean;
+    revision: number;
+    encryptedPath: string | null;
+    offDiskPath: string | null;
+    encrypted: boolean;
+    localDigest: string | null;
+    offDiskDigest: string | null;
+    digestsMatch: boolean;
+    includedPaths: string[];
+    excludedPaths: string[];
+    cursorSeenIds: number | null;
+    retentionKept: number;
+    retentionPruned: number;
+    message: string;
+  }> {
+    const { createHash } = await import("node:crypto");
+    const { mkdir, copyFile, readFile, stat, readdir } = await import("node:fs/promises");
+    const { join, basename } = await import("node:path");
+    const { collectRecoveryPackage, restoredCursorSeenIdCount } = await import("./recovery-package.js");
+    const { planBackupRetention } = await import("./backup-retention.js");
+    const { resolvePrivateBackupPassphrase } = await import("./private-backup-key.js");
+
+    const state = await this.snapshot();
+    const dataRoot = this.#resolveDataRoot();
+    if (!dataRoot) {
+      return {
+        ok: false, revision: state.revision, encryptedPath: null, offDiskPath: null, encrypted: false,
+        localDigest: null, offDiskDigest: null, digestsMatch: false, includedPaths: [], excludedPaths: [],
+        cursorSeenIds: null, retentionKept: 0, retentionPruned: 0,
+        message: "No filesystem data root; recovery backup requires on-disk state.",
+      };
+    }
+    const key = resolvePrivateBackupPassphrase(dataRoot);
+    if (!key.passphrase || key.passphrase.length < 12) {
+      return {
+        ok: false, revision: state.revision, encryptedPath: null, offDiskPath: null, encrypted: false,
+        localDigest: null, offDiskDigest: null, digestsMatch: false, includedPaths: [], excludedPaths: [],
+        cursorSeenIds: null, retentionKept: 0, retentionPruned: 0,
+        message: "No backup passphrase could be resolved.",
+      };
+    }
+
+    const now = this.ports.clock.now();
+    const pkg = collectRecoveryPackage(dataRoot, now);
+    const snapDir = join(dataRoot, "exports", "pre-import-snapshots");
+    await mkdir(snapDir, { recursive: true });
+    const ts = now.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    const dest = join(snapDir, `aion-recovery-${ts}.aionbak`);
+
+    const backupPort = this.ports.backup as unknown as {
+      createPackage?: (s: AssistantStateV1, sc: Record<string, unknown>, m: unknown, d: string, p: string) => Promise<{ digest: string; bytes: number }>;
+      restorePackage?: (d: string, p: string) => Promise<{ state: AssistantStateV1; sidecars: Record<string, unknown> }>;
+    };
+    if (typeof backupPort.createPackage !== "function") {
+      return {
+        ok: false, revision: state.revision, encryptedPath: null, offDiskPath: null, encrypted: false,
+        localDigest: null, offDiskDigest: null, digestsMatch: false,
+        includedPaths: pkg.manifest.includedPaths, excludedPaths: pkg.manifest.excludedPaths,
+        cursorSeenIds: null, retentionKept: 0, retentionPruned: 0,
+        message: "Backup port does not support recovery packages.",
+      };
+    }
+    const created = await backupPort.createPackage(state, pkg.sidecars, pkg.manifest, dest, key.passphrase);
+    const localDigest = createHash("sha256").update(await readFile(dest)).digest("hex");
+
+    let offDiskPath: string | null = null;
+    let offDiskDigest: string | null = null;
+    if (offDiskRoot && offDiskRoot.trim()) {
+      const targetDir = join(offDiskRoot.trim(), "recovery-packages");
+      await mkdir(targetDir, { recursive: true });
+      const target = join(targetDir, basename(dest));
+      await copyFile(dest, target);
+      offDiskDigest = createHash("sha256").update(await readFile(target)).digest("hex");
+      offDiskPath = target;
+    }
+
+    const cursorSeenIds = restoredCursorSeenIdCount(pkg.sidecars);
+
+    // Retention over local recovery packages only; the off-disk copy is never pruned here.
+    const localFiles = (await readdir(snapDir)).filter((f) => f.endsWith(".aionbak"));
+    const artifacts = await Promise.all(
+      localFiles.map(async (f) => {
+        const p = join(snapDir, f);
+        const s = await stat(p);
+        return { path: p, modifiedMs: s.mtimeMs, verified: p === dest, offDisk: false };
+      }),
+    );
+    const plan = planBackupRetention(artifacts);
+
+    return {
+      ok: true,
+      revision: state.revision,
+      encryptedPath: dest,
+      offDiskPath,
+      encrypted: true,
+      localDigest,
+      offDiskDigest,
+      digestsMatch: offDiskDigest === null ? true : offDiskDigest === localDigest,
+      includedPaths: pkg.manifest.includedPaths,
+      excludedPaths: pkg.manifest.excludedPaths,
+      cursorSeenIds,
+      retentionKept: plan.keep.length,
+      retentionPruned: plan.prune.length,
+      message: `Recovery package written (${created.bytes} bytes)${offDiskPath ? " and copied off-disk" : ""}.`,
+    };
+  }
+
+  /** Best-effort filesystem data root from whichever repository adapter is installed. */
+  #resolveDataRoot(): string {
+    const repo = this.ports.repository as {
+      root?: string; statePath?: string;
+      inner?: { root?: string; statePath?: string };
+      underlying?: { root?: string; statePath?: string };
+    };
+    return (
+      (typeof repo.root === "string" && repo.root) ||
+      (typeof repo.inner?.root === "string" && repo.inner.root) ||
+      (typeof repo.underlying?.root === "string" && repo.underlying.root) ||
+      (typeof repo.statePath === "string" && repo.statePath.endsWith("state-v1.json")
+        ? repo.statePath.replace(/[\\/]state-v1\.json$/i, "")
+        : "") ||
+      (typeof repo.inner?.statePath === "string" && repo.inner.statePath.endsWith("state-v1.json")
+        ? repo.inner.statePath.replace(/[\\/]state-v1\.json$/i, "")
+        : "")
+    );
+  }
+
   async preImportPrivateStateBackup(): Promise<{
     ok: boolean;
     snapshotPath: string;

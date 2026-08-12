@@ -1516,6 +1516,19 @@ export class LocalArchiveImportSourceV1 implements ImportSourceV1 {
 }
 
 interface BackupEnvelopeV1 { version: "aion.private-backup.v1"; kdf: "scrypt"; cipher: "aes-256-gcm"; salt: string; nonce: string; tag: string; ciphertext: string; stateDigest: string; }
+/**
+ * v2 reuses the v1 envelope exactly — scrypt KDF, AES-256-GCM, digest-checked, written `wx` — and
+ * only widens the plaintext from bare state to a recovery package (`{ state, sidecars, manifest }`).
+ * Keeping one envelope means one crypto path to reason about, and v1 artifacts stay readable.
+ */
+interface BackupEnvelopeV2 extends Omit<BackupEnvelopeV1, "version"> { version: "aion.private-backup.v2"; }
+interface BackupPackagePlaintextV2 { state: unknown; sidecars: Record<string, unknown>; manifest: unknown; }
+export interface RestoredBackupPackageV1 {
+  state: AssistantStateV1;
+  sidecars: Record<string, unknown>;
+  manifest: unknown;
+  version: "aion.private-backup.v1" | "aion.private-backup.v2";
+}
 export class NodePrivateBackupV1 implements PrivateBackupV1 {
   constructor(private readonly approvedDestinationRoot: string) { normalizedAbsolute(approvedDestinationRoot, "Private backup root"); }
   async create(state: AssistantStateV1, destination: string, passphrase: string): Promise<{ digest: string; bytes: number }> {
@@ -1536,17 +1549,62 @@ export class NodePrivateBackupV1 implements PrivateBackupV1 {
     return { digest: createHash("sha256").update(serialized).digest("hex"), bytes: Buffer.byteLength(serialized) };
   }
   async restore(destination: string, passphrase: string): Promise<AssistantStateV1> {
+    return (await this.restorePackage(destination, passphrase)).state;
+  }
+  /**
+   * Write a recovery package: canonical state plus the non-secret sidecars that otherwise force
+   * avoidable reconfiguration after a disaster. Secret material is the caller's responsibility to
+   * exclude before this point; the payload is encrypted either way, so this only widens what a
+   * legitimate restore can reproduce.
+   */
+  async createPackage(
+    state: AssistantStateV1,
+    sidecars: Record<string, unknown>,
+    manifest: unknown,
+    destination: string,
+    passphrase: string,
+  ): Promise<{ digest: string; bytes: number }> {
+    if (passphrase.length < 12) fail("Private backup passphrase must contain at least 12 characters.");
+    await mkdir(this.approvedDestinationRoot, { recursive: true });
+    await authorize(this.approvedDestinationRoot, destination);
+    const payload: BackupPackagePlaintextV2 = { state: validateStateV1(state), sidecars, manifest };
+    const plaintext = Buffer.from(JSON.stringify(payload), "utf8");
+    const salt = randomBytes(16); const nonce = randomBytes(12);
+    const key = await scrypt(passphrase, salt, 32) as Buffer;
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    cipher.setAAD(Buffer.from("aion.private-backup.v2", "utf8"));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const envelope: BackupEnvelopeV2 = { version: "aion.private-backup.v2", kdf: "scrypt", cipher: "aes-256-gcm", salt: salt.toString("base64url"), nonce: nonce.toString("base64url"), tag: cipher.getAuthTag().toString("base64url"), ciphertext: ciphertext.toString("base64url"), stateDigest: createHash("sha256").update(plaintext).digest("hex") };
+    const serialized = `${JSON.stringify(envelope)}\n`;
+    await writeFile(destination, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const restored = await this.restorePackage(destination, passphrase);
+    if (!timingSafeEqual(Buffer.from(digestValue(restored.state), "hex"), Buffer.from(digestValue(state), "hex"))) fail("Private backup restore verification failed.");
+    return { digest: createHash("sha256").update(serialized).digest("hex"), bytes: Buffer.byteLength(serialized) };
+  }
+  /** Read either envelope version. v1 artifacts yield empty sidecars rather than failing. */
+  async restorePackage(destination: string, passphrase: string): Promise<RestoredBackupPackageV1> {
     await authorize(this.approvedDestinationRoot, destination);
     const raw = await readFile(destination, "utf8");
-    if (Buffer.byteLength(raw) > MAX_STATE_BYTES * 2) fail("Private backup is oversized.");
-    const envelope = JSON.parse(raw) as BackupEnvelopeV1;
-    if (envelope.version !== "aion.private-backup.v1" || envelope.kdf !== "scrypt" || envelope.cipher !== "aes-256-gcm") fail("Private backup version is unsupported.");
+    if (Buffer.byteLength(raw) > MAX_STATE_BYTES * 4) fail("Private backup is oversized.");
+    const envelope = JSON.parse(raw) as BackupEnvelopeV1 | BackupEnvelopeV2;
+    const version = envelope.version;
+    if ((version !== "aion.private-backup.v1" && version !== "aion.private-backup.v2") || envelope.kdf !== "scrypt" || envelope.cipher !== "aes-256-gcm") fail("Private backup version is unsupported.");
     const key = await scrypt(passphrase, Buffer.from(envelope.salt, "base64url"), 32) as Buffer;
     const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.nonce, "base64url"));
-    decipher.setAAD(Buffer.from("aion.private-backup.v1", "utf8")); decipher.setAuthTag(Buffer.from(envelope.tag, "base64url"));
+    decipher.setAAD(Buffer.from(version, "utf8")); decipher.setAuthTag(Buffer.from(envelope.tag, "base64url"));
     const plaintext = Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, "base64url")), decipher.final()]);
     const actual = createHash("sha256").update(plaintext).digest("hex");
     if (!timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(envelope.stateDigest, "hex"))) fail("Private backup integrity validation failed.");
-    return validateStateV1(JSON.parse(plaintext.toString("utf8")));
+    const parsed = JSON.parse(plaintext.toString("utf8")) as unknown;
+    if (version === "aion.private-backup.v1") {
+      return { state: validateStateV1(parsed), sidecars: {}, manifest: null, version };
+    }
+    const pkg = parsed as BackupPackagePlaintextV2;
+    return {
+      state: validateStateV1(pkg.state),
+      sidecars: (pkg.sidecars ?? {}) as Record<string, unknown>,
+      manifest: pkg.manifest ?? null,
+      version,
+    };
   }
 }
