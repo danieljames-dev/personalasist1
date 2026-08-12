@@ -323,7 +323,15 @@ const COMMAND_RULES: CommandRule[] = [
   },
   {
     command: "WEBSITE_STALE",
-    patterns: [/\bwhat(?:'s| is) stale on my website\b/i, /\bstale website\b/i, /\bwebsite out of date\b/i],
+    // Both orderings the Owner uses. Without the second, "What website content is stale?" reaches
+    // the content intent but falls through to the posting plan — right subject, wrong answer.
+    patterns: [
+      /\bwhat(?:'s| is) stale on my website\b/i,
+      /\bwhat website content is stale\b/i,
+      /\bwebsite content is stale\b/i,
+      /\bstale website\b/i,
+      /\bwebsite out of date\b/i,
+    ],
   },
   {
     command: "PREPARE_WEBSITE_UPDATE",
