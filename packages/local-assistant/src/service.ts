@@ -9565,27 +9565,6 @@ export class AionAssistantV1 {
           data: completeness,
         };
       }
-      if (/\bwhat (are )?(my )?(current )?goals\b|\bshow (me )?(my )?goals\b/i.test(text)) {
-        const ok = await this.getOwnerKnowledge();
-        const goals = (ok.facts || []).filter((f) => f.enabled !== false && f.category === "goal");
-        const reply = goals.length
-          ? [
-              "CURRENT GOALS (evidence-grounded)",
-              ...goals.map(
-                (g, i) =>
-                  `  ${i + 1}. ${g.title}\n     ${g.content.slice(0, 240)}\n     source=${g.provenance?.sourceRef || "unknown"} conf=${g.confidence}`,
-              ),
-            ].join("\n")
-          : "No structured GOAL facts yet. Capture with “Remember my goal is …” or import strong plan documents.";
-        return {
-          intent: route.intent,
-          confidence: "high",
-          reply,
-          sources,
-          action: "owner.goals.list",
-          data: { goals },
-        };
-      }
       const registry = await this.realDataSourceRegistry();
       const readiness = await this.importReadiness();
       const dash = await this.importDashboard();
@@ -10494,6 +10473,64 @@ export class AionAssistantV1 {
 
     // Career/skills questions must reach stored Owner knowledge rather than the generic briefing.
     // The data was already there; only the route was missing.
+    if (route.intent === "OWNER_GOALS") {
+      const { buildGoalViews, formatGoalsAnswer } = await import("./owner-goals-projects.js");
+      // Capture path first: the empty-state message invites "Remember my goal is …", and until now
+      // nothing implemented it, so goals could never grow beyond what import happened to produce.
+      const capture = text.match(/\b(?:remember (?:that )?)?my goal is\b[:\s]*(.+)$/i)
+        ?? text.match(/\b(?:add|set) (?:a )?goal\b[:\s]*(.+)$/i);
+      if (capture?.[1]?.trim()) {
+        const statement = capture[1].trim().replace(/[.\s]+$/, "");
+        await this.addOwnerKnowledgeFact({
+          category: "goal",
+          title: statement.slice(0, 80),
+          content: statement,
+          confidence: 95,
+          sourceType: "owner",
+          sourceRef: "assistant.goal.capture",
+        });
+        return {
+          intent: "OWNER_GOALS",
+          confidence: "high",
+          reply: `Got it — I'll remember that goal:\n· ${statement}`,
+          sources,
+          action: "owner.goals.add",
+          data: { statement },
+        };
+      }
+      const views = buildGoalViews(state.ownerKnowledge?.facts ?? []);
+      return {
+        intent: "OWNER_GOALS",
+        confidence: views.length ? "high" : "low",
+        reply: formatGoalsAnswer(views),
+        sources,
+        action: "owner.goals.list",
+        data: { goals: views },
+      };
+    }
+
+    if (route.intent === "PROJECT_STATUS") {
+      const { formatProjectsAnswer } = await import("./owner-goals-projects.js");
+      const all = await this.projects();
+      const workspaceId0 = state.settings.activeWorkspace;
+      const mine = all.filter((p) => !p.workspace || p.workspace === workspaceId0);
+      return {
+        intent: "PROJECT_STATUS",
+        confidence: mine.length ? "high" : "low",
+        reply: formatProjectsAnswer(
+          mine.map((p) => ({
+            title: p.title,
+            stage: String(p.stage ?? "idea"),
+            standing: p.standing ?? "",
+            createdAt: p.createdAt,
+          })),
+        ),
+        sources,
+        action: "owner.projects.list",
+        data: { projects: mine.map((p) => ({ id: p.id, title: p.title, stage: p.stage })) },
+      };
+    }
+
     if (route.intent === "CAREER_PROFILE") {
       const { buildCareerProfile, formatSkillsAnswer, formatWorkHistoryAnswer, formatJobFitAnswer } =
         await import("./career-profile.js");

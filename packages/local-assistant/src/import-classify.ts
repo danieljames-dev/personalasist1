@@ -56,27 +56,51 @@ export const AUTO_ASSOCIATE_CONFIDENCE = 80;
 /** Below this, always queue for review if any signal exists. */
 export const REVIEW_CONFIDENCE_FLOOR = 45;
 
+/**
+ * Path hints.
+ *
+ * Every alternation here is grouped deliberately. Written as `/\bA|B|C\b/` the pattern parses as
+ * `(\bA)|(B)|(C\b)` — the anchors bind only to the outer alternatives, so the middle ones match
+ * mid-word anywhere. That is not a stylistic point: it is why 21 facts in production were promoted
+ * to "employment" purely because the word "career" appeared inside AION's own directory names, and
+ * why documents ending in "cv" were read as résumés. `ungroupedAlternation` in the tests pins this.
+ */
 const PATH_HINTS: Array<{ re: RegExp; kind: ImportEntityKindV1; category: OwnerKnowledgeCategoryV1 | null; conf: number }> = [
-  { re: /\bresume|cv\b/i, kind: "owner", category: "employment", conf: 88 },
-  { re: /\bemployment|work[-_]?history|career\b/i, kind: "employment", category: "employment", conf: 85 },
-  { re: /\bskill|competenc/i, kind: "skill", category: "skill", conf: 82 },
+  { re: /\b(?:resume|cv)\b/i, kind: "owner", category: "employment", conf: 88 },
+  { re: /\b(?:employment|work[-_]?history|career)\b/i, kind: "employment", category: "employment", conf: 85 },
+  { re: /\b(?:skill|competenc)/i, kind: "skill", category: "skill", conf: 82 },
   { re: /\bbrand\b/i, kind: "brand", category: "business-role", conf: 80 },
-  { re: /\bproduct|service\b/i, kind: "product-service", category: "product-service", conf: 78 },
-  { re: /\bcollaborat|partner\b/i, kind: "collaborator", category: "business-role", conf: 75 },
-  { re: /\bcustomer|client\b/i, kind: "customer", category: null, conf: 78 },
-  { re: /\bprospect|lead\b/i, kind: "prospect", category: null, conf: 76 },
+  { re: /\b(?:product|service)\b/i, kind: "product-service", category: "product-service", conf: 78 },
+  { re: /\b(?:collaborat|partner)/i, kind: "collaborator", category: "business-role", conf: 75 },
+  { re: /\b(?:customer|client)\b/i, kind: "customer", category: null, conf: 78 },
+  { re: /\b(?:prospect|lead)\b/i, kind: "prospect", category: null, conf: 76 },
   { re: /\bcontact\b/i, kind: "contact", category: null, conf: 70 },
-  { re: /\bopportunit|deal\b/i, kind: "opportunity", category: null, conf: 74 },
+  { re: /\b(?:opportunit|deal\b)/i, kind: "opportunity", category: null, conf: 74 },
   { re: /\bproject\b/i, kind: "project", category: "project", conf: 76 },
-  { re: /\bresearch|whitepaper|brief\b/i, kind: "research-document", category: "other", conf: 72 },
+  { re: /\b(?:research|whitepaper|brief)\b/i, kind: "research-document", category: "other", conf: 72 },
   { re: /\bsales\b/i, kind: "opportunity", category: "sales-experience", conf: 68 },
   { re: /\bbusiness\b/i, kind: "business", category: "business-role", conf: 70 },
 ];
 
+/**
+ * Repository-internal path segments.
+ *
+ * AION's own source tree contains directories named `career`, `projects`, `contracts` and so on.
+ * A specification living under `docs/sprints/sprint-3.0-career-vertical-slice/` describes software
+ * AION is building; it says nothing about where the Owner has worked. Without this, AION's own
+ * documentation about career features became the Owner's employment history.
+ */
+const REPO_INTERNAL_PATH = /(?:^|[\\/])(?:docs?|sprints?|contracts?|implementation|security|decisions|architecture|adr|specs?|packages|apps|scripts|node_modules|dist|test|tests|\.aion-local)(?:[\\/]|$)/i;
+
 const TEXT_HINTS: Array<{ re: RegExp; kind: ImportEntityKindV1; category: OwnerKnowledgeCategoryV1 | null; conf: number; label: string }> = [
   { re: /\b(work experience|employment history|professional experience)\b/i, kind: "employment", category: "employment", conf: 86, label: "Employment history signals" },
   { re: /\b(skills?|competencies|proficient in)\b/i, kind: "skill", category: "skill", conf: 80, label: "Skill signals" },
-  { re: /\b(curriculum vitae|résumé|resume)\b/i, kind: "owner", category: "employment", conf: 90, label: "Resume signals" },
+  // "resume" is also an ordinary English verb, and it was the single largest source of bad Owner
+  // facts: every one of the 22 confidence-90 promotions in production came from engineering prose
+  // like "resume wrong phase" and "Resume token issue/verify". The unaccented spelling now needs a
+  // structural co-signal that a real résumé has and a sentence about resuming a task does not.
+  { re: /\b(?:curriculum vitae|résumé)\b/i, kind: "owner", category: "employment", conf: 90, label: "Resume signals" },
+  { re: /\bresume\b(?=[\s\S]{0,4000}?\b(?:work experience|employment history|professional experience|education|references available)\b)/i, kind: "owner", category: "employment", conf: 90, label: "Resume signals" },
   { re: /\b(invoice|quote|proposal for)\b/i, kind: "opportunity", category: null, conf: 72, label: "Sales document signals" },
   { re: /\b(brand guidelines|brand voice|brand identity)\b/i, kind: "brand", category: "business-role", conf: 84, label: "Brand document signals" },
   { re: /\b(product description|service offering)\b/i, kind: "product-service", category: "product-service", conf: 80, label: "Product/service signals" },
@@ -103,7 +127,12 @@ export function classifyImportMaterial(input: {
     if (!prev || prev.confidence < c.confidence) byKey.set(key, c);
   };
 
+  // A path inside a source tree describes software, not the Owner. Skipping path hints here still
+  // lets the document's *text* speak for itself below — a real résumé stored under docs/ is found
+  // by its contents, which is the correct evidence anyway.
+  const repoInternal = REPO_INTERNAL_PATH.test(haystackPath);
   for (const hint of PATH_HINTS) {
+    if (repoInternal) break;
     if (hint.re.test(haystackPath)) {
       push({
         kind: hint.kind,

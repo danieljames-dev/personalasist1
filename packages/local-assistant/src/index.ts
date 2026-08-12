@@ -38,6 +38,7 @@ export * from "./vehicle-intelligence.js";
 export * from "./vin-ocr.js";
 export * from "./photo-vehicle-match.js";
 export * from "./image-region.js";
+export * from "./owner-goals-projects.js";
 export * from "./vehicle-research.js";
 export * from "./executive-context.js";
 export * from "./executive-state.js";

@@ -39,6 +39,8 @@ export type CrmAssistantIntentV1 =
   | "CONNECTOR_STATUS"
   | "VEHICLE_INVENTORY"
   | "CAREER_PROFILE"
+  | "OWNER_GOALS"
+  | "PROJECT_STATUS"
   | "CONTEXT_SWITCH"
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
@@ -121,6 +123,40 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bi just talked to\b/i,
       /\bidea:\s*/i,
       /\bfollow up with\b.+\btomorrow\b/i,
+    ],
+  },
+  {
+    // Goals were previously matched inside the IMPORT_STATUS rule, so asking about them was
+    // reported as an import-status question. They are their own subject, and phrasings beyond the
+    // literal word "goals" — "working toward", "trying to accomplish" — never matched at all.
+    // Ordered ahead of the CRM and briefing fallbacks, which otherwise swallow these.
+    intent: "OWNER_GOALS",
+    confidence: "high",
+    patterns: [
+      /\bwhat (are )?(my |our )?(current |top )?goals?\b/i,
+      /\bshow (me )?(my )?goals?\b/i,
+      /\bmy goals?\b/i,
+      /\bwhat am i (working|aiming) (toward|towards|for)\b/i,
+      /\bwhat (am i|are we) trying to (accomplish|achieve|do)\b/i,
+      /\bwhat do i want to (get done|accomplish|achieve)\b/i,
+      /\bwhat (are )?(my |our )?(top )?(priorities|objectives)\b/i,
+      /\bwhat('?s| is) most important to me\b/i,
+    ],
+  },
+  {
+    // Projects, same story: "What projects am I working on?" reached the CRM name matcher and came
+    // back with a car buyer, because "am" appears inside "Camry" in a customer note.
+    intent: "PROJECT_STATUS",
+    confidence: "high",
+    patterns: [
+      /\b(what|which) projects?\b/i,
+      /\bmy projects?\b/i,
+      /\bshow (me )?(my )?projects?\b/i,
+      /\blist projects?\b/i,
+      /\bproject status\b/i,
+      /\bwhat am i building\b/i,
+      /\bwhat('?s| is) (unfinished|still open|in progress|active|paused)\b/i,
+      /\bwhat should happen next on (my|the) projects?\b/i,
     ],
   },
   {
@@ -403,9 +439,6 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat failed (to import)?\b/i,
       /\bwhat needs review\b/i,
       /\bdata completeness\b/i,
-      /\bwhat (are )?(my )?current goals\b/i,
-      /\bwhat (are )?my goals\b/i,
-      /\bshow (me )?(my )?goals\b/i,
     ],
   },
   {
@@ -618,20 +651,50 @@ export function findRelationshipsByName(relationships: readonly RelationshipV1[]
     "concerned",
     "concern",
     "interested",
+    // Self-referential question words. These describe the Owner's own work, never a customer, so
+    // letting them reach the name matcher only produces false CRM hits.
+    "working",
+    "toward",
+    "towards",
+    "building",
+    "project",
+    "projects",
+    "goal",
+    "goals",
+    "priority",
+    "priorities",
+    "important",
+    "accomplish",
+    "unfinished",
+    "active",
+    "paused",
   ]);
   const tokens = q
     .replace(/[?.!,]/g, " ")
     .split(/\s+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 2 && !stop.has(t));
+    // Three characters, not two: a two-letter fragment is almost never a distinguishing name, and
+    // as a bare substring it collides with ordinary English constantly.
+    .filter((t) => t.length >= 3 && !stop.has(t));
   return relationships.filter((r) => {
     if (r.archived) return false;
     const hay = `${r.displayName} ${r.organisation} ${r.role} ${r.notes} ${r.objections.join(" ")} ${r.interests.map((i) => i.description).join(" ")}`.toLowerCase();
-    if (hay.includes(q)) return true;
+    // Word-boundary here as well: the whole-query fast path is the same unanchored match, and a
+    // one-word query would otherwise slip past the token rule below and hit mid-word again.
+    if (new RegExp(`\\b${escapeForNameMatch(q)}`, "i").test(hay)) return true;
     if (!tokens.length) return false;
-    // Any distinctive token match (first/last name, company word) is enough for CRM lookup.
-    return tokens.some((tok) => hay.includes(tok));
+    // Match at a word boundary rather than anywhere inside a word. Unanchored substring matching
+    // meant "What am I working toward?" found the "am" inside "Camry" in a customer note and
+    // answered with that customer's account summary — the same reason "What projects am I working
+    // on?" returned a car buyer. A prefix match still finds "Dan" in "Daniel" and "ACME" in
+    // "ACME Corp", which is the partial-name lookup this function exists to provide.
+    return tokens.some((tok) => new RegExp(`\\b${escapeForNameMatch(tok)}`, "i").test(hay));
   });
+}
+
+/** Escape a query token before it becomes part of a name-matching pattern. */
+function escapeForNameMatch(token: string): string {
+  return token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Concise Owner-facing customer list lines (workspace already filtered by caller). */
