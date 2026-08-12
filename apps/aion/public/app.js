@@ -1968,23 +1968,29 @@ document.addEventListener("submit", async (event) => {
           summary: vin ? `Walk photo for VIN ${vin}` : "Walk photo (VIN pending)",
         });
         photoDocumentIds = [doc.id];
-        // If VIN empty, run OCR and require confirm rather than silent save
+        // One-shot Lot Walk photo path: OCR + inventory join + website price + customer matches.
         if (!vin) {
-          ocrMeta = await api("vin.ocr", {
+          const lot = await api("inventory.walk.photo", {
             filename: file.name || "vin.jpg",
             mimeType: file.type || "image/jpeg",
             contentBase64,
+            documentRef: doc.id,
+            note: d.note || undefined,
           });
-          window.__aionVinOcr = ocrMeta;
-          if (ocrMeta.best?.vin) {
-            vin = ocrMeta.best.vin;
-            if (!stockNumber && ocrMeta.sticker?.stockNumber) stockNumber = ocrMeta.sticker.stockNumber;
-          }
-          if (ocrMeta.status !== "VIN_OCR_HIGH_CONFIDENCE" || !ocrMeta.best?.valid) {
-            toast(ocrMeta.message || "VIN uncertain — confirm or edit, then SAVE.");
+          window.__aionLastWalkObs = lot;
+          window.__aionVinOcr = lot.ocr || null;
+          if (!lot.ocr?.best?.valid) {
+            toast(lot.reply || lot.ocr?.message || "VIN uncertain — confirm or edit, then SAVE.");
             render();
             return;
           }
+          toast(lot.reply || "Saved · NEXT");
+          form.reset();
+          await load();
+          requestAnimationFrame(() => {
+            document.querySelector('form[data-form="walk-observe"] input[name="vin"]')?.focus();
+          });
+          return;
         }
       }
       if (!vin && !photoDocumentIds.length) throw new Error("Enter a VIN or take a photo.");

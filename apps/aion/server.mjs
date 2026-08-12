@@ -1154,6 +1154,21 @@ export async function createAionServer(options = {}) {
         entryMethod: input.entryMethod,
         walkId: input.walkId,
       });
+      case "inventory.walk.photo":
+        return service.processLotWalkPhoto({
+          contentBase64: input.contentBase64,
+          mimeType: input.mimeType,
+          filename: input.filename,
+          documentRef: input.documentRef,
+          extractedText: input.extractedText,
+          offline: input.offline === true,
+          walkId: input.walkId,
+          note: input.note,
+        });
+      case "inventory.walk.list":
+        return { list: await service.lotWalkCurrentList(input.walkId) };
+      case "inventory.walk.call_list":
+        return service.lotWalkCallList(input.walkId);
       case "inventory.walk.end": return service.endInventoryWalk({
         coverageDeclaredComplete: input.coverageDeclaredComplete === true,
         walkId: input.walkId,
