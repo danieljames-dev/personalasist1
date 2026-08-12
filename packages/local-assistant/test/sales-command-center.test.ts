@@ -359,6 +359,8 @@ test("the sales day routes, and existing traffic is untouched", () => {
     ["Make a Reel script for JTDACAAJ8T3051788", "SALES_CONTENT_COMMAND"],
     ["Which vehicles should I feature?", "SALES_CONTENT_COMMAND"],
     ["What's stale on my website?", "SALES_CONTENT_COMMAND"],
+    // Same question the other way round. Found missing during integration acceptance.
+    ["What website content is stale?", "SALES_CONTENT_COMMAND"],
     ["Prepare a website update", "SALES_CONTENT_COMMAND"],
   ];
   for (const [text, expected] of claimed) {

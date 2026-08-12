@@ -357,7 +357,7 @@ function buildCustomerAttention(input: {
       })),
       lastInteractionAt: lastInteraction(relationship, input.conversations),
       // Unknowns are surfaced because they are what the Owner can resolve and AION cannot.
-      unknowns: [...new Set(fits.flatMap((f) => f.unknowns.map((u) => `${u.attribute} not verified`)))].slice(0, 3),
+      unknowns: [...new Set(fits.flatMap((f) => f.unknowns.map((u) => `${attributeLabel(u.attribute)} not verified`)))].slice(0, 3),
     });
   }
 
@@ -386,6 +386,30 @@ function whyLine(input: {
 function lowerFirst(text: string): string {
   const trimmed = String(text ?? "").trim().replace(/^I(?:'| wi)ll\s+/i, "");
   return trimmed ? trimmed.charAt(0).toLowerCase() + trimmed.slice(1) : trimmed;
+}
+
+/**
+ * Owner-readable name for a need attribute.
+ *
+ * `must-have` is how the extraction layer stores equipment, and it is not a phrase anybody says out
+ * loud. Internal vocabulary reaching a phone screen is how an interface starts sounding like a
+ * database.
+ */
+function attributeLabel(attribute: string): string {
+  const labels: Record<string, string> = {
+    "must-have": "equipment",
+    "must-not-have": "excluded equipment",
+    "nice-to-have": "preferred equipment",
+    "max-price": "price",
+    "payment-target": "monthly payment",
+    powertrain: "powertrain",
+    color: "colour",
+    condition: "new or used",
+    model: "model",
+    make: "make",
+    trim: "trim",
+  };
+  return labels[attribute] ?? attribute;
 }
 
 function summariseNeeds(needs: readonly CustomerNeedV1[]): string {
@@ -665,7 +689,10 @@ function buildToday(input: {
 
   const headlines: string[] = [];
   if (input.customerAttention.length) {
-    headlines.push(`${input.customerAttention.length} customer${input.customerAttention.length === 1 ? "" : "s"} need attention`);
+    const customerCount = input.customerAttention.length;
+    // The verb has to agree as well as the noun: "1 customer need attention" is the first thing
+    // the Owner reads every morning.
+    headlines.push(`${customerCount} customer${customerCount === 1 ? " needs" : "s need"} attention`);
   }
   if (strong) headlines.push(`${strong} strong vehicle match${strong === 1 ? "" : "es"}`);
   if (input.lotWalk.identified) headlines.push(`${input.lotWalk.identified} vehicle${input.lotWalk.identified === 1 ? "" : "s"} photographed today`);
@@ -736,7 +763,7 @@ function buildOwnerMustDo(input: {
   if (unverified.length) {
     out.push({
       label: "Verify on the lot",
-      detail: `Listings don't state ${[...new Set(unverified)].slice(0, 2).join(" or ")} — worth checking before you promise anything.`,
+      detail: `Listings don't state ${[...new Set(unverified.map((u) => u.replace(/ not verified$/, "")))].slice(0, 2).join(" or ")} — worth checking before you promise anything.`,
       target: "vehicles",
     });
   }

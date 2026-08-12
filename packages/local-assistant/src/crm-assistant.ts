@@ -342,7 +342,11 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bmake (?:a |an )?(?:reel|instagram|facebook|tiktok|short video)\b[^?]{0,30}\bfor\b/i,
       /\bturn this (?:vehicle|car|vin) into a (?:facebook |instagram )?post\b/i,
       /\bwhich vehicles? (?:should i |are worth )?featur/i,
+      // Both orderings the Owner actually uses. "What's stale on my website?" and "What website
+      // content is stale?" are the same question and neither should fall through to a generic reply.
       /\bwhat(?:'| i)s stale on my website\b/i,
+      /\bwhat website content is stale\b/i,
+      /\bwebsite content is stale\b/i,
       /\bprepare a website update\b/i,
     ],
   },
