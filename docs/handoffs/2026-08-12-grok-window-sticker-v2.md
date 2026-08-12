@@ -91,22 +91,30 @@ FALSE_POSITIVE_GUARDS = isPlausibleVinCharset + isContiguousVinObservation + isN
 FALSE_VIN_READS = 0 (on measured real images)
 FALSE_IMAGE_LINKS = 0
 
-STICKER_FIELDS_EXTRACTED = make Toyota, model Crown Signia, trim Limited (from OCR text); price signals available
+STICKER_FIELDS_EXTRACTED = year 2026, make Toyota, model Crown Signia, trim Limited;
+  totalSuggestedRetail 53378 recovered from EasyOCR garble "553.378.00" ($→5)
 
-FIRST_PASS_MS ≈ 32500 (EasyOCR cold+full page on 5712×4284)
+FIRST_PASS_MS ≈ 27621 (EasyOCR cold+full page on 5712×4284; re-measured 2026-08-12 session)
 LOCALIZATION_MS ≈ 0 separate (full-frame OCR)
-OCR/VISION_MS ≈ 32144
+OCR/VISION_MS ≈ 27621
 RETRY_COUNT = 0 (first EasyOCR pass succeeded)
-TOTAL_REAL_IMAGE_MS ≈ 32477
+TOTAL_REAL_IMAGE_MS ≈ 28000
 RAM_IMPACT = EasyOCR/torch CPU load (host-local; no external API)
 ```
+
+## Follow-up in same branch (this session)
+
+- Independent Phase 1 reproduction confirmed REAL_FULL_IMAGE_PASS on IMG_0326.
+- Clarified d449 path is Prius glass etch, not Crown Monroney.
+- `parseStickerMoneyBlob` recovers TOTAL SUGGESTED RETAIL when OCR turns `$53,378.00` into `553.378.00`.
+- Updated `.aion-local/coordination/GROK-LATEST.md`.
 
 ## Verification Results
 
 ```
 BUILD = PASS (npm run build)
 FULL_VERIFY = PASS (npm run verify)
-LOCAL_ASSISTANT_TESTS = PASS (766/766)
+LOCAL_ASSISTANT_TESTS = PASS (767/767)
 SERVER_TESTS = included in verify PASS
 RAW_CONTROL_BYTES_INTRODUCED = 0
 ```
@@ -115,7 +123,7 @@ RAW_CONTROL_BYTES_INTRODUCED = 0
 
 - BRANCH = executor/grok-window-sticker-v2
 - START_HEAD = 6a8046aea4f3bb4f4b8972bfce5dae7b5388a0c3
-- END_HEAD = e75c4612a152718d5d44d125a585baaaeab49a7c
+- END_HEAD = (see latest commit after price-recovery checkpoint)
 - Do NOT merge main from this lane
 
 ## Privacy and Hygiene

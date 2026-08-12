@@ -144,6 +144,15 @@ test("sticker fields recognize Crown Signia Limited", () => {
   assert.equal(fields.price, 50955);
 });
 
+test("total suggested retail recovers OCR $→5 garble (553.378.00 → 53378)", () => {
+  // Measured EasyOCR on real Monroney: TOTAL line became "553.378.00" instead of $53,378.00
+  const fields = extractStickerFields(
+    "TOYOTA CROWN SIGNIA LIMITED MANUFACTURER'S SUGGESTED RETAIL PRICE $50,955.00 TOTAL SUGGESTED RETAIL PRICE 553.378.00",
+  );
+  assert.equal(fields.price, 53378);
+  assert.ok(fields.rawSignals.some((s) => s === "totalSuggestedRetail:53378"));
+});
+
 test("noisy reflection OCR does not yield silent HIGH_CONFIDENCE VIN links", () => {
   // Heavy punctuation + reflection symbols (measured classical OCR on lot glass photos).
   const garbage =
