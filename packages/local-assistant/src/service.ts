@@ -148,6 +148,13 @@ import {
   type LotWalkCallListEntryV1,
 } from "./lot-walk.js";
 import {
+  buildSalesCommandCenter,
+  formatCommandCenterToday,
+  formatCustomerAttention,
+  type SalesCommandCenterV1,
+} from "./sales-command-center.js";
+import { routeSalesPresenceCommand } from "./content-plan.js";
+import {
   isSupportedAudioType,
   resolveTranscriptionEngineStatus,
   transcribeAudioBytes,
@@ -5533,6 +5540,138 @@ export class AionAssistantV1 {
       reconciliation,
       workspace,
     });
+  }
+
+  /**
+   * The whole sales day as one read model.
+   *
+   * Read-only and deliberately cheap: it reads state other paths already produced and does not
+   * crawl, transcribe, OCR or call a model. The Owner opens this on a phone between customers, so
+   * anything expensive belongs behind an explicit action rather than behind a glance.
+   */
+  async salesCommandCenter(): Promise<SalesCommandCenterV1> {
+    const state = await this.snapshot();
+    const workspace = state.settings.activeWorkspace || "work";
+    const inv = this.vehicleInv(state);
+    // Only the active walk counts as "today"; an old walk is history, not a live panel.
+    const lotWalkView = inv.walks.some((w) => w.state === "active")
+      ? await this.lotWalkCurrentList()
+      : null;
+
+    let gmailReady = false;
+    try {
+      const gmail = await this.gmailConsentStatus();
+      gmailReady = Boolean((gmail as { authorized?: boolean }).authorized);
+    } catch {
+      // A connector probe must never stop the dashboard rendering. Unknown reads as not connected.
+      gmailReady = false;
+    }
+
+    return buildSalesCommandCenter({
+      workspace,
+      now: this.ports.clock.now(),
+      relationships: state.relationships || [],
+      needs: state.customerNeeds || [],
+      commitments: state.commitmentCandidates || [],
+      proposals: state.crmActionProposals || [],
+      conversations: state.conversationEvents || [],
+      vehicles: inv.vehicles,
+      lotWalkView,
+      gmailReady,
+      inventoryCount: inv.vehicles.length,
+    });
+  }
+
+  /**
+   * Grounded content for today, built from what actually happened.
+   *
+   * Signals come from the lot walk and from aggregate customer demand — never from a calendar. If
+   * neither produced anything, the plan says so rather than inventing a subject, which is the whole
+   * point of the opportunity engine.
+   */
+  async salesContentToday(): Promise<{
+    opportunities: import("./content-opportunity.js").ContentOpportunityV1[];
+    plan: import("./content-plan.js").SocialContentPlanV1;
+    brand: import("./sales-brand.js").SalesBrandProfileV1;
+    declined: Array<{ subject: string; reason: string }>;
+  }> {
+    const [
+      { rankContentOpportunities },
+      { buildContentPlan },
+      { buildSalesBrandProfile, DEFAULT_CONTENT_PILLARS },
+    ] = await Promise.all([
+      import("./content-opportunity.js"),
+      import("./content-plan.js"),
+      import("./sales-brand.js"),
+    ]);
+
+    const state = await this.snapshot();
+    const workspace = state.settings.activeWorkspace || "work";
+    const now = this.ports.clock.now();
+    const inv = this.vehicleInv(state);
+    const dealership = inv.dealerships.find((d) => d.isCurrent) ?? inv.dealerships[0] ?? null;
+
+    const brandBuilt = buildSalesBrandProfile({
+      workspace,
+      // Only what the Owner already told AION. Nothing here is inferred about him.
+      displayName: state.ownerKnowledge?.profile?.displayName || null,
+      dealershipName: dealership?.name ?? null,
+      contactPreferences: { preferred: "text" },
+      now,
+    });
+    const brand = "refused" in brandBuilt
+      ? (buildSalesBrandProfile({ workspace, now }) as import("./sales-brand.js").SalesBrandProfileV1)
+      : brandBuilt;
+
+    const signals: import("./content-opportunity.js").ContentSignalV1[] = [];
+
+    // Vehicles seen on the lot today.
+    const walkView = inv.walks.some((w) => w.state === "active") ? await this.lotWalkCurrentList() : null;
+    for (const item of walkView?.vehicles ?? []) {
+      if (!item.vehicleId) continue;
+      signals.push({
+        kind: "LOT_OBSERVATION",
+        workspace,
+        subject: [item.year, item.make, item.model, item.trim].filter(Boolean).join(" ") || item.vin || "vehicle",
+        observedAt: item.observedAt,
+        sourceRefs: [`vehicle:${item.vehicleId}`, `observation:${item.observationId}`],
+        vehicleRef: item.vehicleId,
+      });
+    }
+
+    // Aggregate demand. Counts only — the engine refuses anything below its own privacy floor.
+    const needs = (state.customerNeeds || []).filter((n) => n.workspace === workspace && !n.supersededAt && !n.invalidatedAt);
+    const demand = new Map<string, { count: number; refs: string[] }>();
+    for (const need of needs) {
+      if (need.attribute !== "model" && need.attribute !== "must-have") continue;
+      const key = String(need.value).toLowerCase();
+      const entry = demand.get(key) ?? { count: 0, refs: [] };
+      entry.count += 1;
+      entry.refs.push(need.sourceRef);
+      demand.set(key, entry);
+    }
+    for (const [subject, entry] of demand) {
+      signals.push({
+        kind: "CUSTOMER_DEMAND",
+        workspace,
+        subject,
+        observedAt: now,
+        sourceRefs: entry.refs.slice(0, 8),
+        customerCount: entry.count,
+      });
+    }
+
+    const ranked = rankContentOpportunities({
+      signals, enabledPillars: brand.contentPillars.length ? brand.contentPillars : DEFAULT_CONTENT_PILLARS,
+      workspace, now, nextId: (i) => `content-opp-${i}`,
+    });
+    const plan = buildContentPlan({
+      planId: `content-plan-${now}`, workspace, horizon: "DAILY",
+      opportunities: ranked.opportunities, brand, periodStart: now, now,
+      nextSlotId: (i) => `content-slot-${i}`,
+    });
+
+    return { opportunities: ranked.opportunities, plan, brand, declined: ranked.declined };
   }
 
   async lotWalkCallList(walkId?: string): Promise<{
@@ -11758,6 +11897,73 @@ export class AionAssistantV1 {
         sources: [...sources, { type: "relationship", id: customer.id, label: customer.displayName }],
         action: "customer.need.correction",
         data: { corrections: parsed.corrections.length },
+      };
+    }
+
+    if (route.intent === "SALES_TODAY" || route.intent === "SALES_WHO_TO_CALL") {
+      const view = await this.salesCommandCenter();
+      const asksWho = route.intent === "SALES_WHO_TO_CALL";
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: asksWho ? formatCustomerAttention(view) : formatCommandCenterToday(view),
+        sources: view.customerAttention.map((c) => ({
+          type: "relationship", id: c.relationshipRef, label: c.name,
+        })),
+        action: asksWho ? "sales.who_to_call" : "sales.today",
+        data: view,
+      };
+    }
+
+    if (route.intent === "SALES_CONTENT_COMMAND") {
+      const command = routeSalesPresenceCommand(text);
+      const content = await this.salesContentToday();
+
+      // Website staleness is answered from the command centre, which already knows which drafts
+      // stopped matching the live listing.
+      if (command.command === "WEBSITE_STALE" || command.command === "PREPARE_WEBSITE_UPDATE") {
+        const view = await this.salesCommandCenter();
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: view.website.message,
+          sources: [],
+          action: "sales.website",
+          data: view.website,
+        };
+      }
+
+      if (command.command === "WHICH_VEHICLES_TO_FEATURE") {
+        const view = await this.salesCommandCenter();
+        const featurable = view.vehicleOpportunities.filter((v) => v.onWebsite && !v.price.unknown);
+        return {
+          intent: route.intent,
+          confidence: route.confidence,
+          reply: featurable.length
+            ? ["Worth featuring:", ...featurable.map((v) => `· ${v.label} — ${v.price.headline}`)].join("\n")
+            : "Nothing is worth featuring right now — I need a vehicle that's listed with a published price.",
+          sources: featurable.map((v) => ({ type: "vehicle", id: v.vehicleRef, label: v.label })),
+          action: "sales.feature_candidates",
+          data: featurable,
+        };
+      }
+
+      const lines: string[] = [content.plan.message];
+      for (const slot of content.plan.slots) {
+        lines.push(`· ${slot.subject} — ${slot.suggestedFormat.replace(/_/g, " ").toLowerCase()}${slot.requiresOwnerReview ? " (needs your eyes — it quotes a price)" : ""}`);
+      }
+      if (content.plan.noPostRecommended && content.declined.length) {
+        lines.push("", `I looked at ${content.declined.length} thing${content.declined.length === 1 ? "" : "s"} and none was strong enough.`);
+      }
+      lines.push("", "Nothing is connected, so nothing can be posted. These are drafts for you.");
+
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: lines.join("\n"),
+        sources: [],
+        action: "sales.content_today",
+        data: { plan: content.plan, opportunities: content.opportunities },
       };
     }
 

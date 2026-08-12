@@ -64,6 +64,8 @@ export * from "./content-draft.js";
 export * from "./content-plan.js";
 export * from "./sales-website.js";
 export * from "./sales-presence-proposal.js";
+export * from "./price-display.js";
+export * from "./sales-command-center.js";
 export * from "./vehicle-research.js";
 export * from "./executive-context.js";
 export * from "./executive-state.js";

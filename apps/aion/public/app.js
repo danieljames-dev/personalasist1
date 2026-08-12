@@ -132,6 +132,93 @@ async function sendStreamed(id, content) {
   await load();
 }
 
+/**
+ * The sales day, on a phone.
+ *
+ * Sections are named after what the Owner is trying to do, not after the contracts underneath — no
+ * panel here is called a proposal or an opportunity. Every section is allowed to be empty, and says
+ * so plainly: a dashboard that always shows numbers teaches the reader that the numbers are
+ * decoration.
+ *
+ * Nothing renders until the Owner taps "My sales day", so opening Home costs nothing.
+ */
+function salesCommandPanel() {
+  const view = window.__aionSalesCenter;
+  if (!view || !view.today) return "";
+  const t = view.today;
+
+  const section = (title, body) => `<div class="card"><h2>${esc(title)}</h2>${body}</div>`;
+  const meta = (text) => `<p class="meta">${esc(text)}</p>`;
+
+  const headlines = t.headlines.length
+    ? t.headlines.map((h) => `<p class="meta">· ${esc(h)}</p>`).join("")
+    : meta("Nothing needs you right now.");
+
+  const owner = view.ownerMustDo.length
+    ? view.ownerMustDo.slice(0, 4).map((a) => `<p class="meta"><b>${esc(a.label)}</b> — ${esc(a.detail)}</p>`).join("")
+    : meta("Nothing only you can do.");
+
+  const aion = view.aionCanDo.length
+    ? `<div class="tap-grid quick">${view.aionCanDo.slice(0, 4).map((a) =>
+        `<button type="button" data-do="${a.target === "content" ? "sales-content" : "sales-center"}">${esc(a.label)}</button>`).join("")}</div>`
+    : meta("Nothing waiting on me.");
+
+  const customers = view.customerAttention.length
+    ? view.customerAttention.map((c) => `<article class="card"><h3>${esc(c.name)}</h3>
+<p class="meta">${esc(c.why)}</p>
+${c.currentNeedSummary && c.currentNeedSummary !== "Nothing recorded yet." ? `<p class="meta">Wants: ${esc(c.currentNeedSummary)}</p>` : ""}
+${c.topMatches.map((m) => `<p class="meta">On the lot: ${esc(m.label)} — ${esc(m.price)}</p>`).join("")}
+${c.unknowns.length ? `<p class="meta warn">Worth checking: ${esc(c.unknowns.join(", "))}</p>` : ""}</article>`).join("")
+    : meta("No customer follow-ups need attention right now.");
+
+  const lot = view.lotWalk.active || view.lotWalk.identified
+    ? `<p class="meta">${esc(view.lotWalk.message)}</p>
+${view.lotWalk.notOnWebsite ? meta(`${view.lotWalk.notOnWebsite} not currently found on the dealer site — that is not the same as sold.`) : ""}
+${view.lotWalk.unresolvedPhotos ? meta(`${view.lotWalk.unresolvedPhotos} photo(s) I could not read a VIN from.`) : ""}
+<div class="tap-grid quick"><button type="button" data-area-jump="Inventory Walk">Next photo</button></div>`
+    : `<p class="meta">${esc(view.lotWalk.message)}</p>
+<div class="tap-grid quick"><button type="button" data-area-jump="Inventory Walk">Start lot walk</button></div>`;
+
+  // Every price line names its own kind. There is deliberately no bare "Price:" row.
+  const vehicles = view.vehicleOpportunities.length
+    ? view.vehicleOpportunities.map((v) => `<article class="card"><h3>${esc(v.label)}</h3>
+${v.price.lines.length
+      ? v.price.lines.map((l) => `<p class="meta">${esc(l.label)}: $${Number(l.amount).toLocaleString("en-US")} <span class="meta">(${esc(l.sourceLabel)})</span></p>`).join("")
+      : meta("Price not currently published.")}
+<p class="meta">${esc(v.websiteNote)}</p>
+${v.interestedCustomers.length ? `<p class="meta">May want it: ${esc(v.interestedCustomers.map((c) => c.name).join(", "))}</p>` : ""}</article>`).join("")
+    : meta("No vehicles from today's walk yet.");
+
+  const followups = view.preparedFollowups.length
+    ? view.preparedFollowups.map((f) => `<article class="card"><h3>${esc(f.kind)} — ${esc(f.customerName)}</h3>
+<p class="meta">${esc(String(f.what).slice(0, 220))}</p>
+<p class="meta">From ${esc(f.sourceSummary)}. Status: <b>${esc(f.status)}</b> — nothing has been written anywhere.</p></article>`).join("")
+    : meta("Nothing prepared right now.");
+
+  const content = window.__aionSalesContent?.plan
+    ? `<p class="meta">${esc(window.__aionSalesContent.plan.message)}</p>
+${(window.__aionSalesContent.plan.slots || []).map((sl) => `<p class="meta">· ${esc(sl.subject)} — ${esc(String(sl.suggestedFormat).replace(/_/gu, " ").toLowerCase())}</p>`).join("")}`
+    : `<p class="meta">${esc(view.content.message)}</p>
+<div class="tap-grid quick"><button type="button" data-do="sales-content">Make today's content</button></div>`;
+
+  const status = view.capabilityStatus
+    .map((c) => `<p class="meta">${esc(c.area)}: <b>${esc(c.state.replace(/_/gu, " ").toLowerCase())}</b> — ${esc(c.detail)}</p>`)
+    .join("");
+
+  return [
+    section("Today", headlines),
+    section("Only you can do", owner),
+    section("I can do", aion),
+    section("Customers to contact", customers),
+    section("Lot walk", lot),
+    section("Vehicles", vehicles),
+    section("Prepared for your review", followups),
+    section("Content", content),
+    section("Website", `<p class="meta">${esc(view.website.message)}</p><p class="meta">Status: <b>PREPARED</b> — no site is deployed.</p>`),
+    section("What's connected", status),
+  ].join("");
+}
+
 function homeArea(s) {
   const brief = window.__aionLastBriefing;
   const ws = s.settings?.activeWorkspace ?? "personal";
@@ -142,14 +229,16 @@ function homeArea(s) {
   return `<div class="sales home-mobile"><h1>Home</h1>
 <p class="lead">Context: <b>${esc(wsLabel)}</b>. Owner must do · AION handling · commitments.</p>
 <div class="tap-grid quick">
+<button type="button" data-do="sales-center">My sales day</button>
+<button type="button" data-area-jump="Inventory Walk">Lot walk</button>
 <button type="button" data-do="briefing-refresh">What needs me?</button>
-<button type="button" data-area-jump="Capture">Capture</button>
 <button type="button" data-area-jump="Customers">Customers</button>
-<button type="button" data-area-jump="Inventory Walk">Inventory Walk</button>
+<button type="button" data-do="sales-content">Today's content</button>
+<button type="button" data-area-jump="Capture">Capture</button>
 <button type="button" data-do="attention-board">Attention</button>
-<button type="button" data-do="executive-cycle">Run cycle</button>
 <button type="button" data-do="eod-wrap">Wrap day</button>
 </div>
+${salesCommandPanel()}
 <div class="card next"><h2>Executive briefing</h2>
 ${brief ? `<pre class="msg assistant" style="white-space:pre-wrap;max-height:28vh;overflow:auto">${esc(brief)}</pre>` : `<p class="meta">Tap <b>What needs me?</b> for OWNER MUST DO / AION HANDLING.</p>`}
 </div>
@@ -1417,6 +1506,20 @@ document.addEventListener("click", async (event) => {
       window.__aionLastBriefing = b.text || b.reply || JSON.stringify(b).slice(0, 2000);
       render();
       toast("Briefing refreshed from stored facts.");
+      return;
+    }
+    // The sales day as one read model. Read-only on the server: no crawl, no OCR, no transcription,
+    // no model call — safe to pull whenever the Owner opens the phone.
+    if (verb === "sales-center") {
+      window.__aionSalesCenter = await api("sales.command_center", {});
+      render();
+      return;
+    }
+    if (verb === "sales-content") {
+      const content = await api("sales.content_today", {});
+      window.__aionSalesContent = content;
+      render();
+      toast(content?.plan?.message || "Content plan built.");
       return;
     }
     if (verb === "voice-prompt") {
