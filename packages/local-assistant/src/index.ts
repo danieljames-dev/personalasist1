@@ -49,6 +49,8 @@ export * from "./transcript-conversation-adapter.js";
 export * from "./customer-needs.js";
 export * from "./customer-inventory-match.js";
 export * from "./conversation-event.js";
+export * from "./conversation-ingest.js";
+export * from "./need-correction.js";
 export * from "./crm-action-proposal.js";
 export * from "./vehicle-research.js";
 export * from "./executive-context.js";

@@ -86,6 +86,16 @@ export function conversationEventFromTranscript(input: TranscriptAdapterInputV1)
   // A transcript that failed is not weak evidence about a customer; it is no evidence about one.
   const ok = t.status === "READY" && Boolean(String(t.fullText ?? "").trim());
 
+  // faster-whisper reports per-segment confidence but no overall figure, so a live transcript would
+  // otherwise arrive here as confidence 0 — indistinguishable from an engine that was sure it had
+  // heard nothing. The mean of what the engine did report is the honest summary of it.
+  const perSegment = t.segments
+    .map((s) => s.confidence)
+    .filter((c): c is number => typeof c === "number" && Number.isFinite(c));
+  const meanConfidence = perSegment.length
+    ? Math.round(perSegment.reduce((sum, c) => sum + c, 0) / perSegment.length)
+    : 0;
+
   return {
     id: input.eventId,
     workspace: t.workspace,
@@ -101,7 +111,7 @@ export function conversationEventFromTranscript(input: TranscriptAdapterInputV1)
     extraction: {
       provider: t.model ? `${t.engine}:${t.model}` : t.engine,
       ok,
-      confidence: t.confidence ?? 0,
+      confidence: typeof t.confidence === "number" ? t.confidence : meanConfidence,
     },
     derived: { needIds: [], commitmentIds: [], proposalIds: [] },
     correctedAt: null,

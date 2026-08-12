@@ -145,6 +145,13 @@ import type { CommitmentCandidateV1, ConversationEventV1 } from "./conversation-
 import type { CustomerNeedV1 } from "./customer-needs.js";
 import type { CrmActionProposalV1 } from "./crm-action-proposal.js";
 import {
+  describeIngestOutcome,
+  ingestConversationFromTranscript,
+  type ConversationIngestOutcomeV1,
+} from "./conversation-ingest.js";
+import type { AudioIngestPathV1, SpeakerBindingV1 } from "./transcript-conversation-adapter.js";
+import { resolveCustomerIdentity, type IdentitySignalsV1 } from "./customer-identity.js";
+import {
   buildVehicleTalkingPoints,
   compareTwoVehicles,
   formatResearchReply,
@@ -9589,10 +9596,34 @@ export class AionAssistantV1 {
     /** Tests only. */
     fixtureText?: string;
     offline?: boolean;
+    /**
+     * Continue a successful transcript into the customer intelligence path.
+     *
+     * Opt-in rather than automatic: a dictated note or a voice command is not a customer call, and
+     * deriving needs from every recording would fill a customer's record with the Owner talking to
+     * themselves. The caller that knows this was a call says so.
+     */
+    deriveConversation?: {
+      ingestPath?: AudioIngestPathV1;
+      speakerBinding?: SpeakerBindingV1;
+      signals?: {
+        phone?: string | null;
+        email?: string | null;
+        spokenName?: string | null;
+        boundRelationshipRef?: string | null;
+        ownerAssertedRef?: string | null;
+        externalId?: { system: string; id: string } | null;
+      };
+    };
   }): Promise<{
     transcript: TranscriptRecordV1;
     document: CrmDocumentV1 | null;
     engineStatus: ReturnType<typeof resolveTranscriptionEngineStatus>;
+    conversation?: {
+      outcome: ConversationIngestOutcomeV1 | null;
+      reply: string;
+      stored: { eventId: string; needsStored: number; commitmentsStored: number; proposalsStored: number } | null;
+    };
   }> {
     const engineStatus = resolveTranscriptionEngineStatus();
     let bytes: Buffer | null = input.bytes ?? null;
@@ -9682,6 +9713,16 @@ export class AionAssistantV1 {
         saved.transcriptId,
       );
     });
+
+    if (input.deriveConversation) {
+      const conversation = await this.processConversationFromTranscript({
+        transcriptId: saved.transcriptId,
+        ...(input.deriveConversation.ingestPath ? { ingestPath: input.deriveConversation.ingestPath } : {}),
+        ...(input.deriveConversation.speakerBinding ? { speakerBinding: input.deriveConversation.speakerBinding } : {}),
+        ...(input.deriveConversation.signals ? { signals: input.deriveConversation.signals } : {}),
+      });
+      return { transcript: saved, document, engineStatus, conversation };
+    }
 
     return { transcript: saved, document, engineStatus };
   }
@@ -9825,6 +9866,140 @@ export class AionAssistantV1 {
         proposalsStored: proposals.length,
       };
     });
+  }
+
+  /**
+   * Take a stored transcript all the way to a conversation, needs, commitments and PREPARE proposals.
+   *
+   * This is the runtime join that was missing: every piece below was already tested, and none of them
+   * had ever been run against a transcript the microphone produced. Identity is resolved from the
+   * transcript's own workspace rather than the active one, so processing a recording while looking at
+   * a different workspace cannot attach a dealership call to a personal contact.
+   *
+   * Re-processing the same transcript is safe by construction — every id is derived from the
+   * transcript id, so a second run overwrites the first rather than accumulating beside it.
+   */
+  async processConversationFromTranscript(input: {
+    transcriptId: string;
+    ingestPath?: AudioIngestPathV1;
+    speakerBinding?: SpeakerBindingV1;
+    /** Grounded call metadata. Never guessed from the audio. */
+    signals?: {
+      phone?: string | null;
+      email?: string | null;
+      spokenName?: string | null;
+      boundRelationshipRef?: string | null;
+      ownerAssertedRef?: string | null;
+      externalId?: { system: string; id: string } | null;
+    };
+  }): Promise<{
+    outcome: ConversationIngestOutcomeV1 | null;
+    reply: string;
+    stored: { eventId: string; needsStored: number; commitmentsStored: number; proposalsStored: number } | null;
+  }> {
+    const state = await this.snapshot();
+    const transcripts = Array.isArray(state.audioTranscripts) ? state.audioTranscripts : [];
+    const transcript = transcripts.find((t) => t.transcriptId === input.transcriptId) ?? null;
+    if (!transcript) {
+      return {
+        outcome: null,
+        reply: `I don't have a transcript with id ${input.transcriptId}.`,
+        stored: null,
+      };
+    }
+
+    const signals: IdentitySignalsV1 = {
+      workspace: transcript.workspace,
+      phone: input.signals?.phone ?? null,
+      email: input.signals?.email ?? null,
+      spokenName: input.signals?.spokenName ?? null,
+      boundRelationshipRef: input.signals?.boundRelationshipRef ?? null,
+      ownerAssertedRef: input.signals?.ownerAssertedRef ?? null,
+      externalId: input.signals?.externalId ?? null,
+    };
+    const identity = resolveCustomerIdentity({
+      signals,
+      relationships: state.relationships ?? [],
+    });
+
+    const outcome = ingestConversationFromTranscript({
+      transcript,
+      identity,
+      ingestPath: input.ingestPath ?? "UPLOADED_CALL_RECORDING",
+      ...(input.speakerBinding ? { speakerBinding: input.speakerBinding } : {}),
+      capturedAt: this.ports.clock.now(),
+      existingNeeds: Array.isArray(state.customerNeeds) ? state.customerNeeds : [],
+    });
+
+    const stored = await this.persistConversationDerivations({
+      event: outcome.event,
+      needs: outcome.needs,
+      commitments: outcome.commitments,
+      proposals: outcome.proposals,
+    });
+
+    return { outcome, reply: describeIngestOutcome(outcome), stored };
+  }
+
+  /**
+   * Owner correction at the level of a single want.
+   *
+   * The original observation is superseded, never rewritten, and the transcript is not touched at
+   * all. What the recording said remains what the recording said; the Owner's reading of it simply
+   * outranks AION's.
+   */
+  async applyNeedCorrection(input: {
+    relationshipRef: string;
+    attribute: CustomerNeedV1["attribute"];
+    value: string;
+    strength: CustomerNeedV1["strength"];
+    numericValue?: number | null;
+    targetNeedId?: string | null;
+    note: string;
+  }): Promise<{ applied: boolean; reply: string; correctedNeedId: string | null; newNeedId: string | null }> {
+    const state = await this.snapshot();
+    const { applyOwnerNeedCorrection } = await import("./need-correction.js");
+    const relationship = (state.relationships ?? []).find((r) => r.id === input.relationshipRef) ?? null;
+    if (!relationship) {
+      return { applied: false, reply: "I don't have that customer on file.", correctedNeedId: null, newNeedId: null };
+    }
+
+    const result = applyOwnerNeedCorrection({
+      needs: Array.isArray(state.customerNeeds) ? state.customerNeeds : [],
+      relationshipRef: input.relationshipRef,
+      workspace: relationship.workspace,
+      attribute: input.attribute,
+      value: input.value,
+      strength: input.strength,
+      numericValue: input.numericValue ?? null,
+      targetNeedId: input.targetNeedId ?? null,
+      correctionId: this.ports.ids.next("need-correction"),
+      at: this.ports.clock.now(),
+      note: input.note,
+    });
+    if ("refused" in result) {
+      return { applied: false, reply: result.reason, correctedNeedId: null, newNeedId: null };
+    }
+
+    await this.mutate((draft) => {
+      if (!Array.isArray(draft.customerNeeds)) draft.customerNeeds = [];
+      const ids = new Set(result.needs.map((n) => n.id));
+      draft.customerNeeds = [...result.needs, ...draft.customerNeeds.filter((n) => !ids.has(n.id))].slice(0, 5000);
+      this.activity(
+        draft,
+        "memory",
+        "customer.need.correct",
+        `Owner corrected ${input.attribute} for ${relationship.displayName}`,
+        result.created.id,
+      );
+    });
+
+    return {
+      applied: true,
+      reply: result.message,
+      correctedNeedId: result.corrected?.id ?? null,
+      newNeedId: result.created.id,
+    };
   }
 
   /** Current (non-superseded) needs for one customer. */
@@ -10361,9 +10536,14 @@ export class AionAssistantV1 {
       };
     }
 
-    // Explainability
+    // Explainability.
+    //
+    // "What changed?" is the briefing delta and stays here. "What changed for Sarah?" is a question
+    // about one customer's needs and belongs to CUSTOMER_NEEDS_HISTORY — this block runs before
+    // intent routing, so without the exclusion it would swallow the customer question whatever the
+    // router decided. Only an explicit subject preposition releases it; "since yesterday" does not.
     if (
-      /\bwhy are you telling me this\b|\bwhy is this first\b|\bwhere did that come from\b|\bwhat changed\b/i.test(
+      /\bwhy are you telling me this\b|\bwhy is this first\b|\bwhere did that come from\b|\bwhat (?:has )?changed\b(?!\s+(?:for|about|with|in)\b)/i.test(
         text,
       )
     ) {
@@ -10384,7 +10564,7 @@ export class AionAssistantV1 {
           data: board.ownerMustDo.slice(0, 3),
         };
       }
-      if (/\bwhat changed\b/i.test(text)) {
+      if (/\bwhat (?:has )?changed\b/i.test(text)) {
         const hours = /\byesterday\b/i.test(text) ? 24 : /\blast briefing\b/i.test(text) ? 12 : 24;
         const changed = await this.whatChangedSince(hours);
         return {
@@ -11203,6 +11383,83 @@ export class AionAssistantV1 {
         sources: [...sources, ...answer.sources],
         action: answer.action,
         data: answer.data,
+      };
+    }
+
+    if (route.intent === "CUSTOMER_FOLLOWUP_PREP") {
+      const handlers = await import("./customer-query-handlers.js");
+      const workspaceId = state.settings.activeWorkspace;
+      const named = findRelationshipsByName(inWorkspace, text);
+      const customer = named.length === 1 ? named[0]! : null;
+      // Workspace is filtered here as well as at construction: this answer lists work to do about
+      // real people, and a dealership proposal must never surface while the Owner is in Personal.
+      const pending = (Array.isArray(state.crmActionProposals) ? state.crmActionProposals : [])
+        .filter((p) => p.workspace === workspaceId && p.status === "PROPOSED")
+        .filter((p) => (customer ? p.customerRef === customer.id : true));
+      const nameFor = (ref: string): string =>
+        inWorkspace.find((r) => r.id === ref)?.displayName ?? ref;
+      const answer = handlers.answerPreparedActions({
+        proposals: pending,
+        customer,
+        nameFor,
+      });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: answer.reply,
+        sources: [...sources, ...answer.sources],
+        action: answer.action,
+        data: answer.data,
+      };
+    }
+
+    if (route.intent === "CUSTOMER_NEED_CORRECTION") {
+      const { parseNeedCorrection } = await import("./need-correction.js");
+      const parsed = parseNeedCorrection(text);
+      const named = findRelationshipsByName(inWorkspace, text);
+      if (!parsed) {
+        return {
+          intent: route.intent,
+          confidence: "low",
+          reply: "I can tell I got something wrong, but not what it should be instead. Tell me what they actually want.",
+          sources,
+          action: "customer.need.correction.unclear",
+          data: {},
+        };
+      }
+      if (named.length !== 1) {
+        return {
+          intent: route.intent,
+          confidence: "low",
+          reply: named.length
+            ? `More than one customer matches that — ${named.slice(0, 4).map((r) => r.displayName).join(", ")}. Which one?`
+            : "Which customer is that about?",
+          sources,
+          action: "customer.need.correction.unresolved",
+          data: { candidates: named.slice(0, 4).map((r) => ({ id: r.id, label: r.displayName })) },
+        };
+      }
+
+      const customer = named[0]!;
+      const replies: string[] = [];
+      for (const correction of parsed.corrections) {
+        const applied = await this.applyNeedCorrection({
+          relationshipRef: customer.id,
+          attribute: correction.attribute,
+          value: correction.value,
+          strength: correction.strength,
+          numericValue: correction.numericValue,
+          note: parsed.note,
+        });
+        replies.push(applied.reply);
+      }
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: replies.join("\n"),
+        sources: [...sources, { type: "relationship", id: customer.id, label: customer.displayName }],
+        action: "customer.need.correction",
+        data: { corrections: parsed.corrections.length },
       };
     }
 
