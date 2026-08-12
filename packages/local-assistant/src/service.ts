@@ -71,10 +71,12 @@ import {
   buildDailyBriefing,
   buildEmailDraftFromCustomer,
   buildWorkQueue,
+  detectNaturalAttentionKind,
   findCustomersMentioning,
   findRelationshipsByName,
   findStalledDeals,
   formatCustomerList,
+  formatNaturalOwnerAttention,
   newCrmDocument,
   newEmailDraft,
   routeCrmAssistantIntent,
@@ -113,7 +115,20 @@ import {
   VIN_VISION_PROMPT,
   type VinOcrResultV1,
 } from "./vin-ocr.js";
-import { buildPhotoProvenance, matchPhotoToVehicle } from "./photo-vehicle-match.js";
+import {
+  buildPhotoProvenance,
+  buildPhotoVehicleContext,
+  isPhotoVehicleFollowUpQuestion,
+  matchPhotoToVehicle,
+  resolvePhotoVehicleContext,
+  upsertPhotoVehicleContext,
+  type PhotoVehicleContextV1,
+} from "./photo-vehicle-match.js";
+import {
+  cropPngToRegion,
+  VIN_STICKER_FOCUS_PROMPT,
+  vinIdentityCropRegions,
+} from "./image-region.js";
 import {
   buildVehicleTalkingPoints,
   compareTwoVehicles,
@@ -261,6 +276,7 @@ import {
   answerVehicleQuery,
   formatCustomerMatches,
   isFixtureVehicle,
+  latestPrice,
   matchCustomerToVehicles,
   vinDetailLines,
   type CustomerVehicleMatchV1,
@@ -440,7 +456,10 @@ export class AionAssistantV1 {
   private controllers = new Map<string, AbortController>();
   /** Sessions with a readiness check in flight. One at a time, so no session registers twice. */
   #activating = new Set<string>();
-  /** Vehicle most recently identified from a Chat photo, so follow-ups need no second upload. */
+  /**
+   * Process-local cache of the durable photo vehicle context.
+   * Authoritative copy lives in state.photoVehicleContext so production restarts keep follow-ups.
+   */
   #lastPhotoVehicleId: string | null = null;
   private reconciliation: Promise<void> = Promise.resolve();
   /**
@@ -5473,34 +5492,50 @@ export class AionAssistantV1 {
     extractedText?: string;
     /** Skip network vision (tests). */
     offline?: boolean;
-  }): Promise<VinOcrResultV1 & { documentHint: string }> {
+    /** Skip sticker crop / second-pass fallback (tests). */
+    skipStickerFallback?: boolean;
+  }): Promise<VinOcrResultV1 & { documentHint: string; extractionPasses?: string[] }> {
     let text = String(input.extractedText ?? "").trim();
     let provider = "text-input";
     let byteLength = 0;
     let bytes: Buffer | null = null;
+    /** Whether text came from a real extraction path (not a diagnostic failure string). */
+    let extractionOk: boolean | undefined = text ? true : undefined;
+    const extractionPasses: string[] = [];
 
     if (input.contentBase64) {
       bytes = Buffer.from(String(input.contentBase64), "base64");
       byteLength = bytes.byteLength;
     }
 
-    if (!text && bytes && !input.offline) {
+    const runVision = async (img: Buffer, prompt: string, passName: string, mimeType: string) => {
       const vision = await extractImageWithLocalVision({
         filename: input.filename || "vin.jpg",
-        mimeType: input.mimeType || "image/jpeg",
-        byteLength,
-        bytes,
-        prompt: VIN_VISION_PROMPT,
+        mimeType,
+        byteLength: img.byteLength,
+        bytes: img,
+        prompt,
         timeoutMs: 60_000,
       });
-      if (vision.extractedText?.trim()) {
-        text = vision.extractedText;
+      extractionPasses.push(passName);
+      if (vision.extractedText?.trim() && vision.code === "READY") {
+        text = vision.extractedText.trim();
         provider = vision.provider || "ollama-vision";
-      } else if (vision.code === "IMAGE_EXTRACTION_PROVIDER_REQUIRED") {
+        extractionOk = true;
+        return true;
+      }
+      if (vision.code === "IMAGE_EXTRACTION_PROVIDER_REQUIRED") {
         provider = "no-vision-provider";
+        extractionOk = false;
       } else {
         provider = vision.provider || "vision-empty";
+        extractionOk = false;
       }
+      return false;
+    };
+
+    if (!text && bytes && !input.offline) {
+      await runVision(bytes, VIN_VISION_PROMPT, "full-frame", input.mimeType || "image/jpeg");
     }
 
     // Optional tesseract.js (installed at monorepo root when available)
@@ -5518,7 +5553,11 @@ export class AionAssistantV1 {
           try {
             const result = await worker.recognize(bytes);
             text = String(result?.data?.text ?? "").trim();
-            if (text) provider = "tesseract.js";
+            if (text) {
+              provider = "tesseract.js";
+              extractionOk = true;
+              extractionPasses.push("tesseract-full");
+            }
           } finally {
             await worker.terminate();
           }
@@ -5528,13 +5567,52 @@ export class AionAssistantV1 {
       }
     }
 
-    const ocr = buildVinOcrResult({
+    let ocr = buildVinOcrResult({
       extractedText: text,
       provider,
       ...(byteLength ? { byteLength } : {}),
+      ...(extractionOk === undefined ? {} : { extractionOk }),
     });
+
+    /*
+     * Sticker fallback: dense multi-field stickers often return empty or no VIN on full-frame.
+     * Do not pull another model — try a focused prompt, then identity-band crops (PNG only).
+     * Goal is identity (VIN / stock), not every sticker field.
+     */
+    if (
+      !input.offline
+      && !input.skipStickerFallback
+      && bytes
+      && ocr.status === "VIN_OCR_FAILED"
+    ) {
+      if (await runVision(bytes, VIN_STICKER_FOCUS_PROMPT, "sticker-focus-full", input.mimeType || "image/jpeg")) {
+        ocr = buildVinOcrResult({
+          extractedText: text,
+          provider: `${provider}+sticker-focus`,
+          ...(byteLength ? { byteLength } : {}),
+          extractionOk: true,
+        });
+      }
+      if (ocr.status === "VIN_OCR_FAILED") {
+        for (const region of vinIdentityCropRegions()) {
+          const cropped = cropPngToRegion(bytes, region);
+          if (!cropped) continue;
+          if (await runVision(cropped, VIN_STICKER_FOCUS_PROMPT, `crop:${region.name}`, "image/png")) {
+            ocr = buildVinOcrResult({
+              extractedText: text,
+              provider: `${provider}+crop:${region.name}`,
+              ...(byteLength ? { byteLength } : {}),
+              extractionOk: true,
+            });
+            if (ocr.status !== "VIN_OCR_FAILED") break;
+          }
+        }
+      }
+    }
+
     return {
       ...ocr,
+      extractionPasses,
       documentHint: bytes
         ? `Image ${input.filename || "upload"} (${byteLength} bytes) preserved; OCR via ${provider}.`
         : `Text-only OCR via ${provider}.`,
@@ -5554,6 +5632,11 @@ export class AionAssistantV1 {
     mimeType?: string;
     filename?: string;
     documentRef?: string | null;
+    conversationId?: string | null;
+    /** Tests: skip live vision network. */
+    offline?: boolean;
+    /** Tests: provide OCR text instead of vision. */
+    extractedText?: string;
   }): Promise<{
     intent: string;
     confidence: string;
@@ -5561,19 +5644,25 @@ export class AionAssistantV1 {
     sources: Array<{ type: string; id: string; label: string }>;
     action: string | null;
     data: unknown;
+    /** Attachment / document reference when stored. */
+    documentRef: string | null;
+    attachmentRef: string | null;
   }> {
     const ocr = await this.ocrVinFromImage({
       contentBase64: input.contentBase64,
       ...(input.mimeType ? { mimeType: input.mimeType } : {}),
       ...(input.filename ? { filename: input.filename } : {}),
+      ...(input.offline ? { offline: true } : {}),
+      ...(input.extractedText ? { extractedText: input.extractedText } : {}),
     });
     const snapshot = await this.snapshot();
     const vehicles = snapshot.vehicleInventory?.vehicles ?? [];
     const link = matchPhotoToVehicle({ ocr, vehicles });
     const observedAt = this.ports.clock.now();
+    const imageSourceRef = input.documentRef || `image:${input.filename || "photo"}`;
     const provenance = buildPhotoProvenance({
       link,
-      imageSourceRef: input.documentRef || `image:${input.filename || "photo"}`,
+      imageSourceRef,
       observedAt,
       extractionProvider: ocr.provider,
       vinCandidate: ocr.best?.vin ?? null,
@@ -5582,6 +5671,51 @@ export class AionAssistantV1 {
     const lines: string[] = [];
     const sources: Array<{ type: string; id: string; label: string }> = [];
     const matched = link.vehicleRef ? vehicles.find((v) => v.id === link.vehicleRef) ?? null : null;
+    const workspaceId = snapshot.settings.activeWorkspace;
+
+    // Persist structured context + provenance so restart and follow-ups stay grounded.
+    const context = buildPhotoVehicleContext({
+      workspaceId,
+      conversationId: input.conversationId ?? null,
+      documentRef: input.documentRef ?? null,
+      link,
+      provenance,
+      setAt: observedAt,
+    });
+    await this.mutate((draft) => {
+      // Durable conversation + workspace scoped list (survives restart); legacy single field = latest.
+      draft.photoVehicleContexts = upsertPhotoVehicleContext(draft.photoVehicleContexts, context);
+      draft.photoVehicleContext = context;
+      // Attach provenance summary onto the CRM document when we have a durable ref.
+      if (input.documentRef && Array.isArray(draft.crmDocuments)) {
+        const doc = draft.crmDocuments.find((d) => d.id === input.documentRef);
+        if (doc) {
+          const note = [
+            `photo-match:${link.state}`,
+            link.vin ? `vin:${link.vin}` : null,
+            link.vehicleRef ? `vehicleRef:${link.vehicleRef}` : null,
+            `method:${link.matchMethod}`,
+            `provider:${ocr.provider}`,
+            `confidence:${link.confidence}`,
+          ].filter(Boolean).join(" ");
+          doc.summary = [doc.summary, note].filter(Boolean).join(" · ").slice(0, 4000);
+          if (ocr.extractedText && !doc.extractedText) {
+            doc.extractedText = ocr.extractedText.slice(0, 100_000);
+          }
+          doc.updatedAt = observedAt;
+        }
+      }
+      this.activity(
+        draft,
+        "agent",
+        "vehicle.photo.identify",
+        matched
+          ? `Photo matched inventory vehicle ${matched.id} (${link.matchMethod})`
+          : `Photo vehicle match ${link.state} — no auto-link`,
+        link.vehicleRef || input.documentRef || null,
+      );
+    });
+    this.#lastPhotoVehicleId = matched?.id ?? null;
 
     if (matched) {
       const name = [matched.year, matched.make, matched.model, matched.trim].filter(Boolean).join(" ");
@@ -5592,11 +5726,8 @@ export class AionAssistantV1 {
       const recall = describeRecallStatus(matched.recallAssessment);
       if (recall) { lines.push(""); lines.push(recall); }
       sources.push({ type: "vehicle", id: matched.id, label: name || matched.id });
-      // Remember the vehicle so "does it have recalls?" needs no second photo.
-      this.#lastPhotoVehicleId = matched.id;
     } else {
       lines.push(link.message);
-      this.#lastPhotoVehicleId = null;
     }
 
     if (link.candidates.length) {
@@ -5615,8 +5746,28 @@ export class AionAssistantV1 {
       reply: lines.join("\n").trim(),
       sources,
       action: "vehicle.photo.identify",
-      data: { link, provenance, ocrStatus: ocr.status },
+      documentRef: input.documentRef ?? null,
+      attachmentRef: input.documentRef ?? imageSourceRef,
+      data: {
+        link,
+        provenance,
+        ocrStatus: ocr.status,
+        matchState: link.state,
+        vehicleRef: link.vehicleRef,
+        conversationId: input.conversationId ?? null,
+        processingState: matched ? "IDENTIFIED" : link.state,
+      },
     };
+  }
+
+  /** Durable photo vehicle context for the active workspace (optional conversation). No secrets. */
+  async getPhotoVehicleContext(opts: { conversationId?: string | null } = {}): Promise<PhotoVehicleContextV1 | null> {
+    const state = await this.snapshot();
+    return resolvePhotoVehicleContext(
+      state.photoVehicleContexts,
+      state.photoVehicleContext,
+      { workspaceId: state.settings.activeWorkspace, conversationId: opts.conversationId ?? null },
+    );
   }
 
   async vehicleRecallLookup(input: {
@@ -9242,7 +9393,7 @@ export class AionAssistantV1 {
    * R7 natural-language assistant entry for CRM/sales. Deterministic structured CRM first;
    * falls back to chat when no CRM intent matches or subject cannot be resolved.
    */
-  async assistantPrompt(text: string): Promise<{
+  async assistantPrompt(text: string, opts: { conversationId?: string | null } = {}): Promise<{
     intent: string;
     confidence: string;
     reply: string;
@@ -9252,17 +9403,81 @@ export class AionAssistantV1 {
   }> {
     const route = routeCrmAssistantIntent(text);
     const state = await this.snapshot();
+    const workspaceId = state.settings.activeWorkspace;
 
-    // A question that leans on "it"/"this" right after a photo is about the car just identified.
-    // Requiring a re-upload for every follow-up is the difference between a conversation and a form.
-    if (this.#lastPhotoVehicleId && /\b(it|this|that|the car|the vehicle|this one)\b/i.test(text)) {
-      const v = (state.vehicleInventory?.vehicles ?? []).find((x) => x.id === this.#lastPhotoVehicleId);
+    // Follow-ups after a Chat photo: durable conversation + workspace scoped vehicle context.
+    // Pronouns ("does it have recalls?") and attribute questions ("what's the price?") both count.
+    const photoCtx = resolvePhotoVehicleContext(
+      state.photoVehicleContexts,
+      state.photoVehicleContext,
+      { workspaceId, conversationId: opts.conversationId ?? null },
+    );
+    if (photoCtx && isPhotoVehicleFollowUpQuestion(text)) {
+      this.#lastPhotoVehicleId = photoCtx.vehicleId;
+      const v = (state.vehicleInventory?.vehicles ?? []).find((x) => x.id === photoCtx.vehicleId);
       if (v) {
         const name = [v.year, v.make, v.model, v.trim].filter(Boolean).join(" ");
+        // "Would this fit Sarah?" — match the identified unit against the named customer, not inventory search.
+        const fitName = text.match(
+          /\b(?:fit|match|suit|right for|show)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i,
+        )?.[1];
+        if (fitName || /\bwould this fit\b/i.test(text)) {
+          const nameHint = (fitName || text.match(/\b([A-Z][a-z]{1,20})\b/)?.[1] || "").trim();
+          const rel = state.relationships.find(
+            (r) =>
+              !r.archived
+              && r.workspace === workspaceId
+              && nameHint
+              && r.displayName.toLowerCase().includes(nameHint.toLowerCase()),
+          );
+          if (rel) {
+            const matched = await this.matchCustomerVehicles(rel.id);
+            const hit = matched.matches.find((m) => m.vehicleId === v.id);
+            const reply = hit
+              ? [
+                  `${name}${v.vin ? ` · VIN ${v.vin}` : ""}`,
+                  "",
+                  `Against ${rel.displayName}:`,
+                  hit.whyMatches?.length ? hit.whyMatches.map((w) => `· ${w}`).join("\n") : "Recorded interest overlap.",
+                  hit.knownConflicts?.length ? `Conflicts: ${hit.knownConflicts.join("; ")}` : null,
+                ].filter(Boolean).join("\n")
+              : [
+                  `${name}${v.vin ? ` · VIN ${v.vin}` : ""}`,
+                  "",
+                  `This photo-linked vehicle was not among automatic inventory matches for ${rel.displayName}.`,
+                  "That is not a claim it is wrong for them — only that interests/budget on the customer card did not auto-select it.",
+                ].join("\n");
+            return {
+              intent: "VEHICLE_PHOTO_FOLLOWUP",
+              confidence: "high",
+              reply,
+              sources: [
+                { type: "vehicle", id: v.id, label: name || v.id },
+                { type: "relationship", id: rel.id, label: rel.displayName },
+              ],
+              action: "vehicle.photo.followup.fit",
+              data: { vehicleId: v.id, relationshipId: rel.id, photoContext: photoCtx },
+            };
+          }
+        }
         const wantsRecall = /\brecall/i.test(text);
-        const body = wantsRecall
-          ? describeRecallStatus(v.recallAssessment)
-          : vinDetailLines(v, text).map((l) => l.text).join("\n");
+        const wantsPrice = /\b(price|msrp|cost|how much|advertised)\b/i.test(text);
+        const wantsTrim = /\btrim\b/i.test(text);
+        let body: string;
+        if (wantsRecall) {
+          body = describeRecallStatus(v.recallAssessment);
+        } else if (wantsPrice) {
+          const price = latestPrice(v);
+          body = price != null
+            ? `Advertised price on record: $${price.toLocaleString()}.`
+            : "No advertised price is on record for this vehicle.";
+        } else if (wantsTrim) {
+          body = v.trim
+            ? `Trim on the dealer listing: ${v.trim}.`
+            : "No trim is recorded on the dealer listing for this unit.";
+        } else {
+          body = vinDetailLines(v, text).map((l) => l.text).join("\n");
+        }
         if (body) {
           return {
             intent: "VEHICLE_PHOTO_FOLLOWUP",
@@ -9270,13 +9485,11 @@ export class AionAssistantV1 {
             reply: `${name}${v.vin ? ` · VIN ${v.vin}` : ""}\n\n${body}`,
             sources: [{ type: "vehicle", id: v.id, label: name || v.id }],
             action: "vehicle.photo.followup",
-            data: { vehicleId: v.id },
+            data: { vehicleId: v.id, photoContext: photoCtx },
           };
         }
       }
     }
-
-    const workspaceId = state.settings.activeWorkspace;
     const inWorkspace = state.relationships.filter(
       (r) => r.workspace === workspaceId && !r.archived && !isSyntheticRelationship(r),
     );
@@ -9514,15 +9727,19 @@ export class AionAssistantV1 {
 
     if (/\bwhat (am i|are we) waiting on\b|\bwaiting on others\b|\bwho (owes|promised) me\b/i.test(text)) {
       const daily = await this.dailyOperatingReport();
-      const lines = daily.waitingOnOthers.length
-        ? daily.waitingOnOthers.map(
-            (w) => `  • [${w.workspace}] ${w.person}: ${w.expected.slice(0, 120)} (src ${w.source.slice(0, 40)})`,
-          )
-        : ["  (nothing grounded — no inferred marketing obligations)"];
+      const reply = formatNaturalOwnerAttention({
+        kind: "waiting",
+        overdue: [],
+        dueSoon: [],
+        waiting: daily.waitingOnOthers.map((w) => ({
+          person: w.person,
+          expected: w.expected,
+        })),
+      });
       return {
         intent: "WAITING_ON",
         confidence: "high",
-        reply: ["WAITING ON OTHERS", ...lines].join("\n"),
+        reply,
         sources: [],
         action: "executive.waiting_on",
         data: daily.waitingOnOthers,
@@ -9530,19 +9747,24 @@ export class AionAssistantV1 {
     }
 
     if (/\bwho should i follow up\b|\bfollow[- ]?up (queue|list|intelligence)\b|\bwho needs follow[- ]?up\b/i.test(text)) {
-      const daily = await this.dailyOperatingReport();
+      const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
+      const reply = formatNaturalOwnerAttention({
+        kind: "follow_up",
+        overdue: queue.overdue,
+        dueSoon: queue.dueSoon,
+        recentlyQuiet: queue.staleAccounts.map((s) => ({ customer: s.customer })),
+      });
       return {
         intent: "FOLLOW_UP_INTEL",
         confidence: "high",
-        reply: [
-          "FOLLOW-UP INTELLIGENCE",
-          ...(daily.importantFollowUps.length
-            ? daily.importantFollowUps.map((x) => `  • ${x}`)
-            : ["  (none ranked — no open high-confidence follow-ups)"]),
-        ].join("\n"),
-        sources: [],
+        reply,
+        sources: queue.overdue.slice(0, 5).map((o) => ({
+          type: "follow-up",
+          id: o.customer,
+          label: o.customer,
+        })),
         action: "executive.followups",
-        data: daily.importantFollowUps,
+        data: { queue },
       };
     }
 
@@ -10254,71 +10476,89 @@ export class AionAssistantV1 {
     }
 
     if (route.intent === "WORK_QUEUE" || route.intent === "LIST_FOLLOWUPS") {
-      const useBriefing =
-        route.intent === "WORK_QUEUE" ||
-        /\bbriefing|what needs me|what can you handle|what changed|prepare me for today|what did i forget\b/i.test(text);
-      if (useBriefing) {
-        // Prefer proactive brief with delta; keep CRM briefing as detail
-        const proactive = await this.prepareProactiveBrief();
-        const brands = (state.workspaces ?? [])
-          .filter((w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w))
-          .map((w) => ({ name: w.brand?.name || w.label }));
-        const briefing = buildDailyBriefing({
-          relationships: inWorkspace,
-          tasks: state.tasks ?? [],
-          drafts: (state.emailDrafts ?? []).filter((d) => d.workspace === workspaceId),
-          documents: (state.crmDocuments ?? []).filter((d) => d.workspace === workspaceId),
-          brands,
-          workspaceId,
-          nowIso: this.ports.clock.now(),
+      const naturalKind = detectNaturalAttentionKind(text)
+        ?? (route.intent === "LIST_FOLLOWUPS" ? "follow_up" as const : null)
+        ?? (/\bbriefing|prepare me for today|what did i forget|what changed|what needs me\b/i.test(text)
+          ? "today" as const
+          : "next" as const);
+      // Owner natural questions get assistant voice — not CRM diagnostic dumps or brand inventory.
+      // Explicit diagnostic/status phrasing still receives the fuller structured briefing below.
+      const wantsDiagnostic =
+        /\b(diagnostic|crm detail|work queue|status report|briefing delta|what changed since)\b/i.test(text)
+        || /\bbrand|caleb|collaborator|metricool|scheduled posts?\b/i.test(text);
+
+      const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
+      const openTasks = (state.tasks ?? []).filter(
+        (t) => t.workspace === workspaceId && t.state !== "completed" && t.state !== "cancelled",
+      );
+
+      if (!wantsDiagnostic) {
+        const reply = formatNaturalOwnerAttention({
+          kind: naturalKind === "waiting" ? "today" : naturalKind,
+          overdue: queue.overdue,
+          dueSoon: queue.dueSoon,
+          recentlyQuiet: naturalKind === "follow_up" || naturalKind === "call"
+            ? queue.staleAccounts.map((s) => ({ customer: s.customer }))
+            : [],
+          openTasks: naturalKind === "today" || naturalKind === "next"
+            ? openTasks.map((t) => ({ title: t.title }))
+            : [],
         });
-        let brandExtra = "";
-        if (/\bbrand|caleb|collaborator|scheduled|posted|metricool|performed\b/i.test(text)) {
-          const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
-          const m = this.metricoolInsight();
-          brandExtra = [
-            "",
-            brands.length
-              ? `Active brand workspaces (${brands.length}): ${brands.map((b) => b.name).join(", ")}`
-              : "Active brand workspaces: none recorded.",
-            collabs.length
-              ? `Collaborators (owner-supplied only):\n${collabs
-                  .slice(0, 12)
-                  .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
-                  .join("\n")}`
-              : "Collaborators: none recorded. AION does not invent who manages a brand.",
-            "",
-            m.activeBrands.length
-              ? `Metricool fixtures — active brands: ${m.activeBrands.map((b) => b.name).join(", ")}`
-              : `Metricool: ${m.status.message}`,
-            m.scheduled.length
-              ? `Scheduled posts (fixture): ${m.scheduled.slice(0, 5).map((p) => `${p.network}@${p.scheduledAt?.slice(0, 10)}`).join("; ")}`
-              : "",
-            m.bestPosts.length
-              ? `Best performing (fixture): ${m.bestPosts.slice(0, 3).map((p) => `"${p.text.slice(0, 40)}" likes=${p.metrics.likes ?? 0}`).join("; ")}`
-              : "",
-            m.needsAttention.length
-              ? `Brand attention (fixture): ${m.needsAttention.map((n) => `${n.brand}: ${n.reason}`).join("; ")}`
-              : "",
-          ].filter(Boolean).join("\n");
-        }
         return {
           intent: route.intent,
           confidence: route.confidence,
-          reply: `${proactive.reply}\n\n— Active context CRM detail (${state.settings.workspaceLabels?.[workspaceId] ?? workspaceId}) —\n${briefing.text}${brandExtra}`,
-          sources,
-          action: "work.briefing",
-          data: { briefing, proactive },
+          reply,
+          sources: queue.overdue.slice(0, 5).map((o) => ({
+            type: "follow-up",
+            id: o.customer,
+            label: `${o.customer}: ${o.reason}`,
+          })),
+          action: naturalKind === "call" || naturalKind === "follow_up" ? "work.queue" : "work.briefing",
+          data: { queue, naturalKind },
         };
       }
-      const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
+
+      // Diagnostic / brand-explicit path only when Owner asked for it.
+      const proactive = await this.prepareProactiveBrief();
+      const brands = (state.workspaces ?? [])
+        .filter((w) => w.kind === "business" && !w.archived && !isTestOrE2eWorkspace(w))
+        .map((w) => ({ name: w.brand?.name || w.label }));
+      const briefing = buildDailyBriefing({
+        relationships: inWorkspace,
+        tasks: state.tasks ?? [],
+        drafts: (state.emailDrafts ?? []).filter((d) => d.workspace === workspaceId),
+        documents: (state.crmDocuments ?? []).filter((d) => d.workspace === workspaceId),
+        brands,
+        workspaceId,
+        nowIso: this.ports.clock.now(),
+      });
+      let brandExtra = "";
+      if (/\bbrand|caleb|collaborator|scheduled|posted|metricool|performed\b/i.test(text)) {
+        const collabs = Array.isArray(state.brandCollaborators) ? state.brandCollaborators : [];
+        const m = this.metricoolInsight();
+        brandExtra = [
+          "",
+          brands.length
+            ? `Brand workspaces: ${brands.map((b) => b.name).join(", ")}`
+            : "No brand workspaces recorded.",
+          collabs.length
+            ? `Collaborators (owner-supplied only):\n${collabs
+                .slice(0, 12)
+                .map((c) => `  - ${c.name}${c.role ? ` · ${c.role}` : ""}${c.brandResponsibility ? ` — ${c.brandResponsibility}` : ""}`)
+                .join("\n")}`
+            : "Collaborators: none recorded. AION does not invent who manages a brand.",
+          m.activeBrands.length
+            ? `Metricool — active brands: ${m.activeBrands.map((b) => b.name).join(", ")}`
+            : `Metricool: ${m.status.message}`,
+        ].filter(Boolean).join("\n");
+      }
       return {
         intent: route.intent,
         confidence: route.confidence,
-        reply: queue.text,
+        reply: `${proactive.reply}\n\n${briefing.text}${brandExtra}`,
         sources,
-        action: "work.queue",
-        data: { queue },
+        action: "work.briefing",
+        data: { briefing, proactive },
       };
     }
 
@@ -10856,50 +11096,33 @@ export class AionAssistantV1 {
       };
     }
 
-    // GENERAL_ASSISTANT_QUERY and unmatched phrasing: useful daily briefing + capability guide.
-    // Prefer a grounded work queue over a dead-end. Never invent CRM facts.
+    // GENERAL_ASSISTANT_QUERY and unmatched phrasing: grounded priorities in assistant voice.
+    // Never invent CRM facts. Never dump brand/workspace inventory unless asked.
     const queue = buildWorkQueue(inWorkspace, this.ports.clock.now());
     const openTasks = (state.tasks ?? []).filter(
       (t) => t.workspace === workspaceId && t.state !== "completed" && t.state !== "cancelled",
     );
-    const brands = (state.workspaces ?? []).filter((w) => w.kind === "business" && !w.archived && w.brand?.name);
-    const docs = (state.crmDocuments ?? []).filter((d) => d.workspace === workspaceId).slice(0, 5);
-    const lines = [
-      "Here is what I can ground in stored AION data right now:",
-      "",
-      queue.text,
-      "",
-      openTasks.length
-        ? `Open tasks (${openTasks.length}): ${openTasks.slice(0, 8).map((t) => t.title).join("; ")}`
-        : "Open tasks: none recorded.",
-      brands.length
-        ? `Active brand workspaces: ${brands.map((b) => b.brand?.name || b.label).join(", ")}`
-        : "Brand registry: no business brand workspaces yet (create one under Knowledge / Import or workspaces).",
-      docs.length
-        ? `Recent documents: ${docs.map((d) => d.filename).join(", ")}`
-        : "Documents: none in this workspace yet — use Knowledge / Import or attach under Sales.",
-      "",
-      "You can also ask naturally, for example:",
-      "· What should I follow up on? / Who do I need to call?",
-      "· What do we know about <name>? / What's going on with <company>?",
-      "· Draft <name> an email · Research <company>",
-      "· Save this note to <name> · Create a customer for <name>",
-      "",
-      route.intent === "GENERAL_ASSISTANT_QUERY" || route.confidence === "low"
-        ? `I did not match a precise CRM command for: “${text.slice(0, 200)}”. The briefing above is from stored facts only (not model invention).`
-        : "",
-    ].filter(Boolean);
+    const naturalKind = detectNaturalAttentionKind(text) ?? "next";
+    const reply = formatNaturalOwnerAttention({
+      kind: naturalKind === "waiting" ? "next" : naturalKind,
+      overdue: queue.overdue,
+      dueSoon: queue.dueSoon,
+      recentlyQuiet: naturalKind === "call" || naturalKind === "follow_up"
+        ? queue.staleAccounts.map((s) => ({ customer: s.customer }))
+        : [],
+      openTasks: openTasks.map((t) => ({ title: t.title })),
+    });
     return {
       intent: "GENERAL_ASSISTANT_QUERY",
       confidence: route.confidence === "high" ? "medium" : route.confidence,
-      reply: lines.join("\n"),
+      reply,
       sources: queue.overdue.slice(0, 5).map((o) => ({
         type: "follow-up",
         id: o.customer,
         label: `${o.customer}: ${o.reason}`,
       })),
       action: "assistant.briefing",
-      data: { route, queue, openTaskCount: openTasks.length },
+      data: { route, queue, openTaskCount: openTasks.length, naturalKind },
     };
   }
 }

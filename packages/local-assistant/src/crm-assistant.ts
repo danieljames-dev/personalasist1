@@ -752,13 +752,133 @@ export function buildWorkQueue(relationships: readonly RelationshipV1[], nowIso:
       });
     }
   }
-  const text = [
-    "What needs your attention:",
-    overdue.length ? `Overdue follow-ups (${overdue.length}):\n${overdue.slice(0, 10).map((o) => `  - ${o.customer}: ${o.reason} (due ${o.dueAt.slice(0, 10)})`).join("\n")}` : "Overdue follow-ups: none",
-    dueSoon.length ? `Due soon:\n${dueSoon.slice(0, 8).map((o) => `  - ${o.customer}: ${o.reason}`).join("\n")}` : "Due soon: none",
-    staleAccounts.length ? `Quiet accounts (14+ days):\n${staleAccounts.slice(0, 8).map((s) => `  - ${s.customer} (last ${s.lastContact.slice(0, 10)})`).join("\n")}` : "Quiet accounts: none flagged",
-  ].join("\n\n");
+  // Owner-facing queue text — natural assistant voice (not CRM diagnostic labels).
+  const text = formatNaturalOwnerAttention({
+    kind: "today",
+    overdue,
+    dueSoon,
+    openTasks: [],
+  });
   return { overdue, dueSoon, staleAccounts, text };
+}
+
+/** Natural Owner questions about calls / follow-ups / today — not diagnostic status dumps. */
+export type NaturalAttentionKindV1 = "call" | "follow_up" | "today" | "waiting" | "next";
+
+export function detectNaturalAttentionKind(text: string): NaturalAttentionKindV1 | null {
+  const t = String(text ?? "");
+  if (/\bwho (do i need to|should i) call\b|\bwho needs a call\b|\bwho do i need to call\b/i.test(t)) return "call";
+  if (/\bwho should i follow up\b|\bwho needs follow[- ]?up\b|\bwhat should i follow up\b|\bfollow[- ]?up (queue|list)\b/i.test(t)) {
+    return "follow_up";
+  }
+  if (/\bwhat matters today\b|\bwhat is most important( today)?\b|\btoday'?s priorit/i.test(t)) return "today";
+  if (/\bwhat (am i|are we) waiting on\b|\bwaiting on others\b|\bwho (owes|promised) me\b/i.test(t)) return "waiting";
+  if (/\bwhat should i do next\b|\bwhat should i do\b|\bwhat do i need to do\b|\bwhat needs (my )?attention\b/i.test(t)) {
+    return "next";
+  }
+  return null;
+}
+
+/**
+ * Compose Owner Chat answers that sound like an assistant.
+ *
+ * Grounded only — never invents calls or tasks. Does not expose internal mechanics such as
+ * quiet-account algorithms, workspace inventories, handler categories, or CRM diagnostic labels.
+ */
+export function formatNaturalOwnerAttention(input: {
+  kind: NaturalAttentionKindV1;
+  overdue: Array<{ customer: string; reason: string; dueAt: string }>;
+  dueSoon: Array<{ customer: string; reason: string; dueAt: string }>;
+  /** Soft re-engage list only — never labeled as an algorithm. */
+  recentlyQuiet?: Array<{ customer: string }>;
+  waiting?: Array<{ person: string; expected: string }>;
+  openTasks?: Array<{ title: string }>;
+}): string {
+  const overdue = input.overdue.slice(0, 8);
+  const dueSoon = input.dueSoon.slice(0, 6);
+  const tasks = (input.openTasks ?? []).slice(0, 6);
+  const waiting = (input.waiting ?? []).slice(0, 8);
+  const quiet = (input.recentlyQuiet ?? []).slice(0, 5);
+
+  const peopleLine = (rows: Array<{ customer: string; reason: string; dueAt?: string }>, verb: string) =>
+    rows.map((r) => {
+      const when = r.dueAt ? ` (due ${r.dueAt.slice(0, 10)})` : "";
+      return `· ${r.customer} — ${r.reason || verb}${when}`;
+    }).join("\n");
+
+  if (input.kind === "waiting") {
+    if (!waiting.length) {
+      return "I don't currently have anything grounded that someone else owes you.";
+    }
+    return [
+      "You're waiting on:",
+      ...waiting.map((w) => `· ${w.person} — ${w.expected.slice(0, 160)}`),
+    ].join("\n");
+  }
+
+  if (input.kind === "call") {
+    if (overdue.length) {
+      return [
+        overdue.length === 1
+          ? `You should call ${overdue[0]!.customer}.`
+          : "People to call:",
+        ...(overdue.length === 1
+          ? [`${overdue[0]!.reason}${overdue[0]!.dueAt ? ` — due ${overdue[0]!.dueAt.slice(0, 10)}` : ""}.`]
+          : [peopleLine(overdue, "follow-up")]),
+      ].join("\n");
+    }
+    if (dueSoon.length) {
+      return [
+        "I don't currently have a grounded call that's overdue.",
+        "Coming up soon:",
+        peopleLine(dueSoon, "follow-up"),
+      ].join("\n");
+    }
+    return "I don't currently have a grounded call that's overdue.";
+  }
+
+  if (input.kind === "follow_up") {
+    if (overdue.length || dueSoon.length) {
+      const lines = [
+        overdue.length ? "Overdue:" : null,
+        overdue.length ? peopleLine(overdue, "follow-up") : null,
+        dueSoon.length ? "Due soon:" : null,
+        dueSoon.length ? peopleLine(dueSoon, "follow-up") : null,
+      ].filter(Boolean);
+      return lines.join("\n");
+    }
+    if (quiet.length) {
+      return [
+        "I don't have open follow-ups with a due date right now.",
+        `People you haven't been in touch with recently: ${quiet.map((q) => q.customer).join(", ")}.`,
+      ].join("\n");
+    }
+    return "I don't currently have anyone ranked for follow-up from stored records.";
+  }
+
+  // today / next — useful priorities without brand/workspace inventory dumps
+  const parts: string[] = [];
+  if (overdue.length) {
+    parts.push(overdue.length === 1
+      ? `Priority: follow up with ${overdue[0]!.customer} (${overdue[0]!.reason}).`
+      : `Priority follow-ups:\n${peopleLine(overdue, "follow-up")}`);
+  }
+  if (dueSoon.length) {
+    parts.push(`Coming up:\n${peopleLine(dueSoon, "follow-up")}`);
+  }
+  if (tasks.length) {
+    parts.push(
+      tasks.length === 1
+        ? `Open task: ${tasks[0]!.title}.`
+        : `Open tasks:\n${tasks.map((t) => `· ${t.title}`).join("\n")}`,
+    );
+  }
+  if (!parts.length) {
+    return input.kind === "next"
+      ? "I don't currently have a grounded next step from stored records. Nothing overdue is on the follow-up list."
+      : "Nothing urgent is grounded in stored records for today.";
+  }
+  return parts.join("\n\n");
 }
 
 /**

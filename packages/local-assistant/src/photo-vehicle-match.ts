@@ -226,3 +226,151 @@ export function applyOwnerPhotoCorrection(
     correctionNote: input.note.slice(0, 500),
   };
 }
+
+/**
+ * Durable Chat photo → vehicle context for follow-ups without re-upload.
+ *
+ * Scoped to a workspace (and optionally a conversation). Never shared across workspaces.
+ * Vision prose is not stored as fact — only structured match fields and provenance.
+ */
+export interface PhotoVehicleContextV1 {
+  workspaceId: string;
+  /** When set, follow-ups in a *different* conversation must not use this context. */
+  conversationId: string | null;
+  vehicleId: string | null;
+  validatedVin: string | null;
+  matchState: PhotoMatchStateV1;
+  matchMethod: PhotoMatchMethodV1;
+  confidence: number;
+  documentRef: string | null;
+  provenance: PhotoVehicleProvenanceV1;
+  setAt: IsoTimestamp;
+}
+
+/** Build durable context after a photo match. vehicleId is only set for safe live links. */
+export function buildPhotoVehicleContext(input: {
+  workspaceId: string;
+  conversationId?: string | null;
+  documentRef?: string | null;
+  link: PhotoVehicleLinkV1;
+  provenance: PhotoVehicleProvenanceV1;
+  setAt: IsoTimestamp;
+}): PhotoVehicleContextV1 {
+  return {
+    workspaceId: input.workspaceId,
+    conversationId: input.conversationId ?? null,
+    vehicleId: input.link.vehicleRef,
+    validatedVin: input.link.vin,
+    matchState: input.link.state,
+    matchMethod: input.link.matchMethod,
+    confidence: input.link.confidence,
+    documentRef: input.documentRef ?? null,
+    provenance: input.provenance,
+    setAt: input.setAt,
+  };
+}
+
+/**
+ * Whether a text turn may reuse the last photo vehicle.
+ *
+ * Pronouns are the common path ("does it have recalls?"). Attribute questions without a pronoun
+ * ("what's the price?", "what trim?") also apply once a car was just identified — requiring the
+ * Owner to re-upload for every attribute is a form, not a conversation.
+ *
+ * Workspace and conversation scopes are enforced by the caller before invoking this.
+ */
+export function isPhotoVehicleFollowUpQuestion(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t || t.length > 500) return false;
+  if (/\b(it|this|that|the car|the vehicle|this one|this unit)\b/i.test(t)) return true;
+  if (/\b(price|msrp|sticker|cost|how much)\b/i.test(t)) return true;
+  if (/\b(trim|package|packages|options?|equipment)\b/i.test(t)) return true;
+  if (/\brecalls?\b/i.test(t)) return true;
+  if (/\b(mileage|miles|odometer|stock|colour|color|condition)\b/i.test(t)) return true;
+  if (/\b(fit|match|show|suit|right for)\b/i.test(t) && /\b[A-Z][a-z]{1,20}\b/.test(t)) return true;
+  if (/\bwhat (do we|do you) know\b/i.test(t)) return true;
+  return false;
+}
+
+/**
+ * Context is usable only in the same workspace, and only in the same conversation when one was
+ * recorded. A null conversationId on either side means "workspace-scoped Chat path" (Claude's
+ * current assistant.prompt attachment flow does not always open a conversation first).
+ *
+ * Never: workspace A → workspace B, or conversation A → conversation B when both ids are known.
+ */
+export function photoContextApplies(
+  ctx: PhotoVehicleContextV1 | null | undefined,
+  input: { workspaceId: string; conversationId?: string | null },
+): boolean {
+  if (!ctx?.vehicleId) return false;
+  if (ctx.workspaceId !== input.workspaceId) return false;
+  if (ctx.conversationId && input.conversationId && ctx.conversationId !== input.conversationId) return false;
+  return true;
+}
+
+const PHOTO_CONTEXT_MAX = 24;
+
+/** Dedupe key: one slot per workspace + conversation (null conversation = workspace Chat path). */
+export function photoContextKey(ctx: Pick<PhotoVehicleContextV1, "workspaceId" | "conversationId">): string {
+  return `${ctx.workspaceId}\u0000${ctx.conversationId ?? ""}`;
+}
+
+/** Insert/replace newest context; bounded; no secrets. */
+export function upsertPhotoVehicleContext(
+  list: readonly PhotoVehicleContextV1[] | null | undefined,
+  ctx: PhotoVehicleContextV1,
+  max = PHOTO_CONTEXT_MAX,
+): PhotoVehicleContextV1[] {
+  const key = photoContextKey(ctx);
+  const rest = (list ?? []).filter((c) => photoContextKey(c) !== key);
+  return [ctx, ...rest].slice(0, max);
+}
+
+/**
+ * Resolve the correct durable photo context for this turn.
+ *
+ * Preference order:
+ * 1. Exact workspace + conversation match
+ * 2. Workspace-scoped entry (conversationId null) when the caller has no conversation yet,
+ *    or when the caller has a conversation but only a workspace-scoped photo was stored
+ * 3. Legacy single `photoVehicleContext` field (pre-list states)
+ *
+ * Never returns another conversation's vehicle when the caller named a different conversation.
+ */
+export function resolvePhotoVehicleContext(
+  list: readonly PhotoVehicleContextV1[] | null | undefined,
+  legacy: PhotoVehicleContextV1 | null | undefined,
+  input: { workspaceId: string; conversationId?: string | null },
+): PhotoVehicleContextV1 | null {
+  const merged = [
+    ...(Array.isArray(list) ? list : []),
+    ...(legacy ? [legacy] : []),
+  ];
+  // De-dupe while preserving order (list first, then legacy)
+  const seen = new Set<string>();
+  const contexts: PhotoVehicleContextV1[] = [];
+  for (const c of merged) {
+    const k = `${photoContextKey(c)}\u0000${c.setAt}\u0000${c.vehicleId}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    contexts.push(c);
+  }
+
+  const conv = input.conversationId ?? null;
+  if (conv) {
+    const exact = contexts.find(
+      (c) => c.conversationId === conv && photoContextApplies(c, input),
+    );
+    if (exact) return exact;
+    // Workspace-only photo (no conversation recorded) may feed a later turn that now has a conversation id.
+    const workspaceOnly = contexts.find(
+      (c) => !c.conversationId && c.workspaceId === input.workspaceId && c.vehicleId,
+    );
+    if (workspaceOnly) return workspaceOnly;
+    return null;
+  }
+
+  // No conversation on the request: most recent applicable workspace context (including conversation-scoped).
+  return contexts.find((c) => photoContextApplies(c, input)) ?? null;
+}
