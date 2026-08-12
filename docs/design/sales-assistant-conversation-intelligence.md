@@ -181,6 +181,22 @@ old fact gets `supersededAt` + `supersededBy`; it is not mutated. This is what m
 *"Has Sarah changed what she wants?"* answerable, and it is the single most valuable property of
 reusing `TemporalFactV1` — the history is the feature.
 
+Worked example — the customer changes their mind:
+
+```
+Monday   customer-need:model  "Camry"  PREFERENCE  conf 85  observedAt Mon  sourceRef conversation:c1#7
+         customer-need:trim   "XSE"    PREFERENCE  conf 80  observedAt Mon  sourceRef conversation:c1#7
+
+Friday   customer-need:vehicle-type "SUV"  PREFERENCE conf 88 observedAt Fri sourceRef conversation:c2#3
+         → Monday's model/trim facts get supersededAt=Fri, supersededBy=<friday fact ids>
+         → they are NOT deleted and NOT edited
+```
+
+*"What does Sarah want now?"* reads current facts only and says SUV. *"What did Sarah want before?"*
+and *"What changed?"* read the superseded chain and can say: *on Monday she wanted a Camry XSE; on
+Friday she said an SUV instead* — each citing the sentence that produced it. **The history is the
+feature**, and it is the reason to reuse `TemporalFactV1` rather than store a current-value field.
+
 **Payment and financing preferences are recorded only when explicitly stated**, never inferred from
 budget, and they never imply qualification. See §7.
 
@@ -415,6 +431,154 @@ Nothing invented: no payment terms, no qualification, no colour AION was never t
 beyond the current observed listing.
 
 ---
+
+## CUSTOMER_TIMELINE_MODEL
+
+The timeline is a **view, not a store**. Nothing new is persisted for it; it is a merge of records
+that already exist plus the one new event type:
+
+```
+timeline(relationshipRef) = merge, ordered by occurredAt, of
+    RelationshipInteractionV1[]        already on the relationship
+    ConversationEventV1[]              new (§1)
+    CommitmentV1[]                     by relationshipId
+    EmailDraftV1[]                     prepared, never sent
+    TemporalFactV1[] customer-need:*   need changes are timeline events
+    CrmActionProposalV1[]              proposed / approved / executed
+```
+
+Building this as a stored timeline would create a second copy of records that already exist, which
+then drifts. Every entry keeps its own provenance and `sourceRef`, so *"What did I tell John
+yesterday?"* answers with the sentence and its origin rather than a summary.
+
+## CORRECTION_MODEL
+
+Corrections are the Owner overruling AION, and the rule throughout AION applies unchanged:
+**correct forward, never erase.** A correction that deletes the original hides the pattern that
+caused it, and a recurring mis-extraction is exactly what the Owner needs to see.
+
+| Owner says | Effect |
+|---|---|
+| *"That's not what Sarah meant."* | The derived fact is invalidated (`invalidatedAt`, `invalidationReason`), the `ConversationEventV1` and its segment survive untouched |
+| *"Sarah is a different person."* | `IdentityResolutionV1` re-pointed to `OWNER_ASSERTED`; prior resolution retained; **every fact derived under the wrong identity is re-attributed or invalidated, not silently left behind** |
+| *"She doesn't want a hybrid anymore."* | New `customer-need` fact at Owner-direct trust supersedes the old one; the old remains in the history |
+| *"I already called him."* | The commitment resolves to `kept` with an Owner-asserted resolution, not deleted |
+
+Two properties matter:
+
+1. **A correction outranks any derived confidence.** `source-trust.ts` already places
+   `owner_direct(100)` above every extraction tier — reuse it rather than inventing precedence.
+2. **Re-identification cascades.** This is the one correction that cannot be handled locally: facts,
+   commitments and proposals created under a wrong `customerRef` must all be revisited. Any design
+   that treats identity correction as a single-field edit will leave a customer's record polluted
+   with another customer's needs.
+
+## REVERSE_MATCH_MODEL
+
+*"Who might want this Crown Signia?"* is the inverse of §5 and is **more dangerous**, because its
+output is a prompt to contact a person.
+
+```
+reverseMatch(vehicle) =
+  for each relationship with current customer-need facts in the same workspace:
+    score as in §5, then apply eligibility gates
+```
+
+Eligibility gates, all required:
+
+- **Freshness.** A need observed six months ago is not current intent. Needs carry `observedAt` and
+  `validUntil`; a stale need may be shown as *"said this in March — worth confirming"* but never as a
+  live match.
+- **Not superseded.** Superseded needs never participate.
+- **Confidence floor.** A single hedged mention is not a want.
+- **No hard-requirement conflict.** Same disqualification rule as forward matching.
+- **Lifecycle.** A closed, sold, or opted-out relationship is excluded.
+
+Every reverse match states **which need it matched and when that need was observed**, so the Owner
+can judge whether it is worth a call. `"Sarah — matched: non-hybrid + under $35k, observed 3 days
+ago"` is actionable; a bare ranked list is a nudge to cold-call someone on stale data.
+
+Reverse matching is **surfaced on request, never pushed**. See open question 9.
+
+## WORKSPACE_ISOLATION
+
+The Owner runs a dealership workspace, Compassionate Choice, and personal contexts in one AION. A
+leak here is not an inconvenience — it is a partner in a care business appearing in a car-sales
+follow-up queue, or a personal contact becoming a sales prospect.
+
+Rules:
+
+1. **Workspace is assigned at event capture and never inferred later.** A `ConversationEventV1`
+   without a workspace is `UNRESOLVED`, not defaulted to the active one.
+2. **Identity resolution never crosses workspaces.** A phone number matching a Compassionate Choice
+   contact must not resolve a dealership call to that person. Cross-workspace *recognition* may be
+   surfaced to the Owner as a question ("this number matches a contact in another workspace"), but
+   never as a link.
+3. **Matching, reverse matching, and every read model filter by workspace before scoring**, not
+   after — a filtered-after design leaks through score displays and counts.
+4. **CRM proposals carry their workspace and are gated on it.** A dealership proposal derived from a
+   non-dealership conversation is refused, not merely warned about.
+5. **The existing active-workspace filter is a display convenience, not a security boundary.** It is
+   already known to hide records the Owner wants (Kristina Leach is unreachable from the `work`
+   workspace). Fixing findability must not be done by removing the boundary — the fix is naming the
+   workspace in results, not merging them.
+
+## DEPENDENCIES_ON_GROK_BROWSER_WORKER
+
+Read from `design/grok-browser-automation` @ `64bedef`. The two designs meet at one seam and it
+fits — Grok's worker consumes structured tasks; this layer produces them.
+
+**Mapping.** `CrmActionProposalV1` (§6) → `BrowserTaskV1`:
+
+| This layer | Grok's worker |
+|---|---|
+| `customerRef` | `customerRef` — **must already be grounded**; see the obligation below |
+| `action` | `taskType` (`PREPARE_ADD_NOTE`, `ADD_NOTE`, `CREATE_FOLLOWUP`, `UPDATE_ALLOWED_PREFERENCE`, …) |
+| `authorityTier` ROUTINE / CONSEQUENTIAL / ELEVATED | `authorityMode` `PREPARE_ONLY` / `APPROVED_WRITE` / `HIGH_CONSEQUENCE_OWNER_CONFIRM` |
+| `sourceRefs` | `sourceRefs` |
+| `idempotencyKey` | `idempotencyKey` |
+| `facts` | `input` (validated per `taskType`) |
+| `expectedExternalEffect` | Owner-facing approval text (no worker equivalent — stays here) |
+
+**The obligation Grok's design places on this layer, verbatim in effect:** a proposal *must* supply a
+`customerRef` already grounded by AION identity resolution, never a free-text name. Therefore:
+
+> **Only `EXACT_EXTERNAL_ID`, `EXACT_CONTACT_MATCH`, or `OWNER_ASSERTED` identity states may produce
+> a write proposal.** `AMBIGUOUS_CANDIDATES`, `UNRESOLVED` and `CONFLICTING_SIGNALS` may produce a
+> *question* for the Owner, and nothing else. This is the single most important interface rule
+> between the two designs.
+
+**`UNCERTAIN_WRITE` is this layer's problem, not the worker's.** Grok's `BrowserTaskResultV1` can
+return `UNCERTAIN_WRITE` — the write may or may not have landed. This layer must then:
+
+- mark the proposal `status: FAILED` with the uncertainty recorded, **never** `EXECUTED`;
+- **never auto-retry** — a blind retry is how one note becomes two in a customer's history;
+- raise it as an Owner-must-do item to verify in Tekion directly;
+- and refuse to derive any further proposal from the uncertain state.
+
+**Alignment confirmed** with Grok's principles: API first (this layer is transport-agnostic and emits
+the same proposal either way), no free-form model JavaScript (this layer emits typed proposals, never
+instructions), intelligence proposes / authority gates / worker executes, and fail-closed on wrong
+customer — enforced here at the identity gate before a task is ever produced.
+
+**No dependency in the other direction.** Steps 1–9 of the build order deliver value with no browser
+worker at all. If browser automation is never authorized, this layer is still a working assistant
+that prepares work the Owner performs manually.
+
+## TOP_10_OWNER_QUERIES_SUPPORTED_BY_DESIGN
+
+1. *Who should I call?* — overdue commitments + stale relationships, triaged
+2. *Who is waiting on me?* — open Owner commitments + unanswered inbound
+3. *Who am I waiting on?* — open customer commitments
+4. *What does Sarah want now?* — current `customer-need:*` facts
+5. *What did Sarah say she wanted before?* / *What changed?* — the superseded chain
+6. *Which cars fit Sarah?* — needs × inventory, hard requirements disqualifying
+7. *Who might want this Crown Signia?* — reverse match with freshness gates
+8. *What did I promise John?* — commitments where `committedBy = owner`
+9. *What should I know before I call him?* — `CallPrepView`, unknowns included
+10. *Which customers have new inventory matches?* — `NEWLY_SEEN` vehicles × current needs
+
+Also supported: *Who hasn't heard from me?* and *Who should I follow up with today?*
 
 ## CALL_TRANSCRIPTION_BOUNDARY
 
