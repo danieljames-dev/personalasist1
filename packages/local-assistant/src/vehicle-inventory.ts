@@ -387,6 +387,8 @@ export interface VehicleRecordV1 {
    * values, and a decode never implies installed options.
    */
   govVinFacts?: VehicleGovVinFactsV1 | null;
+  /** Recall campaign assessment, scoped to what the checked source actually answers. */
+  recallAssessment?: import("./recall-intelligence.js").VehicleRecallAssessmentV1 | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
 }

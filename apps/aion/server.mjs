@@ -1469,6 +1469,7 @@ export async function createAionServer(options = {}) {
       case "backup.key.identity": return service.recoveryKeyIdentity();
       case "backup.key.export": return service.exportRecoveryKeyPackage(typeof input.destinationDir === "string" ? input.destinationDir : null);
       case "vehicle.vin.enrich": return service.enrichLiveVinFacts({ limit: Number(input.limit) || undefined, delayMs: Number(input.delayMs) || undefined });
+      case "vehicle.recall.enrich": return service.enrichRecallAssessments({ limit: Number(input.limit) || undefined, delayMs: Number(input.delayMs) || undefined });
       case "career.run": {
         try { const result = await runCareer(repositoryRoot, input); await service.recordCareerActivity(input.command, "success", "No Career content is stored in activity."); return result; }
         catch (error) { if (error?.careerCommand) await service.recordCareerActivity(error.careerCommand, "failed", "The command failed; no Career content is stored."); throw error; }

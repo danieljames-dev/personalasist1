@@ -4874,6 +4874,101 @@ export class AionAssistantV1 {
     };
   }
 
+  /**
+   * Check recall campaigns for live inventory, one lookup per distinct year/make/model.
+   *
+   * 288 vehicles collapse to ~87 combinations, so covering the whole lot costs a fraction of the
+   * public requests a per-VIN sweep would. The result is stored on every vehicle sharing the
+   * combination, carrying the scope of what was actually asked — a campaign lookup, never a
+   * VIN-specific clean bill of health.
+   */
+  async enrichRecallAssessments(opts: { limit?: number; delayMs?: number } = {}): Promise<{
+    combosChecked: number;
+    vehiclesUpdated: number;
+    recallsFound: number;
+    noRecords: number;
+    failures: number;
+    remainingCombos: number;
+  }> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 30, 200));
+    const delayMs = opts.delayMs ?? 300;
+    const { buildRecallAssessment, recallComboKey } = await import("./recall-intelligence.js");
+    const { lookupRecallsNhtsa } = await import("./vehicle-research.js");
+
+    const snapshot = await this.snapshot();
+    const vehicles = snapshot.vehicleInventory?.vehicles ?? [];
+
+    // Government-decoded make/model is the authoritative key when present.
+    const comboOf = (v: { govVinFacts?: unknown; year?: number | null; make?: string | null; model?: string | null }) => {
+      const g = v.govVinFacts as { modelYear?: string | null; make?: string | null; model?: string | null } | null | undefined;
+      const year = g?.modelYear ?? (v.year != null ? String(v.year) : null);
+      const make = g?.make ?? v.make ?? null;
+      const model = g?.model ?? v.model ?? null;
+      return { key: recallComboKey(year, make, model), year, make, model };
+    };
+
+    const pending = new Map<string, { year: string | null; make: string | null; model: string | null }>();
+    for (const v of vehicles) {
+      if (v.recallAssessment && v.recallAssessment.status !== "NOT_CHECKED") continue;
+      const c = comboOf(v);
+      if (!c.key || pending.has(c.key)) continue;
+      pending.set(c.key, { year: c.year, make: c.make, model: c.model });
+      if (pending.size >= limit) break;
+    }
+
+    const results = new Map<string, ReturnType<typeof buildRecallAssessment>>();
+    let recallsFound = 0, noRecords = 0, failures = 0;
+    for (const [key, q] of pending) {
+      const now = this.ports.clock.now();
+      try {
+        const res = await lookupRecallsNhtsa({
+          make: q.make, model: q.model, year: q.year ? Number(q.year) : null, now,
+        });
+        const assessment = buildRecallAssessment({
+          ok: res.mode !== "error",
+          campaigns: res.recalls,
+          query: q,
+          now,
+          source: "https://api.nhtsa.gov/recalls/recallsByVehicle",
+        });
+        results.set(key, assessment);
+        if (assessment.status === "RECALLS_FOUND") recallsFound++;
+        else if (assessment.status === "NO_MATCHING_RECORDS_RETURNED") noRecords++;
+        else failures++;
+      } catch {
+        results.set(key, buildRecallAssessment({
+          ok: false, campaigns: [], query: q, now,
+          source: "https://api.nhtsa.gov/recalls/recallsByVehicle",
+        }));
+        failures++;
+      }
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    let vehiclesUpdated = 0;
+    if (results.size > 0) {
+      await this.mutate((draft) => {
+        for (const v of draft.vehicleInventory?.vehicles ?? []) {
+          const c = comboOf(v);
+          const assessment = c.key ? results.get(c.key) : undefined;
+          if (assessment) { v.recallAssessment = assessment; vehiclesUpdated++; }
+        }
+        this.activity(draft, "agent", "vehicle.recall.check",
+          `Recall campaigns checked for ${results.size} year/make/model combination(s); ${vehiclesUpdated} vehicle(s) updated.`, null);
+        return null;
+      });
+    }
+
+    const after = await this.snapshot();
+    const remaining = new Set<string>();
+    for (const v of after.vehicleInventory?.vehicles ?? []) {
+      if (v.recallAssessment && v.recallAssessment.status !== "NOT_CHECKED") continue;
+      const c = comboOf(v);
+      if (c.key) remaining.add(c.key);
+    }
+    return { combosChecked: results.size, vehiclesUpdated, recallsFound, noRecords, failures, remainingCombos: remaining.size };
+  }
+
   async decodeVinAction(raw: string, opts: { offline?: boolean } = {}) {
     const v = validateVin(raw);
     const now = this.ports.clock.now();
