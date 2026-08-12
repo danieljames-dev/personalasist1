@@ -459,6 +459,8 @@ export class AionAssistantV1 {
   private controllers = new Map<string, AbortController>();
   /** Sessions with a readiness check in flight. One at a time, so no session registers twice. */
   #activating = new Set<string>();
+  /** Last document whose promotion to an Owner fact was refused, for diagnostics. */
+  #lastPromotionRefusal: { path: string; reasons: string[] } | null = null;
   /**
    * Process-local cache of the durable photo vehicle context.
    * Authoritative copy lives in state.photoVehicleContext so production restarts keep follow-ups.
@@ -4530,7 +4532,22 @@ export class AionAssistantV1 {
 
     if (auto && !review.needs && !needsWorkspaceReview && !instructionLike) {
       const draft = factDraftFromCandidate(auto, input.extractedText || "", input.relativePath || input.filename);
-      if (draft) {
+      // A document that merely *mentions* work is still a document. This gate is the only
+      // document→Owner-fact path in the system, so refusing here is what keeps a README out of the
+      // Owner's biography. The document, its review item and its provenance are all untouched —
+      // only the semantic promotion is refused.
+      const { rawDocumentPromotionReasons } = await import("./owner-fact-gate.js");
+      const refusals = draft
+        ? rawDocumentPromotionReasons({
+            title: draft.title,
+            content: draft.content,
+            sourceRef: `import:${input.relativePath || input.filename}`,
+          })
+        : [];
+      if (draft && refusals.length) {
+        reviewItem = reviewItem ?? null;
+        this.#lastPromotionRefusal = { path: input.relativePath || input.filename, reasons: refusals };
+      } else if (draft) {
         const fact = await this.addOwnerKnowledgeFact({
           category: draft.category,
           title: draft.title,
@@ -9685,27 +9702,6 @@ export class AionAssistantV1 {
           data: completeness,
         };
       }
-      if (/\bwhat (are )?(my )?(current )?goals\b|\bshow (me )?(my )?goals\b/i.test(text)) {
-        const ok = await this.getOwnerKnowledge();
-        const goals = (ok.facts || []).filter((f) => f.enabled !== false && f.category === "goal");
-        const reply = goals.length
-          ? [
-              "CURRENT GOALS (evidence-grounded)",
-              ...goals.map(
-                (g, i) =>
-                  `  ${i + 1}. ${g.title}\n     ${g.content.slice(0, 240)}\n     source=${g.provenance?.sourceRef || "unknown"} conf=${g.confidence}`,
-              ),
-            ].join("\n")
-          : "No structured GOAL facts yet. Capture with “Remember my goal is …” or import strong plan documents.";
-        return {
-          intent: route.intent,
-          confidence: "high",
-          reply,
-          sources,
-          action: "owner.goals.list",
-          data: { goals },
-        };
-      }
       const registry = await this.realDataSourceRegistry();
       const readiness = await this.importReadiness();
       const dash = await this.importDashboard();
@@ -10635,6 +10631,63 @@ export class AionAssistantV1 {
 
     // Career/skills questions must reach stored Owner knowledge rather than the generic briefing.
     // The data was already there; only the route was missing.
+    if (route.intent === "OWNER_GOALS") {
+      const { buildGoalViews, formatGoalsAnswer, parseGoalCapture } = await import("./owner-goals-projects.js");
+      // Capture first. The empty-state message has invited "Remember my goal is …" all along while
+      // nothing implemented it, so goals could never grow beyond whatever import happened to find.
+      const statement = parseGoalCapture(text);
+      if (statement) {
+        await this.addOwnerKnowledgeFact({
+          category: "goal",
+          title: statement.slice(0, 80),
+          content: statement,
+          confidence: 95,
+          // Owner-direct provenance, not the import path — this is the Owner's own words.
+          sourceType: "owner",
+          sourceRef: "assistant.goal.capture",
+        });
+        return {
+          intent: "OWNER_GOALS",
+          confidence: "high",
+          reply: `Got it — I'll remember that goal:\n· ${statement}`,
+          sources,
+          action: "owner.goals.add",
+          data: { statement },
+        };
+      }
+      const views = buildGoalViews(state.ownerKnowledge?.facts ?? []);
+      return {
+        intent: "OWNER_GOALS",
+        confidence: views.length ? "high" : "low",
+        reply: formatGoalsAnswer(views),
+        sources,
+        action: "owner.goals.list",
+        data: { goals: views },
+      };
+    }
+
+    if (route.intent === "PROJECT_STATUS") {
+      const { formatProjectsAnswer } = await import("./owner-goals-projects.js");
+      const all = await this.projects();
+      const activeWorkspace = state.settings.activeWorkspace;
+      const mine = all.filter((p) => !p.workspace || p.workspace === activeWorkspace);
+      return {
+        intent: "PROJECT_STATUS",
+        confidence: mine.length ? "high" : "low",
+        reply: formatProjectsAnswer(
+          mine.map((p) => ({
+            title: p.title,
+            stage: String(p.stage ?? "idea"),
+            standing: p.standing ?? "",
+            createdAt: p.createdAt,
+          })),
+        ),
+        sources,
+        action: "owner.projects.list",
+        data: { projects: mine.map((p) => ({ id: p.id, title: p.title, stage: p.stage })) },
+      };
+    }
+
     if (route.intent === "CAREER_PROFILE") {
       const { buildCareerProfile, formatSkillsAnswer, formatWorkHistoryAnswer, formatJobFitAnswer } =
         await import("./career-profile.js");
