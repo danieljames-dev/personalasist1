@@ -41,6 +41,12 @@ export type CrmAssistantIntentV1 =
   | "CAREER_PROFILE"
   | "OWNER_GOALS"
   | "PROJECT_STATUS"
+  | "CUSTOMER_NEEDS"
+  | "CUSTOMER_NEEDS_HISTORY"
+  | "CUSTOMER_FIT"
+  | "VEHICLE_CUSTOMER_MATCH"
+  | "CUSTOMER_COMMITMENTS"
+  | "CUSTOMER_PRECALL"
   | "CONTEXT_SWITCH"
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
@@ -184,6 +190,76 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat experience (is|do i have that is) most valuable\b/i,
       /\bam i qualified\b/i,
       /\bwhat should i (look for|apply for)\b/i,
+    ],
+  },
+  {
+    // What a customer wants, and how that changed.
+    //
+    // Placed here, ahead of VEHICLE_INVENTORY and the CRM fallbacks, because these questions name a
+    // person and would otherwise reach the raw-text name matcher in service.ts and come back as a
+    // generic account summary. Patterns deliberately span the whole clause through the trailing
+    // verb: subject extraction takes the text after the match, so a short prefix would hand the
+    // handler "Sarah want" instead of "Sarah".
+    //
+    // Bare pronouns are excluded on purpose — "What did she want?" already belongs to
+    // ACCOUNT_SUMMARY, and stealing it would break existing behaviour for no gain.
+    intent: "CUSTOMER_NEEDS_HISTORY",
+    confidence: "high",
+    patterns: [
+      /\bwhat (?:has )?changed\b[^?]{0,30}\b(?:needs?|wants?|looking for)\b/i,
+      /\bwhat did\b[^?]{0,30}\bwant (?:before|originally|at first|previously)\b/i,
+      /\bdid\b[^?]{0,30}\bchange (?:their|his|her) mind\b/i,
+    ],
+  },
+  {
+    intent: "CUSTOMER_NEEDS",
+    confidence: "high",
+    patterns: [
+      /\bwhat does\b[^?]{0,30}\b(?:want|need)s?\b(?: now)?/i,
+      /\bwhat is\b[^?]{0,30}\blooking for\b/i,
+      /\bwhat are\b[^?]{0,30}\b(?:requirements|must[- ]haves)\b/i,
+    ],
+  },
+  {
+    // Forward fit: a named person plus a fit verb. Bare inventory questions ("what vehicles do we
+    // have", "show me Camrys under 30k") must still fall through to VEHICLE_INVENTORY, so a fit
+    // verb is required — the category word alone is not enough.
+    intent: "CUSTOMER_FIT",
+    confidence: "high",
+    patterns: [
+      /\b(?:which|what) (?:vehicles?|cars?|trucks?|suvs?)\b[^?]{0,20}\b(?:fit|suit|match|work for|are right for)\b/i,
+      /\bwould (?:this|that|it)\b[^?]{0,20}\bfit\b/i,
+      /\bwhy (?:does|doesn'?t|does not)\b[^?]{0,40}\bfit\b/i,
+    ],
+  },
+  {
+    // Reverse match, anchored to a demonstrative so CRM_LOOKUP's broad topic search
+    // ("customers interested in Camrys") is left alone.
+    intent: "VEHICLE_CUSTOMER_MATCH",
+    confidence: "high",
+    patterns: [
+      /\bwho (?:might|would|could)\b[^?]{0,20}\b(?:want|be interested in|be a fit for)\b[^?]{0,20}\b(?:this|that)\b/i,
+      /\bwho\b[^?]{0,20}\bfor (?:this|that) (?:vehicle|car|truck|suv|vin)\b/i,
+    ],
+  },
+  {
+    intent: "CUSTOMER_COMMITMENTS",
+    confidence: "high",
+    patterns: [
+      /\bwhat did i promise\b/i,
+      /\bwhat did\b[^?]{0,25}\bpromise me\b/i,
+      /\bwhat (?:am i|are we) waiting on\b[^?]{0,20}\bfor\b/i,
+    ],
+  },
+  {
+    // Pre-call brief. The service has an older "prepare me for ..." block that fires on raw text
+    // before intent branches; this rule covers the phrasings that block does not claim.
+    intent: "CUSTOMER_PRECALL",
+    confidence: "high",
+    patterns: [
+      /\bwhat should i know before i (?:call|contact|ring|phone)\b/i,
+      /\bbrief me (?:on|about)\b/i,
+      /\bcatch me up on\b/i,
     ],
   },
   {
