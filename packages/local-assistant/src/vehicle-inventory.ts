@@ -23,6 +23,7 @@ export type VinValidationCodeV1 =
   | "INVALID_LENGTH"
   | "INVALID_CHARACTERS"
   | "CHECK_DIGIT_FAIL"
+  | "PLACEHOLDER_VIN"
   | "EMPTY";
 
 export interface VinValidationResultV1 {
@@ -72,6 +73,22 @@ export function validateVin(raw: string): VinValidationResultV1 {
       code: "INVALID_CHARACTERS",
       checkDigitOk: null,
       message: "VIN contains illegal characters (I, O, Q are never used).",
+    };
+  }
+  // A run of 17 identical characters satisfies the weighted-sum check digit by coincidence (both
+  // sides of the comparison scale together), so "00000000000000000" and "11111111111111111" pass
+  // the arithmetic and would be reported as validated VINs. A camera pointed at a dark or blown-out
+  // surface is exactly how OCR produces such a string, and no real VIN looks like this — the WMI
+  // alone rules it out. Reject before the check digit rather than after, so the reason given is the
+  // true one.
+  if (/^(.)\1{16}$/u.test(normalized)) {
+    return {
+      raw: original,
+      normalized,
+      valid: false,
+      code: "PLACEHOLDER_VIN",
+      checkDigitOk: null,
+      message: "VIN is a single repeated character — a placeholder or a failed read, not a real VIN.",
     };
   }
   const checkOk = vinCheckDigitValid(normalized);
