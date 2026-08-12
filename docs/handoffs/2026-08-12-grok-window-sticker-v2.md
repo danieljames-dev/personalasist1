@@ -115,7 +115,7 @@ RAW_CONTROL_BYTES_INTRODUCED = 0
 
 - BRANCH = executor/grok-window-sticker-v2
 - START_HEAD = 6a8046aea4f3bb4f4b8972bfce5dae7b5388a0c3
-- END_HEAD = (see commit after push)
+- END_HEAD = e75c4612a152718d5d44d125a585baaaeab49a7c
 - Do NOT merge main from this lane
 
 ## Privacy and Hygiene
