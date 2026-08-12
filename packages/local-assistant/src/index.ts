@@ -70,4 +70,5 @@ export * from "./backup-retention.js";
 export * from "./recovery-key.js";
 export * from "./recall-intelligence.js";
 export * from "./toyota-model-knowledge.js";
+export * from "./career-profile.js";
 export * from "./private-backup-key.js";

@@ -38,6 +38,7 @@ export type CrmAssistantIntentV1 =
   | "IMPORT_STATUS"
   | "CONNECTOR_STATUS"
   | "VEHICLE_INVENTORY"
+  | "CAREER_PROFILE"
   | "CONTEXT_SWITCH"
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
@@ -120,6 +121,26 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bi just talked to\b/i,
       /\bidea:\s*/i,
       /\bfollow up with\b.+\btomorrow\b/i,
+    ],
+  },
+  {
+    // Owner career/skills questions. The knowledge already exists; these are the shapes a person
+    // actually types. Kept ahead of the CRM fallbacks so they never land on a generic briefing.
+    intent: "CAREER_PROFILE",
+    confidence: "high",
+    patterns: [
+      /\b(my|our)\b[^?]{0,20}\b(strongest |best |top )?skills?\b/i,
+      /\bwhat (am i|are you) good at\b/i,
+      /\bwhat (skills|experience|background)\b[^?]{0,30}\b(do i|have i|i have)\b/i,
+      /\bwhat jobs?\b[^?]{0,25}\b(fit|suit|match|should i|for me)\b/i,
+      /\bwhat (kind|type) of (work|job|role)\b/i,
+      /\bwhat (jobs?|roles?|positions?)\b[^?]{0,20}\b(have i|did i)\b/i,
+      /\b(my|our) (work|employment|job) history\b/i,
+      /\bwhat (industries|fields|sectors)\b[^?]{0,25}\b(have i|did i|i worked)\b/i,
+      /\bwhere have i worked\b/i,
+      /\bwhat experience (is|do i have that is) most valuable\b/i,
+      /\bam i qualified\b/i,
+      /\bwhat should i (look for|apply for)\b/i,
     ],
   },
   {

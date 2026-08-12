@@ -10120,6 +10120,32 @@ export class AionAssistantV1 {
       };
     }
 
+    // Career/skills questions must reach stored Owner knowledge rather than the generic briefing.
+    // The data was already there; only the route was missing.
+    if (route.intent === "CAREER_PROFILE") {
+      const { buildCareerProfile, formatSkillsAnswer, formatWorkHistoryAnswer, formatJobFitAnswer } =
+        await import("./career-profile.js");
+      const profile = buildCareerProfile(
+        state.ownerKnowledge?.facts ?? [],
+        state.ownerKnowledge?.profile?.summary ?? null,
+      );
+      const asksFit = /\b(fit|suit|what kind of work|what jobs should|look for|apply for)\b/i.test(text);
+      const asksHistory = /\b(work history|jobs have i|worked|employer|experience do i|industries)\b/i.test(text);
+      const reply = asksFit
+        ? formatJobFitAnswer(profile)
+        : asksHistory
+          ? formatWorkHistoryAnswer(profile)
+          : formatSkillsAnswer(profile);
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply,
+        sources: profile.employers.slice(0, 5).map((e) => ({ type: "ownerKnowledge", id: e.employer, label: e.employer })),
+        action: asksFit ? "career.fit" : asksHistory ? "career.history" : "career.skills",
+        data: profile,
+      };
+    }
+
     if (route.intent === "WORK_QUEUE" || route.intent === "LIST_FOLLOWUPS") {
       const useBriefing =
         route.intent === "WORK_QUEUE" ||
