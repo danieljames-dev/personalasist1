@@ -93,9 +93,40 @@ export function vehicleSourceClass(v: VehicleRecordV1): VehicleKnowledgeClassV1 
   return "INFERENCE";
 }
 
+/**
+ * Budget cap from natural phrasing.
+ *
+ * Salespeople say "under 30k", not "under 30000". Capturing digits alone turned that into a $30
+ * ceiling, so every price filter matched nothing — the query looked like empty inventory rather
+ * than a parsing bug. Handle the k/K suffix, and treat bare small numbers as thousands too.
+ */
+export function parseMaxPriceFromText(text: string): number | null {
+  const m = String(text ?? "")
+    .toLowerCase()
+    .match(/(?:under|below|less than|cheaper than|<)\s*\$?\s*([\d,]+(?:\.\d+)?)\s*(k\b)?/);
+  if (!m) return null;
+  const raw = Number(m[1]!.replace(/,/g, ""));
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  // "30k" -> 30000. A bare "30" in a car-price question means the same thing.
+  const value = m[2] ? raw * 1000 : raw < 1000 ? raw * 1000 : raw;
+  return value;
+}
+
+/**
+ * Most recent *known* price.
+ *
+ * A refresh records an observation for every vehicle it sees, including listing pages that publish
+ * no price — so the newest history entry is frequently all-null. Reading position 0 blindly
+ * reported "price unknown" for vehicles whose price had just been recorded, and silently broke
+ * price-filtered queries such as "Camrys under 30k". Scan newest-first for an actual value, and
+ * still return null when no observation ever carried one.
+ */
 export function latestPrice(v: VehicleRecordV1): number | null {
-  const p = v.priceHistory?.[0]?.advertisedPrice ?? v.priceHistory?.[0]?.dealerPrice ?? null;
-  return p != null && p > 0 ? p : null;
+  for (const entry of v.priceHistory ?? []) {
+    const p = entry?.advertisedPrice ?? entry?.dealerPrice ?? entry?.msrp ?? null;
+    if (p != null && p > 0) return p;
+  }
+  return null;
 }
 
 export function inventoryFreshness(
@@ -202,9 +233,9 @@ export function answerVehicleQuery(input: {
   if (/\brav4s?\b/i.test(ql)) pool = queryVehicles(pool, { model: "RAV4", nowIso: input.nowIso });
   if (/\bprius\b/i.test(ql)) pool = queryVehicles(pool, { model: "Prius", nowIso: input.nowIso });
 
-  const under = ql.match(/under\s*\$?\s*([\d,]+)/) || ql.match(/below\s*\$?\s*([\d,]+)/) || ql.match(/<\s*\$?\s*([\d,]+)/);
+  const under = parseMaxPriceFromText(ql);
   if (under) {
-    const max = Number(under[1]!.replace(/,/g, ""));
+    const max = under;
     if (Number.isFinite(max)) {
       pool = pool.filter((v) => {
         const p = latestPrice(v);
@@ -312,8 +343,7 @@ export function matchCustomerToVehicles(input: {
     .toLowerCase();
 
   const max = input.maxResults ?? 5;
-  const under = blob.match(/under\s*\$?\s*([\d,]+)/);
-  const maxPrice = under ? Number(under[1]!.replace(/,/g, "")) : null;
+  const maxPrice = parseMaxPriceFromText(blob);
   const wants = {
     camry: /\bcamry\b/.test(blob),
     corolla: /\bcorolla\b/.test(blob) && !/cross/.test(blob),

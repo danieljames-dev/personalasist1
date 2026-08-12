@@ -131,6 +131,15 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bdo we have\b.{0,60}\b(vin|camrys?|tacomas?|highlanders?|rav4s?|corollas?|tundras?|4runners?|toyotas?)\b/i,
       /\bwhat (tacomas?|camrys?|highlanders?|rav4s?|trucks?|cars?) (are )?listed\b/i,
       /\bfind me a (used |new )?.{0,40}(under|below)\s*\$?\d/i,
+      // The Owner asks about stock in plain language far more often than in the shapes above:
+      // "what vehicles do we have", "show me Camrys under 30k", "what hybrids do we have".
+      // Match a category word anywhere in the question, not only after "do we have".
+      /\b(what|which|show me|list|any|got any|how many)\b[^?]{0,40}\b(vehicles?|cars?|trucks?|suvs?|sedans?|hybrids?|inventory|stock)\b/i,
+      /\b(show me|list|find|any|got any|do we have)\b[^?]{0,40}\b(camrys?|corollas?|tacomas?|rav4s?|highlanders?|tundras?|4runners?|siennas?|priu(?:s|ses)?|venzas?|sequoias?|crowns?|bz4x)\b/i,
+      /\b(under|below|less than|cheaper than)\s*\$?\d[\d,]*\s*k?\b/i,
+      /\b(new|used|certified)\b[^?]{0,30}\b(inventory|vehicles?|cars?|trucks?)\b/i,
+      /\bwhat (came in|arrived|is new)\b[^?]{0,30}\b(recently|today|this week)\b/i,
+      /\bno longer (online|listed|available)\b/i,
       /\bdecode (this )?vin\b/i,
       /\bwhat car is this\b/i,
       /\b(verify|verified) (today|this morning|on the lot)\b/i,

@@ -92,3 +92,32 @@ test("pagination stops when a page contributes no new vehicles", async () => {
   assert.ok(calls <= 2, `must stop once a page adds nothing new (fetched ${calls})`);
   assert.equal(res.listings.length, 2, "duplicate VINs are not double-counted");
 });
+
+test("latestPrice reports the most recent known price, not a null observation", async () => {
+  const { latestPrice } = await import("../src/vehicle-intelligence.js");
+  // A refresh that saw no published price prepends an all-null observation. The real price
+  // recorded earlier must still be reported, or price filters silently return nothing.
+  const vehicle = {
+    priceHistory: [
+      { at: "2026-08-12T01:00:00.000Z", advertisedPrice: null, msrp: null, dealerPrice: null },
+      { at: "2026-08-11T23:00:00.000Z", advertisedPrice: 28995, msrp: null, dealerPrice: null },
+    ],
+  } as never;
+  assert.equal(latestPrice(vehicle), 28995);
+
+  const neverPriced = { priceHistory: [{ at: "x", advertisedPrice: null, msrp: null, dealerPrice: null }] } as never;
+  assert.equal(latestPrice(neverPriced), null, "unknown stays unknown — never invented");
+
+  const msrpOnly = { priceHistory: [{ at: "x", advertisedPrice: null, msrp: 31000, dealerPrice: null }] } as never;
+  assert.equal(latestPrice(msrpOnly), 31000);
+});
+
+test("budget phrasing parses k-suffixed and bare thousands", async () => {
+  const { parseMaxPriceFromText } = await import("../src/vehicle-intelligence.js");
+  assert.equal(parseMaxPriceFromText("show me camrys under 30k"), 30000);
+  assert.equal(parseMaxPriceFromText("under $30,000"), 30000);
+  assert.equal(parseMaxPriceFromText("below 25K"), 25000);
+  assert.equal(parseMaxPriceFromText("less than 40k"), 40000);
+  assert.equal(parseMaxPriceFromText("under 30"), 30000, "a bare small number means thousands");
+  assert.equal(parseMaxPriceFromText("what hybrids do we have"), null);
+});
