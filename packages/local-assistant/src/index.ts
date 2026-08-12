@@ -42,6 +42,8 @@ export * from "./audio-transcription.js";
 export * from "./connectors/local-whisper.js";
 export * from "./owner-goals-projects.js";
 export * from "./customer-identity.js";
+export * from "./need-extraction.js";
+export * from "./transcript-conversation-adapter.js";
 export * from "./customer-needs.js";
 export * from "./customer-inventory-match.js";
 export * from "./conversation-event.js";
