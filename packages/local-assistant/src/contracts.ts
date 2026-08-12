@@ -666,6 +666,11 @@ export interface AssistantStateV1 {
    * Additive; default []. Survives restart via normal state file. No secrets.
    */
   photoVehicleContexts: import("./photo-vehicle-match.js").PhotoVehicleContextV1[];
+  /**
+   * Audio transcription evidence (speech text only). Newest first; bounded.
+   * Never auto-promoted to customer needs/identity — Claude intelligence consumes these.
+   */
+  audioTranscripts: import("./audio-transcription.js").TranscriptRecordV1[];
 }
 
 export interface StateRepositoryV1 {

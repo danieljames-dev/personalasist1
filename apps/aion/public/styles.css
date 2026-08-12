@@ -343,3 +343,7 @@ label.inline input { width: auto; }
   .aion-area-nav { display: flex; flex-wrap: wrap; gap: .35rem; position: static; }
   .aion-area-nav button { flex: 1 1 auto; min-width: 5.5rem; text-align: center; padding: .55rem .5rem; }
 }
+
+/* Explicit microphone recording (never ambient) */
+.aion-voice-active { outline: 2px solid #c0392b; background: #fdecea; }
+.aion-voice-rec { border-color: #c0392b; }

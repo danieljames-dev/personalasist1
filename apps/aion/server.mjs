@@ -13,6 +13,7 @@ import {
   UnavailableGpuInfrastructureV1, UnavailableResearchProviderV1, VerificationCapabilityV1, digestValue, validateBindAddress,
   defaultGmailConfig, gmailConnectorStatus, defaultMetricoolConfig, metricoolConnectorStatus,
   imageUnderstandingStatus, extractImageMetadataOnly, extractImageWithLocalVision,
+  resolveTranscriptionEngineStatus,
   walkAuthorizedFolder, mimeForBulkExtension, hashBytes,
   discoverPrivateLanAddresses, discoverAccessEndpoints, buildPhoneUrl, buildAppUrl,
 } from "../../packages/local-assistant/dist/index.js";
@@ -627,6 +628,52 @@ export async function createAionServer(options = {}) {
         return result;
       }
       case "crm.document.attach": return service.attachCrmDocument(input.document ?? input);
+      /**
+       * Audio transcription foundation (Grok).
+       * Private upload uses crm.document.upload; this action produces fallible speech evidence only.
+       * No customer identity/needs inference — Claude intelligence consumes TRANSCRIPT_RESULT.
+       */
+      case "audio.transcribe": {
+        return service.transcribeAudio({
+          contentBase64: input.contentBase64,
+          mimeType: input.mimeType,
+          filename: input.filename,
+          documentRef: input.documentRef ?? input.documentId ?? null,
+          storedPath: input.storedPath ?? null,
+          conversationId: input.conversationId ?? null,
+          durationMs: typeof input.durationMs === "number" ? input.durationMs : null,
+          fixtureText: typeof input.fixtureText === "string" ? input.fixtureText : undefined,
+          offline: input.offline === true,
+        });
+      }
+      case "audio.transcript.get": {
+        const id = String(input.transcriptId || input.id || "");
+        if (!id) throw new Error("transcriptId is required.");
+        return service.getTranscript(id);
+      }
+      case "audio.transcript.list": {
+        return service.listTranscripts({
+          conversationId: input.conversationId ?? null,
+          limit: typeof input.limit === "number" ? input.limit : 40,
+        });
+      }
+      case "audio.voice_to_chat": {
+        // Microphone / file recording → STT → same assistant.prompt pipeline.
+        return service.voicePromptFromAudio({
+          contentBase64: input.contentBase64,
+          mimeType: input.mimeType,
+          filename: input.filename,
+          documentRef: input.documentRef ?? null,
+          storedPath: input.storedPath ?? null,
+          conversationId: input.conversationId ?? null,
+          textPrefix: input.textPrefix,
+          fixtureText: typeof input.fixtureText === "string" ? input.fixtureText : undefined,
+          offline: input.offline === true,
+        });
+      }
+      case "audio.engine.status": {
+        return resolveTranscriptionEngineStatus(process.env);
+      }
       case "crm.document.upload": {
         // Real byte intake: base64 content written under private/aion/intake (never Git).
         const filename = basename(String(input.filename ?? "upload.bin")).replace(/[^\w.\- ()[\]]+/g, "_").slice(0, 180) || "upload.bin";
@@ -687,11 +734,23 @@ export async function createAionServer(options = {}) {
             extractedText = "";
           }
         }
+        const isAudio =
+          mimeType.startsWith("audio/")
+          || /\.(wav|mp3|m4a|mp4|webm|ogg|flac|mpeg)$/i.test(lower);
         const kind = mimeType.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(lower)
           ? "image"
           : /\.(csv|xlsx?)$/i.test(lower)
             ? "spreadsheet"
-            : "document";
+            : isAudio
+              ? "other"
+              : "document";
+        // Audio: store only — transcription is a separate explicit action (no silent STT→CRM facts).
+        if (isAudio) {
+          if (!Array.isArray(input.tags)) input.tags = [];
+          if (!input.tags.includes("audio")) input.tags = [...input.tags, "audio"];
+          if (!input.summary) input.summary = `Audio upload ${filename} (${bytes.length} bytes) — not transcribed yet.`;
+          extractedText = extractedText || "";
+        }
         if (kind === "image" && !extractedText) {
           // Prefer local Ollama vision when configured; never invent OCR on failure.
           const vision = await extractImageWithLocalVision({

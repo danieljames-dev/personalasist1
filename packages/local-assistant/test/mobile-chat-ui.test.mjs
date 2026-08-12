@@ -75,16 +75,18 @@ test("internal intent labels never render in Owner chat", () => {
 test("voice input feeds the same Chat composer rather than a separate assistant mode", () => {
   const handler = appJs.slice(appJs.indexOf('verb === "voice-prompt"'));
   const body = handler.slice(0, handler.indexOf("rec.start()"));
-  assert.match(body, /getElementById\("aionChatInput"\)/, "voice must target the Chat composer specifically");
+  // Prefer MediaRecorder staging; browser speech still appends into the Chat composer.
+  assert.match(body, /MediaRecorder/, "laptop mic uses explicit MediaRecorder (not ambient surveillance)");
+  assert.match(body, /getUserMedia/, "microphone requires explicit user permission");
+  assert.match(body, /getElementById\("aionChatInput"\)/, "browser speech fallback targets Chat composer");
   assert.ok(
-    !/ta\.value = text/.test(body),
-    "voice must not overwrite text the Owner already typed",
+    !/ta\.value\s*=\s*text\s*;/.test(body),
+    "Chat voice must not overwrite text the Owner already typed",
   );
-  assert.match(body, /ta\.value\.trim\(\) \?/, "transcript should append to existing text");
-  assert.ok(
-    !/api\("assistant\.prompt"/.test(body),
-    "voice must not open its own submission path — Chat owns submission and context",
-  );
+  assert.match(body, /ta\.value\.trim\(\) \?/, "browser speech transcript should append to existing text");
+  // Submission is Chat-owned: recording stages attachment; Send uses audio.voice_to_chat / assistant.prompt
+  assert.match(appJs, /audio\.voice_to_chat/, "audio recordings submit through the voice-to-chat foundation");
+  assert.match(appJs, /isAudio/, "audio attachments are first-class in the composer");
 });
 
 test("the More sheet holds secondary functions, not the core chat intake", () => {

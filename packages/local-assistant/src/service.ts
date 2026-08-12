@@ -135,6 +135,12 @@ import {
   ownerFacingExtractionMessage,
 } from "./image-region.js";
 import {
+  isSupportedAudioType,
+  resolveTranscriptionEngineStatus,
+  transcribeAudioBytes,
+  type TranscriptRecordV1,
+} from "./audio-transcription.js";
+import {
   buildVehicleTalkingPoints,
   compareTwoVehicles,
   formatResearchReply,
@@ -9465,7 +9471,9 @@ export class AionAssistantV1 {
           ? input.kind
           : mimeType.startsWith("image/")
             ? "image"
-            : "document";
+            : mimeType.startsWith("audio/")
+              ? "other"
+              : "document";
       const tags = Array.isArray(input.tags)
         ? input.tags.map((t) => String(t).slice(0, 80)).filter(Boolean).slice(0, 32)
         : typeof input.tags === "string"
@@ -9525,6 +9533,222 @@ export class AionAssistantV1 {
     const docs = Array.isArray(state.crmDocuments) ? state.crmDocuments : [];
     if (!relationshipId) return docs;
     return docs.filter((d) => d.relationshipId === relationshipId);
+  }
+
+  /**
+   * Transcribe private audio bytes into a structured transcript evidence record.
+   * Does NOT write customer CRM facts, needs, or identity assertions.
+   */
+  async transcribeAudio(input: {
+    contentBase64?: string;
+    bytes?: Buffer;
+    mimeType?: string;
+    filename?: string;
+    documentRef?: string | null;
+    storedPath?: string | null;
+    conversationId?: string | null;
+    durationMs?: number | null;
+    /** Tests only. */
+    fixtureText?: string;
+    offline?: boolean;
+  }): Promise<{
+    transcript: TranscriptRecordV1;
+    document: CrmDocumentV1 | null;
+    engineStatus: ReturnType<typeof resolveTranscriptionEngineStatus>;
+  }> {
+    const engineStatus = resolveTranscriptionEngineStatus();
+    let bytes: Buffer | null = input.bytes ?? null;
+    if (!bytes && input.contentBase64) {
+      bytes = Buffer.from(String(input.contentBase64), "base64");
+    }
+    const mimeType = String(input.mimeType || "application/octet-stream");
+    const filename = String(input.filename || "audio.bin");
+    const sourceRef = input.documentRef || input.storedPath || `audio:${filename}`;
+
+    if (!bytes || !bytes.length) {
+      const empty = await this.#persistTranscript(
+        await this.#makeEmptyAudioTranscript({
+          sourceRef,
+          mimeType,
+          filename,
+          byteLength: 0,
+          ...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
+          statusMessage: "No audio bytes provided.",
+          status: "EMPTY_AUDIO",
+        }),
+      );
+      return { transcript: empty, document: null, engineStatus };
+    }
+
+    if (!isSupportedAudioType(mimeType, filename)) {
+      const bad = await this.#persistTranscript(
+        await this.#makeEmptyAudioTranscript({
+          sourceRef,
+          mimeType,
+          filename,
+          byteLength: bytes.byteLength,
+          ...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
+          statusMessage: `Unsupported audio type (${mimeType}).`,
+          status: "UNSUPPORTED_AUDIO_TYPE",
+        }),
+      );
+      return { transcript: bad, document: null, engineStatus };
+    }
+
+    // Index audio as CRM document metadata (bytes already on disk when documentRef/storedPath set).
+    let document: CrmDocumentV1 | null = null;
+    if (input.documentRef) {
+      const docs = await this.listCrmDocuments();
+      document = docs.find((d) => d.id === input.documentRef) ?? null;
+    }
+
+    const now = this.ports.clock.now();
+    const snapshot = await this.snapshot();
+    const transcriptId = this.ports.ids.next("transcript");
+    const transcript = await transcribeAudioBytes({
+      bytes,
+      mimeType,
+      filename,
+      transcriptId,
+      sourceRef,
+      workspace: snapshot.settings.activeWorkspace,
+      conversationId: input.conversationId ?? null,
+      startedAt: now,
+      audioSourceRef: input.storedPath || sourceRef,
+      ...(input.fixtureText !== undefined ? { fixtureText: input.fixtureText } : {}),
+      ...(input.offline ? { offline: true } : {}),
+    });
+    if (input.durationMs != null && transcript.durationMs == null) {
+      transcript.durationMs = input.durationMs;
+    }
+
+    const saved = await this.#persistTranscript(transcript);
+    // Optionally attach transcript text to document summary without CRM customer mutation.
+    await this.mutate((draft) => {
+      if (document) {
+        const doc = (draft.crmDocuments || []).find((d) => d.id === document!.id);
+        if (doc && saved.fullText) {
+          const note = `transcript:${saved.transcriptId} status:${saved.status} engine:${saved.engine}`;
+          doc.summary = [doc.summary, note].filter(Boolean).join(" · ").slice(0, 4000);
+          if (!doc.extractedText) doc.extractedText = saved.fullText.slice(0, 100_000);
+          doc.updatedAt = this.ports.clock.now();
+          if (!doc.tags.includes("audio")) doc.tags = [...doc.tags, "audio"].slice(0, 32);
+          if (!doc.tags.includes("transcript")) doc.tags = [...doc.tags, "transcript"].slice(0, 32);
+        }
+      }
+      this.activity(
+        draft,
+        "agent",
+        "audio.transcribe",
+        `Audio transcript ${saved.transcriptId}: ${saved.status} (${saved.engine}) — not customer factual authority`,
+        saved.transcriptId,
+      );
+    });
+
+    return { transcript: saved, document, engineStatus };
+  }
+
+  async getTranscript(transcriptId: string): Promise<TranscriptRecordV1 | null> {
+    const state = await this.snapshot();
+    const list = Array.isArray(state.audioTranscripts) ? state.audioTranscripts : [];
+    return list.find((t) => t.transcriptId === transcriptId) ?? null;
+  }
+
+  async listTranscripts(opts: { conversationId?: string | null; limit?: number } = {}): Promise<TranscriptRecordV1[]> {
+    const state = await this.snapshot();
+    let list = Array.isArray(state.audioTranscripts) ? state.audioTranscripts : [];
+    if (opts.conversationId) {
+      list = list.filter((t) => t.conversationId === opts.conversationId);
+    }
+    const limit = Math.min(100, Math.max(1, opts.limit ?? 40));
+    return list.slice(0, limit);
+  }
+
+  /**
+   * Voice → Chat foundation: transcribe then run the same assistant.prompt path on the text.
+   * Transcript remains fallible evidence; no customer fact side effects from STT alone.
+   */
+  async voicePromptFromAudio(input: {
+    contentBase64?: string;
+    mimeType?: string;
+    filename?: string;
+    documentRef?: string | null;
+    storedPath?: string | null;
+    conversationId?: string | null;
+    textPrefix?: string;
+    offline?: boolean;
+    fixtureText?: string;
+  }): Promise<{
+    transcript: TranscriptRecordV1;
+    reply: string;
+    intent: string;
+    sources: Array<{ type: string; id: string; label: string }>;
+    action: string | null;
+    data: unknown;
+  }> {
+    const { transcript } = await this.transcribeAudio({
+      ...(input.contentBase64 !== undefined ? { contentBase64: input.contentBase64 } : {}),
+      ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
+      ...(input.filename !== undefined ? { filename: input.filename } : {}),
+      ...(input.documentRef !== undefined ? { documentRef: input.documentRef } : {}),
+      ...(input.storedPath !== undefined ? { storedPath: input.storedPath } : {}),
+      ...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
+      ...(input.offline !== undefined ? { offline: input.offline } : {}),
+      ...(input.fixtureText !== undefined ? { fixtureText: input.fixtureText } : {}),
+    });
+    const spoken = transcript.fullText.trim();
+    const prefix = String(input.textPrefix || "").trim();
+    const text = [prefix, spoken].filter(Boolean).join(" ").trim()
+      || "(No speech text extracted from the recording.)";
+    const result = await this.assistantPrompt(text, {
+      conversationId: input.conversationId ?? null,
+    });
+    return {
+      transcript,
+      reply: String(result.reply || ""),
+      intent: String(result.intent || "VOICE_INPUT"),
+      sources: Array.isArray(result.sources) ? result.sources : [],
+      action: result.action ?? "audio.voice_to_chat",
+      data: {
+        transcriptId: transcript.transcriptId,
+        transcriptStatus: transcript.status,
+        factualAuthority: "NONE",
+        assistant: result.data ?? null,
+      },
+    };
+  }
+
+  async #persistTranscript(transcript: TranscriptRecordV1): Promise<TranscriptRecordV1> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.audioTranscripts)) draft.audioTranscripts = [];
+      draft.audioTranscripts = [transcript, ...draft.audioTranscripts.filter((t) => t.transcriptId !== transcript.transcriptId)].slice(0, 200);
+      return transcript;
+    });
+  }
+
+  async #makeEmptyAudioTranscript(input: {
+    sourceRef: string;
+    mimeType: string;
+    filename: string;
+    byteLength: number;
+    conversationId?: string | null;
+    statusMessage: string;
+    status: TranscriptRecordV1["status"];
+  }): Promise<TranscriptRecordV1> {
+    const snapshot = await this.snapshot();
+    const { emptyTranscript } = await import("./audio-transcription.js");
+    return emptyTranscript({
+      transcriptId: this.ports.ids.next("transcript"),
+      sourceRef: input.sourceRef,
+      workspace: snapshot.settings.activeWorkspace,
+      conversationId: input.conversationId ?? null,
+      startedAt: this.ports.clock.now(),
+      audioSourceRef: input.sourceRef,
+      mimeType: input.mimeType,
+      byteLength: input.byteLength,
+      status: input.status,
+      message: input.statusMessage,
+    });
   }
 
   async createEmailDraft(input: Record<string, unknown> = {}): Promise<EmailDraftV1> {
