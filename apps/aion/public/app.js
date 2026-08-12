@@ -1409,8 +1409,17 @@ document.addEventListener("click", async (event) => {
       rec.lang = "en-US";
       rec.onresult = (ev) => {
         const text = ev.results?.[0]?.[0]?.transcript || "";
-        const ta = document.querySelector('textarea[name="text"]');
-        if (ta && text) { ta.value = text; toast("Voice captured — review and tap Ask."); }
+        // Voice is a modality of Chat, not a separate assistant: the transcript lands in the same
+        // composer, keeps any attachment staged beside it, and submits down the same path as typing.
+        const ta = document.getElementById("aionChatInput")
+          || document.querySelector('form[data-form="assistant-prompt"] textarea[name="text"]')
+          || document.querySelector('textarea[name="text"]');
+        if (!ta || !text) return;
+        // Append rather than replace, so speaking after typing adds to the thought.
+        ta.value = ta.value.trim() ? `${ta.value.trim()} ${text}` : text;
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        ta.focus();
+        toast(pendingAttachment ? "Voice captured — tap Send to ask about the photo." : "Voice captured — review and tap Send.");
       };
       rec.onerror = () => toast("Voice capture failed. Type instead.");
       rec.start();
