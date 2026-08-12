@@ -881,6 +881,8 @@ export async function createAionServer(options = {}) {
       case "crm.email.draft": return service.createEmailDraft(input.draft ?? input);
       case "crm.email.list": return { drafts: await service.listEmailDrafts(input.relationshipId) };
       case "owner.knowledge.get": return service.getOwnerKnowledge();
+      // Dry run unless apply is explicitly true. Repair disables and records a reason; it never deletes.
+      case "owner.knowledge.repair": return service.repairOwnerFactContamination({ apply: input.apply === true });
       case "owner.profile.update": return service.updateOwnerProfile(input.profile ?? input.change ?? input);
       case "owner.knowledge.add": return service.addOwnerKnowledgeFact(input.fact ?? input);
       case "owner.knowledge.correct": return service.correctOwnerKnowledgeFact(input.id, String(input.content ?? ""), String(input.reason ?? ""));

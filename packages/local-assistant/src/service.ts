@@ -3519,6 +3519,56 @@ export class AionAssistantV1 {
     });
   }
 
+  /**
+   * Disable Owner facts that are really imported document bodies.
+   *
+   * Dry run by default. Repair means `enabled: false` plus a recorded reason — the fact, its
+   * content and its provenance all survive, so a wrong call costs a re-enable rather than lost
+   * evidence. Nothing is deleted, and facts already disabled are left alone.
+   */
+  async repairOwnerFactContamination(input: { apply?: boolean } = {}): Promise<{
+    applied: boolean;
+    total: number;
+    misclassified: number;
+    misclassifiedEnabled: number;
+    legitimatePreserved: number;
+    disabled: Array<{ id: string; title: string; reasons: string[] }>;
+  }> {
+    const { planOwnerFactRepair } = await import("./owner-fact-repair.js");
+    const state = await this.snapshot();
+    const facts = state.ownerKnowledge?.facts ?? [];
+    const plan = planOwnerFactRepair(facts);
+    const targets = plan.decisions.filter((d) => d.verdict === "RAW_DOCUMENT" && d.wasEnabled);
+
+    if (input.apply && targets.length) {
+      const ids = new Set(targets.map((t) => t.id));
+      await this.mutate((draft) => {
+        for (const fact of draft.ownerKnowledge?.facts ?? []) {
+          if (!ids.has(fact.id)) continue;
+          fact.enabled = false;
+          fact.updatedAt = this.ports.clock.now();
+        }
+        this.activity(
+          draft,
+          "memory",
+          "owner.knowledge.repair",
+          `Disabled ${ids.size} imported document bodies misfiled as Owner facts (reversible)`,
+          null,
+        );
+        return null;
+      });
+    }
+
+    return {
+      applied: Boolean(input.apply),
+      total: plan.total,
+      misclassified: plan.misclassified,
+      misclassifiedEnabled: plan.misclassifiedEnabled,
+      legitimatePreserved: plan.legitimatePreserved,
+      disabled: targets.map((t) => ({ id: t.id, title: t.title, reasons: t.reasons })),
+    };
+  }
+
   async correctOwnerKnowledgeFact(id: string, content: string, reason: string): Promise<OwnerKnowledgeFactV1> {
     return this.mutate((draft) => {
       if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
