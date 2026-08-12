@@ -1165,6 +1165,14 @@ export async function createAionServer(options = {}) {
           walkId: input.walkId,
           note: input.note,
         });
+      /**
+       * The sales day as one read model. Read-only: no crawl, no OCR, no transcription, no model
+       * call, and no state mutation — the Owner opens this between customers.
+       */
+      case "sales.command_center":
+        return service.salesCommandCenter();
+      case "sales.content_today":
+        return service.salesContentToday();
       case "inventory.walk.list":
         return { list: await service.lotWalkCurrentList(input.walkId) };
       case "inventory.walk.call_list":

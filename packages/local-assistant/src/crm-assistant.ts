@@ -49,6 +49,9 @@ export type CrmAssistantIntentV1 =
   | "CUSTOMER_PRECALL"
   | "CUSTOMER_NEED_CORRECTION"
   | "CUSTOMER_FOLLOWUP_PREP"
+  | "SALES_TODAY"
+  | "SALES_WHO_TO_CALL"
+  | "SALES_CONTENT_COMMAND"
   | "CONTEXT_SWITCH"
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
@@ -291,6 +294,56 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat should i prepare\b/i,
       /\bwhat have you prepared\b/i,
       /\bwhat(?:'|)s prepared\b/i,
+    ],
+  },
+  {
+    // The sales day, as one answer.
+    //
+    // Scoped tightly on purpose. "What should I do?" and "What should I do today?" both belong to
+    // WORK_QUEUE — the cross-workspace briefing covering career and personal work as well as sales —
+    // and that contract is asserted in `crm-assistant.test.ts` and `owner-knowledge-routing.test.ts`.
+    // Taking either would change an answer the Owner already relies on, so the sales day is reached
+    // by its own phrasings and by the Home button instead.
+    intent: "SALES_TODAY",
+    confidence: "high",
+    patterns: [
+      /\bshow me everything important\b/i,
+      /\bsales (?:command center|dashboard|day)\b/i,
+      /\bmy sales day\b/i,
+      /\bwhat(?:'|)s my day look like\b/i,
+      /\bhow does my day look\b/i,
+    ],
+  },
+  {
+    // Distinct from LIST_FOLLOWUPS ("who do I need to call"), which reads the task list. This ranks
+    // customers by what is currently true about them — an owed promise, a match, a prepared action.
+    //
+    // The lookahead yields "who should I call from today's lot walk?" to the lot-walk handler, which
+    // answers it from the vehicles just photographed. Same words, genuinely different question.
+    intent: "SALES_WHO_TO_CALL",
+    confidence: "high",
+    patterns: [
+      /\bwho should i call\b(?![^?]*\blot walk\b)/i,
+      /\bwhat customers need attention\b/i,
+      /\bwhich customers need attention\b/i,
+    ],
+  },
+  {
+    // Content and website commands. The subject after the match (a VIN, a model) is carried through
+    // to the sales-presence router, which decides which of them this is.
+    intent: "SALES_CONTENT_COMMAND",
+    confidence: "high",
+    patterns: [
+      /\bwhat should i post today\b/i,
+      /\bmake today'?s (?:social|content|posts?)\b/i,
+      /\b(?:create|make) a weekly content plan\b/i,
+      /\bweekly content plan\b/i,
+      /\bwhat should i make a video about\b/i,
+      /\bmake (?:a |an )?(?:reel|instagram|facebook|tiktok|short video)\b[^?]{0,30}\bfor\b/i,
+      /\bturn this (?:vehicle|car|vin) into a (?:facebook |instagram )?post\b/i,
+      /\bwhich vehicles? (?:should i |are worth )?featur/i,
+      /\bwhat(?:'| i)s stale on my website\b/i,
+      /\bprepare a website update\b/i,
     ],
   },
   {
