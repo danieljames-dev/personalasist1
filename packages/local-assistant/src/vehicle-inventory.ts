@@ -378,8 +378,47 @@ export interface VehicleRecordV1 {
   /** CRM links (Owner-asserted only). */
   relationshipIds: OpaqueId[];
   opportunityIds: OpaqueId[];
+  /**
+   * Government VIN decode, cached per vehicle.
+   *
+   * Kept in its own field rather than merged into the dealer-sourced columns above: the decode is
+   * `GOVERNMENT_VIN_FACT` and the listing is `LIVE_DEALER_INVENTORY`, and a salesperson needs to
+   * know which is which. Dealer trim/price/colour are never overwritten by weaker generic decode
+   * values, and a decode never implies installed options.
+   */
+  govVinFacts?: VehicleGovVinFactsV1 | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+}
+
+export type VinDecodeStatusV1 = "NOT_CHECKED" | "DECODED" | "DECODE_FAILED" | "VIN_INVALID";
+
+export interface VehicleGovVinFactsV1 {
+  status: VinDecodeStatusV1;
+  decodedAt: IsoTimestamp | null;
+  source: string;
+  /** VIN structural/check-digit standing at decode time. */
+  vinValidity: "VALID" | "STRUCTURALLY_VALID" | "INVALID" | "UNKNOWN";
+  modelYear: string | null;
+  make: string | null;
+  model: string | null;
+  manufacturer: string | null;
+  bodyClass: string | null;
+  vehicleType: string | null;
+  driveType: string | null;
+  fuelType: string | null;
+  electrification: string | null;
+  engineCylinders: string | null;
+  displacementL: string | null;
+  engineConfiguration: string | null;
+  transmission: string | null;
+  plantCountry: string | null;
+  plantCity: string | null;
+  /** Set when the decode's make/model disagrees with the dealer listing. Never auto-resolved. */
+  conflictsWithListing: string[];
+  errorText: string | null;
+  /** False once a permanent failure (invalid VIN) makes retrying pointless. */
+  retryEligible: boolean;
 }
 
 export interface PhysicalObservationV1 {
@@ -872,4 +911,115 @@ export function synthesizeValidVin(seed: string): string {
   const remainder = sum % 11;
   const check = remainder === 10 ? "X" : String(remainder);
   return body.slice(0, 8) + check + body.slice(9);
+}
+
+/**
+ * Real disagreements between dealer listing and government decode.
+ *
+ * A dealer names a car more specifically than vPIC does — "RAV4 Hybrid" against "RAV4",
+ * "Tacoma 4WD" against "Tacoma". Treating that as a conflict produced 35 flags of which 32 were
+ * noise, which is worse than no signal at all: it buried three vehicles whose VIN decodes to a
+ * different *manufacturer* than the listing claims. So containment counts as refinement, and only
+ * genuine divergence is reported.
+ */
+export function detectListingConflicts(input: {
+  listingMake: string | null;
+  listingModel: string | null;
+  govMake: string | null;
+  govModel: string | null;
+}): string[] {
+  const conflicts: string[] = [];
+  const norm = (s: string | null): string => String(s ?? "").trim().toLowerCase();
+  const diverges = (dealer: string | null, gov: string | null): boolean => {
+    const a = norm(dealer);
+    const b = norm(gov);
+    if (!a || !b) return false; // absence is not disagreement
+    if (a === b) return false;
+    // "RAV4 Hybrid" vs "RAV4" is the dealer being more specific, not a contradiction.
+    if (a.includes(b) || b.includes(a)) return false;
+    return true;
+  };
+  if (diverges(input.listingMake, input.govMake)) {
+    conflicts.push(`make: dealer "${input.listingMake}" vs government "${input.govMake}"`);
+  }
+  if (diverges(input.listingModel, input.govModel)) {
+    conflicts.push(`model: dealer "${input.listingModel}" vs government "${input.govModel}"`);
+  }
+  return conflicts;
+}
+
+/**
+ * Build the cached government-fact record for one vehicle from a VIN decode.
+ *
+ * Pure so the merge rules are testable without touching the network. Two rules matter:
+ * dealer-sourced columns are never overwritten here (this record sits beside them, not on top of
+ * them), and a make/model disagreement between the government decode and the dealer listing is
+ * *recorded as a conflict* rather than resolved — inventing a winner would manufacture a fact.
+ */
+export function buildGovVinFacts(input: {
+  decode: VinDecodeResultV1;
+  listingMake: string | null;
+  listingModel: string | null;
+  vinValidity: VehicleGovVinFactsV1["vinValidity"];
+  now: IsoTimestamp;
+}): VehicleGovVinFactsV1 {
+  const { decode } = input;
+  const raw = decode.raw ?? {};
+  const pick = (...keys: string[]): string | null => {
+    for (const k of keys) {
+      const v = raw[k];
+      if (v && String(v).trim() && String(v).trim() !== "Not Applicable") return String(v).trim();
+    }
+    return null;
+  };
+
+  const failed = Boolean(decode.errorText && decode.errorText !== "0" && !decode.make);
+  const conflicts = detectListingConflicts({
+    listingMake: input.listingMake,
+    listingModel: input.listingModel,
+    govMake: decode.make,
+    govModel: decode.model,
+  });
+
+  return {
+    status: input.vinValidity === "INVALID" ? "VIN_INVALID" : failed ? "DECODE_FAILED" : "DECODED",
+    decodedAt: input.now,
+    source: "https://vpic.nhtsa.dot.gov/api/",
+    vinValidity: input.vinValidity,
+    modelYear: decode.year,
+    make: decode.make,
+    model: decode.model,
+    manufacturer: pick("Manufacturer", "ManufacturerName"),
+    bodyClass: decode.bodyClass,
+    vehicleType: pick("VehicleType"),
+    driveType: decode.driveType,
+    fuelType: decode.fuelType,
+    electrification: pick("ElectrificationLevel"),
+    engineCylinders: pick("EngineCylinders"),
+    displacementL: pick("DisplacementL"),
+    engineConfiguration: pick("EngineConfiguration"),
+    transmission: pick("TransmissionStyle", "TransmissionSpeeds"),
+    plantCountry: decode.plantCountry,
+    plantCity: pick("PlantCity"),
+    conflictsWithListing: conflicts,
+    errorText: decode.errorText,
+    // An invalid VIN will never decode; anything else is worth another attempt later.
+    retryEligible: input.vinValidity !== "INVALID" && failed,
+  };
+}
+
+/** Vehicles still worth decoding: live, VIN present, and not already cached. */
+export function vehiclesNeedingVinDecode(
+  vehicles: readonly VehicleRecordV1[],
+  opts: { limit?: number } = {},
+): VehicleRecordV1[] {
+  const out: VehicleRecordV1[] = [];
+  for (const v of vehicles) {
+    if (!v.vin) continue;
+    const g = v.govVinFacts;
+    if (g && (g.status === "DECODED" || g.status === "VIN_INVALID" || g.retryEligible === false)) continue;
+    out.push(v);
+    if (opts.limit != null && out.length >= opts.limit) break;
+  }
+  return out;
 }

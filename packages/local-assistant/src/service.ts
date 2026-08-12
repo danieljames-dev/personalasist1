@@ -4761,6 +4761,119 @@ export class AionAssistantV1 {
     return validateVin(raw);
   }
 
+  /**
+   * Cache government VIN facts for live inventory, a bounded batch at a time.
+   *
+   * Paced and cached deliberately: vPIC is a free public service and the lot has hundreds of
+   * vehicles, so we decode only what is missing, one VIN per request with a courtesy delay, and
+   * never re-decode a VIN we already resolved. Dealer trim/price/colour are untouched — the decode
+   * lands in its own `govVinFacts` field so `GOVERNMENT_VIN_FACT` never masquerades as dealer
+   * evidence, and a make/model disagreement is recorded as a conflict rather than resolved.
+   */
+  async enrichLiveVinFacts(opts: { limit?: number; delayMs?: number } = {}): Promise<{
+    attempted: number;
+    decoded: number;
+    failed: number;
+    invalid: number;
+    conflicts: number;
+    remaining: number;
+    coverage: string;
+    reconciled: number;
+  }> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 40, 300));
+    const delayMs = opts.delayMs ?? 250;
+    const { vehiclesNeedingVinDecode, buildGovVinFacts } = await import("./vehicle-inventory.js");
+
+    const { detectListingConflicts } = await import("./vehicle-inventory.js");
+
+    // Re-derive conflicts for already-cached vehicles from stored decode values. Conflict rules
+    // improve over time; replaying them must never mean re-querying a public service.
+    let reconciled = 0;
+    await this.mutate((draft) => {
+      for (const v of draft.vehicleInventory?.vehicles ?? []) {
+        const g = v.govVinFacts;
+        if (!g || g.status !== "DECODED") continue;
+        const next = detectListingConflicts({
+          listingMake: v.make, listingModel: v.model, govMake: g.make, govModel: g.model,
+        });
+        if (JSON.stringify(next) !== JSON.stringify(g.conflictsWithListing)) {
+          g.conflictsWithListing = next;
+          reconciled++;
+        }
+      }
+      return null;
+    });
+
+    const snapshot = await this.snapshot();
+    const all = snapshot.vehicleInventory?.vehicles ?? [];
+    const pending = vehiclesNeedingVinDecode(all, { limit });
+
+    let decoded = 0, failed = 0, invalid = 0, conflicts = 0;
+    const results = new Map<string, ReturnType<typeof buildGovVinFacts>>();
+
+    for (const vehicle of pending) {
+      const now = this.ports.clock.now();
+      const validation = validateVin(vehicle.vin ?? "");
+      if (!validation.valid || !validation.normalized) {
+        // A structurally impossible VIN will never decode; record it and stop retrying.
+        results.set(vehicle.id, buildGovVinFacts({
+          decode: emptyVinDecode(vehicle.vin ?? "", now),
+          listingMake: vehicle.make, listingModel: vehicle.model,
+          vinValidity: validation.code === "CHECK_DIGIT_FAIL" ? "STRUCTURALLY_VALID" : "INVALID",
+          now,
+        }));
+        invalid++;
+        continue;
+      }
+      try {
+        const decode = await decodeVinNhtsa(validation.normalized, now);
+        const facts = buildGovVinFacts({
+          decode,
+          listingMake: vehicle.make,
+          listingModel: vehicle.model,
+          vinValidity: "VALID",
+          now,
+        });
+        results.set(vehicle.id, facts);
+        if (facts.status === "DECODED") decoded++; else failed++;
+        if (facts.conflictsWithListing.length) conflicts++;
+      } catch (err) {
+        const decode = emptyVinDecode(validation.normalized, now);
+        decode.errorText = err instanceof Error ? err.message : String(err);
+        results.set(vehicle.id, buildGovVinFacts({
+          decode, listingMake: vehicle.make, listingModel: vehicle.model, vinValidity: "VALID", now,
+        }));
+        failed++;
+      }
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    if (results.size > 0) {
+      await this.mutate((draft) => {
+        const list = draft.vehicleInventory?.vehicles ?? [];
+        for (const v of list) {
+          const facts = results.get(v.id);
+          if (facts) v.govVinFacts = facts;
+        }
+        this.activity(draft, "agent", "vehicle.vin.enrich",
+          `Government VIN facts cached for ${results.size} vehicle(s): ${decoded} decoded, ${failed} failed, ${invalid} invalid.`, null);
+        return null;
+      });
+    }
+
+    const after = await this.snapshot();
+    const list = after.vehicleInventory?.vehicles ?? [];
+    const withFacts = list.filter((v) => v.govVinFacts?.status === "DECODED").length;
+    const withVin = list.filter((v) => v.vin).length;
+    return {
+      attempted: pending.length,
+      decoded, failed, invalid, conflicts,
+      remaining: vehiclesNeedingVinDecode(list).length,
+      reconciled,
+      coverage: `${withFacts}/${withVin}`,
+    };
+  }
+
   async decodeVinAction(raw: string, opts: { offline?: boolean } = {}) {
     const v = validateVin(raw);
     const now = this.ports.clock.now();
