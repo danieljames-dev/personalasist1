@@ -241,6 +241,7 @@ export function createEmptyStateV1(): AssistantStateV1 {
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
     photoVehicleContext: null,
     photoVehicleContexts: [],
+    audioTranscripts: [],
   };
 }
 
@@ -768,6 +769,7 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
   if (!Array.isArray(clone.photoVehicleContexts)) {
     clone.photoVehicleContexts = clone.photoVehicleContext ? [clone.photoVehicleContext] : [];
   }
+  if (!Array.isArray(clone.audioTranscripts)) clone.audioTranscripts = [];
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "auto", sessionDays: 90 };
   if (clone.settings.remoteAccess && !clone.settings.remoteAccess.bindAddress) clone.settings.remoteAccess.bindAddress = "auto";
   {

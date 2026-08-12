@@ -172,18 +172,19 @@ function chatArea(s) {
     return `<div class="aion-chat-phone" id="aionChatPanel">
 <h1>Chat</h1>
 <p class="meta">Ask about follow-ups, customers, or “What needs me?”. Answers use stored Work CRM facts when available.</p>
+${renderVoiceRecordingChip()}
 ${renderPendingAttachment()}
 <form data-form="assistant-prompt" class="quick-form aion-chat-compose" id="aionChatForm">
-<label>Message<textarea name="text" id="aionChatInput" maxlength="10000" rows="3" placeholder="Ask, or attach a photo…"></textarea></label>
+<label>Message<textarea name="text" id="aionChatInput" maxlength="10000" rows="3" placeholder="Ask, attach a photo, or record audio…"></textarea></label>
 <div class="actions aion-compose-actions">
 <button type="button" data-do="attach-camera" title="Take photo">📷 Photo</button>
-<button type="button" data-do="attach-file" title="Choose photo or file">＋ File</button>
-<button type="button" data-do="voice-prompt" title="Voice">🎤</button>
+<button type="button" data-do="attach-file" title="Choose photo, file, or audio">＋ File</button>
+<button type="button" data-do="voice-prompt" title="${voiceRecording ? "Stop recording" : "Record voice"}" class="${voiceRecording ? "aion-voice-active" : ""}">${voiceRecording ? "⏹" : "🎤"}</button>
 <button type="submit" class="aion-send">Send</button>
 </div>
 ${/* capture="environment" opens the camera directly on iOS; the second input is the library/file picker. */ ""}
 <input type="file" id="aionCaptureInput" accept="image/*" capture="environment" hidden>
-<input type="file" id="aionPickInput" accept="image/*,.pdf,.txt,.md,.csv,.docx,.rtf,.heic" hidden>
+<input type="file" id="aionPickInput" accept="image/*,audio/*,.pdf,.txt,.md,.csv,.docx,.rtf,.heic,.wav,.mp3,.m4a,.webm,.ogg" hidden>
 </form>
 ${reply ? `<div class="card next aion-chat-reply">${reply.attachmentName ? `<p class="meta">📎 ${esc(reply.attachmentName)}</p>` : ""}
 <pre class="msg assistant" style="white-space:pre-wrap;margin:0;max-height:50svh;overflow:auto">${esc(reply.reply || "")}</pre>
@@ -287,14 +288,30 @@ const todayAppointments = (s, onDate = today()) => active(s).flatMap((c) => c.ap
  * one VIN, and a queue would raise "which of these am I asking about?" without answering it.
  */
 let pendingAttachment = null;
+/** Laptop microphone MediaRecorder session (explicit; never ambient/background). */
+let voiceRecording = null; // { recorder, chunks, startedAt } | null
 
 function renderPendingAttachment() {
   if (!pendingAttachment) return "";
-  const { name, dataUrl, isImage, sizeLabel, status } = pendingAttachment;
+  const { name, dataUrl, isImage, isAudio, sizeLabel, status } = pendingAttachment;
+  const icon = isImage
+    ? `<img src="${esc(dataUrl)}" alt="Attached photo preview">`
+    : isAudio
+      ? `<span class="aion-attach-doc" aria-hidden="true">🎙</span>`
+      : `<span class="aion-attach-doc">📄</span>`;
   return `<div class="aion-attach-chip">
-${isImage ? `<img src="${esc(dataUrl)}" alt="Attached photo preview">` : `<span class="aion-attach-doc">📄</span>`}
-<span class="aion-attach-meta"><b>${esc(name)}</b><small>${esc(sizeLabel)}${status ? ` · ${esc(status)}` : ""}</small></span>
+${icon}
+<span class="aion-attach-meta"><b>${esc(name)}</b><small>${esc(sizeLabel)}${status ? ` · ${esc(status)}` : ""}${isAudio ? " · audio" : ""}</small></span>
 <button type="button" class="aion-attach-remove" data-do="attach-remove" aria-label="Remove attachment">✕</button>
+</div>`;
+}
+
+function renderVoiceRecordingChip() {
+  if (!voiceRecording) return "";
+  return `<div class="aion-attach-chip aion-voice-rec" role="status" aria-live="polite">
+<span class="aion-attach-doc" aria-hidden="true">●</span>
+<span class="aion-attach-meta"><b>Recording…</b><small>Tap 🎤 again to stop. Not continuous surveillance.</small></span>
+<button type="button" class="aion-attach-remove" data-do="voice-prompt" aria-label="Stop recording">Stop</button>
 </div>`;
 }
 
@@ -1403,27 +1420,71 @@ document.addEventListener("click", async (event) => {
       return;
     }
     if (verb === "voice-prompt") {
+      // Prefer explicit MediaRecorder (upload + local STT). Fall back to browser speech recognition
+      // only for live dictation into the composer. Never continuous/ambient recording.
+      if (voiceRecording?.recorder) {
+        try { voiceRecording.recorder.stop(); } catch { /* */ }
+        toast("Stopping recording…");
+        return;
+      }
+      if (navigator.mediaDevices?.getUserMedia && window.MediaRecorder) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+            ? "audio/webm;codecs=opus"
+            : MediaRecorder.isTypeSupported("audio/webm")
+              ? "audio/webm"
+              : "";
+          const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+          const chunks = [];
+          recorder.ondataavailable = (ev) => { if (ev.data?.size) chunks.push(ev.data); };
+          recorder.onstop = async () => {
+            stream.getTracks().forEach((t) => t.stop());
+            voiceRecording = null;
+            try {
+              const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+              if (!blob.size) { toast("Recording was empty."); render(); return; }
+              const file = new File([blob], `recording-${Date.now()}.webm`, { type: blob.type || "audio/webm" });
+              await stageAttachment(file);
+              toast("Recording staged — tap Send to transcribe and ask, or remove.");
+            } catch (err) {
+              toast(err.message || "Could not stage recording.");
+            }
+            render();
+          };
+          recorder.onerror = () => {
+            stream.getTracks().forEach((t) => t.stop());
+            voiceRecording = null;
+            toast("Recording failed. Type instead.");
+            render();
+          };
+          voiceRecording = { recorder, chunks, startedAt: Date.now() };
+          recorder.start(250);
+          toast("Recording… tap 🎤 again to stop. (Not continuous surveillance.)");
+          render();
+          return;
+        } catch {
+          // Fall through to SpeechRecognition if mic permission denied / unavailable.
+        }
+      }
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) { toast("Voice input is not available in this browser. Type instead."); return; }
+      if (!SR) { toast("Microphone capture is not available in this browser. Type instead."); return; }
       const rec = new SR();
       rec.lang = "en-US";
       rec.onresult = (ev) => {
         const text = ev.results?.[0]?.[0]?.transcript || "";
-        // Voice is a modality of Chat, not a separate assistant: the transcript lands in the same
-        // composer, keeps any attachment staged beside it, and submits down the same path as typing.
         const ta = document.getElementById("aionChatInput")
           || document.querySelector('form[data-form="assistant-prompt"] textarea[name="text"]')
           || document.querySelector('textarea[name="text"]');
         if (!ta || !text) return;
-        // Append rather than replace, so speaking after typing adds to the thought.
         ta.value = ta.value.trim() ? `${ta.value.trim()} ${text}` : text;
         ta.dispatchEvent(new Event("input", { bubbles: true }));
         ta.focus();
-        toast(pendingAttachment ? "Voice captured — tap Send to ask about the photo." : "Voice captured — review and tap Send.");
+        toast("Live dictation captured — review and tap Send.");
       };
       rec.onerror = () => toast("Voice capture failed. Type instead.");
       rec.start();
-      toast("Listening…");
+      toast("Listening (browser speech)…");
       return;
     }
     if (verb === "tab") { salesTab = tab; coachPanel = null; render(); return; }
@@ -1739,12 +1800,14 @@ async function stageAttachment(file) {
   const base64 = base64FromBytes(bytes);
   const mimeType = file.type || "application/octet-stream";
   const isImage = mimeType.startsWith("image/");
+  const isAudio = mimeType.startsWith("audio/") || /\.(wav|mp3|m4a|webm|ogg|flac)$/i.test(file.name || "");
   const kb = file.size / 1024;
   pendingAttachment = {
-    name: file.name || (isImage ? "photo.jpg" : "attachment"),
-    mimeType,
+    name: file.name || (isImage ? "photo.jpg" : isAudio ? "recording.webm" : "attachment"),
+    mimeType: isAudio && !mimeType.startsWith("audio/") ? "audio/webm" : mimeType,
     base64,
     isImage,
+    isAudio,
     dataUrl: isImage ? `data:${mimeType};base64,${base64}` : "",
     sizeLabel: kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`,
     status: "",
@@ -1776,7 +1839,36 @@ document.addEventListener("submit", async (event) => {
     if (kind === "assistant-prompt") {
       const text = String(d.text || "").trim();
       const attachment = pendingAttachment;
-      if (!text && !attachment) { toast("Type a message or attach a photo."); return; }
+      if (!text && !attachment) { toast("Type a message, attach a photo, or record audio."); return; }
+
+      // Audio path: private upload + local STT + same Chat pipeline (no cellular-call claim).
+      if (attachment?.isAudio) {
+        pendingAttachment = { ...attachment, status: "transcribing…" };
+        render();
+        const result = await api("audio.voice_to_chat", {
+          contentBase64: attachment.base64,
+          mimeType: attachment.mimeType,
+          filename: attachment.name,
+          textPrefix: text || "",
+        });
+        const tr = result?.transcript;
+        window.__aionLastAssistant = {
+          ...result,
+          reply: result?.reply
+            || (tr?.fullText
+              ? `Transcript (fallible speech text):\n${tr.fullText}`
+              : tr?.message || "Could not transcribe audio."),
+          attachmentName: attachment.name,
+        };
+        pendingAttachment = null;
+        form.reset();
+        await load();
+        render();
+        if (tr?.status === "TRANSCRIPTION_PROVIDER_REQUIRED") {
+          toast("Audio stored privately; local STT engine not ready. Install faster-whisper or set AION_WHISPER_CMD.");
+        }
+        return;
+      }
 
       let documentRef = null;
       if (attachment) {
