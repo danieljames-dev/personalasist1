@@ -2,20 +2,50 @@
  * Host-side sticker / VIN OCR (EasyOCR via Python).
  * Process boundary only — domain modules must not spawn processes.
  *
- * Applies EXIF orientation before OCR (critical for phone JPEGs — orientation 6
- * was the root cause of the real-lot sticker failure).
+ * Latency strategy (correctness-preserving):
+ *  1. Warm long-lived EasyOCR Reader worker (model load once)
+ *  2. VIN-band native crops first; stop when a 17-char VIN run appears
+ *  3. Full-page fallback only if bands miss
+ *
+ * Applies EXIF orientation inside the worker (critical for phone JPEGs).
  */
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  rmSync,
+  copyFileSync,
+} from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { extractVinCandidatesFromText, validateVin } from "../vehicle-inventory.js";
 
 export interface StickerOcrLineV1 {
   text: string;
   confidence: number;
   /** Bounding box as [[x,y]×4] in oriented-image pixel space, if available. */
   box: number[][] | null;
+}
+
+export interface StickerOcrRegionFracV1 {
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface StickerOcrAttemptV1 {
+  region: string;
+  latencyMs: number;
+  lineCount: number;
+  hasVinRun?: boolean;
+  cropSize?: number[];
+  error?: string;
 }
 
 export interface StickerOcrResultV1 {
@@ -25,7 +55,53 @@ export interface StickerOcrResultV1 {
   exifOrientation: number | null;
   lines: StickerOcrLineV1[];
   fullText: string;
+  /** End-to-end worker handling time for this request (includes region tries). */
   latencyMs: number;
+  /** Last OCR call milliseconds (region or full page). */
+  ocrMs?: number;
+  /** Model load cost on worker (0 after warm). */
+  readerLoadMs?: number;
+  sourceRegion?: string;
+  strategy?: "vin-band" | "full-page" | "full-page-only" | "oneshot";
+  attempts?: StickerOcrAttemptV1[];
+  warm?: boolean;
+}
+
+/**
+ * Bounded general identity / VIN bands for Monroney-style stickers and plates.
+ * Not manufacturer-coordinate hardcoding — layout priors only.
+ * Ordered most-likely first; full-page is a separate fallback.
+ */
+export function easyOcrVinPriorityRegions(): StickerOcrRegionFracV1[] {
+  return [
+    // VIN line commonly sits under the manufacturer header / barcode block.
+    { name: "vin-mid-band", x: 0.04, y: 0.16, w: 0.92, h: 0.22 },
+    { name: "vin-upper-band", x: 0.04, y: 0.06, w: 0.92, h: 0.22 },
+    // Wider identity third if the mid band missed (angled phone shots).
+    { name: "identity-top-third", x: 0.02, y: 0.02, w: 0.96, h: 0.4 },
+  ];
+}
+
+/** True when text already contains a contiguous 17-char VIN charset run. */
+export function textHasVinCharsetRun(text: string): boolean {
+  return /[A-HJ-NPR-Z0-9]{17}/.test(String(text ?? "").toUpperCase());
+}
+
+/**
+ * True when OCR text contains at least one check-digit-valid VIN.
+ * Charset-shaped 17-char strings alone are NOT enough — they must pass validateVin.
+ */
+export function textHasCheckDigitValidVin(text: string): boolean {
+  return extractVinCandidatesFromText(text).some((v) => validateVin(v).valid);
+}
+
+/**
+ * VIN-band early-stop may surface a 17-char *looking* string that later fails validation.
+ * Full-page fallback must still run so a later image-derived valid VIN can win.
+ */
+export function bandResultNeedsFullPageFallback(result: StickerOcrResultV1): boolean {
+  if (result.strategy !== "vin-band") return false;
+  return !textHasCheckDigitValidVin(result.fullText);
 }
 
 function runProcess(
@@ -63,15 +139,309 @@ function runProcess(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Warm EasyOCR worker (singleton)
+// ---------------------------------------------------------------------------
+
+type WorkerPending = {
+  id: string;
+  resolve: (v: Record<string, unknown>) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+let workerProc: ChildProcessWithoutNullStreams | null = null;
+let workerBuf = "";
+let workerReady: Promise<void> | null = null;
+let workerQueue: Promise<void> = Promise.resolve();
+const workerPending = new Map<string, WorkerPending>();
+
+function resolveWorkerScriptPath(): string {
+  // Prefer package-adjacent script (src or dist/connectors).
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "easyocr-worker.py"),
+    join(here, "..", "..", "src", "connectors", "easyocr-worker.py"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  // Last resort: copy from candidates into temp (build may omit .py).
+  const home = join(tmpdir(), "aion-easyocr-worker");
+  mkdirSync(home, { recursive: true });
+  const dest = join(home, "easyocr-worker.py");
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      copyFileSync(p, dest);
+      return dest;
+    }
+  }
+  // Embedded minimal fallback is not used when the file ships with the package.
+  throw new Error("easyocr-worker.py not found next to sticker-ocr module");
+}
+
+function settlePending(id: string | null | undefined, payload: Record<string, unknown>) {
+  if (!id) return;
+  const p = workerPending.get(id);
+  if (!p) return;
+  clearTimeout(p.timer);
+  workerPending.delete(id);
+  p.resolve(payload);
+}
+
+function failAllPending(err: Error) {
+  for (const [, p] of workerPending) {
+    clearTimeout(p.timer);
+    p.reject(err);
+  }
+  workerPending.clear();
+}
+
+function attachWorkerHandlers(child: ChildProcessWithoutNullStreams) {
+  workerBuf = "";
+  child.stdout.on("data", (chunk) => {
+    workerBuf += String(chunk);
+    if (workerBuf.length > 8_000_000) workerBuf = workerBuf.slice(-4_000_000);
+    let nl: number;
+    while ((nl = workerBuf.indexOf("\n")) >= 0) {
+      const line = workerBuf.slice(0, nl).trim();
+      workerBuf = workerBuf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line) as Record<string, unknown>;
+        settlePending(String(msg.id ?? ""), msg);
+      } catch {
+        /* ignore partial/noise */
+      }
+    }
+  });
+  child.stderr.on("data", () => {
+    /* model load noise — discard */
+  });
+  child.on("exit", () => {
+    workerProc = null;
+    workerReady = null;
+    failAllPending(new Error("easyocr worker exited"));
+  });
+  child.on("error", () => {
+    workerProc = null;
+    workerReady = null;
+  });
+}
+
+async function ensureWorker(timeoutMs = 180_000): Promise<void> {
+  if (workerProc && !workerProc.killed) {
+    try {
+      const pong = await workerRequest({ cmd: "ping" }, 15_000);
+      if (pong?.ok) return;
+    } catch {
+      try {
+        workerProc.kill();
+      } catch {
+        /* */
+      }
+      workerProc = null;
+      workerReady = null;
+    }
+  }
+  if (workerReady) return workerReady;
+
+  workerReady = (async () => {
+    const script = resolveWorkerScriptPath();
+    const py = process.env.AION_PYTHON?.trim() || "python";
+    const child = spawn(py, ["-u", script], {
+      windowsHide: true,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams;
+    workerProc = child;
+    attachWorkerHandlers(child);
+
+    // Worker preloads Reader before reading stdin — one long ping waits for readiness.
+    const pong = await workerRequest({ cmd: "ping" }, timeoutMs);
+    if (!pong?.ok) throw new Error("easyocr worker ping failed");
+    const result = pong.result as { readerReady?: boolean } | undefined;
+    if (!result?.readerReady) throw new Error("easyocr reader not ready");
+  })();
+
+  try {
+    await workerReady;
+  } catch (e) {
+    workerReady = null;
+    try {
+      workerProc?.kill();
+    } catch {
+      /* */
+    }
+    workerProc = null;
+    throw e;
+  }
+}
+
+function workerRequest(
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    if (!workerProc || !workerProc.stdin.writable) {
+      reject(new Error("easyocr worker not running"));
+      return;
+    }
+    const id = randomBytes(6).toString("hex");
+    const timer = setTimeout(() => {
+      workerPending.delete(id);
+      reject(new Error("easyocr worker request timeout"));
+    }, timeoutMs);
+    workerPending.set(id, { id, resolve, reject, timer });
+    const line = JSON.stringify({ ...body, id }) + "\n";
+    try {
+      workerProc.stdin.write(line, "utf8");
+    } catch (e) {
+      clearTimeout(timer);
+      workerPending.delete(id);
+      reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
+
+/** Serialize OCR jobs on the single worker (EasyOCR is not multi-thread safe here). */
+function enqueueWorker<T>(fn: () => Promise<T>): Promise<T> {
+  const run = workerQueue.then(fn, fn);
+  workerQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/** Stop the warm worker (tests / shutdown). Safe if not running. */
+export async function stopEasyOcrWorker(): Promise<void> {
+  const proc = workerProc;
+  if (!proc) return;
+  try {
+    await workerRequest({ cmd: "shutdown" }, 5_000).catch(() => null);
+  } catch {
+    /* */
+  }
+  try {
+    proc.kill();
+  } catch {
+    /* */
+  }
+  workerProc = null;
+  workerReady = null;
+  failAllPending(new Error("easyocr worker stopped"));
+}
+
 /**
  * Run EasyOCR on image bytes after EXIF-aware orientation.
+ * Uses a warm worker + VIN-band-first strategy when available.
  * Returns null when Python/easyocr unavailable.
  */
 export async function runEasyOcrOnImageBytes(
   bytes: Buffer,
-  opts: { timeoutMs?: number; languages?: string } = {},
+  opts: {
+    timeoutMs?: number;
+    languages?: string;
+    /** Skip region tries (full page only). Default false. */
+    fullPageOnly?: boolean;
+    /** Disable warm worker (oneshot process). Default false. */
+    oneshot?: boolean;
+  } = {},
 ): Promise<StickerOcrResultV1 | null> {
+  if (opts.oneshot || process.env.AION_EASYOCR_ONESHOT === "1") {
+    return runEasyOcrOneshot(bytes, opts);
+  }
+
   const dir = join(tmpdir(), `aion-sticker-ocr-${randomBytes(6).toString("hex")}`);
+  mkdirSync(dir, { recursive: true });
+  const imgPath = join(dir, "input.jpg");
+  try {
+    writeFileSync(imgPath, bytes);
+    try {
+      await ensureWorker(Math.min(opts.timeoutMs ?? 180_000, 180_000));
+    } catch {
+      // Fall back to oneshot if warm worker cannot start.
+      return runEasyOcrOneshot(bytes, opts);
+    }
+
+    const regions = opts.fullPageOnly ? [] : easyOcrVinPriorityRegions();
+    const timeoutMs = opts.timeoutMs ?? 180_000;
+    const first = await requestOcrParsed(imgPath, regions, timeoutMs);
+    if (!first) return null;
+
+    // Critical: charset-shaped band hits that fail check digit / structure must not freeze recovery.
+    if (!opts.fullPageOnly && bandResultNeedsFullPageFallback(first)) {
+      const full = await requestOcrParsed(imgPath, [], timeoutMs);
+      if (full) {
+        const mergedAttempts = [...(first.attempts ?? []), ...(full.attempts ?? [])];
+        const preferFull = textHasCheckDigitValidVin(full.fullText) || !textHasCheckDigitValidVin(first.fullText);
+        const chosen = preferFull ? full : first;
+        const merged: StickerOcrResultV1 = {
+          ...chosen,
+          attempts: mergedAttempts,
+          latencyMs: (first.latencyMs || 0) + (full.latencyMs || 0),
+        };
+        if (preferFull) merged.strategy = "full-page";
+        else if (first.strategy) merged.strategy = first.strategy;
+        return merged;
+      }
+    }
+    return first;
+  } catch {
+    return runEasyOcrOneshot(bytes, opts);
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* */
+    }
+  }
+}
+
+async function requestOcrParsed(
+  imgPath: string,
+  regions: StickerOcrRegionFracV1[],
+  timeoutMs: number,
+): Promise<StickerOcrResultV1 | null> {
+  const resp = await enqueueWorker(() =>
+    workerRequest(
+      {
+        cmd: "ocr",
+        imagePath: imgPath,
+        regions,
+        stopOnVin: regions.length > 0,
+      },
+      timeoutMs,
+    ),
+  );
+  if (!resp.ok || !resp.result) return null;
+  const parsed = resp.result as StickerOcrResultV1;
+  if (!parsed || !Array.isArray(parsed.lines)) return null;
+  const out: StickerOcrResultV1 = {
+    engine: "easyocr",
+    orientedWidth: Number(parsed.orientedWidth) || 0,
+    orientedHeight: Number(parsed.orientedHeight) || 0,
+    exifOrientation: (parsed.exifOrientation as number | null) ?? null,
+    lines: parsed.lines,
+    fullText: String(parsed.fullText ?? ""),
+    latencyMs: Number(parsed.latencyMs) || 0,
+  };
+  if (parsed.ocrMs !== undefined) out.ocrMs = Number(parsed.ocrMs);
+  if (parsed.readerLoadMs !== undefined) out.readerLoadMs = Number(parsed.readerLoadMs);
+  if (parsed.sourceRegion) out.sourceRegion = String(parsed.sourceRegion);
+  if (parsed.strategy) out.strategy = parsed.strategy;
+  if (parsed.attempts) out.attempts = parsed.attempts;
+  if (parsed.warm !== undefined) out.warm = Boolean(parsed.warm);
+  return out;
+}
+
+/** Legacy oneshot process path (cold Reader every call) — fallback / measurement. */
+async function runEasyOcrOneshot(
+  bytes: Buffer,
+  opts: { timeoutMs?: number } = {},
+): Promise<StickerOcrResultV1 | null> {
+  const dir = join(tmpdir(), `aion-sticker-ocr-oneshot-${randomBytes(6).toString("hex")}`);
   mkdirSync(dir, { recursive: true });
   const imgPath = join(dir, "input.jpg");
   const outPath = join(dir, "out.json");
@@ -111,6 +481,8 @@ export async function runEasyOcrOnImageBytes(
     "    'lines': lines,",
     "    'fullText': full,",
     "    'latencyMs': ms,",
+    "    'strategy': 'oneshot',",
+    "    'sourceRegion': 'full-page',",
     "}))",
   ].join("\n");
   try {
@@ -123,7 +495,7 @@ export async function runEasyOcrOnImageBytes(
     if (r.code !== 0 || !existsSync(outPath)) return null;
     const parsed = JSON.parse(readFileSync(outPath, "utf8")) as StickerOcrResultV1;
     if (!parsed || !Array.isArray(parsed.lines)) return null;
-    return parsed;
+    return { ...parsed, strategy: "oneshot", sourceRegion: "full-page" };
   } catch {
     return null;
   } finally {

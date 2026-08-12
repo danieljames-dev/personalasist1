@@ -644,6 +644,34 @@ export async function createAionServer(options = {}) {
           durationMs: typeof input.durationMs === "number" ? input.durationMs : null,
           fixtureText: typeof input.fixtureText === "string" ? input.fixtureText : undefined,
           offline: input.offline === true,
+          // Opt-in continuation into the customer intelligence path. Absent for ordinary voice input,
+          // so dictation never writes needs against a customer.
+          deriveConversation: input.deriveConversation ?? undefined,
+        });
+      }
+      /**
+       * Transcript → conversation → needs → commitments → PREPARE proposals (Claude).
+       * Produces reviewable proposals only; no external CRM write happens here or downstream.
+       */
+      case "conversation.process": {
+        const id = String(input.transcriptId || "");
+        if (!id) throw new Error("transcriptId is required.");
+        return service.processConversationFromTranscript({
+          transcriptId: id,
+          ingestPath: input.ingestPath ?? undefined,
+          speakerBinding: input.speakerBinding ?? undefined,
+          signals: input.signals ?? undefined,
+        });
+      }
+      case "customer.need.correct": {
+        return service.applyNeedCorrection({
+          relationshipRef: String(input.relationshipRef || input.customerRef || ""),
+          attribute: input.attribute,
+          value: String(input.value ?? ""),
+          strength: input.strength,
+          numericValue: typeof input.numericValue === "number" ? input.numericValue : null,
+          targetNeedId: input.targetNeedId ?? null,
+          note: String(input.note ?? "Owner correction"),
         });
       }
       case "audio.transcript.get": {
