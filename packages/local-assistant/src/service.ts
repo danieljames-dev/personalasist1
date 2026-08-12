@@ -5708,6 +5708,9 @@ export class AionAssistantV1 {
 
     const now = this.ports.clock.now();
     const pkg = collectRecoveryPackage(dataRoot, now);
+    // Record which key wrote this artifact. Identity only — material never enters a manifest.
+    const keyIdentity = key.keyId ? { keyId: key.keyId, keyVersion: key.keyVersion ?? 1, keySource: key.source } : { keySource: key.source };
+    const manifestWithKey = { ...pkg.manifest, ...keyIdentity };
     const snapDir = join(dataRoot, "exports", "pre-import-snapshots");
     await mkdir(snapDir, { recursive: true });
     const ts = now.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -5726,7 +5729,7 @@ export class AionAssistantV1 {
         message: "Backup port does not support recovery packages.",
       };
     }
-    const created = await backupPort.createPackage(state, pkg.sidecars, pkg.manifest, dest, key.passphrase);
+    const created = await backupPort.createPackage(state, pkg.sidecars, manifestWithKey, dest, key.passphrase);
     const localDigest = createHash("sha256").update(await readFile(dest)).digest("hex");
 
     let offDiskPath: string | null = null;
@@ -5769,6 +5772,57 @@ export class AionAssistantV1 {
       retentionPruned: plan.prune.length,
       message: `Recovery package written (${created.bytes} bytes)${offDiskPath ? " and copied off-disk" : ""}.`,
     };
+  }
+
+  /** Non-secret recovery-key identity for reports and manifests. Never returns key material. */
+  async recoveryKeyIdentity(): Promise<{ keyId: string; keyVersion: number; algorithm: string; createdAt: string; origin: string } | null> {
+    const dataRoot = this.#resolveDataRoot();
+    if (!dataRoot) return null;
+    const { ensureRecoveryKey, identityOf } = await import("./recovery-key.js");
+    return identityOf(ensureRecoveryKey(dataRoot, this.ports.clock.now()));
+  }
+
+  /**
+   * Write the independent recovery-key copy for physical transfer to the recovery laptop.
+   * Deliberately never targets the backup drive: key and ciphertext must not share a device.
+   */
+  async exportRecoveryKeyPackage(destinationDir?: string | null): Promise<{ ok: boolean; path: string | null; keyId: string | null; message: string }> {
+    const { mkdir } = await import("node:fs/promises");
+    const { join, resolve } = await import("node:path");
+    const dataRoot = this.#resolveDataRoot();
+    if (!dataRoot) return { ok: false, path: null, keyId: null, message: "No filesystem data root." };
+    const { ensureRecoveryKey, buildRecoveryKeyPackage, writeRecoveryKeyPackage } = await import("./recovery-key.js");
+    const record = ensureRecoveryKey(dataRoot, this.ports.clock.now());
+    const dir = resolve(destinationDir && destinationDir.trim() ? destinationDir : join(dataRoot, "exports", "recovery-key"));
+    if (/^[a-z]:[\\/]aion-backups/i.test(dir)) {
+      return { ok: false, path: null, keyId: record.keyId, message: "Refused: the recovery key must not be written to the backup drive." };
+    }
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, `aion-recovery-key-${record.keyId}.json`);
+    writeRecoveryKeyPackage(file, buildRecoveryKeyPackage(record, this.ports.clock.now()));
+    return { ok: true, path: file, keyId: record.keyId, message: "Recovery key package written. Move it to the recovery laptop, then delete the transport copy." };
+  }
+
+  /**
+   * Restore an artifact using any key material this machine still holds — current, rotated-out,
+   * legacy file, or env. Rotation and the move off the old passphrase must never strand a backup.
+   */
+  async restoreBackupWithAnyKnownKey(destination: string): Promise<{ ok: boolean; state: AssistantStateV1 | null; sidecars: Record<string, unknown>; manifest: unknown; keysTried: number }> {
+    const dataRoot = this.#resolveDataRoot();
+    const { candidateKeyMaterials } = await import("./recovery-key.js");
+    const candidates = dataRoot ? candidateKeyMaterials(dataRoot) : [];
+    const port = this.ports.backup as unknown as {
+      restorePackage?: (d: string, p: string) => Promise<{ state: AssistantStateV1; sidecars: Record<string, unknown>; manifest: unknown }>;
+    };
+    for (const material of candidates) {
+      try {
+        const restored = await port.restorePackage!(destination, material);
+        return { ok: true, state: restored.state, sidecars: restored.sidecars, manifest: restored.manifest, keysTried: candidates.length };
+      } catch {
+        /* wrong key for this artifact — try the next */
+      }
+    }
+    return { ok: false, state: null, sidecars: {}, manifest: null, keysTried: candidates.length };
   }
 
   /** Best-effort filesystem data root from whichever repository adapter is installed. */

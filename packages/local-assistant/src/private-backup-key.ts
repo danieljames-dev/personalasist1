@@ -11,16 +11,19 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { ensureRecoveryKey } from "./recovery-key.js";
 
 const ENV_NAME = "AION_PRIVATE_BACKUP_PASSPHRASE";
 const LOCAL_FILE = "private-backup-passphrase.local";
 
-export type BackupPassphraseSourceV1 = "env" | "local_file" | "none";
+export type BackupPassphraseSourceV1 = "env" | "recovery_key" | "local_file" | "none";
 
 export function resolvePrivateBackupPassphrase(dataRoot: string | null | undefined): {
   passphrase: string | null;
   source: BackupPassphraseSourceV1;
   localPath: string | null;
+  keyId?: string;
+  keyVersion?: number;
 } {
   const env = process.env[ENV_NAME]?.trim() ?? "";
   if (env.length >= 12) {
@@ -30,6 +33,23 @@ export function resolvePrivateBackupPassphrase(dataRoot: string | null | undefin
   const root = String(dataRoot ?? "").trim();
   if (!root) {
     return { passphrase: null, source: "none", localPath: null };
+  }
+
+  // Preferred path: the automatic AION Recovery Key. It adopts any pre-existing legacy passphrase
+  // file rather than replacing it, so artifacts written before this existed stay restorable.
+  try {
+    const record = ensureRecoveryKey(root, new Date().toISOString());
+    if (record?.key && record.key.length >= 12) {
+      return {
+        passphrase: record.key,
+        source: "recovery_key",
+        localPath: join(root, "secrets", "recovery-key.local.json"),
+        keyId: record.keyId,
+        keyVersion: record.keyVersion,
+      };
+    }
+  } catch {
+    /* fall through to the legacy local file */
   }
 
   const secretsDir = join(root, "secrets");

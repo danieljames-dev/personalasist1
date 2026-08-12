@@ -67,3 +67,5 @@ export * from "./cold-restore.js";
 export * from "./control-plane-archive.js";
 export * from "./recovery-package.js";
 export * from "./backup-retention.js";
+export * from "./recovery-key.js";
+export * from "./private-backup-key.js";
