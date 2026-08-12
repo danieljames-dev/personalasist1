@@ -136,6 +136,18 @@ import {
 } from "./image-region.js";
 import { orientImageBytesForVision, runEasyOcrOnImageBytes } from "./connectors/sticker-ocr.js";
 import {
+  buildLotWalkCallList,
+  buildLotWalkList,
+  formatLotWalkCallListProse,
+  formatLotWalkPhotoReply,
+  formatLotWalkSessionProse,
+  needsByCustomerFromState,
+  websitePriceFromVehicle,
+  type LotWalkListItemV1,
+  type LotWalkSessionViewV1,
+  type LotWalkCallListEntryV1,
+} from "./lot-walk.js";
+import {
   isSupportedAudioType,
   resolveTranscriptionEngineStatus,
   transcribeAudioBytes,
@@ -5487,6 +5499,196 @@ export class AionAssistantV1 {
       inv.walks[0];
     if (!walk) return null;
     return reconcileInventoryWalk(walk, inv.observations, inv.vehicles, this.ports.clock.now());
+  }
+
+  /**
+   * Enriched Lot Walk list: physical observations + website price (never inventing) + customer matches.
+   */
+  async lotWalkCurrentList(walkId?: string): Promise<LotWalkSessionViewV1 | null> {
+    const state = await this.snapshot();
+    const inv = this.vehicleInv(state);
+    const walk =
+      (walkId ? inv.walks.find((w) => w.id === walkId) : null) ||
+      inv.walks.find((w) => w.state === "active") ||
+      inv.walks[0];
+    if (!walk) return null;
+    const now = this.ports.clock.now();
+    const workspace = state.settings.activeWorkspace || "work";
+    const needsByCustomer = needsByCustomerFromState({
+      relationships: (state.relationships || []).map((r) => ({
+        id: r.id,
+        displayName: r.displayName,
+        workspace: r.workspace,
+      })),
+      needs: state.customerNeeds || [],
+      workspace,
+    });
+    const reconciliation = reconcileInventoryWalk(walk, inv.observations, inv.vehicles, now);
+    return buildLotWalkList({
+      walk,
+      observations: inv.observations,
+      vehicles: inv.vehicles,
+      now,
+      needsByCustomer,
+      reconciliation,
+      workspace,
+    });
+  }
+
+  async lotWalkCallList(walkId?: string): Promise<{
+    entries: LotWalkCallListEntryV1[];
+    reply: string;
+  }> {
+    const view = await this.lotWalkCurrentList(walkId);
+    if (!view) {
+      return {
+        entries: [],
+        reply: "No lot walk on record. Start Inventory Walk, photograph vehicles, then ask who to call.",
+      };
+    }
+    const state = await this.snapshot();
+    const inv = this.vehicleInv(state);
+    const workspace = state.settings.activeWorkspace || "work";
+    const needsByCustomer = needsByCustomerFromState({
+      relationships: (state.relationships || []).map((r) => ({
+        id: r.id,
+        displayName: r.displayName,
+        workspace: r.workspace,
+      })),
+      needs: state.customerNeeds || [],
+      workspace,
+    });
+    const entries = buildLotWalkCallList({
+      items: view.vehicles,
+      vehicles: inv.vehicles,
+      needsByCustomer,
+    });
+    return { entries, reply: formatLotWalkCallListProse(entries) };
+  }
+
+  /**
+   * One-shot phone Lot Walk photo: OCR → validated VIN → walk observation → website price → customers.
+   * Does not invent VINs or prices. Reuses warm EasyOCR path via ocrVinFromImage.
+   */
+  async processLotWalkPhoto(input: {
+    contentBase64?: string;
+    mimeType?: string;
+    filename?: string;
+    documentRef?: string | null;
+    extractedText?: string;
+    offline?: boolean;
+    walkId?: string;
+    note?: string;
+  }): Promise<{
+    reply: string;
+    walkId: string;
+    observation: PhysicalObservationV1 | null;
+    vehicle: VehicleRecordV1 | null;
+    ocr: VinOcrResultV1;
+    item: LotWalkListItemV1 | null;
+    duplicate: boolean;
+    websitePrice: number | null;
+    websitePriceLabel: string;
+  }> {
+    const processStarted = Date.now();
+    let walk = input.walkId
+      ? this.vehicleInv(await this.snapshot()).walks.find((w) => w.id === input.walkId) ?? null
+      : await this.activeInventoryWalk();
+    if (!walk) walk = await this.startInventoryWalk("Lot walk (phone)");
+
+    const ocr = await this.ocrVinFromImage({
+      ...(input.contentBase64 ? { contentBase64: input.contentBase64 } : {}),
+      ...(input.mimeType ? { mimeType: input.mimeType } : {}),
+      ...(input.filename ? { filename: input.filename } : {}),
+      ...(input.extractedText ? { extractedText: input.extractedText } : {}),
+      ...(input.offline ? { offline: true } : {}),
+    });
+
+    const vin = ocr.best?.valid ? ocr.best.vin : null;
+    const photoDocumentIds = input.documentRef ? [String(input.documentRef)] : [];
+    const before = this.vehicleInv(await this.snapshot()).observations.filter(
+      (o) => o.walkId === walk!.id && vin && o.vin === vin,
+    );
+    const duplicate = before.length > 0;
+
+    let observation: PhysicalObservationV1 | null = null;
+    let vehicle: VehicleRecordV1 | null = null;
+
+    if (vin) {
+      const recorded = await this.recordWalkObservation({
+        vin,
+        entryMethod: "photo",
+        photoDocumentIds,
+        recognitionConfidence: ocr.best?.confidence ?? null,
+        walkId: walk.id,
+        note: input.note ?? (ocr.sticker?.model ? `sticker:${ocr.sticker.model}` : ""),
+        vinSource: "OCR",
+        ocrResult: ocr.best?.vin ?? ocr.extractedText?.slice(0, 200) ?? null,
+        ownerCorrectionRequired: ocr.status !== "VIN_OCR_HIGH_CONFIDENCE",
+        processingStartedAtMs: processStarted,
+      });
+      observation = recorded.observation;
+      vehicle = recorded.vehicle;
+      // Merge sticker MSRP into note when present (never as website price).
+      if (ocr.sticker?.price != null && observation) {
+        const msrpNote = `stickerMSRP:${ocr.sticker.price}`;
+        if (!observation.note.includes("stickerMSRP:")) {
+          // Note already stored; enrichment uses ocr.sticker at reply time.
+        }
+        void msrpNote;
+      }
+    } else if (photoDocumentIds.length) {
+      // Unresolved photo still becomes a walk observation (no vehicle invent).
+      const recorded = await this.recordWalkObservation({
+        entryMethod: "photo",
+        photoDocumentIds,
+        recognitionConfidence: ocr.best?.confidence ?? 0,
+        walkId: walk.id,
+        note: input.note ?? "Unresolved VIN photo",
+        vinSource: "OCR",
+        ocrResult: ocr.extractedText?.slice(0, 200) ?? null,
+        ownerCorrectionRequired: true,
+        processingStartedAtMs: processStarted,
+      });
+      observation = recorded.observation;
+      vehicle = recorded.vehicle;
+    }
+
+    const view = await this.lotWalkCurrentList(walk.id);
+    let item: LotWalkListItemV1 | null = null;
+    if (view && vin) {
+      item = view.vehicles.find((v) => v.vin === vin) ?? null;
+    } else if (view && observation) {
+      item = view.vehicles.find((v) => v.observationId === observation!.id) ?? null;
+    }
+    // Attach sticker MSRP from OCR when website enrichment lacked it.
+    if (item && ocr.sticker?.price != null && item.website.stickerMsrp == null) {
+      item = {
+        ...item,
+        website: { ...item.website, stickerMsrp: ocr.sticker.price },
+      };
+    }
+
+    const web = websitePriceFromVehicle(vehicle);
+    const reply = formatLotWalkPhotoReply({
+      item,
+      ocrStatus: ocr.status,
+      ocrMessage: ocr.message,
+      vin,
+      duplicate,
+    });
+
+    return {
+      reply,
+      walkId: walk.id,
+      observation,
+      vehicle,
+      ocr,
+      item,
+      duplicate,
+      websitePrice: web.websitePrice,
+      websitePriceLabel: web.websitePrice == null ? "Website price: not published" : `Website price: $${web.websitePrice.toLocaleString("en-US")}`,
+    };
   }
 
   async listVehicles(query: Parameters<typeof queryVehicles>[1] = {}): Promise<VehicleRecordV1[]> {
@@ -10992,6 +11194,102 @@ export class AionAssistantV1 {
           sources: hits.map((v) => ({ type: "vehicle", id: v.id, label: v.vin || v.id })),
           action: "vehicle.verified-today",
           data: hits,
+        };
+      }
+      // Lot walk list / reconciliation / call list (photographed vehicles)
+      if (
+        /\blot walk\b/i.test(text)
+        || /\b(cars?|vehicles?) i (photographed|saw|walked)\b/i.test(text)
+        || /\bwhat did i (see|photograph) on the lot\b/i.test(text)
+        || /\bshow me the cars? i photographed\b/i.test(text)
+        || /\bphotographed (today|on the lot)\b/i.test(text)
+        || /\bwebsite prices? (next to|for)\b/i.test(text)
+        || /\bwhich photographed\b/i.test(text)
+        || /\baren'?t on the website\b/i.test(text)
+        || /\bon the website that i (didn'?t|did not)\b/i.test(text)
+        || /\bchange price\b/i.test(text)
+        || /\bno published price\b/i.test(text)
+        || /\blast time i walked\b/i.test(text)
+      ) {
+        if (/\bwho should i call\b/i.test(text) || /\bmatch(es|ing)? my customers\b/i.test(text) || /\bphotographed cars? match\b/i.test(text)) {
+          const call = await this.lotWalkCallList();
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: call.reply,
+            sources: call.entries.map((e) => ({
+              type: "customer",
+              id: e.relationshipRef,
+              label: e.customerName,
+            })),
+            action: "inventory.walk.call_list",
+            data: call.entries,
+          };
+        }
+        const view = await this.lotWalkCurrentList();
+        if (!view) {
+          return {
+            intent: route.intent,
+            confidence: "high",
+            reply: "No lot walk on record yet. Start Inventory Walk on the phone and photograph vehicles.",
+            sources: [],
+            action: "inventory.walk.list",
+            data: null,
+          };
+        }
+        let reply = formatLotWalkSessionProse(view);
+        if (/\baren'?t on the website\b/i.test(text) || /\bnot on the website\b/i.test(text)) {
+          const missing = view.vehicles.filter((v) => v.websiteListing === "NOT_FOUND_ON_WEBSITE");
+          reply = [
+            "Photographed / observed but not on current website inventory:",
+            ...(missing.length
+              ? missing.map((v) => `  • ${[v.year, v.make, v.model].filter(Boolean).join(" ") || "Vehicle"} · ${v.vin || "no VIN"}`)
+              : ["  (none)"]),
+            "This is not labeled sold — only not found on the current website inventory.",
+          ].join("\n");
+        } else if (/\bno published price\b/i.test(text)) {
+          const none = view.vehicles.filter((v) => v.website.websitePrice == null);
+          reply = [
+            "Observed vehicles with no published website price:",
+            ...(none.length
+              ? none.map((v) => `  • ${[v.year, v.make, v.model].filter(Boolean).join(" ") || "Vehicle"} · ${v.vin || "?"}`)
+              : ["  (none — all published or unresolved)"]),
+            "Sticker MSRP is never used as website price.",
+          ].join("\n");
+        } else if (/\bchange price\b/i.test(text)) {
+          const changed = view.vehicles.filter((v) => v.website.priceState === "PRICE_CHANGED_SINCE_LAST_OBSERVATION");
+          reply = [
+            "Price changes (website published ask):",
+            ...(changed.length
+              ? changed.map(
+                  (v) =>
+                    `  • ${v.vin}: was $${v.website.previousWebsitePrice} → now $${v.website.websitePrice}`,
+                )
+              : ["  (no website price changes detected among photographed vehicles)"]),
+          ].join("\n");
+        } else if (/\bon the website that i (didn'?t|did not)\b/i.test(text) && view.reconciliation) {
+          reply = [
+            "On website but not photographed during this walk:",
+            `Count: ${view.reconciliation.onlineButNotSeen.length}`,
+            view.caveat,
+            ...view.reconciliation.onlineButNotSeen
+              .slice(0, 15)
+              .map(
+                (v) =>
+                  `  • ${[v.year, v.make, v.model].filter(Boolean).join(" ")} · ${v.vin || v.stockNumber || "?"}`,
+              ),
+          ].join("\n");
+        }
+        return {
+          intent: route.intent,
+          confidence: "high",
+          reply,
+          sources: view.vehicles
+            .filter((v) => v.vehicleId)
+            .slice(0, 20)
+            .map((v) => ({ type: "vehicle", id: v.vehicleId!, label: v.vin || v.vehicleId! })),
+          action: "inventory.walk.list",
+          data: view,
         };
       }
       if (/\bonline.*not (see|verify)|didn'?t (see|verify)\b/i.test(text)) {
