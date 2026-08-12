@@ -262,10 +262,21 @@ export function buildVinOcrResult(input: {
   extractedText: string;
   provider: string;
   byteLength?: number;
+  /**
+   * Whether the vision call actually produced text.
+   *
+   * When a provider fails, callers pass its *diagnostic* string as `extractedText`. Mining that
+   * for VINs produced candidates from the error itself — "Image stored; vision model returned
+   * empty text." yielded `RETURNEDEMPTYTEXT` at CONFIRM_REQUIRED, i.e. AION asking the Owner to
+   * confirm a VIN assembled from its own failure message. An error string is not evidence about a
+   * car, so a failed extraction yields no candidates and no sticker fields.
+   */
+  extractionOk?: boolean;
 }): VinOcrResultV1 {
+  const failed = input.extractionOk === false;
   const text = String(input.extractedText ?? "");
-  const candidates = proposeVinsFromOcrText(text);
-  const sticker = extractStickerFields(text);
+  const candidates = failed ? [] : proposeVinsFromOcrText(text);
+  const sticker = failed ? extractStickerFields("") : extractStickerFields(text);
   const best = candidates.find((c) => c.valid) ?? candidates[0] ?? null;
 
   let status: VinOcrStatusV1 = "VIN_OCR_FAILED";
@@ -316,9 +327,17 @@ export function buildVinOcrResult(input: {
  * VIN-focused vision prompt for local multimodal models.
  * Instructs not to invent characters.
  */
-export const VIN_VISION_PROMPT = `You are reading a vehicle VIN plate or dealer stock sticker photo.
-Extract ONLY text you can actually read. Do not invent characters.
-Prefer the 17-character VIN if visible.
-Also note stock number, year, make, model, trim, price, mileage if clearly printed.
-If text is blurry or incomplete, say so.
-Output plain text.`;
+/**
+ * VIN/sticker read prompt.
+ *
+ * Kept deliberately short. The previous multi-clause instruction made a small local model
+ * (moondream) return an *empty* response for every VIN image while the same model read the same
+ * image fine when simply asked what text it saw. Small vision models follow one plain instruction;
+ * they go silent on a list of rules.
+ *
+ * The anti-invention guarantee therefore does not live in this prompt — it lives downstream in
+ * `proposeVinsFromOcrText` and `scoreVinCandidate`, where a candidate must pass structure and
+ * check-digit validation and ambiguous reads are surfaced rather than silently corrected. That is
+ * the right place for it: a prompt can be ignored, validation cannot.
+ */
+export const VIN_VISION_PROMPT = "What text do you see in this image? List every character exactly as printed.";
