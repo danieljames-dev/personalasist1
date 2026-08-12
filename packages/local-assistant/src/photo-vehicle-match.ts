@@ -226,3 +226,83 @@ export function applyOwnerPhotoCorrection(
     correctionNote: input.note.slice(0, 500),
   };
 }
+
+/**
+ * Durable Chat photo → vehicle context for follow-ups without re-upload.
+ *
+ * Scoped to a workspace (and optionally a conversation). Never shared across workspaces.
+ * Vision prose is not stored as fact — only structured match fields and provenance.
+ */
+export interface PhotoVehicleContextV1 {
+  workspaceId: string;
+  /** When set, follow-ups in a *different* conversation must not use this context. */
+  conversationId: string | null;
+  vehicleId: string | null;
+  validatedVin: string | null;
+  matchState: PhotoMatchStateV1;
+  matchMethod: PhotoMatchMethodV1;
+  confidence: number;
+  documentRef: string | null;
+  provenance: PhotoVehicleProvenanceV1;
+  setAt: IsoTimestamp;
+}
+
+/** Build durable context after a photo match. vehicleId is only set for safe live links. */
+export function buildPhotoVehicleContext(input: {
+  workspaceId: string;
+  conversationId?: string | null;
+  documentRef?: string | null;
+  link: PhotoVehicleLinkV1;
+  provenance: PhotoVehicleProvenanceV1;
+  setAt: IsoTimestamp;
+}): PhotoVehicleContextV1 {
+  return {
+    workspaceId: input.workspaceId,
+    conversationId: input.conversationId ?? null,
+    vehicleId: input.link.vehicleRef,
+    validatedVin: input.link.vin,
+    matchState: input.link.state,
+    matchMethod: input.link.matchMethod,
+    confidence: input.link.confidence,
+    documentRef: input.documentRef ?? null,
+    provenance: input.provenance,
+    setAt: input.setAt,
+  };
+}
+
+/**
+ * Whether a text turn may reuse the last photo vehicle.
+ *
+ * Pronouns are the common path ("does it have recalls?"). Attribute questions without a pronoun
+ * ("what's the price?", "what trim?") also apply once a car was just identified — requiring the
+ * Owner to re-upload for every attribute is a form, not a conversation.
+ *
+ * Workspace and conversation scopes are enforced by the caller before invoking this.
+ */
+export function isPhotoVehicleFollowUpQuestion(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t || t.length > 500) return false;
+  if (/\b(it|this|that|the car|the vehicle|this one|this unit)\b/i.test(t)) return true;
+  if (/\b(price|msrp|sticker|cost|how much)\b/i.test(t)) return true;
+  if (/\b(trim|package|packages|options?|equipment)\b/i.test(t)) return true;
+  if (/\brecalls?\b/i.test(t)) return true;
+  if (/\b(mileage|miles|odometer|stock|colour|color|condition)\b/i.test(t)) return true;
+  if (/\b(fit|match|show|suit|right for)\b/i.test(t) && /\b[A-Z][a-z]{1,20}\b/.test(t)) return true;
+  if (/\bwhat (do we|do you) know\b/i.test(t)) return true;
+  return false;
+}
+
+/**
+ * Context is usable only in the same workspace, and only in the same conversation when one was
+ * recorded. A null conversationId on either side means "workspace-scoped Chat path" (Claude's
+ * current assistant.prompt attachment flow does not always open a conversation first).
+ */
+export function photoContextApplies(
+  ctx: PhotoVehicleContextV1 | null | undefined,
+  input: { workspaceId: string; conversationId?: string | null },
+): boolean {
+  if (!ctx?.vehicleId) return false;
+  if (ctx.workspaceId !== input.workspaceId) return false;
+  if (ctx.conversationId && input.conversationId && ctx.conversationId !== input.conversationId) return false;
+  return true;
+}

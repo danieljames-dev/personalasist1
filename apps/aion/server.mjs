@@ -592,8 +592,11 @@ export async function createAionServer(options = {}) {
       case "customer.summary": return service.accountSummary(input.id);
       case "assistant.prompt": {
         const text = String(input.text ?? input.content ?? "");
+        const conversationId = input.conversationId ? String(input.conversationId) : null;
         // A photo attached in Chat is answered about directly: the Owner is standing at the car and
         // should not have to leave the conversation to identify it.
+        // Unified attachment path: optional prior crm.document.upload → documentRef, then image bytes
+        // for vision. No separate Intake workflow required for ordinary Chat photos.
         if (input.imageBase64) {
           const photo = await service.answerAboutVehiclePhoto({
             text,
@@ -601,21 +604,22 @@ export async function createAionServer(options = {}) {
             mimeType: String(input.imageMimeType || "image/jpeg"),
             filename: String(input.imageFilename || "photo.jpg"),
             documentRef: input.documentRef ? String(input.documentRef) : null,
+            conversationId,
           });
           return photo;
         }
-        const result = await service.assistantPrompt(text);
+        const result = await service.assistantPrompt(text, { conversationId });
         if (result.action === "chat.fallback") {
           // Create/use a short-lived conversation for general chat when CRM intent is unclear.
-          let conversationId = input.conversationId;
-          if (!conversationId) {
+          let cid = conversationId;
+          if (!cid) {
             const conv = await service.createConversation(text.slice(0, 80) || "Assistant");
-            conversationId = conv.id;
+            cid = conv.id;
           }
-          const turn = await service.sendMessage(conversationId, text);
+          const turn = await service.sendMessage(cid, text);
           return {
             ...result,
-            conversationId,
+            conversationId: cid,
             reply: turn.message?.content ?? JSON.stringify(turn).slice(0, 2000),
             data: turn,
           };
