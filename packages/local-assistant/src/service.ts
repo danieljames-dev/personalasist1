@@ -141,6 +141,9 @@ import {
   transcribeAudioBytes,
   type TranscriptRecordV1,
 } from "./audio-transcription.js";
+import type { CommitmentCandidateV1, ConversationEventV1 } from "./conversation-event.js";
+import type { CustomerNeedV1 } from "./customer-needs.js";
+import type { CrmActionProposalV1 } from "./crm-action-proposal.js";
 import {
   buildVehicleTalkingPoints,
   compareTwoVehicles,
@@ -9753,6 +9756,84 @@ export class AionAssistantV1 {
     };
   }
 
+  /**
+   * Persist a conversation and everything derived from it, in one write.
+   *
+   * One mutation rather than four keeps the records consistent under restart: a conversation whose
+   * needs were saved and whose commitments were not would read as a call where the customer said
+   * nothing about timing, which is worse than an absent record because it looks complete.
+   *
+   * De-duplicated by id so re-processing the same transcript replaces rather than doubles.
+   */
+  async persistConversationDerivations(input: {
+    event: ConversationEventV1;
+    needs?: readonly CustomerNeedV1[];
+    commitments?: readonly CommitmentCandidateV1[];
+    proposals?: readonly CrmActionProposalV1[];
+  }): Promise<{ eventId: string; needsStored: number; commitmentsStored: number; proposalsStored: number }> {
+    return this.mutate((draft) => {
+      if (!Array.isArray(draft.conversationEvents)) draft.conversationEvents = [];
+      if (!Array.isArray(draft.customerNeeds)) draft.customerNeeds = [];
+      if (!Array.isArray(draft.commitmentCandidates)) draft.commitmentCandidates = [];
+      if (!Array.isArray(draft.crmActionProposals)) draft.crmActionProposals = [];
+
+      draft.conversationEvents = [
+        input.event,
+        ...draft.conversationEvents.filter((e) => e.id !== input.event.id),
+      ].slice(0, 500);
+
+      const needs = input.needs ?? [];
+      if (needs.length) {
+        // Supersession is computed by the caller against the existing set; store the result whole so
+        // the superseded rows keep their supersededBy links.
+        const incomingIds = new Set(needs.map((n) => n.id));
+        draft.customerNeeds = [
+          ...needs,
+          ...draft.customerNeeds.filter((n) => !incomingIds.has(n.id)),
+        ].slice(0, 5000);
+      }
+
+      const commitments = input.commitments ?? [];
+      if (commitments.length) {
+        const keys = new Set(commitments.map((c) => `${c.sourceRef}:${c.statement}`));
+        draft.commitmentCandidates = [
+          ...commitments,
+          ...draft.commitmentCandidates.filter((c) => !keys.has(`${c.sourceRef}:${c.statement}`)),
+        ].slice(0, 1000);
+      }
+
+      const proposals = input.proposals ?? [];
+      if (proposals.length) {
+        const ids = new Set(proposals.map((p) => p.proposalId));
+        draft.crmActionProposals = [
+          ...proposals,
+          ...draft.crmActionProposals.filter((p) => !ids.has(p.proposalId)),
+        ].slice(0, 500);
+      }
+
+      this.activity(
+        draft,
+        "memory",
+        "conversation.persist",
+        `Conversation ${input.event.channel} stored with ${needs.length} need(s), ${commitments.length} commitment candidate(s)`,
+        input.event.id,
+      );
+      return {
+        eventId: input.event.id,
+        needsStored: needs.length,
+        commitmentsStored: commitments.length,
+        proposalsStored: proposals.length,
+      };
+    });
+  }
+
+  /** Current (non-superseded) needs for one customer. */
+  async customerNeedsFor(relationshipRef: string): Promise<CustomerNeedV1[]> {
+    const state = await this.snapshot();
+    const all = Array.isArray(state.customerNeeds) ? state.customerNeeds : [];
+    return all.filter((n) => n.relationshipRef === relationshipRef);
+  }
+
   async #persistTranscript(transcript: TranscriptRecordV1): Promise<TranscriptRecordV1> {
     return this.mutate((draft) => {
       if (!Array.isArray(draft.audioTranscripts)) draft.audioTranscripts = [];
@@ -11023,6 +11104,105 @@ export class AionAssistantV1 {
         sources: profile.employers.slice(0, 5).map((e) => ({ type: "ownerKnowledge", id: e.employer, label: e.employer })),
         action: asksFit ? "career.fit" : asksHistory ? "career.history" : "career.skills",
         data: profile,
+      };
+    }
+
+    if (
+      route.intent === "CUSTOMER_NEEDS"
+      || route.intent === "CUSTOMER_NEEDS_HISTORY"
+      || route.intent === "CUSTOMER_FIT"
+      || route.intent === "CUSTOMER_COMMITMENTS"
+      || route.intent === "CUSTOMER_PRECALL"
+    ) {
+      const handlers = await import("./customer-query-handlers.js");
+      // route.subject comes from the matched pattern; the raw text is tried as well because a
+      // question naming both a person and a model can leave the subject pointing at the model.
+      const named = [
+        ...findRelationshipsByName(inWorkspace, route.subject),
+        ...findRelationshipsByName(inWorkspace, text),
+      ].filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i);
+
+      if (!named.length) {
+        return {
+          intent: route.intent,
+          confidence: "low",
+          reply: "I'm not sure which customer you mean. Tell me their name and I'll pull up what I have.",
+          sources,
+          action: "customer.unresolved",
+          data: { subject: route.subject },
+        };
+      }
+      if (named.length > 1) {
+        return {
+          intent: route.intent,
+          confidence: "low",
+          reply: `More than one customer matches that — ${named.slice(0, 4).map((r) => r.displayName).join(", ")}. Which one?`,
+          sources,
+          action: "customer.ambiguous",
+          data: { candidates: named.slice(0, 4).map((r) => ({ id: r.id, label: r.displayName })) },
+        };
+      }
+
+      const customer = named[0]!;
+      const allNeeds = Array.isArray(state.customerNeeds) ? state.customerNeeds : [];
+      const candidates = (Array.isArray(state.commitmentCandidates) ? state.commitmentCandidates : [])
+        .filter((c) => c.sourceRef.length > 0);
+      const vehicles = state.vehicleInventory?.vehicles ?? [];
+
+      const answer =
+        route.intent === "CUSTOMER_NEEDS_HISTORY"
+          ? handlers.answerNeedsHistory({ customer, needs: allNeeds })
+          : route.intent === "CUSTOMER_FIT"
+            ? handlers.answerCustomerFit({ customer, needs: allNeeds, vehicles, question: text })
+            : route.intent === "CUSTOMER_COMMITMENTS"
+              ? handlers.answerCommitments({ customer, candidates, question: text })
+              : route.intent === "CUSTOMER_PRECALL"
+                ? handlers.answerPrecallBrief({ customer, needs: allNeeds, candidates, vehicles })
+                : handlers.answerCustomerNeeds({ customer, needs: allNeeds });
+
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: answer.reply,
+        sources: [...sources, ...answer.sources],
+        action: answer.action,
+        data: answer.data,
+      };
+    }
+
+    if (route.intent === "VEHICLE_CUSTOMER_MATCH") {
+      const handlers = await import("./customer-query-handlers.js");
+      const workspaceId = state.settings.activeWorkspace;
+      const vehicles = state.vehicleInventory?.vehicles ?? [];
+      // Anchored to a real unit: the reverse question is only meaningful about a specific car, and
+      // guessing which one would produce outreach about a vehicle nobody asked about.
+      const vinInText = text.toUpperCase().match(/[A-HJ-NPR-Z0-9]{17}/)?.[0] ?? null;
+      const contextVin = state.photoVehicleContexts?.[0]?.validatedVin ?? null;
+      const vin = vinInText ?? contextVin;
+      const vehicle = vin ? vehicles.find((v) => (v.vin ?? "").toUpperCase() === vin) ?? null : null;
+
+      if (!vehicle) {
+        return {
+          intent: route.intent,
+          confidence: "low",
+          reply: "Which vehicle do you mean? Give me the VIN, or take a photo of it and ask again.",
+          sources,
+          action: "vehicle.customer.match.unresolved",
+          data: {},
+        };
+      }
+      const allNeeds = Array.isArray(state.customerNeeds) ? state.customerNeeds : [];
+      const byCustomer = handlers.needsByCustomer(allNeeds, inWorkspace, workspaceId);
+      const answer = handlers.answerVehicleCustomerMatch({
+        vehicle, needsByCustomer: byCustomer, now: this.ports.clock.now(),
+      });
+      return {
+        intent: route.intent,
+        confidence: route.confidence,
+        reply: answer.reply,
+        sources: [...sources, ...answer.sources],
+        action: answer.action,
+        data: answer.data,
       };
     }
 

@@ -242,6 +242,10 @@ export function createEmptyStateV1(): AssistantStateV1 {
     photoVehicleContext: null,
     photoVehicleContexts: [],
     audioTranscripts: [],
+    conversationEvents: [],
+    customerNeeds: [],
+    commitmentCandidates: [],
+    crmActionProposals: [],
   };
 }
 
@@ -770,6 +774,12 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     clone.photoVehicleContexts = clone.photoVehicleContext ? [clone.photoVehicleContext] : [];
   }
   if (!Array.isArray(clone.audioTranscripts)) clone.audioTranscripts = [];
+  // Conversation intelligence. Default-forward only — deliberately NOT in the fail-closed list
+  // above, so every state file written before these existed still loads untouched.
+  if (!Array.isArray(clone.conversationEvents)) clone.conversationEvents = [];
+  if (!Array.isArray(clone.customerNeeds)) clone.customerNeeds = [];
+  if (!Array.isArray(clone.commitmentCandidates)) clone.commitmentCandidates = [];
+  if (!Array.isArray(clone.crmActionProposals)) clone.crmActionProposals = [];
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "auto", sessionDays: 90 };
   if (clone.settings.remoteAccess && !clone.settings.remoteAccess.bindAddress) clone.settings.remoteAccess.bindAddress = "auto";
   {

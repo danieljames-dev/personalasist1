@@ -671,6 +671,23 @@ export interface AssistantStateV1 {
    * Never auto-promoted to customer needs/identity — Claude intelligence consumes these.
    */
   audioTranscripts: import("./audio-transcription.js").TranscriptRecordV1[];
+  /**
+   * Conversations AION has evidence of — a call, an email, a note. Newest first; bounded.
+   * Holds a reference to the transcript rather than a second copy of its text.
+   */
+  conversationEvents: import("./conversation-event.js").ConversationEventV1[];
+  /**
+   * What customers have said they want. Append-only: a change of mind supersedes an observation
+   * rather than overwriting it, so "what changed?" stays answerable. Newest first; bounded.
+   */
+  customerNeeds: import("./customer-needs.js").CustomerNeedV1[];
+  /**
+   * Promises heard in conversation, awaiting Owner confirmation. Candidates, never commitments —
+   * a queue full of promises nobody made is a queue the Owner stops reading.
+   */
+  commitmentCandidates: import("./conversation-event.js").CommitmentCandidateV1[];
+  /** Prepared CRM actions awaiting Owner review. Nothing here has touched an external system. */
+  crmActionProposals: import("./crm-action-proposal.js").CrmActionProposalV1[];
 }
 
 export interface StateRepositoryV1 {
