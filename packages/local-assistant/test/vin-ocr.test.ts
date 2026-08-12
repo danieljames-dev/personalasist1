@@ -153,6 +153,32 @@ test("total suggested retail recovers OCR $→5 garble (553.378.00 → 53378)", 
   assert.ok(fields.rawSignals.some((s) => s === "totalSuggestedRetail:53378"));
 });
 
+test("FALSE_MSRP_FACTS: unrelated digit blobs must not become $53,378", () => {
+  // Recovery is only valid next to total/MSRP monetary labels — not arbitrary long numbers.
+  const negatives = [
+    "phone 555-337-8000 call back",
+    "stock number 55337800 on the lot",
+    "VIN fragment JTDA 553378 near plate",
+    "option code 553378 PKG A",
+    "built 05/33/78 or date 2025-05-33",
+    "combined 33 mpg city 28 highway 55337800 more text",
+    "553.378.00 appears alone with no price label",
+    "55337800",
+  ];
+  for (const text of negatives) {
+    const fields = extractStickerFields(text);
+    assert.notEqual(
+      fields.price,
+      53378,
+      `must not invent $53,378 from: ${text}`,
+    );
+    assert.ok(
+      !fields.rawSignals.some((s) => /totalSuggestedRetail:53378|price:53378/.test(s)),
+      `must not signal false total MSRP from: ${text}`,
+    );
+  }
+});
+
 test("noisy reflection OCR does not yield silent HIGH_CONFIDENCE VIN links", () => {
   // Heavy punctuation + reflection symbols (measured classical OCR on lot glass photos).
   const garbage =
