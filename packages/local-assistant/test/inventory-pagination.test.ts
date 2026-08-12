@@ -121,3 +121,39 @@ test("budget phrasing parses k-suffixed and bare thousands", async () => {
   assert.equal(parseMaxPriceFromText("under 30"), 30000, "a bare small number means thousands");
   assert.equal(parseMaxPriceFromText("what hybrids do we have"), null);
 });
+
+test("price history records observed prices, never the act of looking", async () => {
+  const { applyOnlineListings, emptyVehicleInventoryState } = await import("../src/vehicle-inventory.js");
+  const now = "2026-08-12T02:00:00.000Z";
+  const dealership = { id: "d1", slug: "lakeland-toyota", name: "Lakeland Toyota" } as never;
+  const listing = (advertisedPrice: number | null, at: string) => ([{
+    id: "l1", retrievedAt: at, sourceUrl: "https://x/searchused.aspx", sourceType: "public-dealer-site",
+    vin: "4T1G11AK2PU131060", stockNumber: null, year: 2023, make: "Toyota", model: "Camry", trim: "SE",
+    condition: "used", exteriorColor: null, interiorColor: null, mileage: null,
+    advertisedPrice, msrp: null, dealerPrice: null, listingUrl: "u", detailUrl: "u",
+    availability: "available", raw: {},
+  }] as never);
+
+  let n = 0;
+  const nextId = (k: string) => `${k}-${++n}`;
+  let st = emptyVehicleInventoryState();
+
+  st = applyOnlineListings(st, dealership, listing(29640, now), now, nextId);
+  assert.equal(st.vehicles[0]!.priceHistory.length, 1);
+  assert.equal(st.vehicles[0]!.priceHistory[0]!.advertisedPrice, 29640);
+
+  // A later page with no published price must NOT append a null observation.
+  st = applyOnlineListings(st, dealership, listing(null, "2026-08-12T03:00:00.000Z"), "2026-08-12T03:00:00.000Z", nextId);
+  assert.equal(st.vehicles[0]!.priceHistory.length, 1, "price-absent refresh must not grow history");
+  assert.equal(st.vehicles[0]!.priceHistory[0]!.advertisedPrice, 29640, "the known price survives");
+
+  // The same price again must not bloat history.
+  st = applyOnlineListings(st, dealership, listing(29640, "2026-08-12T04:00:00.000Z"), "2026-08-12T04:00:00.000Z", nextId);
+  assert.equal(st.vehicles[0]!.priceHistory.length, 1, "identical price must not append");
+
+  // A genuine price change is preserved as history.
+  st = applyOnlineListings(st, dealership, listing(27995, "2026-08-12T05:00:00.000Z"), "2026-08-12T05:00:00.000Z", nextId);
+  assert.equal(st.vehicles[0]!.priceHistory.length, 2, "changed price appends");
+  assert.equal(st.vehicles[0]!.priceHistory[0]!.advertisedPrice, 27995, "newest first");
+  assert.equal(st.vehicles[0]!.priceHistory[1]!.advertisedPrice, 29640, "older price preserved");
+});

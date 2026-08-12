@@ -571,13 +571,19 @@ export function applyOnlineListings(
         detailUrl: listing.detailUrl,
         lastOnlineAt: now,
         lastPhysicalAt: null,
-        priceHistory: [{
-          at: now,
-          advertisedPrice: listing.advertisedPrice,
-          msrp: listing.msrp,
-          dealerPrice: listing.dealerPrice,
-          sourceUrl: listing.sourceUrl,
-        }],
+        // Only record a first observation when the listing actually published a price.
+        priceHistory:
+          (listing.advertisedPrice != null && listing.advertisedPrice > 0) ||
+          (listing.msrp != null && listing.msrp > 0) ||
+          (listing.dealerPrice != null && listing.dealerPrice > 0)
+            ? [{
+                at: now,
+                advertisedPrice: listing.advertisedPrice,
+                msrp: listing.msrp,
+                dealerPrice: listing.dealerPrice,
+                sourceUrl: listing.sourceUrl,
+              }]
+            : [],
         statusHistory: [{ at: now, status: "ONLINE_LISTED", note: "First observed online." }],
         listingObservations: [listing],
         relationshipIds: [],
@@ -589,10 +595,25 @@ export function applyOnlineListings(
     }
 
     const prev = vehicles[idx]!;
+    // Price history records observed prices, not the act of looking. A listing page that publishes
+    // no price used to append an all-null entry on every refresh, which grew state without adding
+    // evidence and masked the real price behind a null newest entry. Only a grounded price is
+    // written, and only when it differs from the most recent grounded price we already hold.
+    const observedPrice =
+      (listing.advertisedPrice != null && listing.advertisedPrice > 0) ||
+      (listing.msrp != null && listing.msrp > 0) ||
+      (listing.dealerPrice != null && listing.dealerPrice > 0);
+    const lastGrounded = prev.priceHistory.find(
+      (p) =>
+        (p.advertisedPrice != null && p.advertisedPrice > 0) ||
+        (p.msrp != null && p.msrp > 0) ||
+        (p.dealerPrice != null && p.dealerPrice > 0),
+    );
     const priceChanged =
-      prev.priceHistory[0]?.advertisedPrice !== listing.advertisedPrice ||
-      prev.priceHistory[0]?.msrp !== listing.msrp ||
-      prev.priceHistory[0]?.dealerPrice !== listing.dealerPrice;
+      observedPrice &&
+      (lastGrounded?.advertisedPrice !== listing.advertisedPrice ||
+        lastGrounded?.msrp !== listing.msrp ||
+        lastGrounded?.dealerPrice !== listing.dealerPrice);
 
     const priceHistory = priceChanged
       ? [{
@@ -817,7 +838,13 @@ export function queryVehicles(
     if (query.vin && v.vin !== normalizeVinCandidate(query.vin)) return false;
     if (query.condition && v.condition !== query.condition) return false;
     if (query.maxPrice != null) {
-      const p = v.priceHistory[0]?.advertisedPrice ?? v.priceHistory[0]?.dealerPrice;
+      // Newest *known* price, not newest entry — a price-less observation must not hide a
+      // vehicle from a budget filter.
+      let p: number | null = null;
+      for (const entry of v.priceHistory ?? []) {
+        const candidate = entry?.advertisedPrice ?? entry?.dealerPrice ?? entry?.msrp ?? null;
+        if (candidate != null && candidate > 0) { p = candidate; break; }
+      }
       if (p == null || p > query.maxPrice) return false;
     }
     if (query.presenceStatus && v.presenceStatus !== query.presenceStatus) return false;
