@@ -368,6 +368,37 @@ export function buildFixtureLakelandInventory(
   );
 }
 
+/**
+ * Resolve the next inventory page from the page's own `rel="next"` link.
+ *
+ * Deliberately not a constructed `?page=N` guess: following the link the site publishes keeps us
+ * on the paging scheme it actually supports, and it stops naturally at the last page instead of
+ * probing URLs that were never meant to exist.
+ */
+export function findNextPageUrl(html: string, baseUrl: string): string | null {
+  const patterns = [
+    /<link[^>]+rel=["']next["'][^>]*href=["']([^"']+)["']/i,
+    /<a[^>]+rel=["']next["'][^>]*href=["']([^"']+)["']/i,
+    /href=["']([^"']+)["'][^>]*rel=["']next["']/i,
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    const href = match?.[1];
+    if (!href) continue;
+    try {
+      const resolved = new URL(href.replace(/&amp;/g, "&"), baseUrl);
+      if (resolved.protocol !== "https:" && resolved.protocol !== "http:") continue;
+      // Never leave the dealership host on a "next" link.
+      if (new URL(baseUrl).host !== resolved.host) continue;
+      const next = resolved.toString();
+      return next === baseUrl ? null : next;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export async function refreshDealershipPublicInventory(input: {
   dealership: DealershipContextV1;
   now: string;
@@ -377,6 +408,10 @@ export async function refreshDealershipPublicInventory(input: {
   useFixture?: boolean;
   fixtureVins?: string[];
   maxBytesPerPage?: number;
+  /** Upper bound on paginated public pages per starting URL. */
+  maxPagesPerUrl?: number;
+  /** Courtesy delay between paginated public requests. */
+  pageDelayMs?: number;
 }): Promise<DealershipInventoryRefreshResultV1> {
   const fetchImpl = input.fetchImpl ?? fetch;
   const maxBytes = input.maxBytesPerPage ?? 1_500_000;
@@ -408,38 +443,61 @@ export async function refreshDealershipPublicInventory(input: {
   let truncated = false;
   let liveOk = false;
 
-  for (const url of uniqueUrls.slice(0, 4)) {
-    try {
-      const res = await fetchImpl(url, {
-        method: "GET",
-        headers: {
-          accept: "text/html,application/xhtml+xml,application/json",
-          "user-agent": "AION-InventoryResearch/1.0 (owner-authorized public inventory; no login)",
-        },
-        signal: AbortSignal.timeout(25_000),
-        redirect: "follow",
-      });
-      if (!res.ok) continue;
-      const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.byteLength > maxBytes) truncated = true;
-      const text = new TextDecoder("utf-8", { fatal: false }).decode(buf.slice(0, maxBytes));
-      fetched.push(url);
-      const condition: "new" | "used" | "unknown" = /used/i.test(url)
-        ? "used"
-        : /new/i.test(url)
-          ? "new"
-          : "unknown";
-      const parsed = parsePublicInventoryHtml(text, url, input.now, input.nextId, condition);
-      // Dedupe by VIN
-      const have = new Set(all.map((l) => l.vin).filter(Boolean));
-      for (const l of parsed) {
-        if (l.vin && have.has(l.vin)) continue;
-        if (l.vin) have.add(l.vin);
-        all.push(l);
+  const maxPagesPerUrl = Math.max(1, input.maxPagesPerUrl ?? 12);
+  const pageDelayMs = input.pageDelayMs ?? 1_200;
+  const visited = new Set<string>();
+
+  for (const startUrl of uniqueUrls.slice(0, 4)) {
+    let url: string | null = startUrl;
+    for (let page = 0; page < maxPagesPerUrl && url; page++) {
+      if (visited.has(url)) break;
+      visited.add(url);
+      try {
+        const res = await fetchImpl(url, {
+          method: "GET",
+          headers: {
+            accept: "text/html,application/xhtml+xml,application/json",
+            "user-agent": "AION-InventoryResearch/1.0 (owner-authorized public inventory; no login)",
+          },
+          signal: AbortSignal.timeout(25_000),
+          redirect: "follow",
+        });
+        if (!res.ok) break;
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (buf.byteLength > maxBytes) truncated = true;
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(buf.slice(0, maxBytes));
+        // The response may have redirected (index.htm -> searchnew.aspx); resolve relative
+        // next links against where we actually landed.
+        const landedUrl = typeof res.url === "string" && res.url ? res.url : url;
+        if (visited.has(landedUrl) && landedUrl !== url) break;
+        visited.add(landedUrl);
+        fetched.push(landedUrl);
+        const condition: "new" | "used" | "unknown" = /used/i.test(landedUrl)
+          ? "used"
+          : /new/i.test(landedUrl)
+            ? "new"
+            : "unknown";
+        const parsed = parsePublicInventoryHtml(text, landedUrl, input.now, input.nextId, condition);
+        const have = new Set(all.map((l) => l.vin).filter(Boolean));
+        let added = 0;
+        for (const l of parsed) {
+          if (l.vin && have.has(l.vin)) continue;
+          if (l.vin) have.add(l.vin);
+          all.push(l);
+          added++;
+        }
+        if (parsed.length) liveOk = true;
+        // Stop paging when the site stops offering new vehicles; repeating pages that add
+        // nothing is pure load on someone else's server.
+        if (added === 0) break;
+        // Follow the site's own advertised next link rather than constructing page params.
+        const next = findNextPageUrl(text, landedUrl);
+        if (!next || visited.has(next)) break;
+        url = next;
+        if (pageDelayMs > 0) await new Promise((r) => setTimeout(r, pageDelayMs));
+      } catch {
+        break;
       }
-      if (parsed.length) liveOk = true;
-    } catch {
-      /* continue other URLs */
     }
   }
 
