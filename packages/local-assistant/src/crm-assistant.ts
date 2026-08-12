@@ -39,6 +39,8 @@ export type CrmAssistantIntentV1 =
   | "CONNECTOR_STATUS"
   | "VEHICLE_INVENTORY"
   | "CAREER_PROFILE"
+  | "OWNER_GOALS"
+  | "PROJECT_STATUS"
   | "CONTEXT_SWITCH"
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
@@ -121,6 +123,47 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bi just talked to\b/i,
       /\bidea:\s*/i,
       /\bfollow up with\b.+\btomorrow\b/i,
+    ],
+  },
+  {
+    // Goals are their own subject. They were previously matched inside the IMPORT_STATUS rule, so
+    // asking about them was reported as an import-status question, and any phrasing other than the
+    // literal word "goals" never matched at all.
+    //
+    // The "most important" split is deliberate and load-bearing: "most important TO ME" is about the
+    // Owner's goals, while "most important TODAY" is about the day's queue and belongs to the
+    // morning cycle — which also writes state, so stealing it would do more than misroute a reply.
+    intent: "OWNER_GOALS",
+    confidence: "high",
+    patterns: [
+      /\bwhat (are )?(my |our )?(current |top )?goals?\b/i,
+      /\bshow (me )?(my )?goals?\b/i,
+      /\bmy goals?\b/i,
+      /\bwhat (are )?(my |our )?(top |main |current )?(priorities|objectives)\b/i,
+      /\bwhat am i (working|aiming) (toward|towards|for|at)\b/i,
+      /\bwhat (am i|are we) trying to (accomplish|achieve)\b/i,
+      /\bwhat do i want to (get done|accomplish|achieve)\b/i,
+      /\bwhat('?s| is) most important to me\b/i,
+      // Capture phrasings route here too, so the handler can store them rather than filing them
+      // as a generic note under the wrong category.
+      /\b(remember (that )?)?my goal is\b/i,
+      /\b(add|set) (a )?goal\b/i,
+    ],
+  },
+  {
+    // Projects. "What projects am I working on?" previously reached the CRM name matcher and came
+    // back with a car buyer, because "am" appears inside "Camry" in a customer note.
+    intent: "PROJECT_STATUS",
+    confidence: "high",
+    patterns: [
+      /\b(what|which) projects?\b/i,
+      /\bmy projects?\b/i,
+      /\bshow (me )?(my )?projects?\b/i,
+      /\blist projects?\b/i,
+      /\bproject status\b/i,
+      /\bwhat am i building\b/i,
+      /\bwhat('?s| is) (unfinished|still open|in progress)\b/i,
+      /\bwhat projects? (are|is)\b[^?]{0,20}\b(active|paused|open|stalled)\b/i,
     ],
   },
   {
@@ -403,9 +446,6 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat failed (to import)?\b/i,
       /\bwhat needs review\b/i,
       /\bdata completeness\b/i,
-      /\bwhat (are )?(my )?current goals\b/i,
-      /\bwhat (are )?my goals\b/i,
-      /\bshow (me )?(my )?goals\b/i,
     ],
   },
   {
@@ -618,20 +658,82 @@ export function findRelationshipsByName(relationships: readonly RelationshipV1[]
     "concerned",
     "concern",
     "interested",
+    // First-person question words. These describe the Owner's own work, never a customer, so
+    // letting them reach the matcher only manufactures false CRM hits.
+    "am",
+    "i'm",
+    "im",
+    "my",
+    "me",
+    "doing",
+    "going",
+    "working",
+    "toward",
+    "towards",
+    "building",
+    "trying",
+    "accomplish",
+    "project",
+    "projects",
+    "goal",
+    "goals",
+    "priority",
+    "priorities",
+    "important",
+    "unfinished",
+    "active",
+    "paused",
+    "ready",
+    "track",
+    "behind",
+    "missing",
+    "forgetting",
   ]);
-  const tokens = q
-    .replace(/[?.!,]/g, " ")
+  const tokens = normalizeNameQuery(q)
     .split(/\s+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 2 && !stop.has(t));
+    // Three characters, not two: a two-letter fragment is almost never a distinguishing name, and
+    // as a bare substring it collides with ordinary English constantly.
+    .filter((t) => t.length >= 3 && !stop.has(t));
+  const normalizedQuery = normalizeNameQuery(q).trim();
   return relationships.filter((r) => {
     if (r.archived) return false;
     const hay = `${r.displayName} ${r.organisation} ${r.role} ${r.notes} ${r.objections.join(" ")} ${r.interests.map((i) => i.description).join(" ")}`.toLowerCase();
-    if (hay.includes(q)) return true;
+    // Word-boundary, not bare substring. Unanchored matching meant "What am I working toward?" found
+    // the "am" inside "Camry" in a customer note and answered with that customer's account summary —
+    // the same reason "What projects am I working on?" returned a car buyer. A prefix match still
+    // finds "Sar" in "Sarah" and "ACME" in "ACME Corp", which is the lookup this function exists for.
+    if (normalizedQuery.length >= 3 && startsAtWordBoundary(hay, normalizedQuery)) return true;
     if (!tokens.length) return false;
-    // Any distinctive token match (first/last name, company word) is enough for CRM lookup.
-    return tokens.some((tok) => hay.includes(tok));
+    return tokens.some((tok) => startsAtWordBoundary(hay, tok));
   });
+}
+
+/**
+ * Fold a query into the shape the haystack uses.
+ *
+ * Possessives are stripped rather than left in place: without this, "Sarah's next step" produced the
+ * token "sarah's", which is not a prefix of "sarah " and silently matched nothing. The matcher was
+ * simultaneously too loose (matching "am") and too strict (missing the most natural CRM phrasing
+ * there is).
+ */
+function normalizeNameQuery(text: string): string {
+  return String(text ?? "")
+    .toLowerCase()
+    .replace(/['’]s\b/g, "")
+    .replace(/[?.!,;:'’"]/g, " ");
+}
+
+/** True when `needle` occurs in `hay` starting at a word boundary. */
+function startsAtWordBoundary(hay: string, needle: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = hay.indexOf(needle, from);
+    if (at < 0) return false;
+    const before = at === 0 ? "" : hay[at - 1]!;
+    if (!/[a-z0-9]/.test(before)) return true;
+    from = at + 1;
+  }
 }
 
 /** Concise Owner-facing customer list lines (workspace already filtered by caller). */

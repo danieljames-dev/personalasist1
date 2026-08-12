@@ -70,9 +70,25 @@ export interface CareerProfileV1 {
  */
 export function isDocumentDumpFact(fact: OwnerKnowledgeFactLikeV1): boolean {
   const title = String(fact.title ?? "").trim();
-  if (/^(owner|skill|employment|note|doc)\s*:\s*/i.test(title)) return true;
-  // Titles that are bare filenames are the same problem wearing a different hat.
-  if (/\.(md|txt|json|csv|pdf|docx?|ya?ml)$/i.test(title)) return true;
+  const content = String(fact.content ?? "");
+
+  // Any filename-shaped title, whatever the extension. The list previously stopped at text formats,
+  // so `brand: logo.png` and `product-service: catalog.xlsx` read as curated facts.
+  const FILE_LIKE = /(?:\.(?:md|txt|json|csv|pdf|docx?|ya?ml|xlsx?|pptx?|png|jpe?g|webp|log|rtf|heic)\b|[\\/])/i;
+
+  // The category prefix alone proves nothing: "Skill: Dispatch coordination" is real biography while
+  // "owner: CLAUDE.md" is a file. What separates them is whether a filename follows the colon —
+  // matching on the prefix alone silently dropped genuine Owner facts from every career answer.
+  const prefixed = title.match(
+    /^(?:owner|skill|employment|note|doc|brand|product-service|project|business|collaborator|research-document)\s*:\s*(.+)$/i,
+  );
+  if (prefixed?.[1] && FILE_LIKE.test(prefixed[1])) return true;
+  if (FILE_LIKE.test(title) && /\.[a-z0-9]{2,5}$/i.test(title)) return true;
+
+  // A document body is a document however it is titled. 500 characters is well above the longest
+  // observed curated fact and well below any real document.
+  if (content.length > 500) return true;
+  if (/^#{1,6}\s/m.test(content) || content.includes("```")) return true;
   return false;
 }
 

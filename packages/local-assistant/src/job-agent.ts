@@ -1,5 +1,6 @@
 import type { IsoTimestamp, OpaqueId, ProvenanceV1 } from "./contracts.js";
 import type { OwnerKnowledgeFactV1, OwnerKnowledgeStateV1 } from "./owner-knowledge.js";
+import { isDocumentDumpFact } from "./career-profile.js";
 
 /**
  * Job / work agent (Checkpoint O) — durable application tracker + fit prep.
@@ -87,7 +88,9 @@ export function scoreJobFit(
   knowledge: OwnerKnowledgeStateV1 | null | undefined,
   jobText: string,
 ): { score: number; matched: string[]; notes: string } {
-  const facts = knowledge?.facts?.filter((f) => f.enabled) ?? [];
+  // Exclude document bodies before tokenizing, not only from the skill count: a README shares
+  // plenty of vocabulary with a job posting, and every one of those overlaps inflated the score.
+  const facts = knowledge?.facts?.filter((f) => f.enabled && !isDocumentDumpFact(f)) ?? [];
   const hay = jobText.toLowerCase();
   const matched: string[] = [];
   for (const f of facts) {
@@ -99,7 +102,10 @@ export function scoreJobFit(
       if (hay.includes(tok) && !matched.includes(tok)) matched.push(tok);
     }
   }
-  const skillFacts = facts.filter((f) => f.category === "skill" || f.category === "experience" || f.category === "employment");
+  // A document body is not evidence of a skill. Without this the score counted READMEs.
+  const skillFacts = facts.filter(
+    (f) => !isDocumentDumpFact(f) && (f.category === "skill" || f.category === "experience" || f.category === "employment"),
+  );
   const score = Math.min(100, matched.length * 8 + (skillFacts.length ? 10 : 0));
   return {
     score,
@@ -111,8 +117,11 @@ export function scoreJobFit(
 }
 
 export function draftCoverLetterSkeleton(app: JobApplicationV1, profileName: string, facts: readonly OwnerKnowledgeFactV1[]): string {
-  const skills = facts.filter((f) => f.category === "skill" && f.enabled).slice(0, 5).map((f) => f.title);
-  const role = facts.find((f) => f.category === "employment" && f.enabled);
+  // This text goes into a real job application. An imported README picked as "background" would be
+  // sent to an employer under the Owner's name, so document bodies are excluded outright.
+  const usable = facts.filter((f) => f.enabled && !isDocumentDumpFact(f));
+  const skills = usable.filter((f) => f.category === "skill").slice(0, 5).map((f) => f.title);
+  const role = usable.find((f) => f.category === "employment");
   return [
     `DRAFT ONLY — not submitted. Review and send yourself.`,
     ``,
@@ -135,7 +144,7 @@ export function draftCoverLetterSkeleton(app: JobApplicationV1, profileName: str
 
 export function interviewPrepFromKnowledge(app: JobApplicationV1, facts: readonly OwnerKnowledgeFactV1[]): string {
   const stories = facts
-    .filter((f) => (f.category === "experience" || f.category === "sales-experience" || f.category === "project") && f.enabled)
+    .filter((f) => f.enabled && !isDocumentDumpFact(f) && (f.category === "experience" || f.category === "sales-experience" || f.category === "project"))
     .slice(0, 5);
   return [
     `Interview prep for ${app.title} at ${app.employer} (from stored owner knowledge only):`,
