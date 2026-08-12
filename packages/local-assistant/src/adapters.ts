@@ -238,6 +238,8 @@ export function createEmptyStateV1(): AssistantStateV1 {
     },
     brain: defaultBrainSettings(GENESIS), evaluations: [], lessons: [], projects: [], gpuProposals: [], gpuSessions: [], usage: [],
     salesMetrics: [], devices: [], sessions: [], pairingTokens: [], rateLimits: [],
+    photoVehicleContext: null,
+    photoVehicleContexts: [],
   };
 }
 
@@ -761,6 +763,10 @@ export function validateStateV1(value: unknown): AssistantStateV1 {
     if (!Array.isArray(src.errorLog)) src.errorLog = [];
   }
   for (const key of ["devices", "sessions", "pairingTokens", "rateLimits"] as const) if (!Array.isArray(clone[key])) clone[key] = [] as never;
+  if (clone.photoVehicleContext === undefined) clone.photoVehicleContext = null;
+  if (!Array.isArray(clone.photoVehicleContexts)) {
+    clone.photoVehicleContexts = clone.photoVehicleContext ? [clone.photoVehicleContext] : [];
+  }
   if (!clone.settings.remoteAccess || typeof clone.settings.remoteAccess !== "object") clone.settings.remoteAccess = { enabled: false, bindAddress: "auto", sessionDays: 90 };
   if (clone.settings.remoteAccess && !clone.settings.remoteAccess.bindAddress) clone.settings.remoteAccess.bindAddress = "auto";
   {

@@ -655,6 +655,17 @@ export interface AssistantStateV1 {
   pairingTokens: PairingTokenV1[];
   /** Failed-attempt counters for pairing and session use. */
   rateLimits: RateLimitBucketV1[];
+  /**
+   * Last Chat photo → vehicle identity for follow-ups without re-upload.
+   * Additive; default null. Kept as the most-recent entry for older readers.
+   * Prefer `photoVehicleContexts` for conversation-scoped lookup.
+   */
+  photoVehicleContext: import("./photo-vehicle-match.js").PhotoVehicleContextV1 | null;
+  /**
+   * Bounded recent photo → vehicle contexts (workspace + conversation scoped).
+   * Additive; default []. Survives restart via normal state file. No secrets.
+   */
+  photoVehicleContexts: import("./photo-vehicle-match.js").PhotoVehicleContextV1[];
 }
 
 export interface StateRepositoryV1 {

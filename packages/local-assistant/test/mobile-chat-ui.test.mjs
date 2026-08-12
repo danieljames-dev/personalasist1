@@ -72,6 +72,29 @@ test("internal intent labels never render in Owner chat", () => {
   );
 });
 
+test("voice input feeds the same Chat composer rather than a separate assistant mode", () => {
+  const handler = appJs.slice(appJs.indexOf('verb === "voice-prompt"'));
+  const body = handler.slice(0, handler.indexOf("rec.start()"));
+  assert.match(body, /getElementById\("aionChatInput"\)/, "voice must target the Chat composer specifically");
+  assert.ok(
+    !/ta\.value = text/.test(body),
+    "voice must not overwrite text the Owner already typed",
+  );
+  assert.match(body, /ta\.value\.trim\(\) \?/, "transcript should append to existing text");
+  assert.ok(
+    !/api\("assistant\.prompt"/.test(body),
+    "voice must not open its own submission path — Chat owns submission and context",
+  );
+});
+
+test("the More sheet holds secondary functions, not the core chat intake", () => {
+  const sheet = indexHtml.slice(indexHtml.indexOf('id="aionMoreSheet"'));
+  const panel = sheet.slice(0, sheet.indexOf("</div>", sheet.indexOf("aion-more-panel")) + 6);
+  // Attachment must be reachable without opening More at all; the composer carries it.
+  assert.match(appJs, /aion-compose-actions/, "the composer must own the attachment controls");
+  assert.ok(panel.includes("Close"), "More must still offer an explicit Close");
+});
+
 test("attachments are sent to the assistant with the question, not as a separate errand", () => {
   assert.match(appJs, /imageBase64: attachment\.base64/, "the image must accompany the prompt");
   assert.match(appJs, /crm\.document\.upload/, "the original must still be preserved");
