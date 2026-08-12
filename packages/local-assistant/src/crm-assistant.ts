@@ -47,6 +47,8 @@ export type CrmAssistantIntentV1 =
   | "VEHICLE_CUSTOMER_MATCH"
   | "CUSTOMER_COMMITMENTS"
   | "CUSTOMER_PRECALL"
+  | "CUSTOMER_NEED_CORRECTION"
+  | "CUSTOMER_FOLLOWUP_PREP"
   | "CONTEXT_SWITCH"
   | "UNIVERSAL_CAPTURE"
   | "ATTENTION_BOARD"
@@ -209,6 +211,22 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat (?:has )?changed\b[^?]{0,30}\b(?:needs?|wants?|looking for)\b/i,
       /\bwhat did\b[^?]{0,30}\bwant (?:before|originally|at first|previously)\b/i,
       /\bdid\b[^?]{0,30}\bchange (?:their|his|her) mind\b/i,
+      // A preposition is required so bare "What changed?" stays with WORK_QUEUE, where the daily
+      // briefing has always claimed it.
+      /\bwhat (?:has )?changed (?:for|about|with)\b/i,
+    ],
+  },
+  {
+    // Owner correcting a stored want, which must outrank the recording. Placed ahead of the other
+    // customer rules because "she prefers a hybrid" would otherwise read as a plain needs statement
+    // and be recorded as an ordinary observation with no power to supersede anything.
+    intent: "CUSTOMER_NEED_CORRECTION",
+    confidence: "high",
+    patterns: [
+      /\bthat(?:'|)s not what\b[^?]{0,40}\bmeant\b/i,
+      /\b(?:she|he|they) (?:didn(?:'|)t|did not|never) rule(?:d)?\b/i,
+      /\bi misheard\b|\byou misheard\b|\byou got that wrong\b/i,
+      /\bto be clear,\b[^?]{0,40}\b(?:prefers?|wants?|needs?)\b/i,
     ],
   },
   {
@@ -260,6 +278,19 @@ const RULES: Array<{ intent: CrmAssistantIntentV1; patterns: RegExp[]; confidenc
       /\bwhat should i know before i (?:call|contact|ring|phone)\b/i,
       /\bbrief me (?:on|about)\b/i,
       /\bcatch me up on\b/i,
+    ],
+  },
+  {
+    // What AION has already prepared from a processed call, awaiting approval. Distinct from
+    // LIST_FOLLOWUPS, which reports the Owner's existing task list rather than pending proposals —
+    // "prepare" is required so neither rule takes the other's phrasing.
+    intent: "CUSTOMER_FOLLOWUP_PREP",
+    confidence: "high",
+    patterns: [
+      /\bwhat follow[- ]?up should i prepare\b/i,
+      /\bwhat should i prepare\b/i,
+      /\bwhat have you prepared\b/i,
+      /\bwhat(?:'|)s prepared\b/i,
     ],
   },
   {

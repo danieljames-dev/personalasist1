@@ -13,8 +13,9 @@
 import type { RelationshipV1 } from "./contracts.js";
 import type { VehicleRecordV1 } from "./vehicle-inventory.js";
 import type { CommitmentCandidateV1 } from "./conversation-event.js";
+import type { CrmActionProposalV1 } from "./crm-action-proposal.js";
 import type { CustomerNeedV1 } from "./customer-needs.js";
-import { currentNeeds, formatNeedChanges, isCurrentNeed, needChanges } from "./customer-needs.js";
+import { currentNeeds, describeNeedChange, formatNeedChanges, isCurrentNeed, needChanges } from "./customer-needs.js";
 import { formatFitAnswer, formatReverseMatchAnswer, matchNeedsToInventory, matchVehicleToCustomers } from "./customer-inventory-match.js";
 
 /** Sub-mode detection for the fit question — "why doesn't this fit?" wants the conflicts, not a list. */
@@ -55,6 +56,12 @@ function phraseNeeds(needs: readonly CustomerNeedV1[]): {
     if (n.attribute === "color") return `${n.value} paint`;
     if (n.attribute === "powertrain") return `${n.value}`;
     if (n.attribute === "condition") return `something ${n.value}`;
+    // Equipment reads as a verb phrase in the requirements sentence ("needs to ... have AWD"), but
+    // as a bare noun everywhere else, so "ruled out" does not become "ruled out have AWD".
+    if (n.attribute === "must-have") {
+      return n.strength === "HARD_REQUIREMENT" ? `have ${n.value.toUpperCase()}` : n.value.toUpperCase();
+    }
+    if (n.attribute === "nice-to-have" || n.attribute === "must-not-have") return n.value.toUpperCase();
     return n.value;
   };
   return {
@@ -91,11 +98,16 @@ export function answerCustomerNeeds(input: {
   }
 
   return {
-    reply: parts.join(". ") + ".",
+    // Each clause becomes its own sentence, so the second one does not start mid-word in lower case.
+    reply: parts.map(startSentence).join(". ") + ".",
     action: "customer.needs",
     data: { needs: current },
     sources: [{ type: "relationship", id: input.customer.id, label: name }],
   };
+}
+
+function startSentence(text: string): string {
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
 
 /** "What changed in Sarah's needs?" */
@@ -247,7 +259,7 @@ export function answerPrecallBrief(input: {
 
   if (changes.length) {
     lines.push("");
-    lines.push(`Worth knowing: ${changes.slice(0, 2).map((c) => `they used to want ${c.from} and now say ${c.to}`).join("; ")}.`);
+    lines.push(`Worth knowing: ${changes.slice(0, 2).map(describeNeedChange).join("; ")}.`);
   }
   if (owed.length) {
     lines.push("");
@@ -274,6 +286,54 @@ export function answerPrecallBrief(input: {
     action: "customer.precall",
     data: { needs: current, changes, owed, theirs, fits },
     sources: [{ type: "relationship", id: input.customer.id, label: name }],
+  };
+}
+
+/**
+ * "What follow-up should I prepare?"
+ *
+ * Reports what AION has already drafted from processed calls and is holding for approval. The
+ * closing sentence is not decoration: a list of actions that reads like a list of completed actions
+ * is how an Owner comes to believe a note was filed that never was.
+ */
+export function answerPreparedActions(input: {
+  proposals: readonly CrmActionProposalV1[];
+  customer?: RelationshipV1 | null;
+  nameFor?: (customerRef: string) => string;
+}): CustomerAnswerV1 {
+  const who = input.customer ? ` for ${displayName(input.customer)}` : "";
+  if (!input.proposals.length) {
+    return {
+      reply: `I haven't prepared anything${who} yet. Send me a call recording and I'll draft the note and the follow-up from it.`,
+      action: "customer.prepared",
+      data: { proposals: [] },
+      sources: input.customer ? [{ type: "relationship", id: input.customer.id, label: displayName(input.customer) }] : [],
+    };
+  }
+
+  const label = (action: string): string =>
+    action === "PREPARE_CALL_NOTE" ? "a call note"
+    : action === "PREPARE_FOLLOWUP" ? "a follow-up"
+    : action === "PREPARE_PREFERENCE_UPDATE" ? "an update to their recorded preferences"
+    : action.replace(/_/g, " ").toLowerCase();
+
+  const lines: string[] = [`I've got ${input.proposals.length} thing${input.proposals.length === 1 ? "" : "s"} ready${who}:`];
+  for (const p of input.proposals) {
+    const name = input.nameFor ? input.nameFor(p.customerRef) : null;
+    lines.push(`· ${label(p.action)}${name && !input.customer ? ` for ${name}` : ""} — ${p.note}`);
+  }
+  lines.push("");
+  lines.push("None of it has been written anywhere. Tell me which ones you want and I'll take them further.");
+
+  return {
+    reply: lines.join("\n"),
+    action: "customer.prepared",
+    data: { proposals: input.proposals },
+    sources: input.proposals.slice(0, 5).map((p) => ({
+      type: "relationship",
+      id: p.customerRef,
+      label: input.nameFor ? input.nameFor(p.customerRef) : p.customerRef,
+    })),
   };
 }
 

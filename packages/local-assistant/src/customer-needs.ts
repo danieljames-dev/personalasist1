@@ -21,6 +21,15 @@ export type NeedAttributeV1 =
 
 export type NeedStrengthV1 = "HARD_REQUIREMENT" | "PREFERENCE" | "EXCLUSION" | "UNKNOWN";
 
+/**
+ * Where a need's authority comes from.
+ *
+ * An Owner correction outranks what a microphone heard, and the distinction has to survive storage:
+ * once "she prefers a hybrid" and "she said no hybrids" are both on file, the only thing that decides
+ * which one is current is which of them the Owner said out loud.
+ */
+export type NeedAuthorityV1 = "OBSERVED" | "OWNER_CORRECTION";
+
 export interface CustomerNeedV1 {
   id: OpaqueId;
   workspace: string;
@@ -40,6 +49,15 @@ export interface CustomerNeedV1 {
   /** Set when the Owner voids a need without replacing it. */
   invalidatedAt: IsoTimestamp | null;
   invalidationReason: string | null;
+  /** Optional and additive: absent on every need written before corrections existed, read as OBSERVED. */
+  authority?: NeedAuthorityV1;
+  /** The observation this need was created to correct, so the original stays reachable. */
+  correctsNeedId?: OpaqueId | null;
+}
+
+/** Needs stored before corrections existed carry no authority field; they are plain observations. */
+export function needAuthority(need: CustomerNeedV1): NeedAuthorityV1 {
+  return need.authority === "OWNER_CORRECTION" ? "OWNER_CORRECTION" : "OBSERVED";
 }
 
 export function isCurrentNeed(need: CustomerNeedV1): boolean {
@@ -87,6 +105,11 @@ export interface NeedChangeV1 {
   changedAt: IsoTimestamp;
   fromSourceRef: string;
   toSourceRef: string;
+  /** Carried because a change can be in strength alone: the same car, now ruled out. */
+  fromStrength: NeedStrengthV1;
+  toStrength: NeedStrengthV1;
+  /** True when the replacement came from the Owner rather than from a transcript. */
+  byOwnerCorrection: boolean;
 }
 
 export function needChanges(needs: readonly CustomerNeedV1[], relationshipRef: string): NeedChangeV1[] {
@@ -104,6 +127,9 @@ export function needChanges(needs: readonly CustomerNeedV1[], relationshipRef: s
       changedAt: old.supersededAt,
       fromSourceRef: old.sourceRef,
       toSourceRef: next.sourceRef,
+      fromStrength: old.strength,
+      toStrength: next.strength,
+      byOwnerCorrection: needAuthority(next) === "OWNER_CORRECTION",
     });
   }
   return changes.sort((a, b) => (a.changedAt < b.changedAt ? 1 : -1));
@@ -171,11 +197,36 @@ export function describeNeed(need: CustomerNeedV1): string {
  * Deliberately states both sides. "She wants an SUV" is less useful to a salesperson than "she
  * wanted a Camry XSE on Monday and said SUV on Friday" — the second tells them what to open with.
  */
+/** How a strength reads in a sentence, so a change can be described without naming the enum. */
+function strengthWord(strength: NeedStrengthV1): string {
+  return strength === "HARD_REQUIREMENT" ? "a requirement"
+    : strength === "EXCLUSION" ? "ruled out"
+    : strength === "PREFERENCE" ? "a preference"
+    : "unclear";
+}
+
+/**
+ * One change, in a sentence.
+ *
+ * Shared by the history answer and the pre-call brief so the two cannot drift. Both were previously
+ * capable of reporting a strength-only change as "they used to want hybrid and now say hybrid",
+ * which is true and tells the Owner nothing.
+ */
+export function describeNeedChange(change: NeedChangeV1): string {
+  const because = change.byOwnerCorrection ? " after you corrected me" : "";
+  return change.from === change.to
+    ? `${change.from} went from ${strengthWord(change.fromStrength)} to ${strengthWord(change.toStrength)}${because}`
+    : `they used to want ${change.from} and now say ${change.to}${because}`;
+}
+
 export function formatNeedChanges(changes: readonly NeedChangeV1[], customerName: string): string {
   if (!changes.length) return `Nothing has changed in what I have recorded for ${customerName}.`;
   const lines = [`What changed for ${customerName}:`];
   for (const c of changes) {
-    lines.push(`· ${c.attribute}: was "${c.from}", now "${c.to}" (changed ${c.changedAt.slice(0, 10)})`);
+    // The same value can be superseded by itself at a different strength — a Camry that went from
+    // something she wanted to something she ruled out. Reporting that as was "camry", now "camry"
+    // is technically true and useless, so a strength-only change is described as one.
+    lines.push(`· ${c.attribute}: ${describeNeedChange(c)} (${c.changedAt.slice(0, 10)})`);
   }
   return lines.join("\n");
 }
