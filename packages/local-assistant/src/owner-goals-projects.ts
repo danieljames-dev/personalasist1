@@ -62,7 +62,7 @@ export function formatGoalsAnswer(views: readonly OwnerGoalViewV1[]): string {
 
   if (stated.length) {
     lines.push(stated.length === 1 ? "Your goal:" : "Your goals:");
-    for (const g of stated) lines.push(`· ${g.title}${g.detail ? ` — ${trim(g.detail)}` : ""}`);
+    for (const g of stated) lines.push(`· ${goalLine(g)}`);
   }
 
   if (derived.length) {
@@ -73,12 +73,24 @@ export function formatGoalsAnswer(views: readonly OwnerGoalViewV1[]): string {
         ? "I also worked these out from your documents — you haven't confirmed them:"
         : "You haven't told me a goal directly. From your documents, I think you're working toward:",
     );
-    for (const g of derived) lines.push(`· ${g.title}${g.detail ? ` — ${trim(g.detail)}` : ""}`);
+    for (const g of derived) lines.push(`· ${goalLine(g)}`);
     lines.push("");
     lines.push("Tell me if that's wrong, or say \"Remember my goal is …\" to set one yourself.");
   }
 
   return lines.join("\n");
+}
+
+/**
+ * One goal, without saying it twice.
+ *
+ * A goal the Owner states arrives as a single sentence used for both title and detail, so printing
+ * "title — detail" would echo it back doubled.
+ */
+function goalLine(goal: OwnerGoalViewV1): string {
+  const detail = trim(goal.detail);
+  const same = detail.replace(/[.\s]+$/, "").toLowerCase() === goal.title.replace(/[.\s]+$/, "").toLowerCase();
+  return same || !detail ? goal.title : `${goal.title} — ${detail}`;
 }
 
 function trim(text: string, max = 220): string {

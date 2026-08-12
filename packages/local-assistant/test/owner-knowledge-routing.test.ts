@@ -120,6 +120,12 @@ test("a goal the Owner stated is presented as theirs", () => {
   const answer = formatGoalsAnswer(buildGoalViews([stated]));
   assert.match(answer, /^Your goal:/im);
   assert.ok(!/from your documents/i.test(answer));
+  // A stated goal uses one sentence for both title and detail; it must not be echoed back twice.
+  assert.equal(
+    (answer.match(/Land a remote dispatcher role/gi) ?? []).length,
+    1,
+    `the goal text must appear once, got: ${answer}`,
+  );
 });
 
 test("no goals reads as an invitation, not an error", () => {

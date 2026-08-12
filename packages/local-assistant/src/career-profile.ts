@@ -151,9 +151,14 @@ export function buildCareerProfile(
   }
 
   const credentials = byCategory("accomplishment").map((f) => String(f.content ?? "").slice(0, 300));
-  const goals = byCategory("goal").map((f) =>
-    `${String(f.title ?? "").replace(/^goal\s*[—-]\s*/i, "").trim()}: ${String(f.content ?? "").slice(0, 220)}`,
-  );
+  const goals = byCategory("goal").map((f) => {
+    const title = String(f.title ?? "").replace(/^goal\s*[—:-]\s*/i, "").trim();
+    const detail = String(f.content ?? "").slice(0, 220).trim();
+    // A goal the Owner stated uses the same sentence for title and content; joining them would
+    // print it back twice.
+    const same = detail.replace(/[.\s]+$/, "").toLowerCase() === title.replace(/[.\s]+$/, "").toLowerCase();
+    return same || !detail ? title : `${title}: ${detail}`;
+  });
 
   // Career-summary facts live under "employment" alongside the document dumps.
   const summaryFact = byCategory("employment").sort((a, b) => Number(b.confidence ?? 0) - Number(a.confidence ?? 0))[0];
