@@ -4,6 +4,8 @@ import {
   buildVinOcrResult,
   extractStickerFields,
   generateVinConfusionCandidates,
+  isNoisyOcrText,
+  isPlausibleVinCharset,
   proposeVinsFromOcrText,
 } from "../src/vin-ocr.js";
 import { synthesizeValidVin, validateVin } from "../src/vehicle-inventory.js";
@@ -91,6 +93,36 @@ test("stock sticker fields extracted without fabrication", () => {
   const empty = extractStickerFields("no useful data here");
   assert.equal(empty.stockNumber, null);
   assert.equal(empty.price, null);
+});
+
+test("PLACEHOLDER / letter-heavy check-digit coincidence is not a plausible VIN", () => {
+  // Measured false candidate from reflection OCR on real sticker glass (check digit can pass by chance).
+  assert.equal(isPlausibleVinCharset("SRRL5SAA5REASEVES"), false);
+  assert.equal(isPlausibleVinCharset("JTDACAAJ8T3051788"), true);
+  const vin = synthesizeValidVin("PLAUS01");
+  assert.equal(isPlausibleVinCharset(vin), true);
+});
+
+test("noisy reflection OCR does not yield silent HIGH_CONFIDENCE VIN links", () => {
+  // Heavy punctuation + reflection symbols (measured classical OCR on lot glass photos).
+  const garbage =
+    "!!! … § ‡ · · · £58 / \\ | { } [ ] ~ @ # $ % ^ & * ( ) _ + = < > ? / . , ; : ` ' \" "
+    + "Mini Eo ATE oN TOR AR AER ROE REE Rp “PRN NOS i) ed 2 = § 2 Fad x 3 Xi £38 7 Fide "
+    + "SRRL5SAA5REASEVES more junk !!! ??? ###";
+  assert.equal(isNoisyOcrText(garbage), true);
+  const r = buildVinOcrResult({
+    extractedText: garbage,
+    provider: "tesseract:lower-right",
+    byteLength: 2_500_000,
+    extractionOk: true,
+  });
+  // Letter-heavy check-digit coincidence must not become a silent identity claim.
+  assert.notEqual(r.status, "VIN_OCR_HIGH_CONFIDENCE");
+  assert.ok(!r.best?.valid || r.best.vin !== "SRRL5SAA5REASEVES");
+  if (r.best?.valid) {
+    assert.ok(r.best.confidence < 85);
+    assert.notEqual(r.best.source, "direct");
+  }
 });
 
 test("corrected-only valid VIN requires confirm", () => {
