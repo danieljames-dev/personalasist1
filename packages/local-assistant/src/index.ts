@@ -40,6 +40,7 @@ export * from "./photo-vehicle-match.js";
 export * from "./image-region.js";
 export * from "./audio-transcription.js";
 export * from "./connectors/local-whisper.js";
+export * from "./connectors/sticker-ocr.js";
 export * from "./owner-goals-projects.js";
 export * from "./customer-identity.js";
 export * from "./customer-needs.js";
