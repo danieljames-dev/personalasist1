@@ -296,6 +296,8 @@ export function isPhotoVehicleFollowUpQuestion(text: string): boolean {
  * Context is usable only in the same workspace, and only in the same conversation when one was
  * recorded. A null conversationId on either side means "workspace-scoped Chat path" (Claude's
  * current assistant.prompt attachment flow does not always open a conversation first).
+ *
+ * Never: workspace A → workspace B, or conversation A → conversation B when both ids are known.
  */
 export function photoContextApplies(
   ctx: PhotoVehicleContextV1 | null | undefined,
@@ -305,4 +307,70 @@ export function photoContextApplies(
   if (ctx.workspaceId !== input.workspaceId) return false;
   if (ctx.conversationId && input.conversationId && ctx.conversationId !== input.conversationId) return false;
   return true;
+}
+
+const PHOTO_CONTEXT_MAX = 24;
+
+/** Dedupe key: one slot per workspace + conversation (null conversation = workspace Chat path). */
+export function photoContextKey(ctx: Pick<PhotoVehicleContextV1, "workspaceId" | "conversationId">): string {
+  return `${ctx.workspaceId}\u0000${ctx.conversationId ?? ""}`;
+}
+
+/** Insert/replace newest context; bounded; no secrets. */
+export function upsertPhotoVehicleContext(
+  list: readonly PhotoVehicleContextV1[] | null | undefined,
+  ctx: PhotoVehicleContextV1,
+  max = PHOTO_CONTEXT_MAX,
+): PhotoVehicleContextV1[] {
+  const key = photoContextKey(ctx);
+  const rest = (list ?? []).filter((c) => photoContextKey(c) !== key);
+  return [ctx, ...rest].slice(0, max);
+}
+
+/**
+ * Resolve the correct durable photo context for this turn.
+ *
+ * Preference order:
+ * 1. Exact workspace + conversation match
+ * 2. Workspace-scoped entry (conversationId null) when the caller has no conversation yet,
+ *    or when the caller has a conversation but only a workspace-scoped photo was stored
+ * 3. Legacy single `photoVehicleContext` field (pre-list states)
+ *
+ * Never returns another conversation's vehicle when the caller named a different conversation.
+ */
+export function resolvePhotoVehicleContext(
+  list: readonly PhotoVehicleContextV1[] | null | undefined,
+  legacy: PhotoVehicleContextV1 | null | undefined,
+  input: { workspaceId: string; conversationId?: string | null },
+): PhotoVehicleContextV1 | null {
+  const merged = [
+    ...(Array.isArray(list) ? list : []),
+    ...(legacy ? [legacy] : []),
+  ];
+  // De-dupe while preserving order (list first, then legacy)
+  const seen = new Set<string>();
+  const contexts: PhotoVehicleContextV1[] = [];
+  for (const c of merged) {
+    const k = `${photoContextKey(c)}\u0000${c.setAt}\u0000${c.vehicleId}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    contexts.push(c);
+  }
+
+  const conv = input.conversationId ?? null;
+  if (conv) {
+    const exact = contexts.find(
+      (c) => c.conversationId === conv && photoContextApplies(c, input),
+    );
+    if (exact) return exact;
+    // Workspace-only photo (no conversation recorded) may feed a later turn that now has a conversation id.
+    const workspaceOnly = contexts.find(
+      (c) => !c.conversationId && c.workspaceId === input.workspaceId && c.vehicleId,
+    );
+    if (workspaceOnly) return workspaceOnly;
+    return null;
+  }
+
+  // No conversation on the request: most recent applicable workspace context (including conversation-scoped).
+  return contexts.find((c) => photoContextApplies(c, input)) ?? null;
 }

@@ -123,7 +123,10 @@ test("find by organisation name", () => {
 test("work queue lists overdue follow-ups", () => {
   const q = buildWorkQueue([sampleCustomer()], "2030-06-01T00:00:00.000Z");
   assert.ok(q.overdue.length >= 1);
-  assert.match(q.text, /Overdue/);
+  // Owner-facing text is natural (not "Overdue follow-ups:" diagnostic headings).
+  assert.match(q.text, /follow up|Priority/i);
+  assert.match(q.text, new RegExp(q.overdue[0]!.customer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  assert.doesNotMatch(q.text, /Quiet accounts \(14\+/i);
 });
 
 test("daily briefing distinguishes needs-owner vs autonomous prep", () => {

@@ -127,7 +127,7 @@ test("follow-up question detector covers price/trim/recalls without pronouns", (
   assert.equal(isPhotoVehicleFollowUpQuestion("hello world"), false);
 });
 
-test("photo context does not leak across workspaces", () => {
+test("photo context does not leak across workspaces or conversations", () => {
   const ocr = buildVinOcrResult({ extractedText: `VIN ${LIVE_VIN}`, provider: "fixture", extractionOk: true });
   const link = matchPhotoToVehicle({ ocr, vehicles: [liveVehicle()] });
   const prov = buildPhotoProvenance({
@@ -148,6 +148,33 @@ test("photo context does not leak across workspaces", () => {
   assert.equal(photoContextApplies(ctx, { workspaceId: "personal", conversationId: "conv-a" }), false);
   assert.equal(photoContextApplies(ctx, { workspaceId: "work", conversationId: "conv-b" }), false);
   assert.equal(photoContextApplies(ctx, { workspaceId: "work", conversationId: null }), true);
+});
+
+test("resolvePhotoVehicleContext keeps conversation A vehicle out of conversation B", async () => {
+  const { resolvePhotoVehicleContext, upsertPhotoVehicleContext } = await import("../src/photo-vehicle-match.js");
+  const ocr = buildVinOcrResult({ extractedText: `VIN ${LIVE_VIN}`, provider: "fixture", extractionOk: true });
+  const link = matchPhotoToVehicle({ ocr, vehicles: [liveVehicle()] });
+  const prov = buildPhotoProvenance({
+    link, imageSourceRef: "img", observedAt: NOW, extractionProvider: "fixture", vinCandidate: LIVE_VIN,
+  });
+  const ctxA = buildPhotoVehicleContext({
+    workspaceId: "work", conversationId: "conv-a", link, provenance: prov, setAt: NOW,
+  });
+  const list = upsertPhotoVehicleContext([], ctxA);
+  assert.equal(
+    resolvePhotoVehicleContext(list, null, { workspaceId: "work", conversationId: "conv-b" }),
+    null,
+    "conversation B must not see conversation A's vehicle",
+  );
+  assert.equal(
+    resolvePhotoVehicleContext(list, null, { workspaceId: "work", conversationId: "conv-a" })?.vehicleId,
+    "veh-live-1",
+  );
+  assert.equal(
+    resolvePhotoVehicleContext(list, null, { workspaceId: "personal", conversationId: "conv-a" }),
+    null,
+    "personal workspace must not see work photo vehicle",
+  );
 });
 
 test("Chat photo path: validated VIN → inventory match → durable context → follow-ups", async () => {
