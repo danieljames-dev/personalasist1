@@ -159,7 +159,7 @@ ${opps.length ? `<div class="card"><h2>Opportunities</h2>${opps.map((o) => `<p c
 <form data-form="assistant-prompt" class="quick-form"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What needs me?" rows="2" style="font-size:16px"></textarea></label>
 <div class="actions"><button type="submit">Ask</button>
 <button type="button" data-do="voice-prompt">Voice</button></div></form>
-${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc((window.__aionLastAssistant.reply || "").slice(0, 400))}</p></div>` : ""}
+${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant">${esc((window.__aionLastAssistant.reply || "").slice(0, 400))}</p></div>` : ""}
 </div>
 <p class="meta"><a href="/phone">Photo intake</a></p></div>`;
 }
@@ -172,11 +172,20 @@ function chatArea(s) {
     return `<div class="aion-chat-phone" id="aionChatPanel">
 <h1>Chat</h1>
 <p class="meta">Ask about follow-ups, customers, or “What needs me?”. Answers use stored Work CRM facts when available.</p>
+${renderPendingAttachment()}
 <form data-form="assistant-prompt" class="quick-form aion-chat-compose" id="aionChatForm">
-<label>Message<textarea name="text" id="aionChatInput" required maxlength="10000" rows="3" placeholder="What needs me?"></textarea></label>
-<div class="actions"><button type="submit">Ask AION</button><button type="button" data-do="voice-prompt">Voice</button></div>
+<label>Message<textarea name="text" id="aionChatInput" maxlength="10000" rows="3" placeholder="Ask, or attach a photo…"></textarea></label>
+<div class="actions aion-compose-actions">
+<button type="button" data-do="attach-camera" title="Take photo">📷 Photo</button>
+<button type="button" data-do="attach-file" title="Choose photo or file">＋ File</button>
+<button type="button" data-do="voice-prompt" title="Voice">🎤</button>
+<button type="submit" class="aion-send">Send</button>
+</div>
+${/* capture="environment" opens the camera directly on iOS; the second input is the library/file picker. */ ""}
+<input type="file" id="aionCaptureInput" accept="image/*" capture="environment" hidden>
+<input type="file" id="aionPickInput" accept="image/*,.pdf,.txt,.md,.csv,.docx,.rtf,.heic" hidden>
 </form>
-${reply ? `<div class="card next aion-chat-reply"><p class="meta">${esc(reply.intent || "reply")}</p>
+${reply ? `<div class="card next aion-chat-reply">${reply.attachmentName ? `<p class="meta">📎 ${esc(reply.attachmentName)}</p>` : ""}
 <pre class="msg assistant" style="white-space:pre-wrap;margin:0;max-height:50svh;overflow:auto">${esc(reply.reply || "")}</pre>
 ${(reply.sources || []).length ? `<p class="meta">Sources: ${reply.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}
 </div>` : `<div class="empty">Your reply will show here. Try: <b>What needs me?</b></div>`}
@@ -187,7 +196,7 @@ ${(reply.sources || []).length ? `<p class="meta">Sources: ${reply.sources.map((
 <p class="meta">Try: What should I follow up on? · Who do I need to call? · What should I do today? · What do we know about Jane? · What's going on with ACME? · Draft John an email · Research ACME · Remember this</p>
 <form data-form="assistant-prompt"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What do we know about …" rows="3"></textarea></label>
 <div class="actions"><button type="submit">Ask</button><button type="button" data-do="voice-prompt">Voice</button></div></form>
-${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant"><b>assistant · ${esc(window.__aionLastAssistant.intent || "reply")}:</b> ${esc(window.__aionLastAssistant.reply || "")}</p>
+${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant">${esc(window.__aionLastAssistant.reply || "")}</p>
 ${(window.__aionLastAssistant.sources || []).length ? `<p class="meta">Sources: ${window.__aionLastAssistant.sources.map((x) => esc(x.label || x.id)).join("; ")}</p>` : ""}</div>` : ""}
 </div>
 <p class="hint">Raw model chat (below) is offline by default. CRM prompts above use structured production CRM first.</p>
@@ -271,6 +280,24 @@ const overdueCallbacks = (s, onDate = today()) => active(s).flatMap((c) => openF
 const todayAppointments = (s, onDate = today()) => active(s).flatMap((c) => c.appointments.filter((a) => a.at.slice(0, 10) === onDate && !["cancelled", "no-show"].includes(a.status)).map((a) => ({ c, a })));
 
 /** A short human interval so the timeline reads like a person wrote it. */
+/**
+ * The attachment staged in the composer, before it is sent.
+ *
+ * Held as one pending item rather than a queue: the Owner is standing at a car taking one photo of
+ * one VIN, and a queue would raise "which of these am I asking about?" without answering it.
+ */
+let pendingAttachment = null;
+
+function renderPendingAttachment() {
+  if (!pendingAttachment) return "";
+  const { name, dataUrl, isImage, sizeLabel, status } = pendingAttachment;
+  return `<div class="aion-attach-chip">
+${isImage ? `<img src="${esc(dataUrl)}" alt="Attached photo preview">` : `<span class="aion-attach-doc">📄</span>`}
+<span class="aion-attach-meta"><b>${esc(name)}</b><small>${esc(sizeLabel)}${status ? ` · ${esc(status)}` : ""}</small></span>
+<button type="button" class="aion-attach-remove" data-do="attach-remove" aria-label="Remove attachment">✕</button>
+</div>`;
+}
+
 function ago(at) {
   const days = Math.floor((Date.parse(today() + "T00:00:00.000Z") - Date.parse(at.slice(0, 10) + "T00:00:00.000Z")) / 86400000);
   if (days <= 0) return "Today";
@@ -1332,8 +1359,11 @@ function render() {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
-  const { area: target, action, do: verb, id, state, enabled, value, workspace, tab, sheet: sheetName, kind, followup, appt, status, template, archived, step, stage, result, ref } = button.dataset;
-  if (!target && !action && !verb && !workspace) return; // a plain form submit button; the submit handler owns it
+  const { area: target, areaJump, action, do: verb, id, state, enabled, value, workspace, tab, sheet: sheetName, kind, followup, appt, status, template, archived, step, stage, result, ref } = button.dataset;
+  // areaJump belongs in this guard: without it every `data-area-jump` button (the whole More sheet,
+  // plus the Capture/Customers/Inventory shortcuts) fell through this early return and the branch
+  // that handles them below was unreachable. On the phone that reads as a menu that does nothing.
+  if (!target && !areaJump && !action && !verb && !workspace) return; // a plain form submit button; the submit handler owns it
   event.preventDefault();
   try {
     if (workspace) { await api("settings.update", { settings: { activeWorkspace: workspace } }); openCustomer = null; openSheet = null; coachPanel = null; await load(); toast(`Switched to ${model.state.settings.workspaceLabels?.[workspace] ?? workspace}. Records stay in the workspace they were created in.`); return; }
@@ -1346,6 +1376,15 @@ document.addEventListener("click", async (event) => {
       render();
       return;
     }
+    if (verb === "attach-camera" || verb === "attach-file") {
+      // The hidden inputs live inside the chat form; opening the picker is a direct result of this
+      // tap, which is what iOS Safari requires (a deferred .click() is ignored).
+      const input = document.getElementById(verb === "attach-camera" ? "aionCaptureInput" : "aionPickInput");
+      if (!input) { toast("Attachment control is unavailable on this screen."); return; }
+      input.click();
+      return;
+    }
+    if (verb === "attach-remove") { pendingAttachment = null; render(); return; }
     if (verb === "more-open") {
       const more = document.getElementById("aionMoreSheet");
       if (more) more.hidden = false;
@@ -1675,6 +1714,48 @@ document.addEventListener("click", async (event) => {
   } catch (error) { toast(error.message); }
 });
 
+const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
+
+function base64FromBytes(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+
+/** Read a picked file into the composer. Preview is a data URL, so nothing is stored until send. */
+async function stageAttachment(file) {
+  if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} is larger than the 6 MB limit.`);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const base64 = base64FromBytes(bytes);
+  const mimeType = file.type || "application/octet-stream";
+  const isImage = mimeType.startsWith("image/");
+  const kb = file.size / 1024;
+  pendingAttachment = {
+    name: file.name || (isImage ? "photo.jpg" : "attachment"),
+    mimeType,
+    base64,
+    isImage,
+    dataUrl: isImage ? `data:${mimeType};base64,${base64}` : "",
+    sizeLabel: kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`,
+    status: "",
+  };
+}
+
+document.addEventListener("change", async (event) => {
+  const input = event.target;
+  if (input?.id !== "aionCaptureInput" && input?.id !== "aionPickInput") return;
+  const file = input.files?.[0];
+  input.value = ""; // let the same photo be picked twice in a row
+  if (!file) return;
+  try {
+    await stageAttachment(file);
+    render();
+  } catch (error) {
+    toast(error.message || "Could not read that file.");
+  }
+});
+
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
@@ -1684,9 +1765,35 @@ document.addEventListener("submit", async (event) => {
     if (kind === "conversation") await api("conversation.create", { title: d.title });
     if (kind === "conversation-rename") await api("conversation.update", { id: d.id, change: { title: d.title } });
     if (kind === "assistant-prompt") {
-      const result = await api("assistant.prompt", { text: d.text });
-      window.__aionLastAssistant = result;
-      toast(result.intent ? `Intent: ${result.intent}` : "Assistant replied.");
+      const text = String(d.text || "").trim();
+      const attachment = pendingAttachment;
+      if (!text && !attachment) { toast("Type a message or attach a photo."); return; }
+
+      let documentRef = null;
+      if (attachment) {
+        // Store the image first so the question is answered against a real stored document rather
+        // than a transient upload; the reply then has something durable to cite.
+        pendingAttachment = { ...attachment, status: "sending…" };
+        render();
+        const doc = await api("crm.document.upload", {
+          filename: attachment.name,
+          mimeType: attachment.mimeType,
+          contentBase64: attachment.base64,
+          tags: ["chat-attachment", attachment.isImage ? "photo" : "file"],
+        });
+        documentRef = doc?.id || doc?.sourceRef || null;
+      }
+
+      const result = await api("assistant.prompt", {
+        text: text || (attachment?.isImage ? "What vehicle is this and what do we know about it?" : "What is this file?"),
+        ...(documentRef ? { documentRef } : {}),
+        ...(attachment?.isImage
+          ? { imageBase64: attachment.base64, imageMimeType: attachment.mimeType, imageFilename: attachment.name }
+          : {}),
+      });
+      window.__aionLastAssistant = { ...result, attachmentName: attachment ? attachment.name : null };
+      pendingAttachment = null;
+      // The reply itself is the feedback; an intent name is developer diagnostics, not Owner UI.
       form.reset();
       await load();
       render();

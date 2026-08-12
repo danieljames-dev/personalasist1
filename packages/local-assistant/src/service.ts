@@ -113,6 +113,7 @@ import {
   VIN_VISION_PROMPT,
   type VinOcrResultV1,
 } from "./vin-ocr.js";
+import { buildPhotoProvenance, matchPhotoToVehicle } from "./photo-vehicle-match.js";
 import {
   buildVehicleTalkingPoints,
   compareTwoVehicles,
@@ -261,9 +262,11 @@ import {
   formatCustomerMatches,
   isFixtureVehicle,
   matchCustomerToVehicles,
+  vinDetailLines,
   type CustomerVehicleMatchV1,
   type VehicleQueryAnswerV1,
 } from "./vehicle-intelligence.js";
+import { describeRecallStatus } from "./recall-intelligence.js";
 import {
   buildWalkAcceptanceReport,
   buildWalkObservationMetrics,
@@ -437,6 +440,8 @@ export class AionAssistantV1 {
   private controllers = new Map<string, AbortController>();
   /** Sessions with a readiness check in flight. One at a time, so no session registers twice. */
   #activating = new Set<string>();
+  /** Vehicle most recently identified from a Chat photo, so follow-ups need no second upload. */
+  #lastPhotoVehicleId: string | null = null;
   private reconciliation: Promise<void> = Promise.resolve();
   /**
    * Resolves when the startup reconciliation of rented GPUs has finished.
@@ -5536,6 +5541,84 @@ export class AionAssistantV1 {
     };
   }
 
+  /**
+   * Answer a question about a photo the Owner attached in Chat.
+   *
+   * The whole point is that the Owner is standing at the car: they should get an identification and
+   * what AION actually knows, in one turn, without navigating anywhere. The answer is assembled from
+   * grounded records only — the vision model contributes characters, never facts about the vehicle.
+   */
+  async answerAboutVehiclePhoto(input: {
+    text: string;
+    contentBase64: string;
+    mimeType?: string;
+    filename?: string;
+    documentRef?: string | null;
+  }): Promise<{
+    intent: string;
+    confidence: string;
+    reply: string;
+    sources: Array<{ type: string; id: string; label: string }>;
+    action: string | null;
+    data: unknown;
+  }> {
+    const ocr = await this.ocrVinFromImage({
+      contentBase64: input.contentBase64,
+      ...(input.mimeType ? { mimeType: input.mimeType } : {}),
+      ...(input.filename ? { filename: input.filename } : {}),
+    });
+    const snapshot = await this.snapshot();
+    const vehicles = snapshot.vehicleInventory?.vehicles ?? [];
+    const link = matchPhotoToVehicle({ ocr, vehicles });
+    const observedAt = this.ports.clock.now();
+    const provenance = buildPhotoProvenance({
+      link,
+      imageSourceRef: input.documentRef || `image:${input.filename || "photo"}`,
+      observedAt,
+      extractionProvider: ocr.provider,
+      vinCandidate: ocr.best?.vin ?? null,
+    });
+
+    const lines: string[] = [];
+    const sources: Array<{ type: string; id: string; label: string }> = [];
+    const matched = link.vehicleRef ? vehicles.find((v) => v.id === link.vehicleRef) ?? null : null;
+
+    if (matched) {
+      const name = [matched.year, matched.make, matched.model, matched.trim].filter(Boolean).join(" ");
+      lines.push(name || "Vehicle identified");
+      lines.push(`VIN ${link.vin}${matched.stockNumber ? ` · Stock ${matched.stockNumber}` : ""}`);
+      lines.push("");
+      for (const line of vinDetailLines(matched, input.text)) lines.push(line.text);
+      const recall = describeRecallStatus(matched.recallAssessment);
+      if (recall) { lines.push(""); lines.push(recall); }
+      sources.push({ type: "vehicle", id: matched.id, label: name || matched.id });
+      // Remember the vehicle so "does it have recalls?" needs no second photo.
+      this.#lastPhotoVehicleId = matched.id;
+    } else {
+      lines.push(link.message);
+      this.#lastPhotoVehicleId = null;
+    }
+
+    if (link.candidates.length) {
+      lines.push("");
+      lines.push("Possible matches — tell me which one:");
+      for (const c of link.candidates) lines.push(`· ${c.label}${c.vin ? ` (${c.vin})` : ""}`);
+    }
+    if (!matched && ocr.qualityFeedback.length) {
+      lines.push("");
+      for (const tip of ocr.qualityFeedback.slice(0, 3)) lines.push(tip);
+    }
+
+    return {
+      intent: "VEHICLE_PHOTO",
+      confidence: matched ? "high" : "low",
+      reply: lines.join("\n").trim(),
+      sources,
+      action: "vehicle.photo.identify",
+      data: { link, provenance, ocrStatus: ocr.status },
+    };
+  }
+
   async vehicleRecallLookup(input: {
     vin?: string;
     make?: string;
@@ -9169,6 +9252,30 @@ export class AionAssistantV1 {
   }> {
     const route = routeCrmAssistantIntent(text);
     const state = await this.snapshot();
+
+    // A question that leans on "it"/"this" right after a photo is about the car just identified.
+    // Requiring a re-upload for every follow-up is the difference between a conversation and a form.
+    if (this.#lastPhotoVehicleId && /\b(it|this|that|the car|the vehicle|this one)\b/i.test(text)) {
+      const v = (state.vehicleInventory?.vehicles ?? []).find((x) => x.id === this.#lastPhotoVehicleId);
+      if (v) {
+        const name = [v.year, v.make, v.model, v.trim].filter(Boolean).join(" ");
+        const wantsRecall = /\brecall/i.test(text);
+        const body = wantsRecall
+          ? describeRecallStatus(v.recallAssessment)
+          : vinDetailLines(v, text).map((l) => l.text).join("\n");
+        if (body) {
+          return {
+            intent: "VEHICLE_PHOTO_FOLLOWUP",
+            confidence: "high",
+            reply: `${name}${v.vin ? ` · VIN ${v.vin}` : ""}\n\n${body}`,
+            sources: [{ type: "vehicle", id: v.id, label: name || v.id }],
+            action: "vehicle.photo.followup",
+            data: { vehicleId: v.id },
+          };
+        }
+      }
+    }
+
     const workspaceId = state.settings.activeWorkspace;
     const inWorkspace = state.relationships.filter(
       (r) => r.workspace === workspaceId && !r.archived && !isSyntheticRelationship(r),

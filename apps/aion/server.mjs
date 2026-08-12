@@ -592,6 +592,18 @@ export async function createAionServer(options = {}) {
       case "customer.summary": return service.accountSummary(input.id);
       case "assistant.prompt": {
         const text = String(input.text ?? input.content ?? "");
+        // A photo attached in Chat is answered about directly: the Owner is standing at the car and
+        // should not have to leave the conversation to identify it.
+        if (input.imageBase64) {
+          const photo = await service.answerAboutVehiclePhoto({
+            text,
+            contentBase64: String(input.imageBase64),
+            mimeType: String(input.imageMimeType || "image/jpeg"),
+            filename: String(input.imageFilename || "photo.jpg"),
+            documentRef: input.documentRef ? String(input.documentRef) : null,
+          });
+          return photo;
+        }
         const result = await service.assistantPrompt(text);
         if (result.action === "chat.fallback") {
           // Create/use a short-lived conversation for general chat when CRM intent is unclear.

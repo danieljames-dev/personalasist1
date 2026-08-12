@@ -267,6 +267,54 @@ body.aion-phone-mode {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, .45);
+  /* It is a <button> so click delegation reaches it; strip the button chrome. */
+  border: 0;
+  padding: 0;
+  width: 100%;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+/* ---- Chat composer: attachment + message + voice + send, sized for thumbs ---- */
+.aion-compose-actions {
+  display: flex;
+  gap: .4rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.aion-compose-actions button {
+  min-height: 44px; /* iOS touch target floor */
+  flex: 0 0 auto;
+}
+.aion-compose-actions .aion-send {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+.aion-attach-chip {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .5rem;
+  margin-bottom: .5rem;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: .6rem;
+  background: rgba(255, 255, 255, .04);
+}
+.aion-attach-chip img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: .4rem;
+  flex: 0 0 auto;
+}
+.aion-attach-doc { font-size: 2rem; line-height: 1; }
+.aion-attach-meta { display: grid; min-width: 0; flex: 1 1 auto; }
+.aion-attach-meta b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aion-attach-meta small { opacity: .7; }
+.aion-attach-remove {
+  min-width: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
 }
 .aion-more-panel {
   position: absolute;

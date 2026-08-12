@@ -56,7 +56,8 @@
   </div>
 
   <div id="aionMoreSheet" class="aion-more-sheet" hidden>
-    <div class="aion-more-backdrop" data-do="more-close"></div>
+    <!-- A button, not a div: click delegation matches closest("button"), so a div backdrop was inert. -->
+    <button type="button" class="aion-more-backdrop" data-do="more-close" aria-label="Close"></button>
     <div class="aion-more-panel" role="dialog" aria-label="More">
       <h2>More</h2>
       <button type="button" data-area-jump="Intake">Intake — photos &amp; files</button>
