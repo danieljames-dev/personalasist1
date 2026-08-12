@@ -336,6 +336,67 @@ every new area through the existing Command Center rather than a second interfac
 The model-independence requirement recorded under Cross-cutting programs is part of this milestone.
 
 
+## Vertical: Personal Sales Presence
+
+**Mission.** AION develops and operates the Owner's professional automotive-sales online presence
+using grounded current inventory, Owner brand, aggregate customer demand, and real dealership
+activity — not generic marketing templates.
+
+The distinction that defines this vertical: a content system for a salesperson is only worth having
+if it is *grounded*. A calendar that demands five posts a week produces filler, and filler teaches an
+audience to scroll past. Every opportunity here derives from something that actually happened — a car
+arrived, a price moved, several people asked the same question — and "post nothing today" is a
+supported answer.
+
+### Status legend
+
+`IMPLEMENTED` runnable in production today · `FOUNDATION` domain contracts and logic exist with
+tests, not yet wired to the runtime · `PLANNED` designed, not built · `REQUIRES_EXTERNAL_CONNECTION`
+blocked on an external provider, account, or Owner consent that does not exist yet.
+
+### Capability status
+
+| Capability | Status | Note |
+|---|---|---|
+| Grounded vehicle inventory with price history | `IMPLEMENTED` | Advertised / MSRP / dealer price already separate per observation |
+| Customer needs, commitments, aggregate demand | `IMPLEMENTED` | Consumed here only in privacy-safe aggregate |
+| Sales brand profile | `FOUNDATION` | `SalesBrandProfileV1`; derives from the existing `BrandDnaV1` |
+| Content pillars | `FOUNDATION` | Configurable; consent-gated pillars closed by default |
+| Content opportunity engine | `FOUNDATION` | Ranked from grounded signals; refuses ungrounded ones |
+| Social content plan (daily / weekly / monthly) | `FOUNDATION` | No posting quota; may recommend nothing |
+| Content drafts — Facebook, Instagram, short video, Reel, TikTok, YouTube Short, website feature, article, FAQ, customer share | `FOUNDATION` | One grounded facts object, many renderings |
+| Price-truth enforcement | `FOUNDATION` | Advertised is not MSRP is not observed; unknown prices produce no figure |
+| Temporal invalidation of vehicle content | `FOUNDATION` | Freshness re-derived from the live record, never stored and trusted |
+| Website information architecture | `FOUNDATION` | Mobile-first; a view over inventory facts, never a second database |
+| Vehicle page projection | `FOUNDATION` | Carries price source and last-verified date; VIN display policy |
+| Lead capture contract | `FOUNDATION` | Minimal fields; credit-application fields refused at contract level |
+| Social publish proposal | `FOUNDATION` | `PREPARE_ONLY`; no executor exists |
+| Website change proposal | `FOUNDATION` | `PREPARE_ONLY`; no deployment path exists |
+| Analytics feedback model | `FOUNDATION` | Contracts and fixtures only; refuses to read a sample too small |
+| Owner command vocabulary | `FOUNDATION` | Routing defined and tested; deliberately not spliced into `service.ts` |
+| Runtime wiring into Chat | `PLANNED` | Deferred to integration to avoid collision with parallel executors |
+| Real personal sales website | `PLANNED` | No hosting, domain, or deployment decision has been made |
+| Social scheduling and publishing | `REQUIRES_EXTERNAL_CONNECTION` | Metricool or equivalent; no OAuth, no connection, no post |
+| Real analytics ingestion | `REQUIRES_EXTERNAL_CONNECTION` | Fixtures only until a provider is connected |
+
+### What does not exist
+
+No website is deployed. No domain is registered. No social account is connected. Nothing in this
+vertical can publish, post, schedule, email, or text, and no code path in the repository attempts to.
+Every proposal type is `PREPARE_ONLY` and has no executor.
+
+### Invariants
+
+1. Customer intelligence informs content only in aggregate. A single customer's stated want never
+   becomes public content, and the aggregation floor is enforced where opportunities are constructed
+   rather than where text is written.
+2. A website-advertised price, a window-sticker MSRP, and an in-store observation are three separate
+   facts with separate sources. Only a current advertised price may be quoted as the price.
+3. Vehicle content carries an expiry and is re-verified against the live record rather than trusted.
+4. Nothing asserts financing, payments, incentives, rebates, trade values, or availability.
+5. Claims about the Owner require evidence. Unknown stays unknown.
+
+
 ## Cross-cutting programs
 
 ### Security and privacy
