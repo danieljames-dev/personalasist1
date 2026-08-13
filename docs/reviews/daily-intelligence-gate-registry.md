@@ -24,6 +24,17 @@ Every gate must be labeled with **at most one** primary evidence tier:
 | **TAILSCALE_HTTPS** | `https://<machine>.<tailnet>.ts.net` probes | No |
 | **PHYSICAL_IPHONE** | Owner device Safari | **Only if Owner retests** |
 
+**HTTPS sub-tiers (report separately; do not collapse):**
+
+```text
+TAILSCALE_CONTROL_PLANE_CAPABILITY
+LOCAL_HTTPS_VERIFY
+TAILSCALE_HTTPS_PASS
+PHYSICAL_IPHONE_OWNER_RETEST_PENDING
+```
+
+Local HTTPS verify must **not** be promoted to physical iPhone PASS.
+
 **Rule:** `PHYSICAL_IPHONE_OWNER_RETEST_PENDING` is the default for mic, camera attach, Safari MediaRecorder, and full Owner-day feel until Owner confirms.
 
 ---

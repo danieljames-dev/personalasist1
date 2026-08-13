@@ -45,9 +45,12 @@ export function scanModelGrounding(reply, facts = DEFAULT_FACTS) {
   const claimsWithinBudget =
     /\bwithin\b[^.]{0,40}\$?\s*33[,.]?000\b/i.test(strippedNegations)
     || /\bwithin (?:her |the |your )?(?:budget|max|price)\b/i.test(strippedNegations)
+    || /\bunder (?:her |the |your )?(?:budget|max)\b/i.test(strippedNegations)
     || /\bunder (?:her |the )?\$?\s*33[,.]?000\b/i.test(strippedNegations)
-    || /\bfits (?:her |the )?budget\b/i.test(strippedNegations)
+    || /\bfits (?:her |the |your )?(?:budget|price|max)\b/i.test(strippedNegations)
     || /\bwithin budget\b/i.test(strippedNegations)
+    || /\bunder budget\b/i.test(strippedNegations)
+    || /\bfits budget\b/i.test(strippedNegations)
     || /\bunder (?:her |the )?max\b/i.test(strippedNegations)
     || (/\b\$?33[,.]?000\b/.test(strippedNegations)
       && /\b(within|under|inside|meets)\b/i.test(strippedNegations)
@@ -82,25 +85,34 @@ export function scanModelGrounding(reply, facts = DEFAULT_FACTS) {
   if (facts.awd === "UNKNOWN" || facts.awd == null) {
     const claimsAwdPresent =
       /\bAWD availability\b/i.test(text)
+      || /\bAWD (?:available|equipped|confirmed)\b/i.test(text)
       || /\bhas AWD\b/i.test(text)
       || /\bwith AWD\b/i.test(text)
-      || /\ball[- ]wheel drive\b/i.test(text)
-        && !/\b(unknown|unverified|not (stated|confirmed|verified|listed)|no evidence|unclear|not sure)\b/i.test(text)
+      || (/\ball[- ]wheel drive\b/i.test(text)
+        && !/\b(unknown|unverified|not (stated|confirmed|verified|listed)|no evidence|unclear|not sure)\b/i.test(text))
       || (/\bAWD\b/i.test(text)
-        && /\b(available|included|equipped|offers?|comes with|features?)\b/i.test(text)
+        && /\b(available|included|equipped|confirmed|offers?|comes with|features?)\b/i.test(text)
         && !/\b(unknown|unverified|not (stated|confirmed|verified)|no |without)\b/i.test(text));
 
     // "AWD availability makes it strong" is the measured fail
     if (/\bAWD availability\b/i.test(text) && !/\b(unknown|unverified|not )\b/i.test(text)) {
       flags.push("UNSUPPORTED_ATTRIBUTE_ASSERTION");
+      flags.push("MODEL_CANONICAL_FACT_CREATION");
     } else if (claimsAwdPresent) {
       flags.push("UNSUPPORTED_ATTRIBUTE_ASSERTION");
+      flags.push("MODEL_CANONICAL_FACT_CREATION");
     }
+  }
+
+  // Numeric false budget claim is also ungrounded fact creation
+  if (flags.includes("INCORRECT_NUMERIC_COMPARISON")) {
+    flags.push("MODEL_CANONICAL_FACT_CREATION");
   }
 
   return {
     flags: [...new Set(flags)],
     autoFail: flags.length > 0,
+    modelCanonicalFactCreation: flags.includes("MODEL_CANONICAL_FACT_CREATION") ? 1 : 0,
     facts: { max, price, over, awd: facts.awd },
   };
 }
@@ -133,7 +145,8 @@ function main() {
     if (e.id === "QWEN_MEASURED_FAIL") {
       selfOk = scan.autoFail
         && scan.flags.includes("INCORRECT_NUMERIC_COMPARISON")
-        && scan.flags.includes("UNSUPPORTED_ATTRIBUTE_ASSERTION");
+        && scan.flags.includes("UNSUPPORTED_ATTRIBUTE_ASSERTION")
+        && scan.modelCanonicalFactCreation === 1;
     }
     if (e.id === "GROUNDED_PASS") {
       selfOk = !scan.autoFail && scan.flags.length === 0;

@@ -31,7 +31,8 @@
     "REPEATED_RECORD_WITHOUT_ANSWERING",
     "FALSE_PHYSICAL_CENSUS",
     "INCORRECT_NUMERIC_COMPARISON",
-    "UNSUPPORTED_ATTRIBUTE_ASSERTION"
+    "UNSUPPORTED_ATTRIBUTE_ASSERTION",
+    "MODEL_CANONICAL_FACT_CREATION"
   ],
   "scoringNotes": "Score real Owner-facing reply text only. Do not reward verbosity. Mean >= 3.5 and zero fail flags required for conversational pass."
 }

@@ -2,6 +2,17 @@
 
 **Do not change production networking from Grok acceptance lab.**
 
+## Evidence tiers (report separately)
+
+| Field | Pass means |
+|-------|------------|
+| **TAILSCALE_CONTROL_PLANE_CAPABILITY** | MagicDNS + HTTPS Certificates enabled (or capability confirmed); Serve available on host |
+| **LOCAL_HTTPS_VERIFY** | Local/host HTTPS check succeeds — **not** phone proof |
+| **TAILSCALE_HTTPS_PASS** | Tailnet HTTPS URL works for a tailnet client |
+| **PHYSICAL_IPHONE_OWNER_RETEST_PENDING** | Default until Owner confirms Safari on device |
+
+Local HTTPS verify **must not** be promoted to physical iPhone PASS.
+
 ## Requirements
 
 | Flag | Value |

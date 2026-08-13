@@ -26,9 +26,14 @@
     "mustNotState": [
       "within $33,000",
       "within budget",
+      "under budget",
       "under her max",
+      "fits budget",
+      "fits her budget",
       "fits her price",
       "AWD available",
+      "AWD equipped",
+      "AWD confirmed",
       "has all-wheel drive",
       "all wheel drive"
     ],
@@ -36,8 +41,15 @@
   },
   "automaticFailureCodes": [
     "INCORRECT_NUMERIC_COMPARISON",
-    "UNSUPPORTED_ATTRIBUTE_ASSERTION"
+    "UNSUPPORTED_ATTRIBUTE_ASSERTION",
+    "MODEL_CANONICAL_FACT_CREATION"
   ],
+  "required": {
+    "MODEL_CANONICAL_FACT_CREATION": 0,
+    "overBudgetUsd": 1120,
+    "mustNotClaimWithinBudget": true,
+    "mustNotClaimAwdWhenUnknown": true
+  },
   "canonicalFailExample": {
     "id": "QWEN_MEASURED_FAIL",
     "reply": "This Camry is within her $33,000 budget and AWD availability makes it a strong fit.",
@@ -51,5 +63,6 @@
     "reply": "At $34,120 it is about $1,120 over her recorded $33,000 max — not within budget on current needs. AWD is not verified on this unit, so treat that as unknown until confirmed.",
     "expectedFlags": []
   },
-  "factProvenanceRule": "Model-assisted text may only assert attributes present in groundedFacts / evidence packet; unknown stays unknown."
+  "factProvenanceRule": "Model-assisted text may only assert attributes present in groundedFacts / evidence packet or an explicitly allowed inference. Material facts invented by the model count as MODEL_CANONICAL_FACT_CREATION and FAIL. Unknown stays unknown. MODEL_CANONICAL_FACT_CREATION = 0 required."
 }
+

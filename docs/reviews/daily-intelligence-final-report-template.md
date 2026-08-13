@@ -15,11 +15,25 @@ BASE_MAIN_HEAD =
 ```text
 AUTOMATED_PASS =
 LOCAL_BROWSER_PASS =
+```
+
+### HTTPS evidence (must be separate — do not collapse)
+
+```text
+TAILSCALE_CONTROL_PLANE_CAPABILITY =
+LOCAL_HTTPS_VERIFY =
 TAILSCALE_HTTPS_PASS =
 PHYSICAL_IPHONE_OWNER_RETEST_PENDING = YES
 ```
 
-Do **not** set PHYSICAL_IPHONE to PASS without Owner device confirmation.
+| Field | Meaning |
+|-------|---------|
+| **TAILSCALE_CONTROL_PLANE_CAPABILITY** | MagicDNS / HTTPS certs / Serve capability exist in tailnet control plane (admin/config) |
+| **LOCAL_HTTPS_VERIFY** | Loopback or host-local HTTPS probe succeeds (not proof of phone path) |
+| **TAILSCALE_HTTPS_PASS** | `https://<machine>.<tailnet>.ts.net` works from a tailnet client as designed |
+| **PHYSICAL_IPHONE_OWNER_RETEST_PENDING** | Owner Safari on real device — **default YES until Owner confirms** |
+
+Do **not** call physical iPhone PASS from local HTTPS verification alone.
 
 ## Gate results
 

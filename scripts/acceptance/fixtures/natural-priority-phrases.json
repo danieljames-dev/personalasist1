@@ -1,20 +1,27 @@
 {
   "gate": "NATURAL_PRIORITY_PHRASE_COVERAGE",
-  "description": "Regression from 05ce03e targeted review: bare 'focus on next' must not be UNCLEAR.",
+  "description": "Regression from 05ce03e: natural prioritization wording must not result in UNCLEAR solely due to missing exact patterns.",
   "mustMapTo": ["PLAN_MY_DAY", "PRIORITIZE_VEHICLES"],
+  "expectedBehavior": "prioritization / day-plan behavior — not UNCLEAR solely because exact wording was not listed",
   "variants": [
     "What should I focus on next?",
     "What should I focus on?",
+    "Where should I focus?",
     "Where should I focus next?",
+    "What deserves my attention?",
+    "What should I work on now?",
+    "What should I work on next?",
+    "What matters most right now?",
+    "What would you do next?",
     "What do you think I should focus on next?",
     "What should I do next?",
-    "What should I work on next?",
     "Where should I start?",
     "My sales day."
   ],
   "failIf": {
     "goal": "UNCLEAR",
-    "confidence": 0
+    "confidence": 0,
+    "reason": "solely because exact wording was not listed"
   },
-  "note": "At minimum the first variant must not return UNCLEAR after Claude's pattern fix lands."
+  "note": "At minimum the first six variants must not return UNCLEAR after Claude pattern coverage lands."
 }
