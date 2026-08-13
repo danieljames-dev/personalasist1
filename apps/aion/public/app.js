@@ -376,6 +376,59 @@ const todayAppointments = (s, onDate = today()) => active(s).flatMap((c) => c.ap
  * Held as one pending item rather than a queue: the Owner is standing at a car taking one photo of
  * one VIN, and a queue would raise "which of these am I asking about?" without answering it.
  */
+/**
+ * Why the microphone button did nothing on the Owner's iPhone.
+ *
+ * Safari only exposes `navigator.mediaDevices` in a secure context. Reached over plain http on the
+ * private network, the object is simply absent, so every capability test failed and the handler
+ * returned without a word. The fix is not a workaround — it is saying which of the three possible
+ * causes it is, in a sentence the Owner can act on.
+ */
+function microphoneDiagnostic() {
+  const secure = typeof window !== "undefined" && window.isSecureContext === true;
+  const hasDevices = Boolean(navigator.mediaDevices);
+  const hasGetUserMedia = Boolean(navigator.mediaDevices?.getUserMedia);
+  const hasRecorder = typeof window !== "undefined" && typeof window.MediaRecorder !== "undefined";
+  const mime = hasRecorder ? preferredRecordingMime() : "";
+
+  let usable = false;
+  let message = "";
+  if (!secure) {
+    message = "The mic needs a secure connection. This page is on plain http, so Safari won't let any "
+      + "site record — it's a browser rule, not a permission you can grant. Private HTTPS over Tailscale fixes it.";
+  } else if (!hasDevices || !hasGetUserMedia) {
+    message = "This browser doesn't offer microphone access on this page.";
+  } else if (!hasRecorder) {
+    message = "This browser can reach the mic but can't record audio.";
+  } else {
+    usable = true;
+    message = `Ready to record${mime ? ` (${mime})` : ""}.`;
+  }
+  return { secure, hasDevices, hasGetUserMedia, hasRecorder, mime, usable, message, protocol: location.protocol };
+}
+
+/**
+ * The recording format this browser actually supports.
+ *
+ * mp4 is listed because iOS Safari records mp4/aac and cannot do webm; the original list asked only
+ * for webm, which is why the iPhone path had no usable format.
+ */
+function preferredRecordingMime() {
+  if (typeof window === "undefined" || typeof window.MediaRecorder === "undefined") return "";
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4;codecs=mp4a.40.2",
+    "audio/mp4",
+    "audio/aac",
+    "audio/ogg;codecs=opus",
+  ];
+  for (const type of candidates) {
+    try { if (MediaRecorder.isTypeSupported(type)) return type; } catch { /* keep trying */ }
+  }
+  return "";
+}
+
 let pendingAttachment = null;
 /** Laptop microphone MediaRecorder session (explicit; never ambient/background). */
 let voiceRecording = null; // { recorder, chunks, startedAt } | null
@@ -1530,14 +1583,22 @@ document.addEventListener("click", async (event) => {
         toast("Stopping recording…");
         return;
       }
+      // Why the microphone did nothing on the Owner's iPhone: over plain http the page is not a
+      // secure context, so Safari does not expose navigator.mediaDevices at all. The previous code
+      // tested for it and fell through in silence, which is indistinguishable from a dead button.
+      const micDiag = microphoneDiagnostic();
+      window.__aionMicDiagnostic = micDiag;
+      if (!micDiag.usable) {
+        toast(micDiag.message);
+        render();
+        return;
+      }
       if (navigator.mediaDevices?.getUserMedia && window.MediaRecorder) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-            ? "audio/webm;codecs=opus"
-            : MediaRecorder.isTypeSupported("audio/webm")
-              ? "audio/webm"
-              : "";
+          // Safari/iOS cannot record webm — it records mp4/aac. Asking only for webm left the iPhone
+          // with an empty mime and whatever the browser defaulted to.
+          const mime = preferredRecordingMime();
           const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
           const chunks = [];
           recorder.ondataavailable = (ev) => { if (ev.data?.size) chunks.push(ev.data); };
