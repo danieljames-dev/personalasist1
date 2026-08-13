@@ -43,3 +43,8 @@ It must **not** freeze unrelated authorized work solely because the gate is open
 
 Gates 86–95 (`work-items.json`) freeze Owner gates as local dependency blocks.
 Do not weaken gates 1–85. Do not inspect a future Claude SHA to reshape these fixtures.
+
+## Known-defect regression pack (separate)
+
+Implementation defects found later live under `scripts/acceptance/director/regressions/`.
+They do **not** edit the 95-gate catalog. Final acceptance runs both runners.
