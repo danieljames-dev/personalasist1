@@ -16,3 +16,4 @@ export * from "./handoff.js";
 export * from "./leases.js";
 export * from "./executors.js";
 export * from "./work-items.js";
+export * from "./store-contract.js";

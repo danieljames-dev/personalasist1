@@ -55,10 +55,13 @@ test("a SHA that does not match blocks rather than continues", () => {
   assert.equal(mismatch.to, "BLOCKED");
 });
 
-test("deployment is always gated", () => {
+test("deployment is always gated, and integration is verified before it", () => {
   // There is no transition from integration completing straight into deploying.
   assert.equal(advance("INTEGRATING", "DEPLOY_STARTED").ok, false);
-  assert.equal(advance("INTEGRATING", "INTEGRATION_COMPLETED").to, "READY_FOR_DEPLOYMENT");
+  // This assertion used to expect READY_FOR_DEPLOYMENT, which is the defect independent review
+  // found: integrating went straight to deployment-ready with nothing checking that the integrated
+  // tree was sound. Integration now feeds verification, and only verification can hand on.
+  assert.equal(advance("INTEGRATING", "INTEGRATION_COMPLETED").to, "VERIFYING");
   assert.equal(advance("READY_FOR_DEPLOYMENT", "OWNER_GATE_OPENED").to, "OWNER_GATE_REQUIRED");
 });
 
@@ -135,7 +138,14 @@ test("an answer resumes the same mission rather than starting a new one", () => 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.gate.status, "APPROVED");
   assert.equal(resolved.gate.resumeState, "VERIFYING", "the mission continues where it stopped");
-  assert.equal(advance("WAITING_FOR_OWNER", "OWNER_GATE_RESOLVED").to, "PLANNING");
+  // This used to assert that resolution always lands on PLANNING, which is the defect independent
+  // review found: the gate's own resumeState was computed, stored, and then ignored. Where the
+  // mission goes is now derived from the durable board rather than fixed by the event, so the
+  // assertion is that resolution is accepted and does not invent a destination of its own.
+  const resumed = advance("WAITING_FOR_OWNER", "OWNER_GATE_RESOLVED");
+  assert.equal(resumed.ok, true, resumed.reason);
+  assert.notEqual(resumed.to, "COMPLETED", "answering a gate never completes a mission");
+  assert.notEqual(resumed.to, "FAILED");
 });
 
 test("approval does not carry to a world that has moved since the question", () => {
