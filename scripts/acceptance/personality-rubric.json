@@ -1,0 +1,22 @@
+{
+  "dimensions": [
+    "USEFULNESS",
+    "NATURALNESS",
+    "GROUNDING",
+    "CONTEXT_RETENTION",
+    "PROACTIVITY",
+    "HONESTY_ABOUT_UNKNOWN",
+    "ACTIONABILITY"
+  ],
+  "scale": { "min": 1, "max": 5 },
+  "iphoneUsefulMeanThreshold": 3.5,
+  "failFlags": [
+    "DEBUG_LOG_AS_ANSWER",
+    "SCHEMA_DUMP",
+    "INTENT_ROUTER_LABEL",
+    "GENERIC_AI_BOILERPLATE",
+    "UNHELPFUL_DISCLAIMER_WALL",
+    "REPEATED_RECORD_WITHOUT_ANSWERING"
+  ],
+  "scoringNotes": "Score real Owner-facing reply text only. Do not reward verbosity."
+}

@@ -1,0 +1,21 @@
+{
+  "suite": "physical-vs-website",
+  "question": "How many other used cars are on the lot?",
+  "setup": {
+    "physicallyVerifiedVehicleIds": ["veh-crown"],
+    "websiteUsedCount": 120,
+    "physicallyVerifiedCount": 1
+  },
+  "mustIncludePatterns": [
+    "unknown|not know|haven't (seen|verified)|sample|photographed",
+    "list(ed|ing)|online|website|inventory feed"
+  ],
+  "mustNotIncludePatterns": [
+    "there are 120 used cars on the lot",
+    "120 cars on the lot right now"
+  ],
+  "required": {
+    "noFalsePhysicalClaim": true,
+    "nextStepPresent": true
+  }
+}

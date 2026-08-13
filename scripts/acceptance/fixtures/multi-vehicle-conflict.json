@@ -1,0 +1,30 @@
+{
+  "suite": "multi-vehicle-conflict",
+  "description": "Two different valid VINs in one message — must not fuse",
+  "oracles": {
+    "vinA": "JTDACAAJ8T3051788",
+    "vinB": "4T1G11AK5MU123456"
+  },
+  "images": [
+    {
+      "imageRef": "veh-a",
+      "role": "WINDOW_STICKER",
+      "quality": 90,
+      "vinCandidates": ["JTDACAAJ8T3051788"],
+      "ocrText": "VIN JTDACAAJ8T3051788 CROWN SIGNIA"
+    },
+    {
+      "imageRef": "veh-b",
+      "role": "WINDOW_STICKER",
+      "quality": 90,
+      "vinCandidates": ["4T1G11AK5MU123456"],
+      "ocrText": "VIN 4T1G11AK5MU123456 CAMRY"
+    }
+  ],
+  "note": "vinB check digit may fail depending on serial — harness revalidates and substitutes a second valid VIN if needed",
+  "required": {
+    "resolution": "UNRESOLVED_CONFLICTING_VINS",
+    "falseFusion": 0,
+    "userMessageMentionsMultiple": true
+  }
+}

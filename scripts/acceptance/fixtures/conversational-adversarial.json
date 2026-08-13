@@ -1,0 +1,16 @@
+{
+  "suite": "conversational-adversarial",
+  "questions": [
+    { "id": "C1", "text": "How many other used cars are on the lot?", "expects": ["scope", "unknown", "website-separate"] },
+    { "id": "C2", "text": "What do you think I should focus on next?", "expects": ["next-action"] },
+    { "id": "C3", "text": "Which of these cars should I spend time on?", "expects": ["prioritize-or-limit"] },
+    { "id": "C4", "text": "Is this actually a good match for Sarah?", "expects": ["customer-vehicle", "uncertainty-ok"] },
+    { "id": "C5", "text": "What don't we know yet?", "expects": ["unknowns"] },
+    { "id": "C6", "text": "Why are you recommending this?", "expects": ["reasons"] },
+    { "id": "C7", "text": "What should I do with this car if nobody matches it?", "expects": ["action-no-invented-demand"] },
+    { "id": "C8", "text": "What did Caleb and I decide about this kind of system?", "expects": ["memory-or-insufficient"] },
+    { "id": "C9", "text": "Can you find out what's current instead of guessing?", "expects": ["research-or-limit"] },
+    { "id": "C10", "text": "Use the photos I just sent.", "expects": ["focus-or-evidence"] },
+    { "id": "C11", "text": "What about the other one?", "expects": ["referent-or-clarify"] }
+  ]
+}

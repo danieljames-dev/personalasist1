@@ -1,0 +1,48 @@
+{
+  "suite": "multi-photo-m1",
+  "description": "Owner failure: bad first OCR, valid second VIN, third sticker facts",
+  "note": "Oracle VINs for acceptance only — never hardcode into product logic",
+  "oracles": {
+    "badVin": "STDAAABS1RS004150",
+    "goodVin": "JTDACAAJ8T3051788",
+    "model": "Crown Signia",
+    "trim": "Limited",
+    "baseMsrp": 49090,
+    "totalMsrp": 50955
+  },
+  "images": [
+    {
+      "imageRef": "img-a-bad",
+      "role": "VIN_CLOSEUP",
+      "quality": 35,
+      "vinCandidates": ["STDAAABS1RS004150"],
+      "ocrText": "VIN STDAAABS1RS004150 glare washout"
+    },
+    {
+      "imageRef": "img-b-good",
+      "role": "WINDOW_STICKER",
+      "quality": 88,
+      "vinCandidates": ["JTDACAAJ8T3051788"],
+      "ocrText": "VEHICLE IDENTIFICATION NUMBER JTDACAAJ8T3051788 TOYOTA CROWN SIGNIA LIMITED"
+    },
+    {
+      "imageRef": "img-c-facts",
+      "role": "WINDOW_STICKER",
+      "quality": 80,
+      "vinCandidates": [],
+      "ocrText": "BASE MANUFACTURER'S SUGGESTED RETAIL PRICE $49,090.00 TOTAL SUGGESTED RETAIL PRICE $50,955.00 Advanced Technology Package All-Wheel Drive"
+    }
+  ],
+  "followUps": [
+    "What about the price?",
+    "Who might want this one?",
+    "Is this hybrid?",
+    "Make a post for this one."
+  ],
+  "required": {
+    "resolution": "RESOLVED",
+    "validatedVin": "JTDACAAJ8T3051788",
+    "falseVinLinks": 0,
+    "rejectBadCandidate": true
+  }
+}
