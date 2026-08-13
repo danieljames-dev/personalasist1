@@ -273,7 +273,7 @@ ${renderPendingAttachment()}
 </div>
 ${/* capture="environment" opens the camera directly on iOS; the second input is the library/file picker. */ ""}
 <input type="file" id="aionCaptureInput" accept="image/*" capture="environment" hidden>
-<input type="file" id="aionPickInput" accept="image/*,audio/*,.pdf,.txt,.md,.csv,.docx,.rtf,.heic,.wav,.mp3,.m4a,.webm,.ogg" hidden>
+<input type="file" id="aionPickInput" accept="image/*,audio/*,.pdf,.txt,.md,.csv,.docx,.rtf,.heic,.wav,.mp3,.m4a,.webm,.ogg" multiple hidden>
 </form>
 ${reply ? `<div class="card next aion-chat-reply">${reply.attachmentName ? `<p class="meta">📎 ${esc(reply.attachmentName)}</p>` : ""}
 <pre class="msg assistant" style="white-space:pre-wrap;margin:0;max-height:50svh;overflow:auto">${esc(reply.reply || "")}</pre>
@@ -429,23 +429,56 @@ function preferredRecordingMime() {
   return "";
 }
 
-let pendingAttachment = null;
+/**
+ * Everything staged for the next send.
+ *
+ * An array because the Owner photographs a sticker, a VIN plate and a second page and means them as
+ * one question. The previous single slot silently replaced the first photo with the second, which is
+ * why three pictures of one car arrived as three unrelated questions.
+ */
+let pendingAttachments = [];
+/** Stages of the current send that have actually started. Never a fake percentage. */
+let sendProgress = null;
 /** Laptop microphone MediaRecorder session (explicit; never ambient/background). */
 let voiceRecording = null; // { recorder, chunks, startedAt } | null
 
 function renderPendingAttachment() {
-  if (!pendingAttachment) return "";
-  const { name, dataUrl, isImage, isAudio, sizeLabel, status } = pendingAttachment;
-  const icon = isImage
-    ? `<img src="${esc(dataUrl)}" alt="Attached photo preview">`
-    : isAudio
-      ? `<span class="aion-attach-doc" aria-hidden="true">🎙</span>`
-      : `<span class="aion-attach-doc">📄</span>`;
-  return `<div class="aion-attach-chip">
+  const chips = pendingAttachments.map((a, index) => {
+    const { name, dataUrl, isImage, isAudio, sizeLabel, status } = a;
+    const icon = isImage
+      ? `<img src="${esc(dataUrl)}" alt="Attached photo preview">`
+      : isAudio
+        ? `<span class="aion-attach-doc" aria-hidden="true">🎙</span>`
+        : `<span class="aion-attach-doc">📄</span>`;
+    return `<div class="aion-attach-chip">
 ${icon}
 <span class="aion-attach-meta"><b>${esc(name)}</b><small>${esc(sizeLabel)}${status ? ` · ${esc(status)}` : ""}${isAudio ? " · audio" : ""}</small></span>
-<button type="button" class="aion-attach-remove" data-do="attach-remove" aria-label="Remove attachment">✕</button>
+<button type="button" class="aion-attach-remove" data-do="attach-remove" data-index="${index}" aria-label="Remove ${esc(name)}">✕</button>
 </div>`;
+  }).join("");
+  const count = pendingAttachments.length > 1
+    ? `<p class="meta">${pendingAttachments.length} photos — they go together as one question.</p>`
+    : "";
+  return `${count}${chips}${renderSendProgress()}`;
+}
+
+/**
+ * Truthful stage feedback.
+ *
+ * Stages appear only once they have started, and there is no percentage — a bar that invents
+ * progress is worse than silence, because it sets an expectation nothing is measuring. The Owner's
+ * complaint was a long quiet gap, not a missing number.
+ */
+function renderSendProgress() {
+  if (!sendProgress?.stages?.length) return "";
+  const lines = sendProgress.stages.map((s) => `<p class="meta">${esc(s)}</p>`).join("");
+  return `<div class="aion-attach-chip" role="status" aria-live="polite"><span class="aion-attach-meta">${lines}</span></div>`;
+}
+
+function progressStage(text) {
+  if (!sendProgress) sendProgress = { stages: [] };
+  sendProgress.stages.push(text);
+  render();
 }
 
 function renderVoiceRecordingChip() {
@@ -1543,7 +1576,14 @@ document.addEventListener("click", async (event) => {
       input.click();
       return;
     }
-    if (verb === "attach-remove") { pendingAttachment = null; render(); return; }
+    if (verb === "attach-remove") {
+      const index = Number(el.dataset.index ?? -1);
+      pendingAttachments = Number.isInteger(index) && index >= 0
+        ? pendingAttachments.filter((_, i) => i !== index)
+        : [];
+      render();
+      return;
+    }
     if (verb === "more-open") {
       const more = document.getElementById("aionMoreSheet");
       if (more) more.hidden = false;
@@ -1949,6 +1989,8 @@ document.addEventListener("click", async (event) => {
 });
 
 const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
+/** Bounded so a mis-tap cannot queue a hundred photos into one request. */
+const MAX_ATTACHMENTS = 6;
 
 function base64FromBytes(bytes) {
   let binary = "";
@@ -1966,7 +2008,11 @@ async function stageAttachment(file) {
   const isImage = mimeType.startsWith("image/");
   const isAudio = mimeType.startsWith("audio/") || /\.(wav|mp3|m4a|webm|ogg|flac)$/i.test(file.name || "");
   const kb = file.size / 1024;
-  pendingAttachment = {
+  // Appended, never replaced. Replacing was the bug: the second photo silently discarded the first.
+  if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+    throw new Error(`You can send ${MAX_ATTACHMENTS} at a time. Send these and I'll take the rest next.`);
+  }
+  pendingAttachments.push({
     name: file.name || (isImage ? "photo.jpg" : isAudio ? "recording.webm" : "attachment"),
     mimeType: isAudio && !mimeType.startsWith("audio/") ? "audio/webm" : mimeType,
     base64,
@@ -1975,21 +2021,25 @@ async function stageAttachment(file) {
     dataUrl: isImage ? `data:${mimeType};base64,${base64}` : "",
     sizeLabel: kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`,
     status: "",
-  };
+  });
 }
 
 document.addEventListener("change", async (event) => {
   const input = event.target;
   if (input?.id !== "aionCaptureInput" && input?.id !== "aionPickInput") return;
-  const file = input.files?.[0];
+  // Every file the picker returned, not just the first — iOS lets the Owner select several at once.
+  const files = Array.from(input.files || []);
   input.value = ""; // let the same photo be picked twice in a row
-  if (!file) return;
-  try {
-    await stageAttachment(file);
-    render();
-  } catch (error) {
-    toast(error.message || "Could not read that file.");
+  if (!files.length) return;
+  for (const file of files) {
+    try {
+      await stageAttachment(file);
+    } catch (error) {
+      toast(error.message || "Could not read that file.");
+      break;
+    }
   }
+  render();
 });
 
 document.addEventListener("submit", async (event) => {
@@ -2002,13 +2052,13 @@ document.addEventListener("submit", async (event) => {
     if (kind === "conversation-rename") await api("conversation.update", { id: d.id, change: { title: d.title } });
     if (kind === "assistant-prompt") {
       const text = String(d.text || "").trim();
-      const attachment = pendingAttachment;
-      if (!text && !attachment) { toast("Type a message, attach a photo, or record audio."); return; }
+      const attachment = pendingAttachments[0] || null;
+      if (!text && !pendingAttachments.length) { toast("Type a message, attach a photo, or record audio."); return; }
+      sendProgress = { stages: [] };
 
       // Audio path: private upload + local STT + same Chat pipeline (no cellular-call claim).
       if (attachment?.isAudio) {
-        pendingAttachment = { ...attachment, status: "transcribing…" };
-        render();
+        progressStage("Transcribing…");
         const result = await api("audio.voice_to_chat", {
           contentBase64: attachment.base64,
           mimeType: attachment.mimeType,
@@ -2024,7 +2074,8 @@ document.addEventListener("submit", async (event) => {
               : tr?.message || "Could not transcribe audio."),
           attachmentName: attachment.name,
         };
-        pendingAttachment = null;
+        pendingAttachments = [];
+        sendProgress = null;
         form.reset();
         await load();
         render();
@@ -2034,30 +2085,45 @@ document.addEventListener("submit", async (event) => {
         return;
       }
 
-      let documentRef = null;
-      if (attachment) {
-        // Store the image first so the question is answered against a real stored document rather
-        // than a transient upload; the reply then has something durable to cite.
-        pendingAttachment = { ...attachment, status: "sending…" };
-        render();
-        const doc = await api("crm.document.upload", {
-          filename: attachment.name,
-          mimeType: attachment.mimeType,
-          contentBase64: attachment.base64,
-          tags: ["chat-attachment", attachment.isImage ? "photo" : "file"],
-        });
-        documentRef = doc?.id || doc?.sourceRef || null;
+      // Every attachment is stored first, so the question is answered against durable documents the
+      // reply can cite. One upload failing does not abandon the rest — the same principle the VIN
+      // bundle uses, applied to the transport.
+      const documentRefs = [];
+      const failed = [];
+      for (let i = 0; i < pendingAttachments.length; i += 1) {
+        const a = pendingAttachments[i];
+        progressStage(`Uploading ${i + 1} of ${pendingAttachments.length}…`);
+        try {
+          const doc = await api("crm.document.upload", {
+            filename: a.name,
+            mimeType: a.mimeType,
+            contentBase64: a.base64,
+            tags: ["chat-attachment", a.isImage ? "photo" : "file"],
+          });
+          const ref = doc?.id || doc?.sourceRef || null;
+          if (ref) documentRefs.push(ref);
+        } catch {
+          failed.push(a.name);
+        }
       }
+      if (failed.length) progressStage(`${failed.length} didn't upload — carrying on with the rest.`);
+      if (pendingAttachments.length) progressStage("Reading the photos…");
 
+      const primary = pendingAttachments.find((a) => a.isImage) || attachment;
       const result = await api("assistant.prompt", {
-        text: text || (attachment?.isImage ? "What vehicle is this and what do we know about it?" : "What is this file?"),
-        ...(documentRef ? { documentRef } : {}),
-        ...(attachment?.isImage
-          ? { imageBase64: attachment.base64, imageMimeType: attachment.mimeType, imageFilename: attachment.name }
+        text: text || (primary?.isImage
+          ? (pendingAttachments.length > 1
+            ? "These photos are the same vehicle. What car is this and what do we know about it?"
+            : "What vehicle is this and what do we know about it?")
+          : "What is this file?"),
+        ...(documentRefs.length ? { documentRef: documentRefs[0], documentRefs } : {}),
+        ...(primary?.isImage
+          ? { imageBase64: primary.base64, imageMimeType: primary.mimeType, imageFilename: primary.name }
           : {}),
       });
-      window.__aionLastAssistant = { ...result, attachmentName: attachment ? attachment.name : null };
-      pendingAttachment = null;
+      window.__aionLastAssistant = { ...result, attachmentName: primary ? primary.name : null };
+      pendingAttachments = [];
+      sendProgress = null;
       // The reply itself is the feedback; an intent name is developer diagnostics, not Owner UI.
       form.reset();
       await load();

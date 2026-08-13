@@ -405,7 +405,18 @@ export interface CrmDocumentV1 {
   byteLength: number;
   kind: "document" | "image" | "spreadsheet" | "other";
   summary: string;
+  /**
+   * Extracted text, kept inline only when short.
+   *
+   * Measured at 91% of this collection's bytes and the fastest-growing thing in state, so anything
+   * substantial now lives in a sidecar and this stays empty. Records written before that change
+   * still carry their text here and keep working — read through `resolveDocumentText`.
+   */
   extractedText: string;
+  /** Relative sidecar path under the private data root, when the text was externalised. */
+  extractedTextRef?: string | null;
+  /** Size of the extracted text, so capacity and search need not open the sidecar. */
+  extractedTextBytes?: number;
   tags: string[];
   provenance: ProvenanceV1;
   createdAt: IsoTimestamp;

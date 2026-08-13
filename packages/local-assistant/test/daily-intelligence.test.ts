@@ -511,3 +511,58 @@ test("tier policy keeps blobs and rebuildable indexes out of canonical state", (
   const index = tiers.find((t) => t.tier === "SEARCH_INDEX")!;
   assert.equal(index.backedUp, false, "a rebuildable index need not be backed up like canonical data");
 });
+
+// ---------------------------------------------------------------------------
+// Inline extracted-text growth fix (Phase 1)
+// ---------------------------------------------------------------------------
+
+test("large extracted text moves to a sidecar; short text stays inline", async () => {
+  const {
+    planDocumentTextStorage, planStateTextMigration, applyTextMigrationToDocument,
+    resolveDocumentText, needsTextMigration, documentTextRefFor, INLINE_TEXT_MAX_BYTES,
+  } = await import("../src/document-text-store.js");
+
+  const short = planDocumentTextStorage({ documentId: "d1", text: "a short summary" });
+  assert.equal(short.sidecar, null);
+  assert.equal(short.inlineText, "a short summary");
+
+  const long = planDocumentTextStorage({ documentId: "d2", text: "x".repeat(INLINE_TEXT_MAX_BYTES + 1) });
+  assert.ok(long.sidecar);
+  assert.equal(long.inlineText, "", "large text must not stay in state");
+  assert.equal(long.sidecar!.ref, documentTextRefFor("d2"));
+
+  // Migration over a collection: idempotent, lossless, and it reports what it freed.
+  const docs = [
+    { id: "d1", extractedText: "short" },
+    { id: "d2", extractedText: "y".repeat(20_000) },
+    { id: "d3", extractedText: "z".repeat(30_000) },
+  ] as never[];
+  const plan = planStateTextMigration({ documents: docs, stateBytesBefore: 1_000_000 });
+  assert.equal(plan.items.length, 2);
+  assert.equal(plan.skipped, 1);
+  assert.ok(plan.totalBytesFreed > 45_000);
+  assert.ok(plan.stateBytesAfter < plan.stateBytesBefore);
+
+  const migrated = docs.map((d) => {
+    const item = plan.items.find((i) => i.documentId === (d as { id: string }).id);
+    return item ? applyTextMigrationToDocument(d as never, item) : d;
+  });
+  assert.equal((migrated[1] as unknown as { extractedText: string }).extractedText, "");
+  assert.ok((migrated[1] as unknown as { extractedTextRef?: string }).extractedTextRef);
+  assert.equal((migrated[1] as unknown as { extractedTextBytes?: number }).extractedTextBytes, 20_000);
+  assert.ok(!needsTextMigration(migrated[1] as never), "already migrated");
+
+  const again = planStateTextMigration({ documents: migrated as never, stateBytesBefore: 1 });
+  assert.equal(again.items.length, 0, "MIGRATION_IDEMPOTENT");
+
+  // Reading: sidecar first, legacy inline still works, and a missing sidecar degrades rather than throws.
+  const fromSidecar = await resolveDocumentText(migrated[1] as never, async () => "y".repeat(20_000));
+  assert.equal(fromSidecar.length, 20_000);
+  const legacy = await resolveDocumentText({ extractedText: "old inline text" } as never, async () => null);
+  assert.equal(legacy, "old inline text");
+  const broken = await resolveDocumentText(
+    { extractedText: "fallback", extractedTextRef: "missing.txt" } as never,
+    async () => { throw new Error("gone"); },
+  );
+  assert.equal(broken, "fallback", "a lost sidecar must not break the document");
+});

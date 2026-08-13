@@ -73,6 +73,7 @@ export * from "./aion-conversation.js";
 export * from "./web-research.js";
 export * from "./owner-archive-memory.js";
 export * from "./memory-scale.js";
+export * from "./document-text-store.js";
 export * from "./vehicle-research.js";
 export * from "./executive-context.js";
 export * from "./executive-state.js";

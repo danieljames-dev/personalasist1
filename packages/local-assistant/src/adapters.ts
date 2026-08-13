@@ -21,7 +21,8 @@ import { emptyActivation, normaliseOffer } from "./gpu.js";
 
 const scrypt = promisify(scryptCallback);
 /** Raised for multi-thousand vehicle inventory (was 16 MiB). Still a hard V1 bound — not unbounded growth. */
-const MAX_STATE_BYTES = 32 * 1024 * 1024;
+/** Exported so capacity monitoring derives from the real limit instead of repeating it. */
+export const MAX_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 16 * 1024 * 1024;
 const MAX_IMPORT_FILES = 500;
 

@@ -98,6 +98,29 @@ test("the More sheet holds secondary functions, not the core chat intake", () =>
 });
 
 test("attachments are sent to the assistant with the question, not as a separate errand", () => {
-  assert.match(appJs, /imageBase64: attachment\.base64/, "the image must accompany the prompt");
+  // Matched on the field rather than the variable holding it: the composer now stages several
+  // photos and sends the primary image alongside the prompt, so the local name changed while the
+  // behaviour this guards did not.
+  assert.match(appJs, /imageBase64: \w+\.base64/, "the image must accompany the prompt");
   assert.match(appJs, /crm\.document\.upload/, "the original must still be preserved");
+});
+
+test("the composer stages several photos and sends them as one question", () => {
+  // The Owner's actual failure: a second photo silently replaced the first, so three pictures of
+  // one car arrived as three unrelated questions.
+  assert.match(appJs, /let pendingAttachments = \[\]/, "attachments must be a queue, not one slot");
+  assert.match(appJs, /pendingAttachments\.push\(/, "a new photo appends rather than replaces");
+  assert.match(appJs, /Array\.from\(input\.files \|\| \[\]\)/, "every picked file is read, not just the first");
+  assert.match(appJs, /multiple hidden/, "the picker must allow multi-select");
+  assert.match(appJs, /data-do="attach-remove" data-index=/, "each attachment is individually removable");
+  assert.match(appJs, /Uploading \$\{i \+ 1\} of \$\{pendingAttachments\.length\}/, "upload progress is per file");
+});
+
+test("the microphone reports why it cannot record instead of doing nothing", () => {
+  // Over plain http Safari does not expose navigator.mediaDevices at all, and the old handler
+  // tested for it and returned in silence — indistinguishable from a dead button.
+  assert.match(appJs, /function microphoneDiagnostic\(/, "the mic must be able to explain itself");
+  assert.match(appJs, /isSecureContext/, "secure context is the first thing to check");
+  assert.match(appJs, /audio\/mp4/, "Safari records mp4, not webm");
+  assert.match(appJs, /function preferredRecordingMime\(/, "format is negotiated at runtime");
 });

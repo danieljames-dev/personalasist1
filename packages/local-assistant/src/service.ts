@@ -147,6 +147,7 @@ import {
   type LotWalkSessionViewV1,
   type LotWalkCallListEntryV1,
 } from "./lot-walk.js";
+import { MAX_STATE_BYTES } from "./adapters.js";
 import {
   buildSalesCommandCenter,
   formatCommandCenterToday,
@@ -6849,6 +6850,120 @@ export class AionAssistantV1 {
       }
     }
     return { ok: false, state: null, sidecars: {}, manifest: null, keysTried: candidates.length };
+  }
+
+  /**
+   * Read a document's extracted text wherever it lives.
+   *
+   * Sidecar first, inline second, so every record written before sidecars existed keeps working.
+   */
+  async documentExtractedText(documentId: string): Promise<string> {
+    const state = await this.snapshot();
+    const doc = (state.crmDocuments || []).find((d) => d.id === documentId);
+    if (!doc) return "";
+    const { resolveDocumentText } = await import("./document-text-store.js");
+    const root = this.#resolveDataRoot();
+    return resolveDocumentText(doc, async (ref) => {
+      if (!root) return null;
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        return await readFile(join(root, ref), "utf8");
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  /**
+   * Move large inline extracted text out of state and into sidecars.
+   *
+   * The measured cause of the fastest state growth: 91% of `crmDocuments` bytes is derived text
+   * copied inline from files already on disk. Sidecars are written *before* the state mutation, so a
+   * crash between the two leaves the text in both places rather than in neither — recoverable rather
+   * than lost. Idempotent: a document that already has a ref is skipped.
+   */
+  async migrateDocumentTextToSidecar(opts: { dryRun?: boolean } = {}): Promise<{
+    planned: number; migrated: number; skipped: number; bytesFreed: number;
+    stateBytesBefore: number; stateBytesAfter: number; percentReduction: number; message: string;
+  }> {
+    const { planStateTextMigration, applyTextMigrationToDocument } = await import("./document-text-store.js");
+    const state = await this.snapshot();
+    const documents = state.crmDocuments || [];
+    const stateBytesBefore = Buffer.byteLength(JSON.stringify(state), "utf8");
+    const plan = planStateTextMigration({ documents, stateBytesBefore });
+
+    if (opts.dryRun || !plan.items.length) {
+      return {
+        planned: plan.items.length, migrated: 0, skipped: plan.skipped,
+        bytesFreed: plan.totalBytesFreed, stateBytesBefore,
+        stateBytesAfter: plan.stateBytesAfter, percentReduction: plan.percentReduction,
+        message: plan.items.length
+          ? `${plan.items.length} document(s) would move ${Math.round(plan.totalBytesFreed / 1024)} KiB out of state.`
+          : "Nothing to move.",
+      };
+    }
+
+    const root = this.#resolveDataRoot();
+    if (!root) {
+      return {
+        planned: plan.items.length, migrated: 0, skipped: plan.skipped, bytesFreed: 0,
+        stateBytesBefore, stateBytesAfter: stateBytesBefore, percentReduction: 0,
+        message: "No filesystem data root, so there is nowhere to put the sidecars. Nothing changed.",
+      };
+    }
+
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join, dirname } = await import("node:path");
+    const written: typeof plan.items = [];
+    for (const item of plan.items) {
+      const target = join(root, item.ref);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, item.text, "utf8");
+      written.push(item);
+    }
+
+    const byId = new Map(written.map((i) => [i.documentId, i]));
+    await this.mutate((draft) => {
+      draft.crmDocuments = (draft.crmDocuments || []).map((doc) => {
+        const item = byId.get(doc.id);
+        return item ? applyTextMigrationToDocument(doc, item) : doc;
+      });
+      this.activity(
+        draft, "memory", "document.text.externalise",
+        `Moved extracted text for ${written.length} document(s) out of state into sidecars.`,
+        null,
+      );
+    });
+
+    const after = await this.snapshot();
+    const stateBytesAfter = Buffer.byteLength(JSON.stringify(after), "utf8");
+    return {
+      planned: plan.items.length, migrated: written.length, skipped: plan.skipped,
+      bytesFreed: stateBytesBefore - stateBytesAfter,
+      stateBytesBefore, stateBytesAfter,
+      percentReduction: stateBytesBefore > 0 ? ((stateBytesBefore - stateBytesAfter) / stateBytesBefore) * 100 : 0,
+      message: `Moved ${written.length} document(s); state went from `
+        + `${(stateBytesBefore / 1_048_576).toFixed(2)} to ${(stateBytesAfter / 1_048_576).toFixed(2)} MiB.`,
+    };
+  }
+
+  /**
+   * How close state is to its ceiling, and what is taking the room.
+   *
+   * Reported before writes begin failing rather than after. The threshold derives from the
+   * configured limit rather than repeating a number somewhere else.
+   */
+  async stateCapacity(): Promise<import("./memory-scale.js").CapacityReportV1> {
+    const { assessStateCapacity } = await import("./memory-scale.js");
+    const state = await this.snapshot();
+    const usedBytes = Buffer.byteLength(JSON.stringify(state), "utf8");
+    const collections = Object.entries(state as unknown as Record<string, unknown>).map(([collection, value]) => ({
+      collection,
+      bytes: Buffer.byteLength(JSON.stringify(value ?? null), "utf8"),
+      count: Array.isArray(value) ? value.length : 1,
+    }));
+    return assessStateCapacity({ usedBytes, collections, ceilingBytes: MAX_STATE_BYTES });
   }
 
   /** Best-effort filesystem data root from whichever repository adapter is installed. */
