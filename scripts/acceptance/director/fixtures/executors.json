@@ -1,0 +1,39 @@
+{
+  "schema": "aion.director.acceptance.executors.v1",
+  "spawn": {
+    "shell": false,
+    "promptVia": ["--prompt-file", "stdin"],
+    "forbid": ["cmd.exe /c", "powershell -Command", "string-interpolated shell"]
+  },
+  "localAllowlist": [
+    "git",
+    "npm.cmd",
+    "node",
+    "scripts/aion-production.ps1 -Status",
+    "scripts/aion-preview.ps1 -Status"
+  ],
+  "forbidGenericRemoteShell": true,
+  "claude": {
+    "discoveryOrder": [
+      "AION_CLAUDE_CODE_PATH",
+      "newest vscode anthropic.claude-code-*-win32-*/resources/native-binary/claude.exe that probes",
+      "PATH claude.exe (not .cmd/.ps1)",
+      "%USERPROFILE%/.local/bin/claude.exe",
+      "UNAVAILABLE"
+    ],
+    "requiredFlags": ["-p", "--output-format", "--json-schema", "--session-id", "--permission-mode"],
+    "knownInstallAtSuiteFreeze": "VS Code native-binary claude.exe (version not pinned in discovery)"
+  },
+  "grok": {
+    "discoveryOrder": [
+      "AION_GROK_PATH",
+      "C:\\\\Users\\\\User\\\\.grok\\\\bin\\\\grok.exe",
+      "PATH grok.exe",
+      "UNAVAILABLE"
+    ],
+    "requiredFlags": ["-p", "--prompt-file", "--output-format", "--json-schema", "--cwd", "--permission-mode", "--session-id"],
+    "knownInstallAtSuiteFreeze": "C:\\\\Users\\\\User\\\\.grok\\\\bin\\\\grok.exe",
+    "preferredPermissionMode": "dontAsk",
+    "alwaysApproveIsNotBoundary": true
+  }
+}

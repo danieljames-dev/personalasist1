@@ -1,0 +1,23 @@
+{
+  "schema": "aion.director.acceptance.logging.v1",
+  "maxStdoutBytesPerFile": 8388608,
+  "maxRawBytesPerRun": 16777216,
+  "rotateKeep": 2,
+  "rawLogsTtlDays": 7,
+  "stateJsonMustNotContain": [
+    "stdout",
+    "stderr",
+    "terminal",
+    "BEGIN RSA",
+    "tskey-",
+    "Authorization:",
+    "cookie:"
+  ],
+  "secretPatterns": [
+    "BEGIN (RSA |OPENSSH |PRIVATE )",
+    "tskey-",
+    "sk-ant-",
+    "xai-",
+    "AKIA[0-9A-Z]{16}"
+  ]
+}

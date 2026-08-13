@@ -1,0 +1,26 @@
+{
+  "schema": "aion.director.acceptance.dashboard.v1",
+  "directorBind": "127.0.0.1",
+  "directorPort": 31417,
+  "bridgePath": "/api/director/",
+  "requiredFields": [
+    "missionId",
+    "state",
+    "phase",
+    "currentExecutor",
+    "claudeSha",
+    "grokSha",
+    "mainSha",
+    "productionSha",
+    "spendUsd",
+    "ownerActionRequired",
+    "activeGates"
+  ],
+  "auth": {
+    "forgedOrigin": 403,
+    "unpairedPhone": 401,
+    "directorDown": 503,
+    "emergencyStop": "console-only"
+  },
+  "phoneMustNotFetch": "http://127.0.0.1:31417"
+}

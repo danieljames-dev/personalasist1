@@ -1,0 +1,66 @@
+{
+  "schema": "aion.director.acceptance.crash.v1",
+  "neverAssumePassFromStaleExecutorRunning": true,
+  "cases": [
+    {
+      "id": "DIRECTOR_DIES_WHILE_EXECUTOR_RUNNING_COMMIT_DONE",
+      "gate": "DIRECTOR_CRASH_RECOVERY",
+      "durableState": "EXECUTOR_RUNNING",
+      "processTable": { "directorAlive": false, "executorAlive": false },
+      "git": { "newCommit": true, "dirty": false, "headChanged": true },
+      "expectRecoveredState": "INTERRUPTED",
+      "expectNext": "VERIFYING",
+      "forbid": ["COMPLETED", "PASS", "spawn duplicate executor"]
+    },
+    {
+      "id": "EXECUTOR_DIED_DIRTY",
+      "gate": "EXECUTOR_CRASH_RECOVERY",
+      "durableState": "EXECUTOR_RUNNING",
+      "processTable": { "directorAlive": true, "executorAlive": false },
+      "git": { "newCommit": false, "dirty": true },
+      "expectRecoveredState": "INTERRUPTED",
+      "expectNext": "VERIFYING",
+      "forbid": ["COMPLETED", "assume PASS", "spawn duplicate into same lease"]
+    },
+    {
+      "id": "DIRECTOR_DIES_AFTER_GIT_BEFORE_EVENT",
+      "gate": "INTERRUPTED_RUN_REVERIFICATION",
+      "durableState": "EXECUTOR_RUNNING",
+      "events": { "last": "EXECUTOR_RUNNING" },
+      "git": { "newCommit": true, "dirty": false },
+      "expectRecoveredState": "INTERRUPTED",
+      "expectNext": "VERIFYING",
+      "forbid": ["COMPLETED", "invent PASS", "skip VERIFYING"],
+      "note": "Git is source of commit truth; missing event must not invent PASS"
+    },
+    {
+      "id": "DIRECTOR_DIES_OWNER_GATE_OPEN",
+      "gate": "OWNER_GATE_DURABLE",
+      "durableState": "WAITING_FOR_OWNER",
+      "openGate": "PHYSICAL_IPHONE_TEST_REQUIRED",
+      "missionId": "daily-intelligence-finalization",
+      "expectRecoveredState": "WAITING_FOR_OWNER",
+      "expectSameMissionId": true,
+      "expectGateStillOpen": true,
+      "forbid": ["COMPLETED", "DEPLOYING", "new missionId"]
+    },
+    {
+      "id": "REBOOT_QUOTA_EXHAUSTED",
+      "gate": "CAPACITY_WAIT_SURVIVES_RESTART",
+      "durableState": "WAITING_FOR_CAPACITY",
+      "capacity": "CAPACITY_EXHAUSTED",
+      "expectRecoveredState": "WAITING_FOR_CAPACITY",
+      "forbid": ["paid API fallback", "COMPLETED"]
+    },
+    {
+      "id": "STALE_EXECUTOR_RUNNING_PROCESS_DEAD",
+      "gate": "STALE_EXECUTOR_RUNNING_NOT_ASSUMED_PASS",
+      "durableState": "EXECUTOR_RUNNING",
+      "processTable": { "executorAlive": false },
+      "handoff": null,
+      "expectRecoveredState": "INTERRUPTED",
+      "expectNext": "VERIFYING",
+      "forbid": ["treat as PASS", "COMPLETED"]
+    }
+  ]
+}

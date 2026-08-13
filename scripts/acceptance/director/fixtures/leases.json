@@ -1,0 +1,45 @@
+{
+  "schema": "aion.director.acceptance.leases.v1",
+  "resources": [
+    "worktree",
+    "branch",
+    "integration",
+    "production-writer",
+    "preview-writer"
+  ],
+  "cases": [
+    {
+      "id": "WORKTREE_COLLISION",
+      "gate": "WORKTREE_LEASE_COLLISION",
+      "resource": "worktree",
+      "path": "C:\\\\AION-HQ-claude-director-v01",
+      "holder": "run-1",
+      "challenger": "run-2",
+      "expect": "pause challenger; do not race"
+    },
+    {
+      "id": "BRANCH_COLLISION",
+      "gate": "BRANCH_LEASE_COLLISION",
+      "resource": "branch",
+      "name": "executor/claude-director-v01",
+      "expect": "one writer"
+    },
+    {
+      "id": "INTEGRATION_EXCLUSIVE",
+      "gate": "INTEGRATION_LEASE_EXCLUSIVE",
+      "resource": "integration",
+      "expect": "exactly one holder"
+    },
+    {
+      "id": "PRODUCTION_WRITER_EXCLUSIVE",
+      "gate": "PRODUCTION_WRITER_LEASE_EXCLUSIVE",
+      "resource": "production-writer",
+      "expect": "exactly one holder; tests must not take this lease against real production"
+    },
+    {
+      "id": "DUPLICATE_EXECUTOR",
+      "gate": "DUPLICATE_EXECUTOR_PREVENTION",
+      "expect": "same lease + same role cannot spawn second live process"
+    }
+  ]
+}

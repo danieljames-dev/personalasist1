@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aion.director.handoff.v1",
+  "title": "AION Director structured executor handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "executor",
+    "missionId",
+    "runId",
+    "branch",
+    "headBefore",
+    "headAfter",
+    "status",
+    "productionMutated",
+    "spendUsd"
+  ],
+  "properties": {
+    "schema": { "const": "aion.director.handoff.v1" },
+    "executor": { "enum": ["claude", "grok", "local"] },
+    "missionId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "role": { "type": "string" },
+    "branch": { "type": "string" },
+    "worktree": { "type": "string" },
+    "headBefore": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "headAfter": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "status": { "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "tests": { "type": "object" },
+    "productionMutated": { "type": "boolean" },
+    "spendUsd": { "type": "number", "maximum": 0 },
+    "requiresOwner": { "type": "boolean" },
+    "ownerGate": { "type": ["string", "null"] },
+    "nextRecommendedGate": { "type": ["string", "null"] },
+    "capacity": { "enum": ["OK", "CAPACITY_LOW", "CAPACITY_EXHAUSTED", "UNAVAILABLE"] },
+    "artifacts": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "string" }
+  }
+}

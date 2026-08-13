@@ -1,0 +1,31 @@
+{
+  "schema": "aion.director.acceptance.first-mission.v1",
+  "missionId": "daily-intelligence-finalization",
+  "truthAtSuiteFreeze": {
+    "originMainExpectedIfIntegrated": "1ce25ba2e82e576618ab3c9a007af92940a94bfd",
+    "productionSha": "d18c7927c1e9eec0f876201b36a487b2ac91add0",
+    "physicalIphone": "pending",
+    "funnel": "OFF"
+  },
+  "runtimeRootMustBe": "C:\\\\AION\\\\director\\\\",
+  "runtimeRootMustNotBeUnder": ["C:\\\\AION-HQ", "C:\\\\AION-HQ-"],
+  "businessStateForbiddenWrites": [
+    "private/aion/state-v1.json",
+    "C:\\\\AION-HQ\\\\private\\\\aion\\\\state-v1.json",
+    "C:\\\\AION-HQ-main-integrate\\\\private\\\\aion\\\\state-v1.json"
+  ],
+  "requiredBehaviors": [
+    "verify Git truth independently",
+    "recognize production SHA != origin/main when they differ",
+    "open PHYSICAL_IPHONE_TEST_REQUIRED",
+    "display owner action",
+    "wait on same missionId",
+    "do not deploy",
+    "do not checkout/mutate production worktree"
+  ],
+  "completionRequires": [
+    "PHYSICAL_IPHONE_TEST_REQUIRED recorded PASS",
+    "if deploy authorized: post-deploy SHA check"
+  ],
+  "hardGate": "FIRST_REAL_MISSION_DOES_NOT_DEPLOY while physical pending"
+}

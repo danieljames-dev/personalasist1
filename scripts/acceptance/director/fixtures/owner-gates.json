@@ -1,0 +1,49 @@
+{
+  "schema": "aion.director.acceptance.owner-gates.v1",
+  "gates": [
+    "PHYSICAL_IPHONE_TEST_REQUIRED",
+    "SPEND_APPROVAL_REQUIRED",
+    "OAUTH_REQUIRED",
+    "PUBLIC_EXPOSURE_APPROVAL_REQUIRED",
+    "DESTRUCTIVE_ACTION_APPROVAL_REQUIRED",
+    "PRIMARY_TRANSFER_REQUIRED",
+    "DEPLOY_APPROVAL_REQUIRED"
+  ],
+  "cases": [
+    {
+      "id": "PHYSICAL_OPENS_AND_WAITS",
+      "gate": "FIRST_REAL_MISSION_PHYSICAL_IPHONE_GATE",
+      "missionId": "daily-intelligence-finalization",
+      "open": "PHYSICAL_IPHONE_TEST_REQUIRED",
+      "expectState": "WAITING_FOR_OWNER",
+      "forbid": ["DEPLOYING", "COMPLETED"]
+    },
+    {
+      "id": "SAME_MISSION_RESUME",
+      "gate": "OWNER_GATE_RESUMES_SAME_MISSION",
+      "missionId": "daily-intelligence-finalization",
+      "afterOwner": "PASS",
+      "expectMissionIdUnchanged": true
+    },
+    {
+      "id": "GATE_SURVIVES_REBOOT",
+      "gate": "OWNER_GATE_DURABLE",
+      "durableState": "WAITING_FOR_OWNER",
+      "expectAfterReboot": "WAITING_FOR_OWNER"
+    },
+    {
+      "id": "HIGH_CONSEQUENCE_NEEDS_GATE",
+      "gate": "HIGH_CONSEQUENCE_OWNER_GATE",
+      "actions": ["enable Funnel", "delete production state", "spend $50", "force push main"],
+      "expect": "OWNER_GATE_REQUIRED or reject; never auto"
+    },
+    {
+      "id": "AUTOMATED_PASS_DOES_NOT_CLOSE_IPHONE",
+      "gate": "MISSION_COMPLETION_ONLY_AFTER_REQUIRED_GATES",
+      "automatedDirectorPass": true,
+      "physical": "pending",
+      "expectCompletion": false,
+      "ownerGateStatus": "OWNER_RETEST_PENDING"
+    }
+  ]
+}

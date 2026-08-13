@@ -1,0 +1,56 @@
+{
+  "schema": "aion.director.acceptance.retry.v1",
+  "maxRepairCycles": 2,
+  "maxTransientCommandRetries": 1,
+  "sameShaDoesNotConsumeNewRepairHope": true,
+  "cases": [
+    {
+      "id": "TRANSIENT_COMMAND_ONCE",
+      "gate": "BOUNDED_RETRY",
+      "kind": "transient-local",
+      "failures": 1,
+      "expect": "retry once then continue or BLOCK"
+    },
+    {
+      "id": "MALFORMED_HANDOFF_JSON",
+      "gate": "STRUCTURED_HANDOFF_SCHEMA",
+      "kind": "malformed-json",
+      "expect": "REJECT handoff; do not parse prose as PASS"
+    },
+    {
+      "id": "GROK_REJECT_THEN_CLAUDE_REPAIR",
+      "gate": "GROK_FAIL_ROUTES_TO_CLAUDE_REPAIR",
+      "sequence": ["Grok FAIL", "Claude repair run", "new SHA frozen", "Grok recheck"],
+      "expectRoute": ["INDEPENDENT_REVIEW:FAIL", "EXECUTOR_RUNNING:claude", "VERIFYING", "INDEPENDENT_REVIEW"]
+    },
+    {
+      "id": "REPAIR_MUST_FREEZE_NEW_SHA",
+      "gate": "CLAUDE_REPAIR_FREEZES_NEW_SHA",
+      "expect": "repair run records immutable headAfter different from rejected SHA or BLOCK if unchanged and still failing"
+    },
+    {
+      "id": "REPAIRED_BACK_TO_GROK",
+      "gate": "REPAIRED_SHA_ROUTES_BACK_TO_GROK",
+      "expect": "never integrate a repair SHA without independent Grok review"
+    },
+    {
+      "id": "SAME_FAILING_SHA_REPEATED",
+      "gate": "NO_INFINITE_REPAIR_LOOP_SAME_SHA",
+      "rejectedSha": "9999999999999999999999999999999999999999",
+      "repeats": 3,
+      "maxRepairCycles": 2,
+      "expectFinal": "BLOCKED",
+      "forbid": "infinite Claude↔Grok loop"
+    },
+    {
+      "id": "TIMEOUT",
+      "gate": "EXECUTOR_TIMEOUT",
+      "expect": "kill child, INTERRUPTED or FAILED, no PASS"
+    },
+    {
+      "id": "CAPACITY_THEN_BLOCK_NOT_PAY",
+      "gate": "NO_PAID_FALLBACK",
+      "expect": "CAPACITY_EXHAUSTED → wait or other authorized executor or BLOCKED; never paid API"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "schema": "aion.director.acceptance.capacity.v1",
+  "states": ["AVAILABLE", "CAPACITY_LOW", "CAPACITY_EXHAUSTED", "RESET_AT_KNOWN_TIME", "UNAVAILABLE"],
+  "paidFallbackForbidden": true,
+  "spendCapUsd": 0,
+  "cases": [
+    {
+      "id": "AVAILABLE",
+      "gate": "EXECUTOR_CAPACITY_AVAILABLE",
+      "probe": "ok",
+      "expect": "AVAILABLE"
+    },
+    {
+      "id": "EXHAUSTED",
+      "gate": "EXECUTOR_CAPACITY_EXHAUSTED",
+      "probeText": "rate limit / quota exceeded / usage limit",
+      "expect": "CAPACITY_EXHAUSTED"
+    },
+    {
+      "id": "WAIT_SURVIVES_RESTART",
+      "gate": "CAPACITY_WAIT_SURVIVES_RESTART",
+      "durableState": "WAITING_FOR_CAPACITY",
+      "expectAfterReboot": "WAITING_FOR_CAPACITY"
+    },
+    {
+      "id": "NO_PAID_FALLBACK",
+      "gate": "NO_PAID_FALLBACK",
+      "forbiddenEnv": ["XAI_API_KEY billing path as fallback", "ANTHROPIC_API_KEY billing path as fallback"],
+      "expect": "never open paid API to continue a quota-exhausted subscription CLI"
+    },
+    {
+      "id": "QUOTA_IS_NOT_SPEND_PERMISSION",
+      "gate": "ZERO_SPEND_GUARD",
+      "note": "quota remaining does not authorize USD spend"
+    }
+  ]
+}
