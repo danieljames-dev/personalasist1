@@ -32,9 +32,14 @@
  * asked a question whose answer would have to be invented. That ordering — gather, classify, compose,
  * only then optionally rephrase — is what keeps a fluent sentence from becoming a fabricated one.
  *
- * A practical consequence worth stating: on this machine there is currently no local text model at
- * all, only vision models. The tier router therefore has to degrade to DETERMINISTIC and still
- * produce a good answer, which it does, because composition never depended on a model.
+ * That ordering is not caution for its own sake. Given five short grounded facts and asked which car
+ * to focus on, the local fast model wrote that a $34,120 car was "within Sarah Chen's budget of
+ * $33,000" and credited it with "AWD availability" that no fact mentioned — one arithmetic error and
+ * one invented attribute, in three fluent sentences the Owner would have repeated to a customer.
+ *
+ * A second consequence: availability is checked, never remembered. This machine's durable settings
+ * named two local text models as healthy and installed, and the model store had neither, because the
+ * files were deleted four days after the health record was written.
  */
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 import type { EvidenceClassV1 } from "./lot-scope-reasoning.js";
