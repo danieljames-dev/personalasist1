@@ -15,3 +15,9 @@ dist-install/
 packages/delegated-operator/service/bin/
 packages/delegated-operator/service/obj/
 
+
+# Tesseract downloads its language data into the working directory the first time the optional
+# OCR fallback runs. It is generated, not source: 5.2 MB of it reached a commit through a broad
+# `git add`, and nothing in the repository refers to the path. Root-only so a genuine traineddata
+# fixture in a subdirectory would still be visible.
+/*.traineddata
