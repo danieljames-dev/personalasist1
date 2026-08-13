@@ -1,0 +1,45 @@
+{
+  "gate": "MODEL_MISSING_HEALTH",
+  "description": "Configured vs installed vs healthy vs unavailable must not be collapsed.",
+  "states": [
+    {
+      "id": "CONFIGURED_ONLY",
+      "configured": true,
+      "installed": false,
+      "healthy": false,
+      "ownerFacing": "must not claim model is available for use"
+    },
+    {
+      "id": "INSTALLED_UNHEALTHY",
+      "configured": true,
+      "installed": true,
+      "healthy": false,
+      "ownerFacing": "must not claim ready; may say model is installed but not healthy"
+    },
+    {
+      "id": "HEALTHY",
+      "configured": true,
+      "installed": true,
+      "healthy": true,
+      "ownerFacing": "may use as FAST or REASONING path"
+    },
+    {
+      "id": "STALE_HEALTH_RECORD",
+      "configured": true,
+      "installed": false,
+      "healthy": true,
+      "healthyObservedAt": "stale-or-historical",
+      "ownerFacing": "FAIL if AION claims currently available based on stale health alone"
+    }
+  ],
+  "failIf": [
+    "stale historical health record presented as current availability",
+    "missing model reported READY",
+    "configured-but-not-installed treated as healthy"
+  ],
+  "passIf": [
+    "status distinguishes configured / installed / healthy / unavailable",
+    "degrade to DETERMINISTIC when no healthy text model",
+    "Owner-facing language matches actual health"
+  ]
+}

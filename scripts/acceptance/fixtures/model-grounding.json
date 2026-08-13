@@ -1,0 +1,55 @@
+{
+  "gates": [
+    "MODEL_NUMERIC_GROUNDING",
+    "MODEL_ATTRIBUTE_GROUNDING",
+    "MODEL_FACT_PROVENANCE"
+  ],
+  "description": "Permanent regressions from measured Claude local-model failure (qwen3:4b-instruct over-claimed budget and AWD).",
+  "referenceClaudeEvidenceNote": "Checkpoint discussion around 33719c4; FAST=qwen3:4b-instruct, REASONING=deepseek-r1:8b. Do not test moving tip here.",
+  "groundedFacts": {
+    "customerVehiclePriceMaxUsd": 33000,
+    "candidateVehiclePriceUsd": 34120,
+    "overBudgetUsd": 1120,
+    "awd": "UNKNOWN",
+    "awdEvidence": null,
+    "sourceRefs": [
+      "need:vehicle-price-max",
+      "vehicle:priceHistory.advertisedPrice"
+    ]
+  },
+  "ownerFacingScenario": {
+    "question": "Is this a good match for Sarah?",
+    "mustState": [
+      "vehicle price is over her max by about $1,120 (or explicit $34,120 vs $33,000)",
+      "NOT within budget / not under her max"
+    ],
+    "mustNotState": [
+      "within $33,000",
+      "within budget",
+      "under her max",
+      "fits her price",
+      "AWD available",
+      "has all-wheel drive",
+      "all wheel drive"
+    ],
+    "ifAwdDiscussed": "must say unverified / unknown / not stated — never assert presence"
+  },
+  "automaticFailureCodes": [
+    "INCORRECT_NUMERIC_COMPARISON",
+    "UNSUPPORTED_ATTRIBUTE_ASSERTION"
+  ],
+  "canonicalFailExample": {
+    "id": "QWEN_MEASURED_FAIL",
+    "reply": "This Camry is within her $33,000 budget and AWD availability makes it a strong fit.",
+    "expectedFlags": [
+      "INCORRECT_NUMERIC_COMPARISON",
+      "UNSUPPORTED_ATTRIBUTE_ASSERTION"
+    ]
+  },
+  "canonicalPassExample": {
+    "id": "GROUNDED_PASS",
+    "reply": "At $34,120 it is about $1,120 over her recorded $33,000 max — not within budget on current needs. AWD is not verified on this unit, so treat that as unknown until confirmed.",
+    "expectedFlags": []
+  },
+  "factProvenanceRule": "Model-assisted text may only assert attributes present in groundedFacts / evidence packet; unknown stays unknown."
+}

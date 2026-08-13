@@ -461,8 +461,8 @@ function suiteGateReadiness() {
     return out;
   }
   const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-  out.push(result("gates.count-24",
-    catalog.gates?.length === 24 ? "PASS" : "FAIL",
+  out.push(result("gates.count-30",
+    catalog.gates?.length === 30 ? "PASS" : "FAIL",
     String(catalog.gates?.length)));
   out.push(result("gates.waiting-for-immutable-sha",
     catalog.waitingFor === "CLAUDE_HEAD_TO_TEST" && catalog.doNotTestMovingTip === true
@@ -472,6 +472,10 @@ function suiteGateReadiness() {
     "progress-stages.json",
     "tool-planning.json",
     "model-routing.json",
+    "model-grounding.json",
+    "model-latency-routing.json",
+    "model-availability.json",
+    "natural-priority-phrases.json",
     "active-customer-context.json",
     "name-ambiguity.json",
     "caleb-retrieval.json",
@@ -490,6 +494,7 @@ function suiteGateReadiness() {
     join(ROOT, "docs", "reviews", "daily-intelligence-gate-registry.md"),
     join(ROOT, "docs", "reviews", "daily-intelligence-final-report-template.md"),
     join(__dirname, "score-usefulness.mjs"),
+    join(__dirname, "score-model-grounding.mjs"),
     join(__dirname, "personality-rubric.json"),
   ];
   for (const p of docs) {

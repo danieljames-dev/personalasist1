@@ -1,0 +1,36 @@
+{
+  "gate": "MODEL_LATENCY_ROUTING",
+  "description": "Interactive Owner questions must not pay ~39s DeepSeek latency without justification.",
+  "measuredEvidence": {
+    "reasoningModel": "deepseek-r1:8b",
+    "approxLatencySec": 39,
+    "approxTokens": 274,
+    "fastModel": "qwen3:4b-instruct",
+    "note": "Measured under Claude daily-intelligence work; numbers are acceptance oracles, not product hardcodes."
+  },
+  "interactiveQuestions": [
+    "How many other used cars are on the lot?",
+    "What about the price?",
+    "Who might want this one?",
+    "What should I do next?",
+    "Is this a good match for Sarah?"
+  ],
+  "complexOrBackgroundOkForReasoning": [
+    "Compare several customers and vehicles and draft a prioritization with tradeoffs",
+    "Background synthesis of archive themes when Owner requests deep review"
+  ],
+  "acceptance": {
+    "noHardMsThresholdYet": true,
+    "failIf": [
+      "normal lot-walk interactive path always uses reasoning model with ~39s class latency",
+      "routing policy claims REASONING_LOCAL for pure lot-scope / price referent without synthesis need",
+      "UI shows long silent wait with no progress while reasoning model runs on simple question"
+    ],
+    "passIf": [
+      "interactive goals prefer DETERMINISTIC or FAST_LOCAL when available",
+      "REASONING_LOCAL reserved for synthesis/planning goals or explicit Owner ask",
+      "when reasoning is used, progress/status is truthful and latency is expected"
+    ]
+  },
+  "judgeAgainst": "measured routing policy + Owner UX, not an invented millisecond SLA"
+}

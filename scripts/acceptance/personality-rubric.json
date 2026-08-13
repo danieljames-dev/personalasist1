@@ -29,7 +29,9 @@
     "GENERIC_AI_BOILERPLATE",
     "UNHELPFUL_DISCLAIMER_WALL",
     "REPEATED_RECORD_WITHOUT_ANSWERING",
-    "FALSE_PHYSICAL_CENSUS"
+    "FALSE_PHYSICAL_CENSUS",
+    "INCORRECT_NUMERIC_COMPARISON",
+    "UNSUPPORTED_ATTRIBUTE_ASSERTION"
   ],
   "scoringNotes": "Score real Owner-facing reply text only. Do not reward verbosity. Mean >= 3.5 and zero fail flags required for conversational pass."
 }

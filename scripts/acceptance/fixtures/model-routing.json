@@ -1,6 +1,13 @@
 {
   "gate": "FAST_VS_REASONING_ROUTING",
+  "relatedGates": ["MODEL_LATENCY_ROUTING", "MODEL_MISSING_HEALTH"],
   "description": "Cheap/fast path for simple referents; heavier path only when needed",
+  "measuredModels": {
+    "fast": "qwen3:4b-instruct",
+    "reasoning": "deepseek-r1:8b",
+    "reasoningApproxLatencySec": 39,
+    "referenceCheckpointNote": "33719c4-class restore; do not treat floating tip as oracle"
+  },
   "cases": [
     {
       "id": "R1",

@@ -49,6 +49,25 @@ Do **not** set PHYSICAL_IPHONE to PASS without Owner device confirmation.
 | 22 | ZERO_SPEND_GUARD | | | |
 | 23 | STATE_SIDECAR_CAPACITY | | | |
 | 24 | OWNER_DAY_E2E | | | |
+| 25 | MODEL_NUMERIC_GROUNDING | | | |
+| 26 | MODEL_ATTRIBUTE_GROUNDING | | | |
+| 27 | MODEL_FACT_PROVENANCE | | | |
+| 28 | MODEL_LATENCY_ROUTING | | | |
+| 29 | MODEL_MISSING_HEALTH | | | |
+| 30 | NATURAL_PRIORITY_PHRASE_COVERAGE | | | |
+
+### Model grounding sample (required when models used)
+
+```text
+MAX_PRICE = 33000
+VEHICLE_PRICE = 34120
+AWD = UNKNOWN
+
+INCORRECT_NUMERIC_COMPARISON =
+UNSUPPORTED_ATTRIBUTE_ASSERTION =
+STATES_OVER_BUDGET =
+AWD_TREATED_AS_UNKNOWN =
+```
 
 ## Usefulness scores (conversational sample)
 

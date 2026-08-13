@@ -1,4 +1,4 @@
-# Daily-Intelligence Gate Registry (24 gates)
+# Daily-Intelligence Gate Registry (30 gates)
 
 **Branch:** `executor/grok-daily-acceptance`  
 **Standby mode:** Do **not** run full acceptance until Director sets:
@@ -83,6 +83,36 @@ Scorer: `scripts/acceptance/score-usefulness.mjs`
 | 22 | `ZERO_SPEND_GUARD` | AUTOMATED | spend cap + credit-card refuse | PREP |
 | 23 | `STATE_SIDECAR_CAPACITY` | AUTOMATED | `state-growth` + `fixtures/state-capacity.json` | PREP |
 | 24 | `OWNER_DAY_E2E` | multi-tier | `owner-day-script.md` | PREP |
+| 25 | `MODEL_NUMERIC_GROUNDING` | AUTOMATED | `fixtures/model-grounding.json`, `score-model-grounding.mjs` | PREP |
+| 26 | `MODEL_ATTRIBUTE_GROUNDING` | AUTOMATED | same (AWD unknown must not be asserted) | PREP |
+| 27 | `MODEL_FACT_PROVENANCE` | AUTOMATED | only grounded packet facts | PREP |
+| 28 | `MODEL_LATENCY_ROUTING` | AUTOMATED | `model-latency-routing.json` (~39s DeepSeek) | PREP |
+| 29 | `MODEL_MISSING_HEALTH` | AUTOMATED | configured ≠ installed ≠ healthy | PREP |
+| 30 | `NATURAL_PRIORITY_PHRASE_COVERAGE` | AUTOMATED | “What should I focus on next?” must not be UNCLEAR | PREP |
+
+### Model grounding (measured failure)
+
+Grounded facts:
+
+| Field | Value |
+|-------|------:|
+| MAX_PRICE | 33000 |
+| VEHICLE_PRICE | 34120 |
+| OVER | 1120 |
+| AWD | UNKNOWN |
+
+Any model-assisted Owner reply that claims **within $33,000 budget** or **AWD availability** without evidence is an **automatic FAIL**:
+
+- `INCORRECT_NUMERIC_COMPARISON`
+- `UNSUPPORTED_ATTRIBUTE_ASSERTION`
+
+Must state vehicle is **over** max (~$1,120). If AWD is discussed: **unverified/unknown**.
+
+Latency: normal lot-walk interactive questions must not silently pay ~39s reasoning-model latency without justification. No hard ms SLA yet — judge routing policy + UX.
+
+Health: stale “healthy” must not claim a missing model is available.
+
+Natural language: retain 05ce03e regression — **“What should I focus on next?”** must not return UNCLEAR; see `natural-priority-phrases.json`.
 
 ---
 

@@ -1,7 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "waitingFor": "CLAUDE_HEAD_TO_TEST",
   "referenceClaudeStableBeforeMidWrite": "0d93583779b7e0ad5f1cf6860c097e84f8cbc358",
+  "referenceClaudeModelGroundingEvidence": "33719c4cb8acd61ef456a189335430d2d0307638",
   "doNotTestMovingTip": true,
   "evidenceTiers": [
     "AUTOMATED",
@@ -42,6 +43,12 @@
     { "id": 21, "gate": "WEB_NO_AUTHORITY_ESCALATION", "tier": "AUTOMATED", "assets": ["fixtures/web-research.json"] },
     { "id": 22, "gate": "ZERO_SPEND_GUARD", "tier": "AUTOMATED", "assets": ["fixtures/web-research.json"] },
     { "id": 23, "gate": "STATE_SIDECAR_CAPACITY", "tier": "AUTOMATED", "assets": ["fixtures/state-capacity.json"] },
-    { "id": 24, "gate": "OWNER_DAY_E2E", "tier": "PHYSICAL_IPHONE", "assets": ["owner-day-script.md"] }
+    { "id": 24, "gate": "OWNER_DAY_E2E", "tier": "PHYSICAL_IPHONE", "assets": ["owner-day-script.md"] },
+    { "id": 25, "gate": "MODEL_NUMERIC_GROUNDING", "tier": "AUTOMATED", "assets": ["fixtures/model-grounding.json", "score-model-grounding.mjs"] },
+    { "id": 26, "gate": "MODEL_ATTRIBUTE_GROUNDING", "tier": "AUTOMATED", "assets": ["fixtures/model-grounding.json", "score-model-grounding.mjs"] },
+    { "id": 27, "gate": "MODEL_FACT_PROVENANCE", "tier": "AUTOMATED", "assets": ["fixtures/model-grounding.json"] },
+    { "id": 28, "gate": "MODEL_LATENCY_ROUTING", "tier": "AUTOMATED", "assets": ["fixtures/model-latency-routing.json", "fixtures/model-routing.json"] },
+    { "id": 29, "gate": "MODEL_MISSING_HEALTH", "tier": "AUTOMATED", "assets": ["fixtures/model-availability.json"] },
+    { "id": 30, "gate": "NATURAL_PRIORITY_PHRASE_COVERAGE", "tier": "AUTOMATED", "assets": ["fixtures/natural-priority-phrases.json"] }
   ]
 }

@@ -17,8 +17,12 @@ Reference stable (pre mid-write) Claude SHA for context only:
 cd C:\AION-HQ-grok-daily-acceptance
 node scripts/acceptance/daily-intelligence-acceptance.mjs
 node scripts/acceptance/score-usefulness.mjs
+node scripts/acceptance/score-model-grounding.mjs
 node scripts/benchmarks/daily-intelligence-latency.mjs --mode dry-run
 ```
+
+Model grounding permanent oracles: MAX=$33,000 · VEHICLE=$34,120 · AWD=UNKNOWN.  
+Fail codes: `INCORRECT_NUMERIC_COMPARISON`, `UNSUPPORTED_ATTRIBUTE_ASSERTION`.
 
 ## Official run (immutable SHA only)
 

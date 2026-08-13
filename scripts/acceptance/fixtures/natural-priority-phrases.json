@@ -1,0 +1,20 @@
+{
+  "gate": "NATURAL_PRIORITY_PHRASE_COVERAGE",
+  "description": "Regression from 05ce03e targeted review: bare 'focus on next' must not be UNCLEAR.",
+  "mustMapTo": ["PLAN_MY_DAY", "PRIORITIZE_VEHICLES"],
+  "variants": [
+    "What should I focus on next?",
+    "What should I focus on?",
+    "Where should I focus next?",
+    "What do you think I should focus on next?",
+    "What should I do next?",
+    "What should I work on next?",
+    "Where should I start?",
+    "My sales day."
+  ],
+  "failIf": {
+    "goal": "UNCLEAR",
+    "confidence": 0
+  },
+  "note": "At minimum the first variant must not return UNCLEAR after Claude's pattern fix lands."
+}
