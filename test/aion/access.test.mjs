@@ -357,3 +357,28 @@ test("a mismatched Origin is refused on the proxied path", async () => {
     assert.equal(crossSite.status, 403, "Origin must match the proxied host exactly");
   });
 });
+
+test("a MagicDNS host on an explicit port is accepted, so a second Serve route works", async () => {
+  // Serve answers the main route on the default port and any additional route on an explicit one,
+  // so Host may or may not carry `:port`. Matching only the portless form worked at :443 and
+  // rejected every request to a second route — exactly how an isolated preview looks from a phone.
+  await withServer(async ({ base, address }) => {
+    await enable(base);
+    const response = await servedRequest(address, {
+      host: `${SERVE_HOST}:8443`,
+      origin: `https://${SERVE_HOST}:8443`,
+    });
+    assert.equal(response.status, 401, "reachable, and still required to be a paired device");
+  });
+});
+
+test("the port is not a way round the host check", async () => {
+  await withServer(async ({ base, address }) => {
+    await enable(base);
+    const evil = await servedRequest(address, {
+      host: "evil.example.com:8443",
+      origin: "https://evil.example.com:8443",
+    });
+    assert.equal(evil.status, 403, "a foreign host with a port is still foreign");
+  });
+});

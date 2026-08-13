@@ -335,10 +335,16 @@ function sameOrigin(request, address, extraHosts) {
   if (!host) return false;
   const lowerHost = host.toLowerCase();
 
-  // The proxied case: a portless MagicDNS host, reachable only from the tailnet, over https.
-  if (viaTailscaleServe(request) && MAGIC_DNS_HOST.test(lowerHost)) {
-    if (!origin) return true;
-    return origin.toLowerCase() === `https://${lowerHost}`;
+  // The proxied case: a MagicDNS host reachable only from the tailnet, over https. Serve answers on
+  // the default port for the main route and on an explicit port for any additional one, so `Host`
+  // may or may not carry `:port` — matching only the portless form worked at :443 and rejected every
+  // request to a second route, which is exactly how an isolated preview looks from a phone.
+  if (viaTailscaleServe(request)) {
+    const withoutPort = lowerHost.replace(/:\d+$/, "");
+    if (MAGIC_DNS_HOST.test(withoutPort)) {
+      if (!origin) return true;
+      return origin.toLowerCase() === `https://${lowerHost}`;
+    }
   }
 
   if (!hosts.has(lowerHost)) return false;
