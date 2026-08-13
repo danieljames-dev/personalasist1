@@ -20,6 +20,7 @@ import { resolve, join } from "node:path";
 import { orientImageBytesForVision, runEasyOcrOnImageBytes } from "../packages/local-assistant/dist/connectors/sticker-ocr.js";
 import { vinIdentityCropRegions, cropImageToRegion } from "../packages/local-assistant/dist/image-region.js";
 import { validateVin, normalizeVinCandidate } from "../packages/local-assistant/dist/vehicle-inventory.js";
+import { buildVinOcrResult, proposeVinsFromOcrText } from "../packages/local-assistant/dist/vin-ocr.js";
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -40,14 +41,46 @@ const doc = photos[pick];
 const original = await readFile(doc.storedPath);
 console.log(`IMAGE = ${doc.filename} (${(original.length / 1_048_576).toFixed(2)} MB)`);
 
-/** Any 17-character run that survives structural and check-digit validation. */
+/**
+ * Score OCR text exactly as production does.
+ *
+ * The first version of this benchmark used a contiguous 17-character regex and reported that neither
+ * the crops nor the full frame found a VIN — while the service had resolved one from the same photo.
+ * The regex was the thing that was wrong: production runs candidate proposal with bounded
+ * OCR-confusion recovery, scoring and check-digit validation, and a second simplified parser can
+ * only produce a second, wrong answer about whether the pipeline works.
+ */
+function scoreLikeProduction(text, byteLength) {
+  const result = buildVinOcrResult({
+    extractedText: String(text ?? ""),
+    provider: "easyocr",
+    byteLength: byteLength ?? 0,
+    extractionOk: Boolean(String(text ?? "").trim()),
+  });
+  const raw = proposeVinsFromOcrText(String(text ?? ""));
+  return {
+    rawCandidateCount: raw.length,
+    repairedCount: raw.filter((c) => c.source === "corrected").length,
+    structurallyValid: raw.filter((c) => c.valid).map((c) => c.vin),
+    best: result.best?.vin ?? null,
+    bestValid: Boolean(result.best?.valid),
+    bestSource: result.best?.source ?? null,
+    confidence: result.best?.confidence ?? 0,
+    status: result.status,
+    sticker: result.sticker ?? null,
+  };
+}
+
+/** Inventory corroboration, only ever after an image-derived candidate. */
+function corroborate(vin) {
+  if (!vin) return null;
+  const hit = (state.vehicleInventory?.vehicles ?? []).find((v) => v.vin === vin);
+  return hit ? [hit.year, hit.make, hit.model, hit.trim].filter(Boolean).join(" ") : null;
+}
+
 function validVinsIn(text) {
-  const found = new Set();
-  for (const match of String(text ?? "").matchAll(/[A-HJ-NPR-Z0-9]{17}/gi)) {
-    const normalized = normalizeVinCandidate(match[0]);
-    if (normalized && validateVin(normalized).valid) found.add(normalized);
-  }
-  return [...found];
+  const scored = scoreLikeProduction(text);
+  return scored.bestValid && scored.best ? [scored.best] : [];
 }
 
 const orientBegan = Date.now();
@@ -65,12 +98,23 @@ async function timeEasyOcr(bytes, label) {
   } catch (error) {
     return { label, ms: Date.now() - began, vins: [], chars: 0, error: String(error?.message ?? error).slice(0, 60) };
   }
-  return { label, ms: Date.now() - began, vins: validVinsIn(text), chars: text.length, error: null };
+  const scored = scoreLikeProduction(text, bytes.length);
+  return {
+    label, ms: Date.now() - began, chars: text.length, error: null,
+    vins: scored.bestValid && scored.best ? [scored.best] : [],
+    scored,
+  };
 }
 
 console.log("\n=== FULL FRAME (what runs first today) ===");
 const full = await timeEasyOcr(working, "full-frame");
-console.log(`  ${full.ms} ms · ${full.chars} chars · valid VINs: ${full.vins.join(", ") || "none"}`);
+{
+  const sc = full.scored ?? {};
+  console.log(
+    `  ${full.ms} ms · ${full.chars} chars · raw=${sc.rawCandidateCount ?? 0} valid=${(sc.structurallyValid ?? []).length} `
+    + `BEST=${sc.best ?? "none"}${sc.bestValid ? "(valid)" : ""} ${sc.status ?? ""} inv=${corroborate(sc.best) ?? "no-match"}`,
+  );
+}
 
 console.log("\n=== VIN-REGION CROPS (candidate for running first) ===");
 const rows = [full];
@@ -88,9 +132,12 @@ for (const region of identityRegions) {
   row.cropMs = cropMs;
   row.bytes = cropped.length;
   rows.push(row);
+  const sc = row.scored ?? {};
   console.log(
     `  ${region.name.padEnd(16)} crop=${String(cropMs).padStart(4)}ms  ocr=${String(row.ms).padStart(6)}ms  `
-    + `${String(row.chars).padStart(5)} chars  VIN: ${row.vins.join(", ") || "none"}`,
+    + `${String(row.chars).padStart(5)} chars  raw=${sc.rawCandidateCount ?? 0} valid=${(sc.structurallyValid ?? []).length}  `
+    + `BEST=${sc.best ?? "none"}${sc.bestValid ? "(valid)" : ""} ${sc.status ?? ""} `
+    + `inv=${corroborate(sc.best) ?? "no-match"}`,
   );
 }
 

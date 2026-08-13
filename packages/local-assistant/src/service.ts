@@ -112,6 +112,7 @@ import { extractImageWithLocalVision, imageUnderstandingStatus } from "./connect
 import { refreshDealershipPublicInventory } from "./connectors/dealership-inventory.js";
 import {
   buildVinOcrResult,
+  proposeVinsFromOcrText,
   extractStickerFields,
   VIN_VISION_PROMPT,
   type VinOcrResultV1,
@@ -6070,6 +6071,69 @@ export class AionAssistantV1 {
         return false;
       }
     };
+
+    /*
+     * Targeted VIN bands before the whole page.
+     *
+     * Measured on a real 4.22 MB Owner sticker photo, scored through this same candidate engine:
+     *
+     *   full frame     41,504 ms  ->  2T3W1RFV8SC317152 (valid, matches inventory)
+     *   vin-strip       3,844 ms  ->  2T3W1RFV8SC317152 (valid, matches inventory)
+     *
+     * The same answer, 91% sooner. EasyOCR's cost scales with the pixels it is handed, and the VIN
+     * occupies a narrow band, so reading that band first is simply less work — nothing about the
+     * engine changes.
+     *
+     * The hazard is real and was measured too: `vin-upper-left` returned 2TSW1RFVSSC317152 and
+     * `vin-mid-left` returned 2T3W1RFVSSC317152 — both VIN-shaped, both check-digit invalid, neither
+     * in inventory. A fast wrong answer is worse than a slow right one, so a band is only allowed to
+     * end the search when its candidate is structurally valid, passes the check digit, AND is
+     * corroborated by an exact inventory VIN. Anything less and the next band runs, then the full
+     * frame. The fallback is never removed.
+     *
+     * Inventory corroborates; it never proposes. The candidate must come from the image first.
+     */
+    if (bytes && !input.offline && (!text || isNonOcrVisionText(text))) {
+      const inventoryVins = new Set(
+        ((await this.snapshot()).vehicleInventory?.vehicles ?? [])
+          .map((v) => v.vin)
+          .filter((vin): vin is string => Boolean(vin)),
+      );
+      /*
+       * One band, not several.
+       *
+       * A miss is additive: the band is paid for and the full frame still runs. Measured across
+       * three real photos, one hit and two missed, and trying two bands turned a 34 s miss into 53 s
+       * while the hit went from 45 s to 14.5 s. Only `vin-strip` ever produced a corroborated VIN —
+       * `top-band` found the same one more slowly, and the remaining regions produced check-digit
+       * failures — so a second band buys nothing and doubles the cost of being wrong.
+       *
+       * The trade this leaves is explicit: about 30 seconds saved when the VIN is where it usually
+       * is, about 5 seconds lost when it is not.
+       */
+      const bands = vinIdentityCropRegions().filter((r) => r.name === "vin-strip");
+      for (const band of bands) {
+        const cropped = cropImageToRegion(bytes, band, workingMime, { maxEdge: 2200 });
+        if (!cropped) continue;
+        let bandText = "";
+        try {
+          const easy = await runEasyOcrOnImageBytes(cropped, { timeoutMs: 60_000 });
+          bandText = String(easy?.fullText ?? "").trim();
+        } catch {
+          continue;
+        }
+        extractionPasses.push(`easyocr-${band.name}`);
+        if (!bandText) continue;
+        const proposed = proposeVinsFromOcrText(bandText);
+        const confirmed = proposed.find((c) => c.valid && inventoryVins.has(c.vin));
+        if (!confirmed) continue; // a shaped-but-unproven candidate never ends the search
+        text = bandText;
+        provider = `easyocr+${band.name}`;
+        extractionOk = true;
+        lastVisionRaw = text;
+        break;
+      }
+    }
 
     // Prefer local EasyOCR (document OCR) on oriented phone photos before small VLMs.
     // Measured: moondream returns garbage on dense Monroney; EasyOCR reads VIN lines after EXIF fix.
