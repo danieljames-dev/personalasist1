@@ -165,6 +165,52 @@ const GOAL_SIGNALS: readonly GoalSignal[] = [
 export const AMBIGUITY_MARGIN = 2;
 
 /**
+ * Asking for direction, decomposed.
+ *
+ * Independent review found "What should I focus on next?" reading as UNCLEAR while longer variants
+ * worked, and the cause was structural rather than a missing phrase: every planning signal above is
+ * a whole-sentence pattern, so each new way of asking the same thing needs its own line, and the
+ * ones nobody thought of fall through. Adding the exact string would have fixed one sentence and
+ * left the shape of the bug untouched.
+ *
+ * A request for direction is really two things in one sentence — a frame that asks for a
+ * recommendation, and an object that is the Owner's effort rather than a car or a person. Matching
+ * them separately covers the combinations nobody enumerated, including "what would you do next?"
+ * and "what deserves my attention?".
+ */
+const DIRECTION_FRAME = new RegExp(
+  [
+    // "what should I", "where should I", "what do you think I should", "what would you"
+    String.raw`\b(?:what|which|where)\s+(?:should\s+i|do\s+you\s+think\s+i\s+should|would\s+you|ought\s+i)\b`,
+    // "what matters", "what deserves", "what's most important/urgent"
+    String.raw`\bwhat\s+(?:matters|deserves)\b`,
+    String.raw`\bwhat(?:'s|\s+is)\s+(?:the\s+)?most\s+(?:important|urgent|pressing)\b`,
+  ].join("|"),
+  "i",
+);
+
+/**
+ * The object of the effort. Deliberately excludes speech verbs — "what should I tell her?" is a
+ * drafting request, not a planning one, and must keep reaching its own goal.
+ */
+const DIRECTION_OBJECT = new RegExp(
+  [
+    String.raw`\b(?:do|doing|work\s+on|focus(?:\s+on)?|start(?:\s+with)?|begin\s+with|tackle)\b`,
+    String.raw`\bpriorit(?:y|ise|ize|izing|ising)\b`,
+    String.raw`\bspend\s+(?:my\s+)?time\b`,
+    String.raw`\b(?:attention|attend\s+to)\b`,
+    String.raw`\bmatters?(?:\s+most)?\b`,
+  ].join("|"),
+  "i",
+);
+
+/** True when the sentence asks what the Owner should put his effort into. */
+export function asksForDirection(text: string): boolean {
+  const message = String(text ?? "");
+  return DIRECTION_FRAME.test(message) && DIRECTION_OBJECT.test(message);
+}
+
+/**
  * Score every goal, then decide whether the winner is clear enough to act on.
  *
  * Scoring rather than racing is the whole change. Under the old chain, "how many other used cars are
@@ -179,6 +225,16 @@ export function understandGoal(text: string): GoalReadingV1 {
   for (const signal of GOAL_SIGNALS) {
     if (!signal.pattern.test(message)) continue;
     scores.set(signal.goal, (scores.get(signal.goal) ?? 0) + signal.weight);
+  }
+
+  // The compositional reading, scored alongside the literal ones rather than short-circuiting them.
+  // Weighted below a named drafting or population phrase so "what should I tell her?" and "how many
+  // are on the lot?" keep their own goals.
+  if (asksForDirection(message)) {
+    const goal: PracticalGoalV1 = /\b(?:cars?|vehicles?|units?|inventory)\b/i.test(message)
+      ? "PRIORITIZE_VEHICLES"
+      : "PLAN_MY_DAY";
+    scores.set(goal, (scores.get(goal) ?? 0) + 3);
   }
 
   if (scores.size === 0) {
@@ -523,6 +579,59 @@ export interface TierInputV1 {
   ambiguous: boolean;
   /** Text models actually available locally. Empty is the current real state of this machine. */
   availableTextModels: readonly string[];
+}
+
+/** Vision models cannot answer a text question, however local and however healthy they are. */
+const VISION_ONLY_MODEL = /llava|moondream|vision|clip|bakllava/i;
+
+/**
+ * How long a health check may stand before it stops counting as evidence.
+ *
+ * Falling back to deterministic composition when health is stale costs the Owner nothing he would
+ * notice — the answer is still complete — whereas routing to a model that has been deleted costs him
+ * an error in place of an answer. That asymmetry is the whole argument for the bound.
+ */
+export const MODEL_HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Which configured endpoints can actually serve a text turn right now.
+ *
+ * Configuration is not availability, and the gap is not theoretical. This machine's durable brain
+ * settings named `qwen3:4b-instruct` as primary and `deepseek-r1:8b` beside it, both pointed at a
+ * healthy local Ollama, and Ollama answered "model not found" for both: the model files had been
+ * removed from the store while the configuration stayed intact.
+ *
+ * Age matters more than contents. The stored health record was four days old, said `available: true`
+ * and listed both missing models *by name* — so checking the installed list alone would have
+ * confirmed exactly the wrong answer. An endpoint counts only when its probe succeeded, named the
+ * configured model, and is recent enough to still mean something.
+ */
+export function availableTextModelsFrom(
+  endpoints: ReadonlyArray<{
+    location: string;
+    enabled: boolean;
+    runtime: string;
+    model: string;
+    lastHealth: { available: boolean; checkedAt?: string; installedModels?: readonly string[] } | null;
+  }>,
+  now: string = new Date().toISOString(),
+): string[] {
+  const nowMs = Date.parse(now);
+  return endpoints
+    .filter((endpoint) => endpoint.location === "local-machine" && endpoint.enabled)
+    .filter((endpoint) => endpoint.runtime !== "deterministic-offline")
+    .filter((endpoint) => {
+      const health = endpoint.lastHealth;
+      if (!health?.available) return false;
+      const checkedAt = Date.parse(String(health.checkedAt ?? ""));
+      if (!Number.isFinite(checkedAt)) return false;
+      if (Number.isFinite(nowMs) && nowMs - checkedAt > MODEL_HEALTH_MAX_AGE_MS) return false;
+      const installed = health.installedModels ?? [];
+      // An empty list is not a claim of presence; it is the absence of one.
+      return installed.some((name) => name === endpoint.model || name.startsWith(`${endpoint.model}:`));
+    })
+    .map((endpoint) => endpoint.model)
+    .filter((model) => Boolean(model) && !VISION_ONLY_MODEL.test(model) && model !== "aion-offline-v1");
 }
 
 export function routeReasoningTier(input: TierInputV1): TierDecisionV1 {

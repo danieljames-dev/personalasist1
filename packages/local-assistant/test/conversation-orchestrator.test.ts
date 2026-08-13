@@ -23,6 +23,7 @@ import {
   understandGoal, planTools, buildEvidencePacket, routeReasoningTier,
   composeOrchestratedReply, chooseProactiveHelp, applyPersonality, reviewComposedReply,
   toolSurfaceIsSafe, ORCHESTRATOR_TOOLS, AMBIGUITY_MARGIN, statusForEvidenceClass, alreadyAdvised,
+  availableTextModelsFrom, MODEL_HEALTH_MAX_AGE_MS, asksForDirection,
   type EvidenceItemV1,
 } from "../src/conversation-orchestrator.js";
 import {
@@ -464,4 +465,112 @@ test("a composed reply states what is known before what is not", () => {
   const unknownAt = result.reply.indexOf("not counted");
   assert.ok(knownAt >= 0 && unknownAt > knownAt, "leading with a number and qualifying later is how a caveat gets skipped");
   assert.ok(reviewComposedReply(result.reply).ok);
+});
+
+// ---------------------------------------------------------------------------
+// Natural prioritisation phrasing — independent review found this gap
+// ---------------------------------------------------------------------------
+
+test("asking for direction is understood however the Owner phrases it", () => {
+  // Independent review found "What should I focus on next?" reading as UNCLEAR while longer variants
+  // worked. The cause was structural: every planning signal was a whole-sentence pattern, so each new
+  // phrasing needed its own line and the ones nobody thought of fell through. Adding the exact string
+  // would have fixed one sentence and left the shape of the bug in place.
+  for (const phrasing of [
+    "What should I focus on next?",
+    "What should I focus on?",
+    "Where should I focus?",
+    "What deserves my attention?",
+    "What should I work on now?",
+    "What would you do next?",
+    "What matters most right now?",
+    "What should I do today?",
+    "My sales day.",
+  ]) {
+    assert.equal(understandGoal(phrasing).goal, "PLAN_MY_DAY", phrasing);
+  }
+});
+
+test("the compositional reading does not swallow neighbouring goals", () => {
+  // Speech verbs are deliberately absent from the direction object, so drafting keeps its own goal.
+  assert.equal(understandGoal("What should I tell her?").goal, "DRAFT_MESSAGE");
+  assert.equal(understandGoal("What should I say to Sarah?").goal, "DRAFT_MESSAGE");
+  assert.equal(understandGoal("How many other used cars are on the lot?").goal, "LOT_POPULATION");
+  assert.equal(understandGoal("What about the price?").goal, "VEHICLE_DETAIL");
+  // Naming vehicles turns the same frame into a vehicle-prioritisation question.
+  assert.equal(understandGoal("Which of these vehicles should I spend time on?").goal, "PRIORITIZE_VEHICLES");
+});
+
+test("asksForDirection needs both a frame and an object", () => {
+  assert.ok(asksForDirection("What should I focus on next?"));
+  assert.ok(!asksForDirection("What should I tell her?"), "a speech verb is not a direction object");
+  assert.ok(!asksForDirection("Focus the camera."), "an object without a request frame is not a question");
+});
+
+// ---------------------------------------------------------------------------
+// Model availability — configuration is not health
+// ---------------------------------------------------------------------------
+
+const endpointFixture = (over: Record<string, unknown> = {}) => ({
+  location: "local-machine", enabled: true, runtime: "ollama", model: "qwen3:4b-instruct",
+  lastHealth: {
+    available: true,
+    checkedAt: "2026-08-12T00:00:00.000Z",
+    installedModels: ["qwen3:4b-instruct", "deepseek-r1:8b"],
+  },
+  ...over,
+});
+const HEALTH_NOW = "2026-08-12T06:00:00.000Z";
+
+test("a healthy, currently-probed local text model counts as available", () => {
+  assert.deepEqual(availableTextModelsFrom([endpointFixture()], HEALTH_NOW), ["qwen3:4b-instruct"]);
+});
+
+test("a stale health record does not vouch for a model that has since been deleted", () => {
+  // The real production record: four days old, available: true, and naming both models — while
+  // Ollama answered "model not found" for both. Contents alone could never have caught this.
+  const stale = endpointFixture({
+    lastHealth: {
+      available: true,
+      checkedAt: "2026-08-08T21:38:15.183Z",
+      installedModels: ["qwen3:4b-instruct", "deepseek-r1:8b"],
+    },
+  });
+  assert.deepEqual(availableTextModelsFrom([stale], HEALTH_NOW), [], "a remembered yes is not a current yes");
+  assert.ok(MODEL_HEALTH_MAX_AGE_MS > 0);
+});
+
+test("a configured model absent from the installed list is not available", () => {
+  const missing = endpointFixture({
+    lastHealth: { available: true, checkedAt: HEALTH_NOW, installedModels: ["llava-phi3:latest"] },
+  });
+  assert.deepEqual(availableTextModelsFrom([missing], HEALTH_NOW), []);
+});
+
+test("health with no model list is treated as no evidence at all", () => {
+  const vague = endpointFixture({ lastHealth: { available: true, checkedAt: HEALTH_NOW } });
+  assert.deepEqual(availableTextModelsFrom([vague], HEALTH_NOW), [], "an empty list is not a claim of presence");
+});
+
+test("the offline provider and vision models never count as a text tier", () => {
+  const offline = endpointFixture({ runtime: "deterministic-offline", model: "aion-offline-v1" });
+  const vision = endpointFixture({
+    model: "llava-phi3:latest",
+    lastHealth: { available: true, checkedAt: HEALTH_NOW, installedModels: ["llava-phi3:latest"] },
+  });
+  assert.deepEqual(availableTextModelsFrom([offline, vision], HEALTH_NOW), []);
+});
+
+test("with both approved models healthy, synthesis reaches the reasoning tier", () => {
+  const models = availableTextModelsFrom(
+    [endpointFixture(), endpointFixture({ model: "deepseek-r1:8b" })],
+    HEALTH_NOW,
+  );
+  assert.deepEqual(models, ["qwen3:4b-instruct", "deepseek-r1:8b"]);
+  const packet = buildEvidencePacket({ goal: "PLAN_MY_DAY", items: [] });
+  const decision = routeReasoningTier({
+    goal: "PLAN_MY_DAY", packet, ambiguous: false, availableTextModels: models,
+  });
+  assert.equal(decision.tier, "REASONING_LOCAL");
+  assert.equal(decision.degradedFrom, null);
 });

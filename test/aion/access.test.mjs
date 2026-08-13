@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { request as httpRequest } from "node:http";
 import {
   DeterministicClockV1, DeterministicIdGeneratorV1, DeterministicModelProviderV1,
   InMemoryWriterAuthorityV1, LocalEchoCapabilityV1, SelectableDeveloperAgentRegistryV1,
@@ -276,4 +277,83 @@ test("the service worker caches the shell and never an API response", async () =
   assert.match(html, /rel="manifest"/u);
   assert.match(html, /viewport-fit=cover/u);
   assert.doesNotMatch(html, /https?:\/\//u, "the shell still loads nothing remote");
+});
+
+/*
+ * Tailscale Serve sits in front of the loopback listener, and that changes two things the access
+ * boundary depended on. It answers on the node's MagicDNS name at port 443, so `Host` carries no
+ * port and `Origin` is https — neither of which the same-origin allowlist could express, so the
+ * private URL returned 403 to everything including the Owner's own phone. And it connects to AION
+ * from 127.0.0.1, so without care every phone on the tailnet would be taken for the Owner at the
+ * console and would skip pairing altogether.
+ */
+const SERVE_HOST = "desktop-inlaqjq.tail177dc2.ts.net";
+
+/**
+ * A raw request, because `fetch` silently drops `Host`.
+ *
+ * `host` is a forbidden header name in the fetch spec, so undici rewrites it to the socket target
+ * and the proxied path can never be exercised through `fetch` at all — the first version of these
+ * tests failed for that reason rather than because the server was wrong.
+ */
+function servedRequest(address, { path = "/api/state", host = SERVE_HOST, origin, headers = {} } = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpRequest({
+      host: "127.0.0.1", port: address.port, path, method: "GET",
+      headers: {
+        host,
+        ...(origin === null ? {} : { origin: origin ?? `https://${host}` }),
+        "x-forwarded-proto": "https",
+        "x-forwarded-for": "100.127.184.79",
+        ...headers,
+      },
+    }, (response) => {
+      let raw = "";
+      response.on("data", (chunk) => { raw += chunk; });
+      response.on("end", () => resolvePromise({ status: response.statusCode, raw }));
+    });
+    request.on("error", rejectPromise);
+    request.end();
+  });
+}
+
+test("a request proxied by Tailscale Serve is allowed past the origin gate", async () => {
+  await withServer(async ({ base, address }) => {
+    await enable(base);
+    const response = await servedRequest(address);
+    assert.notEqual(response.status, 403, "the MagicDNS host over https must not be rejected as a foreign origin");
+  });
+});
+
+test("a proxied request still has to be a paired device", async () => {
+  // The security half. Serve connects from loopback, so this must not be read as the console.
+  await withServer(async ({ base, address }) => {
+    await enable(base);
+    const response = await servedRequest(address);
+    assert.equal(response.status, 401, "an unpaired phone must be refused even through the proxy");
+    assert.match(response.raw, /not paired/i);
+  });
+});
+
+test("the console keeps working directly, without proxy headers", async () => {
+  await withServer(async ({ base }) => {
+    const response = await fetch(`${base}/api/state`);
+    assert.equal(response.status, 200, "a direct loopback request is still the Owner at the console");
+  });
+});
+
+test("a foreign host is refused even when it claims to be proxied", async () => {
+  await withServer(async ({ base, address }) => {
+    await enable(base);
+    const evil = await servedRequest(address, { host: "evil.example.com" });
+    assert.equal(evil.status, 403, "only MagicDNS hosts may use the proxied path");
+  });
+});
+
+test("a mismatched Origin is refused on the proxied path", async () => {
+  await withServer(async ({ base, address }) => {
+    await enable(base);
+    const crossSite = await servedRequest(address, { origin: "https://attacker.example" });
+    assert.equal(crossSite.status, 403, "Origin must match the proxied host exactly");
+  });
 });

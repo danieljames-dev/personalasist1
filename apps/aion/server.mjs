@@ -272,8 +272,43 @@ async function body(request) {
  * the phone path from a loopback socket. It is not a runtime setting and cannot be reached from
  * the API, so no request can turn itself into a console session or the reverse.
  */
+/**
+ * A MagicDNS name for a node on a tailnet, e.g. `desktop-abc123.tailnet-name.ts.net`.
+ *
+ * Matched by shape rather than configured, because the control plane assigns the name and it
+ * changes when the machine is renamed. It only ever widens the same-origin allowlist; pairing and
+ * device sessions behind it are untouched, and with Funnel off such a host is reachable only from
+ * inside the tailnet.
+ */
+const MAGIC_DNS_HOST = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$/i;
+
+/**
+ * True when Tailscale Serve proxied this request instead of the peer connecting directly.
+ *
+ * Serve terminates TLS and forwards to the loopback listener, so the socket's peer address is
+ * 127.0.0.1 for every phone on the tailnet. Without this check each of them would be taken for the
+ * Owner sitting at the console and would skip pairing entirely — the proxy would quietly remove a
+ * boundary this server otherwise enforces carefully.
+ *
+ * This does not contradict the rule that console status is never inferred from a header. The
+ * inference only runs in the safe direction: a forged header moves a request from console to phone,
+ * which demands *more* proof, never less. Stripping the headers leaves a direct connection whose
+ * real peer address is already not loopback.
+ */
+function viaTailscaleServe(request) {
+  const headers = request.headers ?? {};
+  return Boolean(
+    headers["tailscale-user-login"]
+    || headers["tailscale-user-name"]
+    || headers["x-forwarded-for"]
+    || headers["x-forwarded-proto"],
+  );
+}
+
 function isLoopbackPeer(request, treatPeerAsRemote) {
   if (treatPeerAsRemote) return false;
+  // A proxied request is never the console, whatever the socket reports.
+  if (viaTailscaleServe(request)) return false;
   const remote = request.socket?.remoteAddress ?? "";
   return remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
 }
@@ -281,6 +316,12 @@ function isLoopbackPeer(request, treatPeerAsRemote) {
 /**
  * Same-origin enforcement. Allowed hosts: loopback plus every private address AION is actually
  * listening on (LAN and/or Tailscale overlay). Wildcards are never allowed.
+ *
+ * Tailscale Serve adds one shape this had no way to express. It answers on the node's MagicDNS name
+ * at the default HTTPS port, so the browser sends `Host: node.tailnet.ts.net` with no port at all
+ * and an `https://` Origin — while every entry built here carries `:31415` and the Origin comparison
+ * was hardcoded to `http://`. Nothing could match, so the secure URL returned 403 on every request,
+ * including the Owner's own phone.
  */
 function sameOrigin(request, address, extraHosts) {
   const host = request.headers.host; const origin = request.headers.origin;
@@ -291,7 +332,16 @@ function sameOrigin(request, address, extraHosts) {
     hosts.add(`${extraHost}:${address.port}`);
     hosts.add(`[${extraHost}]:${address.port}`);
   }
-  if (!host || !hosts.has(host.toLowerCase())) return false;
+  if (!host) return false;
+  const lowerHost = host.toLowerCase();
+
+  // The proxied case: a portless MagicDNS host, reachable only from the tailnet, over https.
+  if (viaTailscaleServe(request) && MAGIC_DNS_HOST.test(lowerHost)) {
+    if (!origin) return true;
+    return origin.toLowerCase() === `https://${lowerHost}`;
+  }
+
+  if (!hosts.has(lowerHost)) return false;
   if (!origin) return true;
   return [...hosts].some((candidate) => origin.toLowerCase() === `http://${candidate}`);
 }

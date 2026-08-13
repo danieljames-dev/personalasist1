@@ -353,6 +353,7 @@ import {
   composeOrchestratedReply,
   chooseProactiveHelp,
   describeGoal,
+  availableTextModelsFrom,
   type EvidenceItemV1,
   type OrchestrationResultV1,
   type PracticalGoalV1,
@@ -10814,15 +10815,14 @@ export class AionAssistantV1 {
   /**
    * Local text models actually available for reasoning.
    *
-   * Reported from configuration rather than assumed, because the answer today is "none": the only
-   * models on this machine are for vision. The tier router needs the real list so it degrades
-   * honestly instead of routing to an endpoint that does not exist.
+   * Health, not configuration. The durable settings on this machine named two local text models as
+   * healthy and installed while Ollama answered "model not found" for both, because the files were
+   * deleted four days after the health record was written. Routing to a configured-but-absent
+   * endpoint hands the Owner an inference error in place of the complete deterministic answer he
+   * could have had.
    */
   #availableTextModels(state: AssistantStateV1): string[] {
-    return (state.brain?.endpoints ?? [])
-      .filter((endpoint) => endpoint.location === "local-machine")
-      .map((endpoint) => String(endpoint.model ?? ""))
-      .filter((model) => model && !/llava|moondream|vision|clip/i.test(model) && model !== "aion-offline-v1");
+    return availableTextModelsFrom(state.brain?.endpoints ?? [], this.ports.clock.now());
   }
 
   /** Vehicles the Owner has physically photographed and AION identified within the last day. */
