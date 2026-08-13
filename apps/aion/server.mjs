@@ -352,6 +352,66 @@ function sameOrigin(request, address, extraHosts) {
   return [...hosts].some((candidate) => origin.toLowerCase() === `http://${candidate}`);
 }
 
+/*
+ * Post-upload processing progress.
+ *
+ * The Owner watched a still screen from the moment his photos finished uploading until the answer
+ * appeared — the upload bar told him the files had arrived and then nothing told him anything. On a
+ * lot, with three photos and a warm OCR worker, that gap is the part of the wait that feels broken.
+ *
+ * Polling a small in-memory board is the least machinery that fixes it. Streaming would mean a
+ * second transport, a second set of failure modes and a reconnect story, for a wait measured in
+ * seconds. Nothing here is durable on purpose: progress is worthless after the answer exists, so it
+ * lives in memory, is capped, and is swept.
+ */
+const PROGRESS_TTL_MS = 5 * 60 * 1000;
+const PROGRESS_MAX_ENTRIES = 64;
+const progressBoard = new Map();
+
+function progressSweep() {
+  const cutoff = Date.now() - PROGRESS_TTL_MS;
+  for (const [token, entry] of progressBoard) {
+    if (entry.updatedAt < cutoff) progressBoard.delete(token);
+  }
+  while (progressBoard.size > PROGRESS_MAX_ENTRIES) {
+    const oldest = progressBoard.keys().next().value;
+    if (oldest === undefined) break;
+    progressBoard.delete(oldest);
+  }
+}
+
+function progressToken(input) {
+  const raw = String(input?.progressToken ?? "").trim();
+  return /^[A-Za-z0-9_-]{6,64}$/.test(raw) ? raw : null;
+}
+
+/** Record a stage. Never throws into the request it is describing. */
+function progressPush(token, stage) {
+  if (!token) return;
+  progressSweep();
+  const entry = progressBoard.get(token) ?? { stages: [], done: false, error: null, updatedAt: 0 };
+  // The last line is what the Owner reads; repeating it would look like nothing is moving.
+  if (entry.stages[entry.stages.length - 1] !== stage) entry.stages.push(stage);
+  if (entry.stages.length > 24) entry.stages.shift();
+  entry.updatedAt = Date.now();
+  progressBoard.set(token, entry);
+}
+
+/**
+ * Close a token out.
+ *
+ * A failure must clear the stage rather than leave the last one showing, because a frozen
+ * "Checking inventory…" reads as a hang when the request has actually already failed.
+ */
+function progressFinish(token, error) {
+  if (!token) return;
+  const entry = progressBoard.get(token) ?? { stages: [], done: false, error: null, updatedAt: 0 };
+  entry.done = true;
+  entry.error = error ? String(error).slice(0, 300) : null;
+  entry.updatedAt = Date.now();
+  progressBoard.set(token, entry);
+}
+
 /** Bearer material is read from a header only. A token in a URL would leak into logs and history. */
 function bearerToken(request) {
   const header = request.headers.authorization;
@@ -647,6 +707,18 @@ export async function createAionServer(options = {}) {
       case "customer.find": return { customers: await service.findCustomers(input.query ?? { kind: "all" }) };
       case "customer.timeline": return service.customerTimeline(input.id);
       case "customer.summary": return service.accountSummary(input.id);
+      case "assistant.progress": {
+        // Read-only, and deliberately says nothing about what is being processed — only how far it
+        // has got. An unknown token is not an error; it is a poll that arrived before the work did.
+        const token = progressToken(input);
+        const entry = token ? progressBoard.get(token) : null;
+        return {
+          stages: entry ? [...entry.stages] : [],
+          stage: entry && entry.stages.length ? entry.stages[entry.stages.length - 1] : null,
+          done: entry ? entry.done === true : false,
+          error: entry ? entry.error : null,
+        };
+      }
       case "assistant.prompt": {
         const text = String(input.text ?? input.content ?? "");
         const conversationId = input.conversationId ? String(input.conversationId) : null;
@@ -658,19 +730,34 @@ export async function createAionServer(options = {}) {
         // plate and a second page and means them as one question. Judging them together is what
         // stops a single bad read ending the conversation.
         if (Array.isArray(input.images) && input.images.length > 1) {
-          return service.answerAboutVehiclePhotoBundle({
-            text,
-            images: input.images
-              .slice(0, 6)
-              .map((img) => ({
-                contentBase64: String(img?.contentBase64 || ""),
-                mimeType: String(img?.mimeType || "image/jpeg"),
-                filename: String(img?.filename || "photo.jpg"),
-                documentRef: img?.documentRef ? String(img.documentRef) : null,
-              }))
-              .filter((img) => img.contentBase64),
-            conversationId,
-          });
+          const token = progressToken(input);
+          progressPush(token, "Reading vehicle information…");
+          try {
+            const bundled = await service.answerAboutVehiclePhotoBundle({
+              text,
+              onStage: (stageText) => progressPush(token, stageText),
+              images: input.images
+                .slice(0, 6)
+                .map((img) => ({
+                  contentBase64: String(img?.contentBase64 || ""),
+                  mimeType: String(img?.mimeType || "image/jpeg"),
+                  filename: String(img?.filename || "photo.jpg"),
+                  documentRef: img?.documentRef ? String(img.documentRef) : null,
+                }))
+                .filter((img) => img.contentBase64),
+              conversationId,
+              // Already a supported service option; passing it through lets a caller ask for the
+              // grounded path without the vision engines, which is what the tests want and what a
+              // machine with no OCR runtime needs.
+              ...(input.offline === true ? { offline: true } : {}),
+            });
+            progressFinish(token, null);
+            return bundled;
+          } catch (error) {
+            // The stage must not stay on screen after the work behind it has failed.
+            progressFinish(token, error instanceof Error ? error.message : "Processing failed.");
+            throw error;
+          }
         }
         if (input.imageBase64) {
           const photo = await service.answerAboutVehiclePhoto({

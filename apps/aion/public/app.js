@@ -475,6 +475,44 @@ function renderSendProgress() {
   return `<div class="aion-attach-chip" role="status" aria-live="polite"><span class="aion-attach-meta">${lines}</span></div>`;
 }
 
+/**
+ * Follow server-side processing while the request is in flight.
+ *
+ * Upload progress ended the moment the bytes landed, and everything after that — orientation, OCR
+ * across three photos, VIN validation, the inventory join — happened behind a still screen. On a lot
+ * that silence is the part of the wait that feels broken.
+ *
+ * Polls a token the server stamps stages against. Deliberately forgiving: a failed poll is skipped
+ * rather than surfaced, because a progress indicator must never be able to break the answer it is
+ * describing.
+ */
+function newProgressToken() {
+  const bytes = new Uint8Array(12);
+  (window.crypto || {}).getRandomValues?.(bytes);
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 24) || String(Date.now());
+}
+
+function followServerProgress(token) {
+  let stopped = false;
+  const tick = async () => {
+    while (!stopped) {
+      await new Promise((r) => setTimeout(r, 700));
+      if (stopped) return;
+      try {
+        const status = await api("assistant.progress", { progressToken: token });
+        if (stopped) return;
+        if (status?.error) { progressStage("That didn't finish — see the message below."); return; }
+        if (status?.done) return;
+        if (status?.stage) progressStage(String(status.stage));
+      } catch {
+        /* a missed poll is not worth showing */
+      }
+    }
+  };
+  void tick();
+  return () => { stopped = true; };
+}
+
 function progressStage(text) {
   if (!sendProgress) sendProgress = { stages: [] };
   sendProgress.stages.push(text);
@@ -2151,8 +2189,12 @@ document.addEventListener("submit", async (event) => {
 
       const imageAttachments = pendingAttachments.filter((a) => a.isImage);
       const primary = imageAttachments[0] || attachment;
-      if (imageAttachments.length > 1) progressStage("Reading the VIN…");
-      const result = await api("assistant.prompt", {
+      const progressTokenValue = imageAttachments.length > 1 ? newProgressToken() : null;
+      const stopFollowing = progressTokenValue ? followServerProgress(progressTokenValue) : null;
+      let result;
+      try {
+      result = await api("assistant.prompt", {
+        ...(progressTokenValue ? { progressToken: progressTokenValue } : {}),
         text: text || (primary?.isImage
           ? (pendingAttachments.length > 1
             ? "These photos are the same vehicle. What car is this and what do we know about it?"
@@ -2175,6 +2217,11 @@ document.addEventListener("submit", async (event) => {
           }
           : {}),
       });
+      } finally {
+        // The follower stops whether the request succeeded or threw, so a stage can never be left
+        // ticking over an answer that has already arrived or a failure that has already happened.
+        stopFollowing?.();
+      }
       window.__aionLastAssistant = { ...result, attachmentName: primary ? primary.name : null };
       pendingAttachments = [];
       sendProgress = null;

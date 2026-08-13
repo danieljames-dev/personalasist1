@@ -382,3 +382,87 @@ test("the port is not a way round the host check", async () => {
     assert.equal(evil.status, 403, "a foreign host with a port is still foreign");
   });
 });
+
+/*
+ * Post-upload processing progress.
+ *
+ * The Owner's upload bar told him the bytes had landed and then nothing told him anything until the
+ * answer appeared. Everything expensive — orientation, OCR across three photos, VIN validation, the
+ * inventory join — happens inside that silence.
+ */
+const TINY_JPEG_B64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a"
+  + "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/E"
+  + "ABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==";
+const photo = (name) => ({ contentBase64: TINY_JPEG_B64, mimeType: "image/jpeg", filename: name });
+
+test("processing stages are readable while a multi-photo turn is still running", async () => {
+  await withServer(async ({ base }) => {
+    const token = "progress-test-token-1";
+    const inFlight = post(base, {
+      type: "assistant.prompt",
+      text: "What car is this?",
+      progressToken: token,
+      offline: true,
+      images: [photo("a.jpg"), photo("b.jpg"), photo("c.jpg")],
+    });
+
+    // Poll while the request is genuinely still in flight.
+    let seen = [];
+    for (let i = 0; i < 40 && seen.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+      const status = await (await post(base, { type: "assistant.progress", progressToken: token })).json();
+      seen = status?.result?.stages ?? [];
+    }
+    await inFlight;
+
+    assert.ok(seen.length > 0, "the Owner must see something between upload and answer");
+    const joined = seen.join(" | ");
+    assert.ok(!/%/.test(joined), `no fake percentages, got: ${joined}`);
+    assert.ok(
+      !/V1\b|ocrVinFromImage|buildVehicleEvidenceBundle|bundle_assembly/.test(joined),
+      `no internal names may reach the Owner, got: ${joined}`,
+    );
+  });
+});
+
+test("progress does not stay frozen once the turn is over", async () => {
+  await withServer(async ({ base }) => {
+    const token = "progress-test-token-2";
+    await post(base, {
+      type: "assistant.prompt",
+      text: "What car is this?", progressToken: token, offline: true, images: [photo("a.jpg"), photo("b.jpg")],
+    });
+    const status = await (await post(base, { type: "assistant.progress", progressToken: token })).json();
+    assert.equal(status?.result?.done, true, "a finished turn must report done, not a stuck stage");
+  });
+});
+
+test("an unknown progress token is an empty answer, not an error", async () => {
+  await withServer(async ({ base }) => {
+    const status = await (await post(base, { type: "assistant.progress", progressToken: "never-seen-token" })).json();
+    assert.equal(status?.result?.done, false);
+    assert.deepEqual(status?.result?.stages, [], "a poll that arrives before the work is not a failure");
+  });
+});
+
+test("one unreadable photo does not stop the bundle reporting progress", async () => {
+  await withServer(async ({ base }) => {
+    const token = "progress-test-token-3";
+    // The first image is not decodable; the rest of the bundle must still be processed and reported.
+    const response = await post(base, {
+      type: "assistant.prompt",
+      text: "What car is this?",
+      progressToken: token,
+      offline: true,
+      images: [
+        { contentBase64: "bm90LWFuLWltYWdl", mimeType: "image/jpeg", filename: "broken.jpg" },
+        photo("b.jpg"),
+        photo("c.jpg"),
+      ],
+    });
+    assert.equal(response.status, 200, "a single bad photo must not fail the whole turn");
+    const status = await (await post(base, { type: "assistant.progress", progressToken: token })).json();
+    assert.equal(status?.result?.error, null, "partial failure is not whole-request failure");
+    assert.equal(status?.result?.done, true);
+  });
+});

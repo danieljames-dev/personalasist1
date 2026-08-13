@@ -469,3 +469,31 @@ export function ownerFacingExtractionMessage(kind: ExtractionFailureKindV1): str
       return "";
   }
 }
+
+/**
+ * Whether a buffer begins like an image an OCR engine can actually open.
+ *
+ * A signature check, not a decode: the goal is to keep bytes that are plainly not an image away
+ * from a worker that reports the problem by crashing out of band. Anything that passes here may
+ * still fail to decode for other reasons, and that is fine — those failures arrive as ordinary
+ * rejections that a caller can catch.
+ */
+export function looksLikeDecodableImage(bytes: Uint8Array | null | undefined): boolean {
+  if (!bytes || bytes.length < 12) return false;
+  const b = bytes;
+  // JPEG
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true;
+  // PNG
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true;
+  // GIF87a / GIF89a
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return true;
+  // BMP
+  if (b[0] === 0x42 && b[1] === 0x4d) return true;
+  // WEBP and HEIC/HEIF both sit inside a RIFF/ISO container with the brand at offset 8.
+  const brand = String.fromCharCode(b[8]!, b[9]!, b[10]!, b[11]!);
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && brand === "WEBP") return true;
+  if (/^(?:heic|heix|hevc|mif1|msf1|avif)$/i.test(brand)) return true;
+  // TIFF, which phones still produce from some scanners.
+  if ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a) || (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0x00)) return true;
+  return false;
+}

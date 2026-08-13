@@ -134,6 +134,7 @@ import {
   STICKER_PRICE_FOCUS_PROMPT,
   vinIdentityCropRegions,
   ownerFacingExtractionMessage,
+  looksLikeDecodableImage,
 } from "./image-region.js";
 import { orientImageBytesForVision, runEasyOcrOnImageBytes } from "./connectors/sticker-ocr.js";
 import {
@@ -6016,6 +6017,15 @@ export class AionAssistantV1 {
     };
 
     const runTesseract = async (img: Buffer, passName: string): Promise<boolean> => {
+      // Bytes that are not an image must never reach the worker.
+      //
+      // tesseract.js reports an undecodable image by throwing inside its worker's message handler,
+      // which is outside the promise being awaited here — so the surrounding try/catch never sees
+      // it and it surfaces as an uncaught exception that takes down the whole turn. One corrupt
+      // frame from an interrupted upload would lose every other photo the Owner had just taken.
+      // Checking the signature first is cheap and removes the class of failure rather than the
+      // symptom.
+      if (!looksLikeDecodableImage(img)) return false;
       try {
         const tessPath = "tesseract.js";
         const tess = await import(tessPath) as {
@@ -6230,6 +6240,14 @@ export class AionAssistantV1 {
     offline?: boolean;
     /** Tests: OCR text per image, positionally parallel to `images`. */
     extractedTexts?: readonly string[];
+    /**
+     * Called as each real stage begins, so the Owner is not left watching a still screen.
+     *
+     * Only ever invoked where work is genuinely starting. A stage that is announced before it runs,
+     * or left showing after it finishes, is worse than silence: it teaches the Owner that the text
+     * is decoration rather than information.
+     */
+    onStage?: (stage: string) => void;
   }): Promise<{
     intent: string; confidence: string; reply: string;
     sources: Array<{ type: string; id: string; label: string }>;
@@ -6239,21 +6257,48 @@ export class AionAssistantV1 {
     const { buildVehicleEvidenceBundle, nextPhotoAdvice } = await import("./vehicle-evidence-bundle.js");
     const startedAt = Date.now();
     const timings: Record<string, number> = {};
+    const stage = (text: string): void => { try { input.onStage?.(text); } catch { /* progress is never load-bearing */ } };
 
     const evidenceImages: Array<import("./vehicle-evidence-bundle.js").EvidenceImageV1> = [];
+    /** Files that could not be decoded at all, named so the Owner can retake exactly those. */
+    const unreadableImages: string[] = [];
     const readings: Array<import("./vehicle-evidence-bundle.js").StickerReadingV1> = [];
 
     for (let i = 0; i < input.images.length; i += 1) {
       const image = input.images[i]!;
       const ref = image.documentRef || `image:${image.filename || `photo-${i + 1}`}`;
+      stage(input.images.length > 1
+        ? `Reading photo ${i + 1} of ${input.images.length}…`
+        : "Reading vehicle information…");
       const began = Date.now();
-      const ocr = await this.ocrVinFromImage({
-        contentBase64: image.contentBase64,
-        ...(image.mimeType ? { mimeType: image.mimeType } : {}),
-        ...(image.filename ? { filename: image.filename } : {}),
-        ...(input.offline ? { offline: true } : {}),
-        ...(input.extractedTexts?.[i] ? { extractedText: input.extractedTexts[i]! } : {}),
-      });
+      /*
+       * A photo that cannot be decoded at all is not a reason to lose the other two.
+       *
+       * The bundle already survives a *bad read* — an invalid VIN is recorded and outvoted. It did
+       * not survive a bad *file*: an undecodable image threw out of the OCR worker, the exception
+       * escaped the whole turn, and every photo the Owner had just taken went with it. On a lot that
+       * is an interrupted upload costing him the entire set rather than one frame.
+       *
+       * The failure is recorded as an image that offered no candidates, which is exactly what it is,
+       * so the evidence bundle weighs it honestly instead of never seeing it.
+       */
+      let ocr: Awaited<ReturnType<typeof this.ocrVinFromImage>>;
+      try {
+        ocr = await this.ocrVinFromImage({
+          contentBase64: image.contentBase64,
+          ...(image.mimeType ? { mimeType: image.mimeType } : {}),
+          ...(image.filename ? { filename: image.filename } : {}),
+          ...(input.offline ? { offline: true } : {}),
+          ...(input.extractedTexts?.[i] ? { extractedText: input.extractedTexts[i]! } : {}),
+        });
+      } catch {
+        timings[`ocr_image_${i + 1}_ms`] = Date.now() - began;
+        unreadableImages.push(image.filename || `photo ${i + 1}`);
+        evidenceImages.push({
+          imageRef: ref, role: "UNKNOWN", ocrText: "", vinCandidates: [], quality: 0,
+        });
+        continue;
+      }
       timings[`ocr_image_${i + 1}_ms`] = Date.now() - began;
 
       evidenceImages.push({
@@ -6291,6 +6336,7 @@ export class AionAssistantV1 {
     const workspaceId = snapshot.settings.activeWorkspace;
     const now = this.ports.clock.now();
 
+    stage("Checking the VIN…");
     const assembleBegan = Date.now();
     const bundle = buildVehicleEvidenceBundle({
       bundleId: this.ports.ids.next("evidence-bundle"),
@@ -6303,7 +6349,11 @@ export class AionAssistantV1 {
     });
     timings.bundle_assembly_ms = Date.now() - assembleBegan;
 
+    stage("Checking inventory…");
     const matched = bundle.vehicleRef ? vehicles.find((v) => v.id === bundle.vehicleRef) ?? null : null;
+    if (matched) stage("Vehicle identified.");
+    if (bundle.money.totalSuggestedRetail) stage("Reading sticker details…");
+    stage("Preparing answer…");
     const sources: Array<{ type: string; id: string; label: string }> = [];
     const lines: string[] = [];
 
@@ -6327,6 +6377,13 @@ export class AionAssistantV1 {
       sources.push({ type: "vehicle", id: matched.id, label: label || matched.id });
     } else {
       lines.push(bundle.message);
+    }
+
+    if (unreadableImages.length) {
+      lines.push("");
+      lines.push(unreadableImages.length === 1
+        ? `One photo wouldn't open (${unreadableImages[0]}), so I worked from the rest.`
+        : `${unreadableImages.length} photos wouldn't open, so I worked from the rest.`);
     }
 
     const advice = nextPhotoAdvice(bundle);
