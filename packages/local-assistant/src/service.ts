@@ -6280,6 +6280,9 @@ export class AionAssistantV1 {
     const evidenceImages: Array<import("./vehicle-evidence-bundle.js").EvidenceImageV1> = [];
     /** Files that could not be decoded at all, named so the Owner can retake exactly those. */
     const unreadableImages: string[] = [];
+    /** When identity first became safely known, so the wait for it can be reported separately. */
+    let firstIdentityAt: number | null = null;
+    let snapshotForFastFirst: AssistantStateV1 | null = null;
     const readings: Array<import("./vehicle-evidence-bundle.js").StickerReadingV1> = [];
 
     for (let i = 0; i < input.images.length; i += 1) {
@@ -6331,6 +6334,53 @@ export class AionAssistantV1 {
         quality: ocr.best?.confidence ?? 0,
       });
 
+      /*
+       * Fast first result.
+       *
+       * Measured on the Owner's own photos: OCR is 100% of the time, at roughly 34 seconds per
+       * image warm, and images are read one at a time because there is a single warm worker. A
+       * three-photo turn therefore takes about 104 seconds, and under the original design the Owner
+       * learned which car it was only at the end of that.
+       *
+       * Nothing here makes OCR faster. What it changes is when the Owner is told: the moment any one
+       * image yields a structurally valid VIN that joins inventory exactly, the identity is
+       * announced and the remaining photos carry on as enrichment. Roughly a third of the wait for
+       * the fact he actually wanted.
+       *
+       * Only an exact, check-digit-valid, inventory-corroborated match qualifies. A fast answer that
+       * might be the wrong car is worth less than no answer at all.
+       */
+      if (!firstIdentityAt) {
+        const candidates = [
+          ...(ocr.best?.vin ? [ocr.best.vin] : []),
+          ...(ocr.candidates ?? []).map((c) => c.vin),
+        ].filter(Boolean) as string[];
+        for (const candidate of candidates) {
+          const normalized = normalizeVinCandidate(candidate);
+          if (!normalized || !validateVin(normalized).valid) continue;
+          const hit = (snapshotForFastFirst ??= await this.snapshot())
+            .vehicleInventory?.vehicles.find((v) => v.vin === normalized);
+          if (!hit) continue;
+          firstIdentityAt = Date.now();
+          timings.first_useful_result_ms = firstIdentityAt - startedAt;
+          const name = [hit.year, hit.make, hit.model, hit.trim].filter(Boolean).join(" ");
+          /*
+           * Phrased as provisional, because it is.
+           *
+           * Measured on three real photos: the first resolved to a RAV4 XLE at 38 seconds and the
+           * completed bundle then returned conflicting VINs, because the photos were of different
+           * vehicles. Announcing "Vehicle identified — RAV4 XLE" and then contradicting it is worse
+           * than the wait it saved: the Owner acts on the first thing he reads. Saying what is true
+           * so far, and that more photos are still being read, is both faster and honest.
+           */
+          const more = i + 1 < input.images.length;
+          stage(name
+            ? (more ? `So far this looks like a ${name} — still reading the other photos.` : `Vehicle identified — ${name}.`)
+            : "Vehicle identified.");
+          break;
+        }
+      }
+
       // The shared OCR path fills `sticker` only when it ran its own sticker pass, so a photo whose
       // text arrived another way comes back with an empty one. Re-reading the text we already have
       // with the same extractor keeps the fusion honest without altering the shared method.
@@ -6366,6 +6416,11 @@ export class AionAssistantV1 {
       capturedAt: now,
     });
     timings.bundle_assembly_ms = Date.now() - assembleBegan;
+    timings.full_result_ms = Date.now() - startedAt;
+    if (timings.first_useful_result_ms === undefined) {
+      // Identity was never proven early, so the first useful result is the whole turn.
+      timings.first_useful_result_ms = timings.full_result_ms;
+    }
 
     stage("Checking inventory…");
     const matched = bundle.vehicleRef ? vehicles.find((v) => v.id === bundle.vehicleRef) ?? null : null;
