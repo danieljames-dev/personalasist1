@@ -346,6 +346,26 @@ import {
   type OwnerKnowledgeStateV1,
 } from "./owner-knowledge.js";
 import {
+  understandGoal,
+  planTools,
+  buildEvidencePacket,
+  routeReasoningTier,
+  composeOrchestratedReply,
+  chooseProactiveHelp,
+  describeGoal,
+  type EvidenceItemV1,
+  type OrchestrationResultV1,
+  type PracticalGoalV1,
+} from "./conversation-orchestrator.js";
+import { answerLotScopeQuestion } from "./lot-scope-reasoning.js";
+import { retrieveOwnerMemory, answerFromOwnerMemory } from "./owner-archive-memory.js";
+import {
+  archiveCoverageNote,
+  planSeedIngest,
+  seedFactToKnowledgeInput,
+  type SeedFactInputV1,
+} from "./owner-seed-ingest.js";
+import {
   extractCommitmentsFromBody,
   gmailConnectorStatus,
   defaultGmailConfig,
@@ -10728,6 +10748,354 @@ export class AionAssistantV1 {
    * R7 natural-language assistant entry for CRM/sales. Deterministic structured CRM first;
    * falls back to chat when no CRM intent matches or subject cannot be resolved.
    */
+  /**
+   * Bring the Owner's archive facts into current knowledge.
+   *
+   * Entries arrive already parsed rather than being read from disk here, which keeps this module
+   * free of filesystem access and lets the plan be exercised in tests without a fixture file. The
+   * plan is computed first and can be inspected without writing, because the failure worth avoiding
+   * is a second run silently doubling the archive.
+   */
+  async ingestOwnerSeedFacts(
+    entries: readonly SeedFactInputV1[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<{
+    added: number;
+    skippedExisting: number;
+    rejected: number;
+    totalSeen: number;
+    dryRun: boolean;
+    titles: string[];
+  }> {
+    const state = await this.snapshot();
+    const existing = state.ownerKnowledge?.facts ?? [];
+    const plan = planSeedIngest({ entries, existingFacts: existing });
+
+    if (opts.dryRun) {
+      return {
+        added: plan.toAdd.length,
+        skippedExisting: plan.skippedExisting.length,
+        rejected: plan.rejected.length,
+        totalSeen: plan.totalSeen,
+        dryRun: true,
+        titles: plan.toAdd.map((f) => f.title),
+      };
+    }
+
+    if (plan.toAdd.length) {
+      await this.mutate((draft: AssistantStateV1) => {
+        if (!draft.ownerKnowledge) draft.ownerKnowledge = emptyOwnerKnowledge();
+        const now = this.ports.clock.now();
+        for (const planned of plan.toAdd) {
+          draft.ownerKnowledge.facts.push(
+            buildOwnerKnowledgeFact(seedFactToKnowledgeInput(planned), {
+              id: this.ports.ids.next("owner-fact"),
+              now,
+            }),
+          );
+        }
+        this.activity(
+          draft, "memory", "owner.knowledge.archive",
+          `Archive facts ingested: ${plan.toAdd.length}`, null,
+        );
+      });
+    }
+
+    return {
+      added: plan.toAdd.length,
+      skippedExisting: plan.skippedExisting.length,
+      rejected: plan.rejected.length,
+      totalSeen: plan.totalSeen,
+      dryRun: false,
+      titles: plan.toAdd.map((f) => f.title),
+    };
+  }
+
+  /**
+   * Local text models actually available for reasoning.
+   *
+   * Reported from configuration rather than assumed, because the answer today is "none": the only
+   * models on this machine are for vision. The tier router needs the real list so it degrades
+   * honestly instead of routing to an endpoint that does not exist.
+   */
+  #availableTextModels(state: AssistantStateV1): string[] {
+    return (state.brain?.endpoints ?? [])
+      .filter((endpoint) => endpoint.location === "local-machine")
+      .map((endpoint) => String(endpoint.model ?? ""))
+      .filter((model) => model && !/llava|moondream|vision|clip/i.test(model) && model !== "aion-offline-v1");
+  }
+
+  /** Vehicles the Owner has physically photographed and AION identified within the last day. */
+  #physicallyVerifiedToday(state: AssistantStateV1, workspaceId: string): string[] {
+    const since = Date.parse(this.ports.clock.now()) - 24 * 60 * 60 * 1000;
+    const ids = (state.photoVehicleContexts ?? [])
+      .filter((ctx) =>
+        ctx.workspaceId === workspaceId
+        && ctx.vehicleId
+        && Number.isFinite(Date.parse(ctx.setAt))
+        && Date.parse(ctx.setAt) >= since,
+      )
+      .map((ctx) => ctx.vehicleId!);
+    return [...new Set(ids)];
+  }
+
+  /**
+   * The conversational layer in front of the narrow handlers.
+   *
+   * This deliberately does not take over the whole of Chat. The existing handlers are correct for
+   * the questions they were written for, and replacing them wholesale would trade a known set of
+   * behaviours for an unknown one. What it does take is the class of question they answer *badly* —
+   * the ones where the first matching pattern is about the wrong subject entirely.
+   *
+   * Returning null is the normal case and means "the old chain is better at this". So the change is
+   * additive: every question that already worked still reaches the handler that made it work.
+   */
+  async #orchestrate(
+    text: string,
+    opts: { conversationId?: string | null },
+  ): Promise<{
+    intent: string;
+    confidence: string;
+    reply: string;
+    sources: Array<{ type: string; id: string; label: string }>;
+    action: string | null;
+    data: unknown;
+  } | null> {
+    const reading = understandGoal(text);
+    const OWNED: PracticalGoalV1[] = [
+      "LOT_POPULATION", "OWNER_HISTORY", "WHAT_IS_UNKNOWN", "VEHICLE_BUYER_MATCH",
+    ];
+    if (!OWNED.includes(reading.goal)) return null;
+
+    const state = await this.snapshot();
+    const workspaceId = state.settings.activeWorkspace;
+    const now = this.ports.clock.now();
+    const vehicles = state.vehicleInventory?.vehicles ?? [];
+    const verifiedIds = this.#physicallyVerifiedToday(state, workspaceId);
+
+    const photoCtx = resolvePhotoVehicleContext(
+      state.photoVehicleContexts,
+      state.photoVehicleContext,
+      { workspaceId, conversationId: opts.conversationId ?? null },
+    );
+    const activeVehicle = photoCtx?.vehicleId
+      ? vehicles.find((v) => v.id === photoCtx.vehicleId) ?? null
+      : null;
+
+    const context = {
+      workspace: workspaceId,
+      conversationId: opts.conversationId ?? null,
+      activeVehicleRef: activeVehicle?.id ?? null,
+      activeCustomerRef: null,
+      physicallyVerifiedVehicleIds: verifiedIds,
+      hasAttachments: false,
+      now,
+      webResearchAllowed: false,
+    };
+    const plan = planTools(reading.goal, context);
+
+    const items: Array<Omit<EvidenceItemV1, "status">> = [];
+    const sources: Array<{ type: string; id: string; label: string }> = [];
+    let body: string | null = null;
+    let strongMatchCount = 0;
+    let unverifiedCustomerIssue: string | null = null;
+    let missingPhotoHint: string | null = null;
+
+    if (reading.goal === "LOT_POPULATION") {
+      // The two halves that must never be collapsed: what was seen, and what is listed.
+      const lastOnline = vehicles
+        .map((v) => v.lastOnlineAt)
+        .filter((t): t is string => Boolean(t))
+        .sort()
+        .at(-1) ?? null;
+      const scope = answerLotScopeQuestion({
+        question: text,
+        physicallyVerifiedVehicleIds: verifiedIds,
+        vehicles,
+        now,
+        listingsObservedAt: lastOnline,
+      });
+      body = scope.reply;
+      items.push({
+        tool: "lot_walk_observations",
+        claim: scope.physicallyVerified.basis,
+        evidenceClass: scope.physicallyVerified.evidenceClass,
+        sourceRefs: verifiedIds,
+        observedAt: scope.physicallyVerified.observedAt,
+      });
+      items.push({
+        tool: "website_inventory",
+        claim: scope.currentlyListed.basis,
+        evidenceClass: scope.currentlyListed.evidenceClass,
+        sourceRefs: [],
+        observedAt: scope.currentlyListed.observedAt,
+      });
+      items.push({
+        tool: "lot_walk_observations",
+        claim: scope.actualLotPopulation.basis,
+        evidenceClass: scope.actualLotPopulation.evidenceClass,
+        sourceRefs: [],
+        observedAt: null,
+      });
+    }
+
+    if (reading.goal === "OWNER_HISTORY") {
+      const packet = retrieveOwnerMemory({
+        question: text,
+        facts: state.ownerKnowledge?.facts ?? [],
+        workspace: workspaceId,
+      });
+      const ingested = (state.ownerKnowledge?.facts ?? []).filter(
+        (f) => String(f.provenance?.sourceRef ?? "").includes("owner-archive:"),
+      ).length;
+      const coverage = archiveCoverageNote({ factsIngested: ingested, factsMatched: packet.facts.length });
+      body = [answerFromOwnerMemory(packet), coverage].filter(Boolean).join("\n\n");
+      for (const fact of packet.facts.slice(0, 4)) {
+        items.push({
+          tool: "owner_knowledge",
+          claim: fact.title,
+          evidenceClass: "OWNER_DIRECT_FACT",
+          sourceRefs: [fact.sourceRef],
+          observedAt: null,
+        });
+        sources.push({ type: "knowledge", id: fact.factId, label: fact.title });
+      }
+      if (!packet.facts.length) {
+        items.push({
+          tool: "owner_knowledge",
+          claim: "nothing on file covers that",
+          evidenceClass: "UNKNOWN",
+          sourceRefs: [],
+          observedAt: null,
+        });
+      }
+    }
+
+    if (reading.goal === "WHAT_IS_UNKNOWN") {
+      if (!activeVehicle) {
+        missingPhotoHint = "Photograph the car or give me the VIN and I'll tell you what's missing on it.";
+        items.push({
+          tool: "active_context",
+          claim: "No vehicle is in front of me right now, so I can't say what's missing on it.",
+          evidenceClass: "UNKNOWN",
+          sourceRefs: [],
+          observedAt: null,
+        });
+      } else {
+        const gaps: string[] = [];
+        if (!activeVehicle.vin) gaps.push("the VIN isn't confirmed");
+        if (latestPrice(activeVehicle) == null) gaps.push("no advertised price is on record");
+        if (!activeVehicle.trim) gaps.push("the trim isn't recorded");
+        if (activeVehicle.mileage == null) gaps.push("mileage isn't recorded");
+        if (!activeVehicle.exteriorColor) gaps.push("exterior colour isn't recorded");
+        // The Owner photographing it is the confirmation. Telling him nobody has confirmed a car he
+        // is standing in front of is the kind of line that makes the whole thing feel unintelligent.
+        if (activeVehicle.lastPhysicalAt == null && !verifiedIds.includes(activeVehicle.id)) {
+          gaps.push("nobody has confirmed it's physically on the lot");
+        }
+        const name = [activeVehicle.year, activeVehicle.make, activeVehicle.model, activeVehicle.trim]
+          .filter(Boolean).join(" ") || activeVehicle.id;
+        body = gaps.length
+          ? `On the ${name}, here's what I don't have: ${gaps.join("; ")}.`
+          : `I have everything recorded on the ${name} that I'd normally check.`;
+        for (const gap of gaps) {
+          items.push({ tool: "vehicle_inventory", claim: gap, evidenceClass: "UNKNOWN", sourceRefs: [activeVehicle.id], observedAt: null });
+        }
+        sources.push({ type: "vehicle", id: activeVehicle.id, label: name });
+      }
+    }
+
+    if (reading.goal === "VEHICLE_BUYER_MATCH") {
+      if (!activeVehicle) return null; // The existing inventory search handles an un-anchored ask better.
+      const name = [activeVehicle.year, activeVehicle.make, activeVehicle.model, activeVehicle.trim]
+        .filter(Boolean).join(" ") || activeVehicle.id;
+      const interested: Array<{ id: string; label: string; why: string }> = [];
+      const people = state.relationships.filter(
+        (r) => r.workspace === workspaceId && !r.archived && !isSyntheticRelationship(r),
+      );
+      for (const person of people.slice(0, 40)) {
+        const matched = await this.matchCustomerVehicles(person.id);
+        const hit = matched.matches.find((m) => m.vehicleId === activeVehicle.id);
+        // A known conflict is a reason not to put someone's name in front of the Owner: he will act
+        // on this list by picking up the phone, and a bad call costs more than an omission.
+        if (hit && hit.knownConflicts.length === 0) {
+          interested.push({
+            id: person.id,
+            label: person.displayName,
+            why: hit.whyMatches?.[0] ?? "recorded interest overlaps this unit",
+          });
+        } else if (hit && hit.knownConflicts.length && !unverifiedCustomerIssue) {
+          unverifiedCustomerIssue = `${person.displayName} lines up except for one thing — ${hit.knownConflicts[0]}.`;
+        }
+      }
+      strongMatchCount = interested.length;
+      body = interested.length
+        ? `On the ${name}, these are the people whose recorded needs line up:\n`
+          + interested.slice(0, 5).map((i) => `· ${i.label} — ${i.why}`).join("\n")
+        : `Nobody on your list matches the ${name} on what's recorded. `
+          + `That isn't a verdict on the car — it means no one's stated needs point at it.`;
+      for (const person of interested.slice(0, 5)) {
+        items.push({
+          tool: "vehicle_customer_reverse_match",
+          claim: `${person.label} — ${person.why}`,
+          evidenceClass: "CUSTOMER_STATEMENT",
+          sourceRefs: [person.id],
+          observedAt: null,
+        });
+        sources.push({ type: "relationship", id: person.id, label: person.label });
+      }
+      sources.push({ type: "vehicle", id: activeVehicle.id, label: name });
+      if (!interested.length) {
+        items.push({
+          tool: "vehicle_customer_reverse_match",
+          claim: "no recorded customer need points at this unit",
+          evidenceClass: "UNKNOWN",
+          sourceRefs: [],
+          observedAt: null,
+        });
+      }
+    }
+
+    const packet = buildEvidencePacket({ goal: reading.goal, items });
+    const tier = routeReasoningTier({
+      goal: reading.goal,
+      packet,
+      ambiguous: reading.ambiguous,
+      availableTextModels: this.#availableTextModels(state),
+    });
+    const proactive = chooseProactiveHelp({
+      goal: reading.goal,
+      packet,
+      strongMatchCount,
+      vinResolved: Boolean(activeVehicle?.vin),
+      missingPhotoHint,
+      unverifiedCustomerIssue,
+    });
+    const result: OrchestrationResultV1 = composeOrchestratedReply({
+      reading, plan, packet, tier, proactive, body,
+    });
+
+    return {
+      intent: "OWNER_CONVERSATION",
+      confidence: reading.ambiguous ? "medium" : "high",
+      reply: result.reply,
+      sources,
+      action: "owner.conversation",
+      data: {
+        goal: result.reading.goal,
+        goalDescription: describeGoal(result.reading.goal),
+        toolsUsed: result.toolsUsed,
+        toolPlan: { required: plan.required, enriching: plan.enriching, rationale: plan.rationale },
+        reasoningTier: tier.tier,
+        reasoningDegradedFrom: tier.degradedFrom,
+        known: packet.known.length,
+        inference: packet.inference.length,
+        unknown: packet.unknown.length,
+        physicallyVerifiedCount: verifiedIds.length,
+      },
+    };
+  }
+
   async assistantPrompt(text: string, opts: { conversationId?: string | null } = {}): Promise<{
     intent: string;
     confidence: string;
@@ -10736,6 +11104,11 @@ export class AionAssistantV1 {
     action: string | null;
     data: unknown;
   }> {
+    // Goal understanding runs before the pattern chain, because the chain's failure mode is
+    // answering a question about a population with a fact about one car.
+    const orchestrated = await this.#orchestrate(text, opts);
+    if (orchestrated) return orchestrated;
+
     const route = routeCrmAssistantIntent(text);
     const state = await this.snapshot();
     const workspaceId = state.settings.activeWorkspace;

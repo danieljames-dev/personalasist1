@@ -166,8 +166,22 @@ function terms(text: string): string[] {
   return String(text ?? "")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
+    // Two characters, not three: the Owner's vocabulary includes short proper nouns like "XO", and
+    // dropping them left "what did we decide about the XO role?" matching on the word "role" alone,
+    // which retrieved an unrelated goal about a dispatcher job.
+    .filter((t) => t.length > 1 && !STOPWORDS.has(t));
 }
+
+/**
+ * How many of the question's own words a fact must actually match.
+ *
+ * A single common word is not a topic. "What was THE REAL PLAY?" scored against an entry titled
+ * "Project portfolio: Real-estate platforms…" purely on *real*, cleared the score threshold on the
+ * title weighting alone, and was returned as though it were the answer — a confident reply to a
+ * question the archive does not cover. Requiring breadth as well as score is what turns that into an
+ * honest "I don't have that".
+ */
+export const MIN_MATCHED_TERMS = 2;
 
 /**
  * Retrieve the part of the Owner's history this question is actually about.
@@ -194,13 +208,17 @@ export function retrieveOwnerMemory(input: {
       const title = terms(fact.title);
       const body = terms(fact.content);
       let score = 0;
+      let matchedTerms = 0;
       for (const term of wanted) {
-        if (title.includes(term)) score += 3;
-        else if (body.includes(term)) score += 1;
+        if (title.includes(term)) { score += 3; matchedTerms += 1; }
+        else if (body.includes(term)) { score += 1; matchedTerms += 1; }
       }
-      return { fact, score };
+      return { fact, score, matchedTerms };
     })
-    .filter((row) => row.score >= minScore)
+    // Breadth as well as weight. A question with several content words needs several of them to
+    // land; a one-word question is judged on score alone because breadth is not available to it.
+    .filter((row) => row.score >= minScore
+      && row.matchedTerms >= Math.min(MIN_MATCHED_TERMS, wanted.length))
     .sort((a, b) => b.score - a.score || b.fact.confidence - a.fact.confidence);
 
   const facts: MemoryRetrievalPacketV1["facts"] = [];
