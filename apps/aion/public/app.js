@@ -483,11 +483,30 @@ function progressStage(text) {
 
 function renderVoiceRecordingChip() {
   if (!voiceRecording) return "";
+  // Elapsed time, so the Owner can see it is genuinely recording rather than trusting a red dot.
+  const seconds = Math.max(0, Math.floor((Date.now() - (voiceRecording.startedAt || Date.now())) / 1000));
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   return `<div class="aion-attach-chip aion-voice-rec" role="status" aria-live="polite">
 <span class="aion-attach-doc" aria-hidden="true">●</span>
-<span class="aion-attach-meta"><b>Recording…</b><small>Tap 🎤 again to stop. Not continuous surveillance.</small></span>
+<span class="aion-attach-meta"><b>Recording ${esc(clock)}</b><small>Tap Stop when you're done. Nothing records in the background.</small></span>
 <button type="button" class="aion-attach-remove" data-do="voice-prompt" aria-label="Stop recording">Stop</button>
 </div>`;
+}
+
+/**
+ * File extension matching what the browser actually recorded.
+ *
+ * Naming an mp4 recording ".webm" made the server reject it as an unsupported audio type — on
+ * exactly the device the Owner uses, since Safari records mp4 and cannot produce webm.
+ */
+function extensionForAudioMime(mime) {
+  const type = String(mime || "").toLowerCase();
+  if (type.includes("mp4")) return ".m4a";
+  if (type.includes("aac")) return ".m4a";
+  if (type.includes("ogg")) return ".ogg";
+  if (type.includes("wav")) return ".wav";
+  if (type.includes("mpeg")) return ".mp3";
+  return ".webm";
 }
 
 function ago(at) {
@@ -1619,8 +1638,9 @@ document.addEventListener("click", async (event) => {
       // Prefer explicit MediaRecorder (upload + local STT). Fall back to browser speech recognition
       // only for live dictation into the composer. Never continuous/ambient recording.
       if (voiceRecording?.recorder) {
+        if (voiceRecording.timer) clearInterval(voiceRecording.timer);
         try { voiceRecording.recorder.stop(); } catch { /* */ }
-        toast("Stopping recording…");
+        toast("Stopping…");
         return;
       }
       // Why the microphone did nothing on the Owner's iPhone: over plain http the page is not a
@@ -1646,13 +1666,17 @@ document.addEventListener("click", async (event) => {
             stream.getTracks().forEach((t) => t.stop());
             voiceRecording = null;
             try {
-              const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-              if (!blob.size) { toast("Recording was empty."); render(); return; }
-              const file = new File([blob], `recording-${Date.now()}.webm`, { type: blob.type || "audio/webm" });
+              // The container is whatever the browser actually recorded. Naming an mp4 recording
+              // ".webm" made the server reject it as an unsupported type on exactly the device the
+              // Owner uses, so the extension is derived from the real mime rather than assumed.
+              const type = recorder.mimeType || mime || "audio/webm";
+              const blob = new Blob(chunks, { type });
+              if (!blob.size) { toast("The recording came out empty. Try again."); render(); return; }
+              const file = new File([blob], `recording-${Date.now()}${extensionForAudioMime(type)}`, { type });
               await stageAttachment(file);
-              toast("Recording staged — tap Send to transcribe and ask, or remove.");
+              toast("Recording ready — tap Send and I'll listen.");
             } catch (err) {
-              toast(err.message || "Could not stage recording.");
+              toast(err.message || "I couldn't process that recording.");
             }
             render();
           };
@@ -1662,13 +1686,29 @@ document.addEventListener("click", async (event) => {
             toast("Recording failed. Type instead.");
             render();
           };
-          voiceRecording = { recorder, chunks, startedAt: Date.now() };
+          // A ticking elapsed time, so the Owner can see it is actually recording rather than
+          // hoping. Cleared on stop; nothing runs in the background once recording ends.
+          const timer = setInterval(() => { if (voiceRecording) render(); }, 1000);
+          voiceRecording = { recorder, chunks, startedAt: Date.now(), timer, mime: recorder.mimeType || mime };
           recorder.start(250);
-          toast("Recording… tap 🎤 again to stop. (Not continuous surveillance.)");
+          toast("Recording… tap the button again to stop.");
           render();
           return;
-        } catch {
-          // Fall through to SpeechRecognition if mic permission denied / unavailable.
+        } catch (err) {
+          // Permission denial is the common case and must be said out loud — falling through to
+          // dictation in silence is how the Owner concluded the button was dead.
+          const name = String(err?.name || "");
+          if (name === "NotAllowedError" || name === "SecurityError") {
+            toast("Microphone permission was denied. Allow it for this site in Safari settings and try again.");
+            render();
+            return;
+          }
+          if (name === "NotFoundError") {
+            toast("No microphone was found on this device.");
+            render();
+            return;
+          }
+          // Anything else falls through to browser dictation as a last resort.
         }
       }
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;

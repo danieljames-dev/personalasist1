@@ -116,6 +116,17 @@ test("the composer stages several photos and sends them as one question", () => 
   assert.match(appJs, /Uploading \$\{i \+ 1\} of \$\{pendingAttachments\.length\}/, "upload progress is per file");
 });
 
+test("voice records in a format Safari can actually produce, and says so when it cannot", () => {
+  // Naming an mp4 recording ".webm" made the server reject it as unsupported on exactly the device
+  // the Owner uses, because Safari records mp4 and cannot produce webm.
+  assert.match(appJs, /function extensionForAudioMime\(/, "the extension must follow the real container");
+  assert.match(appJs, /recorder\.mimeType \|\| mime/, "the blob type comes from the recorder, not a guess");
+  assert.match(appJs, /NotAllowedError/, "permission denial must be reported, not silently swallowed");
+  assert.match(appJs, /Microphone permission was denied/, "and in plain language");
+  assert.match(appJs, /Recording \$\{esc\(clock\)\}/, "an elapsed timer proves it is really recording");
+  assert.match(appJs, /clearInterval\(voiceRecording\.timer\)/, "and the timer stops when recording does");
+});
+
 test("the microphone reports why it cannot record instead of doing nothing", () => {
   // Over plain http Safari does not expose navigator.mediaDevices at all, and the old handler
   // tested for it and returned in silence — indistinguishable from a dead button.
