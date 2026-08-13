@@ -240,7 +240,20 @@ export function decodeJpegRgba(bytes: Buffer): PngInfoV1 | null {
         data: Buffer | Uint8Array;
       };
     };
-    const decoded = jpeg.decode(bytes, { maxMemoryUsageInMB: 256, useTArray: true });
+    /*
+     * 256 MB was too small for the photos this exists to crop.
+     *
+     * An iPhone lot photo is around 5712x4284 — roughly 24 megapixels, about 98 MB of RGBA before
+     * jpeg-js's own working buffers — and the decoder refused it with "limit exceeded by at least
+     * 13MB". `decodeJpegRgba` returned null, `cropImageToRegion` returned null, and every VIN-band
+     * crop was skipped in silence. The targeted-band strategy has therefore never run on a real
+     * Owner photo: the pipeline always fell through to full-frame OCR, which is the slow path the
+     * bands exist to avoid.
+     *
+     * Measured at 512 MB: the same photo decodes in 953 ms. The buffer is transient and the
+     * dimension ceiling below still bounds what can be attempted.
+     */
+    const decoded = jpeg.decode(bytes, { maxMemoryUsageInMB: 512, useTArray: true });
     if (!decoded?.width || !decoded?.height || !decoded.data) return null;
     if (decoded.width < 8 || decoded.height < 8) return null;
     if (decoded.width > 8192 || decoded.height > 8192) return null;
