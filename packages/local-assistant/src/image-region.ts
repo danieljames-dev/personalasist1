@@ -250,8 +250,18 @@ export function decodeJpegRgba(bytes: Buffer): PngInfoV1 | null {
      * Owner photo: the pipeline always fell through to full-frame OCR, which is the slow path the
      * bands exist to avoid.
      *
-     * Measured at 512 MB: the same photo decodes in 953 ms. The buffer is transient and the
-     * dimension ceiling below still bounds what can be attempted.
+     * Measured at 512 MB: the same photo decodes in about 950 ms.
+     *
+     * Resource bound, measured rather than assumed. That 24.5 MP photo produces a 93.3 MB RGBA
+     * buffer and a 302 MB peak RSS delta — jpeg-js costs roughly 3.2x the buffer it returns. The
+     * allowance below is therefore the *effective* bound, not the dimension check further down: a
+     * decompression bomb declaring enormous dimensions is refused by the decoder mid-work rather
+     * than after allocating, and the dimension ceiling then rejects anything that slips through.
+     *
+     * 512 MB was chosen because it clears a 24 MP phone photo with headroom and still refuses well
+     * before the 8192x8192 ceiling, whose 268 MB of RGBA would cost roughly 860 MB at that ratio.
+     * OCR runs one image at a time against a single warm worker, so this peak is not multiplied by
+     * concurrency.
      */
     const decoded = jpeg.decode(bytes, { maxMemoryUsageInMB: 512, useTArray: true });
     if (!decoded?.width || !decoded?.height || !decoded.data) return null;
