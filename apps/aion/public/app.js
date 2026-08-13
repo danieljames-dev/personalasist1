@@ -2109,7 +2109,9 @@ document.addEventListener("submit", async (event) => {
       if (failed.length) progressStage(`${failed.length} didn't upload — carrying on with the rest.`);
       if (pendingAttachments.length) progressStage("Reading the photos…");
 
-      const primary = pendingAttachments.find((a) => a.isImage) || attachment;
+      const imageAttachments = pendingAttachments.filter((a) => a.isImage);
+      const primary = imageAttachments[0] || attachment;
+      if (imageAttachments.length > 1) progressStage("Reading the VIN…");
       const result = await api("assistant.prompt", {
         text: text || (primary?.isImage
           ? (pendingAttachments.length > 1
@@ -2119,6 +2121,18 @@ document.addEventListener("submit", async (event) => {
         ...(documentRefs.length ? { documentRef: documentRefs[0], documentRefs } : {}),
         ...(primary?.isImage
           ? { imageBase64: primary.base64, imageMimeType: primary.mimeType, imageFilename: primary.name }
+          : {}),
+        // Every image, so the server can judge them as one evidence group rather than one photo plus
+        // references whose bytes it never receives.
+        ...(imageAttachments.length > 1
+          ? {
+            images: imageAttachments.map((a, i) => ({
+              contentBase64: a.base64,
+              mimeType: a.mimeType,
+              filename: a.name,
+              documentRef: documentRefs[i] ?? null,
+            })),
+          }
           : {}),
       });
       window.__aionLastAssistant = { ...result, attachmentName: primary ? primary.name : null };

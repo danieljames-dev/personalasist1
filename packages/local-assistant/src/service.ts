@@ -112,6 +112,7 @@ import { extractImageWithLocalVision, imageUnderstandingStatus } from "./connect
 import { refreshDealershipPublicInventory } from "./connectors/dealership-inventory.js";
 import {
   buildVinOcrResult,
+  extractStickerFields,
   VIN_VISION_PROMPT,
   type VinOcrResultV1,
 } from "./vin-ocr.js";
@@ -6186,6 +6187,177 @@ export class AionAssistantV1 {
    * what AION actually knows, in one turn, without navigating anywhere. The answer is assembled from
    * grounded records only — the vision model contributes characters, never facts about the vehicle.
    */
+  /**
+   * Several photos of one car, answered as one question.
+   *
+   * This is the wiring the Owner's lot test was missing. He sent a sticker, a VIN close-up and a
+   * second page; each became a separate errand, the worst one produced `STDAAABS1RS004150`, and
+   * every photo after it was wasted.
+   *
+   * Each image goes through the **existing** `ocrVinFromImage` — same EXIF handling, same VIN bands,
+   * same warm EasyOCR worker, no parallel photo stack. What is new is that the results are judged
+   * together: a failed read is recorded rather than fatal, agreement across images outranks
+   * confidence within one, and two valid conflicting VINs mean two cars rather than a choice.
+   *
+   * Images are read sequentially on purpose. The OCR worker is one warm process, so firing three at
+   * once would contend for it and make all three slower.
+   */
+  async answerAboutVehiclePhotoBundle(input: {
+    text: string;
+    images: ReadonlyArray<{ contentBase64: string; mimeType?: string; filename?: string; documentRef?: string | null }>;
+    conversationId?: string | null;
+    offline?: boolean;
+    /** Tests: OCR text per image, positionally parallel to `images`. */
+    extractedTexts?: readonly string[];
+  }): Promise<{
+    intent: string; confidence: string; reply: string;
+    sources: Array<{ type: string; id: string; label: string }>;
+    action: string | null; data: unknown;
+    documentRef: string | null; attachmentRef: string | null;
+  }> {
+    const { buildVehicleEvidenceBundle, nextPhotoAdvice } = await import("./vehicle-evidence-bundle.js");
+    const startedAt = Date.now();
+    const timings: Record<string, number> = {};
+
+    const evidenceImages: Array<import("./vehicle-evidence-bundle.js").EvidenceImageV1> = [];
+    const readings: Array<import("./vehicle-evidence-bundle.js").StickerReadingV1> = [];
+
+    for (let i = 0; i < input.images.length; i += 1) {
+      const image = input.images[i]!;
+      const ref = image.documentRef || `image:${image.filename || `photo-${i + 1}`}`;
+      const began = Date.now();
+      const ocr = await this.ocrVinFromImage({
+        contentBase64: image.contentBase64,
+        ...(image.mimeType ? { mimeType: image.mimeType } : {}),
+        ...(image.filename ? { filename: image.filename } : {}),
+        ...(input.offline ? { offline: true } : {}),
+        ...(input.extractedTexts?.[i] ? { extractedText: input.extractedTexts[i]! } : {}),
+      });
+      timings[`ocr_image_${i + 1}_ms`] = Date.now() - began;
+
+      evidenceImages.push({
+        imageRef: ref,
+        role: ocr.sticker?.price != null || ocr.sticker?.model ? "WINDOW_STICKER" : "UNKNOWN",
+        ocrText: String(ocr.extractedText ?? "").slice(0, 20_000),
+        // Every candidate this image offered, valid or not. The bundle judges them, not the image.
+        vinCandidates: [
+          ...(ocr.best?.vin ? [ocr.best.vin] : []),
+          ...(ocr.candidates ?? []).map((c) => c.vin),
+        ].filter(Boolean) as string[],
+        quality: ocr.best?.confidence ?? 0,
+      });
+
+      // The shared OCR path fills `sticker` only when it ran its own sticker pass, so a photo whose
+      // text arrived another way comes back with an empty one. Re-reading the text we already have
+      // with the same extractor keeps the fusion honest without altering the shared method.
+      const ocrSticker = ocr.sticker;
+      const hasFields = Boolean(ocrSticker?.model || ocrSticker?.trim || ocrSticker?.price != null);
+      const sticker = hasFields ? ocrSticker : extractStickerFields(String(ocr.extractedText ?? ""));
+      if (sticker && (sticker.model || sticker.trim || sticker.price != null)) {
+        readings.push({
+          imageRef: ref,
+          ...(sticker.model ? { model: sticker.model } : {}),
+          ...(sticker.trim ? { trim: sticker.trim } : {}),
+          // The extractor prefers a stated total suggested retail, so that is what this figure is
+          // carried as. Base MSRP stays unknown rather than being invented from one number.
+          ...(sticker.price != null ? { totalSuggestedRetail: sticker.price } : {}),
+        });
+      }
+    }
+
+    const snapshot = await this.snapshot();
+    const vehicles = snapshot.vehicleInventory?.vehicles ?? [];
+    const workspaceId = snapshot.settings.activeWorkspace;
+    const now = this.ports.clock.now();
+
+    const assembleBegan = Date.now();
+    const bundle = buildVehicleEvidenceBundle({
+      bundleId: this.ports.ids.next("evidence-bundle"),
+      workspace: workspaceId,
+      conversationId: input.conversationId ?? null,
+      images: evidenceImages,
+      readings,
+      vehicles,
+      capturedAt: now,
+    });
+    timings.bundle_assembly_ms = Date.now() - assembleBegan;
+
+    const matched = bundle.vehicleRef ? vehicles.find((v) => v.id === bundle.vehicleRef) ?? null : null;
+    const sources: Array<{ type: string; id: string; label: string }> = [];
+    const lines: string[] = [];
+
+    if (matched) {
+      const label = [matched.year, matched.make, matched.model, matched.trim].filter(Boolean).join(" ");
+      lines.push(input.images.length > 1
+        ? `Got it — those ${input.images.length} photos are the same vehicle.`
+        : "Got it.");
+      lines.push("");
+      lines.push(label || "Vehicle identified");
+      lines.push(`VIN ${bundle.validatedVin}${matched.stockNumber ? ` · Stock ${matched.stockNumber}` : ""}`);
+      if (bundle.vinAgreementCount > 1) {
+        lines.push(`${bundle.vinAgreementCount} of the photos read the same VIN.`);
+      }
+      const { priceDisplayFromVehicle, formatPriceDisplay } = await import("./price-display.js");
+      lines.push("");
+      lines.push(formatPriceDisplay(priceDisplayFromVehicle(matched)));
+      if (bundle.money.totalSuggestedRetail) {
+        lines.push(`Sticker total from your photo: $${bundle.money.totalSuggestedRetail.value.toLocaleString("en-US")}.`);
+      }
+      sources.push({ type: "vehicle", id: matched.id, label: label || matched.id });
+    } else {
+      lines.push(bundle.message);
+    }
+
+    const advice = nextPhotoAdvice(bundle);
+    if (advice) { lines.push(""); lines.push(advice); }
+
+    // Active vehicle context, so "what about the price?" needs no VIN typed again.
+    if (matched && bundle.validatedVin) {
+      const link = {
+        vehicleRef: matched.id, vin: bundle.validatedVin, state: "LINKED",
+        matchMethod: "EXACT_VIN", confidence: bundle.confidence, candidates: [],
+        reason: "multi-photo evidence bundle",
+      };
+      const provenance = buildPhotoProvenance({
+        link: link as never,
+        imageSourceRef: bundle.sourceRefs[0] ?? "image:bundle",
+        observedAt: now,
+        extractionProvider: "bundle",
+        vinCandidate: bundle.validatedVin,
+      });
+      const context = buildPhotoVehicleContext({
+        workspaceId,
+        conversationId: input.conversationId ?? null,
+        documentRef: input.images[0]?.documentRef ?? null,
+        link: link as never,
+        provenance,
+        setAt: now,
+      });
+      await this.mutate((draft) => {
+        draft.photoVehicleContexts = upsertPhotoVehicleContext(draft.photoVehicleContexts, context);
+        draft.photoVehicleContext = context;
+        this.activity(
+          draft, "agent", "vehicle.photo.bundle",
+          `${input.images.length} photo(s) resolved to vehicle ${matched.id}`,
+          matched.id,
+        );
+      });
+      this.#lastPhotoVehicleId = matched.id;
+    }
+
+    timings.total_ms = Date.now() - startedAt;
+    return {
+      intent: "VEHICLE_PHOTO_BUNDLE",
+      confidence: matched ? "high" : "low",
+      reply: lines.join("\n"),
+      sources,
+      action: "vehicle.photo.bundle",
+      data: { bundle, timings },
+      documentRef: input.images[0]?.documentRef ?? null,
+      attachmentRef: null,
+    };
+  }
+
   async answerAboutVehiclePhoto(input: {
     text: string;
     contentBase64: string;

@@ -598,6 +598,24 @@ export async function createAionServer(options = {}) {
         // should not have to leave the conversation to identify it.
         // Unified attachment path: optional prior crm.document.upload → documentRef, then image bytes
         // for vision. No separate Intake workflow required for ordinary Chat photos.
+        // Several photos in one turn are one evidence group: the Owner photographs a sticker, a VIN
+        // plate and a second page and means them as one question. Judging them together is what
+        // stops a single bad read ending the conversation.
+        if (Array.isArray(input.images) && input.images.length > 1) {
+          return service.answerAboutVehiclePhotoBundle({
+            text,
+            images: input.images
+              .slice(0, 6)
+              .map((img) => ({
+                contentBase64: String(img?.contentBase64 || ""),
+                mimeType: String(img?.mimeType || "image/jpeg"),
+                filename: String(img?.filename || "photo.jpg"),
+                documentRef: img?.documentRef ? String(img.documentRef) : null,
+              }))
+              .filter((img) => img.contentBase64),
+            conversationId,
+          });
+        }
         if (input.imageBase64) {
           const photo = await service.answerAboutVehiclePhoto({
             text,
