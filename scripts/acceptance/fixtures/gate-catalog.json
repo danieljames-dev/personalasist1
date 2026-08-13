@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "waitingFor": "CLAUDE_HEAD_TO_TEST",
+  "referenceClaudeStableBeforeMidWrite": "0d93583779b7e0ad5f1cf6860c097e84f8cbc358",
+  "doNotTestMovingTip": true,
+  "evidenceTiers": [
+    "AUTOMATED",
+    "LOCAL_BROWSER",
+    "TAILSCALE_HTTPS",
+    "PHYSICAL_IPHONE"
+  ],
+  "usefulnessDimensions": [
+    "GROUNDING",
+    "USEFULNESS",
+    "CONTEXT_RETENTION",
+    "NATURALNESS",
+    "ACTIONABILITY",
+    "PROACTIVITY",
+    "HONESTY_ABOUT_UNKNOWN"
+  ],
+  "gates": [
+    { "id": 1, "gate": "MULTI_PHOTO_REAL_CHAT", "tier": "LOCAL_BROWSER", "assets": ["fixtures/multi-photo-m1.json", "owner-day-script.md"] },
+    { "id": 2, "gate": "INVALID_FIRST_OCR_RECOVERY", "tier": "AUTOMATED", "assets": ["fixtures/multi-photo-m1.json"] },
+    { "id": 3, "gate": "MULTI_VEHICLE_CONFLICT_SAFE", "tier": "AUTOMATED", "assets": ["fixtures/multi-vehicle-conflict.json"] },
+    { "id": 4, "gate": "ACTIVE_VEHICLE_CONTEXT", "tier": "AUTOMATED", "assets": ["fixtures/active-vehicle-context.json"] },
+    { "id": 5, "gate": "POST_UPLOAD_PROGRESS", "tier": "LOCAL_BROWSER", "assets": ["fixtures/progress-stages.json"] },
+    { "id": 6, "gate": "NO_LONG_SILENT_WAIT", "tier": "LOCAL_BROWSER", "assets": ["fixtures/progress-stages.json", "daily-intelligence-latency.mjs"] },
+    { "id": 7, "gate": "LATENCY_MEASUREMENT", "tier": "AUTOMATED", "assets": ["../benchmarks/daily-intelligence-latency.mjs"] },
+    { "id": 8, "gate": "HTTPS_TAILSCALE_ONLY", "tier": "TAILSCALE_HTTPS", "assets": ["tailscale-https-checklist.md"] },
+    { "id": 9, "gate": "VOICE_FORMAT_NEGOTIATION", "tier": "PHYSICAL_IPHONE", "assets": ["iphone-voice-matrix.md"] },
+    { "id": 10, "gate": "VOICE_WHISPER_CONVERSATION", "tier": "PHYSICAL_IPHONE", "assets": ["iphone-voice-matrix.md", "owner-day-script.md"] },
+    { "id": 11, "gate": "PHYSICAL_VS_WEBSITE_REASONING", "tier": "AUTOMATED", "assets": ["fixtures/lot-scope-physical-vs-web.json"] },
+    { "id": 12, "gate": "CONVERSATIONAL_ORCHESTRATOR", "tier": "AUTOMATED", "assets": ["fixtures/conversational-adversarial.json", "score-usefulness.mjs"] },
+    { "id": 13, "gate": "MULTI_SOURCE_TOOL_PLANNING", "tier": "AUTOMATED", "assets": ["fixtures/tool-planning.json"] },
+    { "id": 14, "gate": "FAST_VS_REASONING_ROUTING", "tier": "AUTOMATED", "assets": ["fixtures/model-routing.json"] },
+    { "id": 15, "gate": "PERSONALITY_QUALITY", "tier": "LOCAL_BROWSER", "assets": ["personality-rubric.json"] },
+    { "id": 16, "gate": "ACTIVE_CUSTOMER_CONTEXT", "tier": "AUTOMATED", "assets": ["fixtures/active-customer-context.json"] },
+    { "id": 17, "gate": "NAME_ONLY_AMBIGUITY_SAFETY", "tier": "AUTOMATED", "assets": ["fixtures/name-ambiguity.json"] },
+    { "id": 18, "gate": "PROACTIVE_HELP", "tier": "LOCAL_BROWSER", "assets": ["owner-day-script.md", "personality-rubric.json"] },
+    { "id": 19, "gate": "CALEB_OWNER_KNOWLEDGE", "tier": "AUTOMATED", "assets": ["fixtures/caleb-retrieval.json"] },
+    { "id": 20, "gate": "PUBLIC_WEB_RESEARCH", "tier": "AUTOMATED", "assets": ["fixtures/web-research.json"] },
+    { "id": 21, "gate": "WEB_NO_AUTHORITY_ESCALATION", "tier": "AUTOMATED", "assets": ["fixtures/web-research.json"] },
+    { "id": 22, "gate": "ZERO_SPEND_GUARD", "tier": "AUTOMATED", "assets": ["fixtures/web-research.json"] },
+    { "id": 23, "gate": "STATE_SIDECAR_CAPACITY", "tier": "AUTOMATED", "assets": ["fixtures/state-capacity.json"] },
+    { "id": 24, "gate": "OWNER_DAY_E2E", "tier": "PHYSICAL_IPHONE", "assets": ["owner-day-script.md"] }
+  ]
+}

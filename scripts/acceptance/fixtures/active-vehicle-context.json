@@ -1,0 +1,19 @@
+{
+  "gate": "ACTIVE_VEHICLE_CONTEXT",
+  "description": "After multi-photo resolve, follow-ups must hold the same vehicle",
+  "setup": {
+    "priorBundleVinOracle": "JTDACAAJ8T3051788",
+    "focusLabel": "this one"
+  },
+  "turns": [
+    { "q": "What about the price?", "mustRetainVehicle": true, "mustSeparatePriceKinds": true },
+    { "q": "Who might want this one?", "mustRetainVehicle": true },
+    { "q": "Is this hybrid?", "mustRetainVehicle": true, "honestyIfUnknown": true },
+    { "q": "Make a post for this one.", "mustRetainVehicle": true, "prepareOnly": true }
+  ],
+  "failIf": [
+    "asks for VIN again without reason",
+    "switches to unrelated inventory vehicle without saying so",
+    "loses focus with no expiry explanation"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "gate": "FAST_VS_REASONING_ROUTING",
+  "description": "Cheap/fast path for simple referents; heavier path only when needed",
+  "cases": [
+    {
+      "id": "R1",
+      "query": "What about the price?",
+      "withActiveVehicle": true,
+      "prefer": "FAST",
+      "reason": "Referent + grounded price fields already in focus"
+    },
+    {
+      "id": "R2",
+      "query": "What do you think I should focus on next?",
+      "prefer": "REASONING_OR_MULTI_SOURCE",
+      "reason": "Cross-domain prioritization"
+    },
+    {
+      "id": "R3",
+      "query": "How many other used cars are on the lot?",
+      "prefer": "SCOPE_REASONING",
+      "reason": "Epistemic scope, not inventory dump"
+    }
+  ],
+  "acceptance": {
+    "mustNot": ["always force largest model", "route every chat through full research"],
+    "must": ["document which path ran when instrumentation exists"]
+  },
+  "note": "If routing telemetry not yet exposed, mark CONDITIONAL and report instrumentation gap — do not invent pass"
+}

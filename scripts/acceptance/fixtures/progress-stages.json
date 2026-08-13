@@ -1,0 +1,30 @@
+{
+  "gates": ["POST_UPLOAD_PROGRESS", "NO_LONG_SILENT_WAIT"],
+  "requiredStageFragments": [
+    "Upload",
+    "photo",
+    "VIN",
+    "inventory",
+    "sticker",
+    "customer",
+    "answer"
+  ],
+  "conceptualOrder": [
+    "Uploading…",
+    "Reading vehicle information… / Reading the photos…",
+    "Checking VIN… / Reading the VIN…",
+    "Checking inventory…",
+    "Vehicle identified…",
+    "Reading sticker details…",
+    "Checking customer matches…",
+    "Preparing answer…"
+  ],
+  "forbidden": [
+    "frozen Send with no stage for >5s before first progress",
+    "silent 15–30s wait with empty UI",
+    "fake percentage complete",
+    "stage stuck forever after hard failure"
+  ],
+  "multiImageRule": "One image OCR failure must not freeze whole bundle progress if others continue",
+  "note": "Static string presence is AUTOMATED; truthful ordering under load is LOCAL_BROWSER"
+}

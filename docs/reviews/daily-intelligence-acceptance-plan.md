@@ -15,31 +15,49 @@ Claude owns `executor/claude-daily-intelligence`. This plan does **not** impleme
 
 | Phase | Action |
 |-------|--------|
-| **Prepare** (this commit) | Harnesses + rubrics + scenarios frozen under `scripts/acceptance/*`, `scripts/benchmarks/*` |
-| **Wait** | Do not grade a half-written remote push |
-| **Lock** | `git fetch origin executor/claude-daily-intelligence` → record exact SHA as `CLAUDE_HEAD_TESTED` |
-| **Run** | Point harnesses at that immutable worktree / commit |
-| **Report** | Pass/fail + defect list only — no silent fixes by Grok |
+| **Prepare** | Harnesses + rubrics + **24-gate registry** under `scripts/acceptance/*`, `scripts/benchmarks/*`, `docs/reviews/*` |
+| **Standby** | Do **not** test Claude mid-write. Do not use floating branch tip. |
+| **Lock** | Director provides `CLAUDE_HEAD_TO_TEST=<immutable SHA>` only |
+| **Verify** | `git rev-parse` that exact SHA; detach checkout; build dist if needed |
+| **Run** | Full suite against that SHA only |
+| **Report** | `docs/reviews/daily-intelligence-final-report-template.md` — pass/fail + usefulness scores |
 
 ```powershell
-# Example once Claude posts a coherent checkpoint:
+# ONLY when Director provides immutable SHA — never mid-write tip:
+$env:CLAUDE_HEAD_TO_TEST = "<immutable SHA>"
 git -C C:\AION-HQ-claude-daily-intelligence fetch origin
-git -C C:\AION-HQ-claude-daily-intelligence rev-parse origin/executor/claude-daily-intelligence
+git -C C:\AION-HQ-claude-daily-intelligence rev-parse $env:CLAUDE_HEAD_TO_TEST
+git -C C:\AION-HQ-claude-daily-intelligence checkout --detach $env:CLAUDE_HEAD_TO_TEST
 $env:AION_CLAUDE_WORKTREE = "C:\AION-HQ-claude-daily-intelligence"
-$env:AION_ACCEPTANCE_HEAD = "<exact sha>"
+$env:AION_ACCEPTANCE_HEAD = $env:CLAUDE_HEAD_TO_TEST
+cd C:\AION-HQ-grok-daily-acceptance
 node scripts/acceptance/daily-intelligence-acceptance.mjs
-node scripts/benchmarks/daily-intelligence-latency.mjs --mode dry-run
+node scripts/acceptance/score-usefulness.mjs
+node scripts/benchmarks/daily-intelligence-latency.mjs --mode domain
 ```
 
-**Observed Claude HEAD at harness-prep:**  
-`563398014a4d4c4f89f52f0d6022afed71d6a3f5` — *“Phases 1-2: stop the state bleed, and let the Owner send three photos at once”*
+**Reference stable Claude checkpoint (before current mid-write — do not treat as “latest tip”):**  
+`0d93583779b7e0ad5f1cf6860c097e84f8cbc358`
 
-**Domain-layer smoke (Grok harness, 2026-08-13):** pointed at Claude worktree `dist/` — **33 PASS / 0 FAIL** for multi-photo M1, multi-VIN conflict, lot scope, web authority, capacity, progress-string presence.  
+**Earlier domain smoke (historical):** `5633980` dist — multi-photo domain OK. Full Owner-day / HTTPS / voice still pending immutable complete SHA.
 
-**Still WAITING for coherent full checkpoint before Owner-day / production / iPhone scoring:** commit message is explicitly Phases 1–2; end-to-end Chat + OCR + HTTPS not graded here.
+**Gate registry (all 24):** `docs/reviews/daily-intelligence-gate-registry.md`  
+**Final report template (tiers):** `docs/reviews/daily-intelligence-final-report-template.md`
 
-Domain modules on that HEAD:  
-`vehicle-evidence-bundle.ts`, `lot-scope-reasoning.ts`, `aion-conversation.ts`, `web-research.ts`, `memory-scale.ts`, `owner-archive-memory.ts`, `document-text-store.ts`, UI progress in `app.js`.
+### Evidence tiers (every final report)
+
+```text
+AUTOMATED_PASS
+LOCAL_BROWSER_PASS
+TAILSCALE_HTTPS_PASS
+PHYSICAL_IPHONE_OWNER_RETEST_PENDING
+```
+
+Never claim physical iPhone PASS without Owner device retest.
+
+### Usefulness rule
+
+Conversational answers must help the Owner. Factually valid **record recap** that fails the practical question is a **FAIL** (see lot-count example in registry + `score-usefulness.mjs`).
 
 ---
 

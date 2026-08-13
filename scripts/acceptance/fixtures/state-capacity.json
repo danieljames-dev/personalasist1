@@ -1,0 +1,15 @@
+{
+  "gate": "STATE_SIDECAR_CAPACITY",
+  "checks": [
+    "new crmDocuments do not inline huge extractedText by default",
+    "legacy records remain readable",
+    "missing sidecar degrades safely",
+    "migration second run moves zero",
+    "sourceRefs remain stable",
+    "capacity WARNING/CRITICAL before 32 MiB hard fail"
+  ],
+  "ceilingBytes": 33554432,
+  "warningRatio": 0.6,
+  "criticalRatio": 0.8,
+  "doNot": "run production migration from acceptance lab"
+}

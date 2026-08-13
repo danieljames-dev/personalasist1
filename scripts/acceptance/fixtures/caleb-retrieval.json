@@ -1,0 +1,18 @@
+{
+  "gate": "CALEB_OWNER_KNOWLEDGE",
+  "description": "Retrieval quality without embedding private fact text in Git",
+  "questions": [
+    "What did Caleb and I build around the trading system?",
+    "What was THE REAL PLAY?",
+    "What did we decide about the XO role?",
+    "Why did we design AION this way?",
+    "What did I tell Caleb about how I want an AI partner to work?"
+  ],
+  "passCriteria": [
+    "answer grounded in available Owner Knowledge / archive evidence",
+    "historical material not treated as current dealership authority",
+    "insufficient source explicitly admitted when corpus thin",
+    "no invented full-archive coverage claims"
+  ],
+  "privacy": "Do not commit private seed_facts or conversation bodies into this repository"
+}

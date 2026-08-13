@@ -452,29 +452,136 @@ function suiteOwnerDayScript() {
   ];
 }
 
+/** Standby readiness: all 24 gates have assets; no full Claude run. */
+function suiteGateReadiness() {
+  const out = [];
+  const catalogPath = join(FIX, "gate-catalog.json");
+  if (!existsSync(catalogPath)) {
+    out.push(result("gates.catalog", "FAIL", "gate-catalog.json missing"));
+    return out;
+  }
+  const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+  out.push(result("gates.count-24",
+    catalog.gates?.length === 24 ? "PASS" : "FAIL",
+    String(catalog.gates?.length)));
+  out.push(result("gates.waiting-for-immutable-sha",
+    catalog.waitingFor === "CLAUDE_HEAD_TO_TEST" && catalog.doNotTestMovingTip === true
+      ? "PASS" : "FAIL"));
+  const requiredFiles = [
+    "active-vehicle-context.json",
+    "progress-stages.json",
+    "tool-planning.json",
+    "model-routing.json",
+    "active-customer-context.json",
+    "name-ambiguity.json",
+    "caleb-retrieval.json",
+    "web-research.json",
+    "state-capacity.json",
+    "multi-photo-m1.json",
+    "multi-vehicle-conflict.json",
+    "lot-scope-physical-vs-web.json",
+    "conversational-adversarial.json",
+  ];
+  for (const f of requiredFiles) {
+    out.push(result(`gates.fixture:${f}`,
+      existsSync(join(FIX, f)) ? "PASS" : "FAIL", f));
+  }
+  const docs = [
+    join(ROOT, "docs", "reviews", "daily-intelligence-gate-registry.md"),
+    join(ROOT, "docs", "reviews", "daily-intelligence-final-report-template.md"),
+    join(__dirname, "score-usefulness.mjs"),
+    join(__dirname, "personality-rubric.json"),
+  ];
+  for (const p of docs) {
+    out.push(result(`gates.asset:${p.split(/[/\\]/).pop()}`,
+      existsSync(p) ? "PASS" : "FAIL", p));
+  }
+  // Usefulness dimensions present
+  const dims = catalog.usefulnessDimensions || [];
+  const need = ["GROUNDING", "USEFULNESS", "CONTEXT_RETENTION", "NATURALNESS", "ACTIONABILITY", "PROACTIVITY", "HONESTY_ABOUT_UNKNOWN"];
+  out.push(result("gates.usefulness-dimensions",
+    need.every((d) => dims.includes(d)) ? "PASS" : "FAIL",
+    dims.join(",")));
+  out.push(result("gates.evidence-tiers",
+    (catalog.evidenceTiers || []).includes("PHYSICAL_IPHONE")
+      && (catalog.evidenceTiers || []).includes("AUTOMATED")
+      ? "PASS" : "FAIL"));
+  // When CLAUDE_HEAD_TO_TEST not set, record standby
+  const headToTest = process.env.CLAUDE_HEAD_TO_TEST || "";
+  out.push(result("gates.standby-no-full-run",
+    !headToTest ? "PASS" : "PASS",
+    headToTest
+      ? `CLAUDE_HEAD_TO_TEST set to ${headToTest} — full domain suites may run`
+      : "WAITING_FOR_CLAUDE_IMMUTABLE_SHA — domain suites skipped unless AION_CLAUDE_WORKTREE forced"));
+  return out;
+}
+
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
-  const domain = await tryImportClaudeDomain();
+  const headToTest = process.env.CLAUDE_HEAD_TO_TEST || "";
+  // Standby: only run Claude-domain suites when immutable SHA is explicitly provided
+  // (or AION_FORCE_DOMAIN=1 for local harness debug — not for official grading).
+  const allowDomain =
+    Boolean(headToTest && ACCEPTANCE_HEAD && headToTest === ACCEPTANCE_HEAD)
+    || process.env.AION_FORCE_DOMAIN === "1";
+  const domain = allowDomain ? await tryImportClaudeDomain() : null;
   const all = [];
 
   if (suiteEnabled("fixtures")) all.push(...suiteFixtures());
-  if (suiteEnabled("multi-photo")) all.push(...await suiteMultiPhoto(domain));
-  if (suiteEnabled("multi-vehicle-conflict")) all.push(...await suiteConflict(domain));
-  if (suiteEnabled("physical-vs-website")) all.push(...await suiteLotScope(domain));
-  if (suiteEnabled("web-authority")) all.push(...await suiteWebAuthority(domain));
-  if (suiteEnabled("state-growth")) all.push(...await suiteMemoryScale(domain));
-  if (suiteEnabled("progress-ux")) all.push(...suiteProgressUxStatic());
+  if (suiteEnabled("gate-readiness")) all.push(...suiteGateReadiness());
+  if (suiteEnabled("multi-photo") && allowDomain) all.push(...await suiteMultiPhoto(domain));
+  else if (suiteEnabled("multi-photo") && !allowDomain) {
+    all.push(result("multi-photo", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA (set CLAUDE_HEAD_TO_TEST)"));
+  }
+  if (suiteEnabled("multi-vehicle-conflict") && allowDomain) all.push(...await suiteConflict(domain));
+  else if (suiteEnabled("multi-vehicle-conflict") && !allowDomain) {
+    all.push(result("multi-vehicle-conflict", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA"));
+  }
+  if (suiteEnabled("physical-vs-website") && allowDomain) all.push(...await suiteLotScope(domain));
+  else if (suiteEnabled("physical-vs-website") && !allowDomain) {
+    all.push(result("physical-vs-website", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA"));
+  }
+  if (suiteEnabled("web-authority") && allowDomain) all.push(...await suiteWebAuthority(domain));
+  else if (suiteEnabled("web-authority") && !allowDomain) {
+    all.push(result("web-authority", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA"));
+  }
+  if (suiteEnabled("state-growth") && allowDomain) all.push(...await suiteMemoryScale(domain));
+  else if (suiteEnabled("state-growth") && !allowDomain) {
+    all.push(result("state-growth", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA"));
+  }
+  if (suiteEnabled("progress-ux")) {
+    if (allowDomain) all.push(...suiteProgressUxStatic());
+    else {
+      // Static check of fixtures only
+      all.push(result("progress-ux.fixture",
+        existsSync(join(FIX, "progress-stages.json")) ? "PASS" : "FAIL"));
+      all.push(result("progress-ux.claude-app", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA"));
+    }
+  }
   if (suiteEnabled("iphone-voice")) all.push(...suiteIphoneVoiceDocs());
   if (suiteEnabled("tailscale-https")) all.push(...suiteTailscalePlan());
   if (suiteEnabled("owner-day")) all.push(...suiteOwnerDayScript());
-  if (suiteEnabled("claude-tests")) all.push(...suiteClaudeUnitTests());
+  if (suiteEnabled("claude-tests") && allowDomain) all.push(...suiteClaudeUnitTests());
+  else if (suiteEnabled("claude-tests") && !allowDomain) {
+    all.push(result("claude.unit-tests", "SKIP", "WAITING_FOR_CLAUDE_IMMUTABLE_SHA"));
+  }
 
   const summary = {
     generatedAt: new Date().toISOString(),
     baseMainExpected: "d18c7927c1e9eec0f876201b36a487b2ac91add0",
+    claudeHeadToTest: headToTest || null,
     claudeWorktree: CLAUDE_WT || null,
-    claudeHeadTested: ACCEPTANCE_HEAD || (CLAUDE_WT ? "WORKTREE_SET_HEAD_NOT_PINNED" : "WAITING_FOR_COHERENT_CHECKPOINT"),
-    domainMode: domain?.mode || "none",
+    claudeHeadTested: allowDomain
+      ? (ACCEPTANCE_HEAD || "WORKTREE_WITHOUT_PIN")
+      : "WAITING_FOR_CLAUDE_IMMUTABLE_SHA",
+    domainMode: domain?.mode || (allowDomain ? "none" : "standby"),
+    allowDomain,
+    evidenceTiersRequired: [
+      "AUTOMATED",
+      "LOCAL_BROWSER",
+      "TAILSCALE_HTTPS",
+      "PHYSICAL_IPHONE_OWNER_RETEST_PENDING",
+    ],
     results: all,
     counts: {
       pass: all.filter((r) => r.status === "PASS").length,

@@ -1,0 +1,24 @@
+{
+  "gate": "MULTI_SOURCE_TOOL_PLANNING",
+  "description": "Orchestrator should plan multiple sources without collapsing to one record",
+  "scenarios": [
+    {
+      "id": "TP1",
+      "owner": "Is this actually a good match for Sarah, and is the price still current?",
+      "expectedSources": ["active vehicle", "customer needs", "website/inventory price", "unknowns"],
+      "failIf": ["only recites vehicle row", "ignores Sarah", "invents price"]
+    },
+    {
+      "id": "TP2",
+      "owner": "What should I focus on next given today's lot walk and open follow-ups?",
+      "expectedSources": ["lot walk / physical", "commitments or customers", "next action"],
+      "failIf": ["generic advice with no AION state"]
+    },
+    {
+      "id": "TP3",
+      "owner": "Can you find out what's current instead of guessing?",
+      "expectedSources": ["web research plan or limit", "why model knowledge is insufficient"],
+      "failIf": ["confident stale claim with no source"]
+    }
+  ]
+}

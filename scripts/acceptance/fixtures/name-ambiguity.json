@@ -1,0 +1,30 @@
+{
+  "gate": "NAME_ONLY_AMBIGUITY_SAFETY",
+  "description": "Name-only or ambiguous identity must refuse unsafe targeting",
+  "cases": [
+    {
+      "id": "N1",
+      "signals": { "spokenName": "Sarah" },
+      "relationships": [
+        { "displayName": "Sarah Whitmore" },
+        { "displayName": "Sarah Delgado" }
+      ],
+      "expected": "AMBIGUOUS or refuse to act as single person"
+    },
+    {
+      "id": "N2",
+      "signals": { "spokenName": "Sarah" },
+      "relationships": [],
+      "expected": "UNRESOLVED"
+    },
+    {
+      "id": "N3",
+      "action": "browser or CRM prepare without ExternalCustomerLink",
+      "expected": "REFUSED — no name-only CRM target"
+    }
+  ],
+  "required": {
+    "NAME_ONLY_BROWSER_TARGET": "REFUSED",
+    "AMBIGUOUS_CUSTOMER": "REFUSED_OR_CLARIFY"
+  }
+}

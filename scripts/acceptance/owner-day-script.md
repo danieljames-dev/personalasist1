@@ -5,11 +5,26 @@ Manual + automated checklist for “does this feel useful on Daniel’s iPhone?�
 **Pin Claude HEAD before scoring.** Record:
 
 ```
-CLAUDE_HEAD_TESTED =
+CLAUDE_HEAD_TESTED =   # must equal CLAUDE_HEAD_TO_TEST from Director — immutable only
 DATE =
 DEVICE = iPhone Safari / desktop Chrome control
-URL = https://…ts.net/  or  http://100.x.x.x:31415/
+URL = https://…ts.net/  preferred; http://100.x.x.x:31415/ is NOT secure for mic
 ```
+
+## Evidence tier for each step
+
+| Step range | Typical tier |
+|------------|--------------|
+| 1–10 desktop loopback | LOCAL_BROWSER |
+| 1–10 via Serve HTTPS | TAILSCALE_HTTPS |
+| 11–12 voice | PHYSICAL_IPHONE (or LOCAL_BROWSER mic on desktop HTTPS) |
+| 13–14 knowledge/research | LOCAL_BROWSER + AUTOMATED support |
+
+```text
+PHYSICAL_IPHONE_OWNER_RETEST_PENDING = YES
+```
+
+until Owner confirms steps 1–14 on device.
 
 ## Steps
 

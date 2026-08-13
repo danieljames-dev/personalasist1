@@ -1,22 +1,35 @@
 {
   "dimensions": [
-    "USEFULNESS",
-    "NATURALNESS",
     "GROUNDING",
+    "USEFULNESS",
     "CONTEXT_RETENTION",
+    "NATURALNESS",
+    "ACTIONABILITY",
     "PROACTIVITY",
-    "HONESTY_ABOUT_UNKNOWN",
-    "ACTIONABILITY"
+    "HONESTY_ABOUT_UNKNOWN"
   ],
   "scale": { "min": 1, "max": 5 },
   "iphoneUsefulMeanThreshold": 3.5,
+  "rule": "Technical correctness alone does not pass. A reply that only repeats a record without answering the practical question FAILS USEFULNESS.",
+  "canonicalExample": {
+    "question": "How many other used cars are on the lot?",
+    "fail": "Repeats the one observed vehicle (even if that vehicle description is accurate).",
+    "pass": [
+      "states physically verified count / sample",
+      "states physical lot total is UNKNOWN",
+      "states website count separately if available",
+      "does not equate website inventory with physical presence",
+      "suggests how AION can determine the real count"
+    ]
+  },
   "failFlags": [
     "DEBUG_LOG_AS_ANSWER",
     "SCHEMA_DUMP",
     "INTENT_ROUTER_LABEL",
     "GENERIC_AI_BOILERPLATE",
     "UNHELPFUL_DISCLAIMER_WALL",
-    "REPEATED_RECORD_WITHOUT_ANSWERING"
+    "REPEATED_RECORD_WITHOUT_ANSWERING",
+    "FALSE_PHYSICAL_CENSUS"
   ],
-  "scoringNotes": "Score real Owner-facing reply text only. Do not reward verbosity."
+  "scoringNotes": "Score real Owner-facing reply text only. Do not reward verbosity. Mean >= 3.5 and zero fail flags required for conversational pass."
 }

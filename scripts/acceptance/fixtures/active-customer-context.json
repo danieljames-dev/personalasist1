@@ -1,0 +1,19 @@
+{
+  "gate": "ACTIVE_CUSTOMER_CONTEXT",
+  "description": "Customer focus must stick across turns like vehicle focus",
+  "setup": {
+    "customerDisplayName": "Sarah",
+    "relationshipRefOracle": "test-only-not-production-id"
+  },
+  "turns": [
+    { "q": "What does Sarah want now?", "establishesFocus": true },
+    { "q": "Which vehicles fit her?", "mustRetainCustomer": true },
+    { "q": "Is this a good match for her?", "mustRetainCustomer": true, "mustUseActiveVehicleIfSet": true },
+    { "q": "What follow-up should I prepare?", "mustRetainCustomer": true, "prepareOnly": true }
+  ],
+  "failIf": [
+    "switches customer without clarification",
+    "uses display-name search as CRM write target",
+    "leaks private fields into public content draft"
+  ]
+}
