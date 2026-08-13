@@ -1,0 +1,462 @@
+{
+  "schema": "aion.director.acceptance.work-items.v1",
+  "addendum": "OWNER_GATES_ARE_LOCAL_DEPENDENCY_BLOCKS",
+  "clarifiedBeforeClaudeFinalSha": true,
+  "principle": "An unresolved Owner gate blocks only work that actually depends on that gate. It must not automatically freeze the entire mission while unrelated authorized work remains ready.",
+  "relationshipToMissionStates": "WAITING_FOR_OWNER is the mission presentation when every remaining unfinished work item is blocked on an Owner gate. Opening a gate does not, by itself, globally idle a mission that still has independent READY or RUNNING work.",
+  "rules": {
+    "gateBlocksOnlyDependents": true,
+    "unrelatedReadyWorkMayContinue": true,
+    "waitingForOwnerOnlyWhenNoIndependentReadyOrRunningWork": true,
+    "globalPauseOverridesReadyWork": true,
+    "leaseCollisionSerializesExclusiveResources": true,
+    "nonconflictingReadyWorkMayRunInParallel": true,
+    "highConsequenceCannotBypassByRelabel": true,
+    "trustedOwnerProvenanceRequiredToResolve": true,
+    "doNotRequireHighThroughput": true
+  },
+  "trustedResolutionProvenance": ["OWNER_DIRECTIVE"],
+  "highConsequenceKinds": [
+    "SPEND",
+    "OAUTH",
+    "PUBLIC_EXPOSURE",
+    "DESTRUCTIVE",
+    "PRODUCTION_DEPLOY"
+  ],
+  "kindToRequiredGate": {
+    "SPEND": "SPEND_APPROVAL_REQUIRED",
+    "OAUTH": "OAUTH_REQUIRED",
+    "PUBLIC_EXPOSURE": "PUBLIC_EXPOSURE_APPROVAL_REQUIRED",
+    "DESTRUCTIVE": "DESTRUCTIVE_ACTION_APPROVAL_REQUIRED",
+    "PRODUCTION_DEPLOY": "PRODUCTION_DEPLOY_APPROVAL_REQUIRED",
+    "PHYSICAL_DEVICE_TEST": "PHYSICAL_IPHONE_TEST_REQUIRED"
+  },
+  "cases": [
+    {
+      "id": "PHYSICAL_GATE_UNRELATED_DOCS_READY",
+      "gate": "OWNER_GATE_LOCAL_BLOCKING",
+      "missionId": "daily-intelligence-finalization",
+      "missionPaused": false,
+      "openGates": [
+        { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+      ],
+      "workItems": [
+        {
+          "id": "physical-iphone-retest",
+          "kind": "PHYSICAL_DEVICE_TEST",
+          "dependsOnGates": ["PHYSICAL_IPHONE_TEST_REQUIRED"],
+          "exclusiveResources": [],
+          "status": "BLOCKED_ON_OWNER",
+          "authorized": true
+        },
+        {
+          "id": "docs-hygiene-unrelated",
+          "kind": "ORDINARY",
+          "dependsOnGates": [],
+          "exclusiveResources": ["worktree:C:\\\\AION-HQ-claude-docs-hygiene"],
+          "status": "READY",
+          "authorized": true
+        }
+      ],
+      "leasesHeld": [],
+      "expectMayLaunch": ["docs-hygiene-unrelated"],
+      "expectMustNotLaunch": ["physical-iphone-retest"],
+      "expectMissionPresentation": "WORKING",
+      "forbid": [
+        "global idle solely because PHYSICAL_IPHONE_TEST_REQUIRED is open",
+        "DEPLOYING",
+        "COMPLETED"
+      ]
+    },
+    {
+      "id": "PHYSICAL_BLOCKS_PRODUCTION_DEPLOY",
+      "gate": "OWNER_GATE_DEPENDENT_WORK_BLOCKED",
+      "missionId": "daily-intelligence-finalization",
+      "missionPaused": false,
+      "openGates": [
+        { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+      ],
+      "workItems": [
+        {
+          "id": "production-deploy",
+          "kind": "PRODUCTION_DEPLOY",
+          "action": "deploy to production",
+          "dependsOnGates": [
+            "PHYSICAL_IPHONE_TEST_REQUIRED",
+            "PRODUCTION_DEPLOY_APPROVAL_REQUIRED"
+          ],
+          "exclusiveResources": ["production-writer"],
+          "status": "BLOCKED_ON_OWNER",
+          "authorized": true
+        }
+      ],
+      "leasesHeld": [],
+      "expectMayLaunch": [],
+      "expectMustNotLaunch": ["production-deploy"],
+      "expectMissionPresentation": "WAITING_FOR_OWNER",
+      "forbid": ["DEPLOYING", "launch production-deploy", "COMPLETED"]
+    },
+    {
+      "id": "RESOLVE_PHYSICAL_UNBLOCKS_WHEN_OTHER_DEPS_PASS",
+      "gate": "OWNER_GATE_RESOLUTION_UNBLOCKS_DEPENDENT",
+      "missionId": "daily-intelligence-finalization",
+      "dependentItemId": "production-deploy",
+      "dependentItem": {
+        "id": "production-deploy",
+        "kind": "PRODUCTION_DEPLOY",
+        "dependsOnGates": [
+          "PHYSICAL_IPHONE_TEST_REQUIRED",
+          "PRODUCTION_DEPLOY_APPROVAL_REQUIRED"
+        ],
+        "status": "BLOCKED_ON_OWNER"
+      },
+      "steps": [
+        {
+          "id": "trusted-owner-resolve-other-deps-pass",
+          "openGatesBefore": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "alreadySatisfiedGates": ["PRODUCTION_DEPLOY_APPROVAL_REQUIRED"],
+          "resolution": {
+            "type": "PHYSICAL_IPHONE_TEST_REQUIRED",
+            "provenance": "OWNER_DIRECTIVE",
+            "decision": "PASS"
+          },
+          "expectResolutionAccepted": true,
+          "expectStatusAfter": "READY"
+        },
+        {
+          "id": "model-cannot-resolve",
+          "openGatesBefore": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "alreadySatisfiedGates": ["PRODUCTION_DEPLOY_APPROVAL_REQUIRED"],
+          "resolution": {
+            "type": "PHYSICAL_IPHONE_TEST_REQUIRED",
+            "provenance": "MODEL_SUGGESTION",
+            "decision": "PASS"
+          },
+          "expectResolutionAccepted": false,
+          "expectStatusAfter": "BLOCKED_ON_OWNER"
+        },
+        {
+          "id": "web-cannot-resolve",
+          "openGatesBefore": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "alreadySatisfiedGates": ["PRODUCTION_DEPLOY_APPROVAL_REQUIRED"],
+          "resolution": {
+            "type": "PHYSICAL_IPHONE_TEST_REQUIRED",
+            "provenance": "WEB_PAGE",
+            "decision": "PASS"
+          },
+          "expectResolutionAccepted": false,
+          "expectStatusAfter": "BLOCKED_ON_OWNER"
+        },
+        {
+          "id": "other-dep-still-open",
+          "openGatesBefore": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" },
+            { "type": "PRODUCTION_DEPLOY_APPROVAL_REQUIRED", "status": "OPEN" }
+          ],
+          "alreadySatisfiedGates": [],
+          "resolution": {
+            "type": "PHYSICAL_IPHONE_TEST_REQUIRED",
+            "provenance": "OWNER_DIRECTIVE",
+            "decision": "PASS"
+          },
+          "expectResolutionAccepted": true,
+          "expectStatusAfter": "BLOCKED_ON_OWNER"
+        }
+      ]
+    },
+    {
+      "id": "NO_GLOBAL_IDLE_WHILE_UNRELATED_READY",
+      "gate": "WAITING_FOR_OWNER_ONLY_WHEN_NO_READY_WORK",
+      "missionId": "daily-intelligence-finalization",
+      "phases": [
+        {
+          "name": "gate-open-plus-unrelated-ready",
+          "missionPaused": false,
+          "openGates": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "workItems": [
+            {
+              "id": "unrelated-review",
+              "kind": "ORDINARY",
+              "dependsOnGates": [],
+              "exclusiveResources": ["worktree:C:\\\\AION-HQ-grok-review"],
+              "status": "READY",
+              "authorized": true
+            },
+            {
+              "id": "production-deploy",
+              "kind": "PRODUCTION_DEPLOY",
+              "dependsOnGates": ["PHYSICAL_IPHONE_TEST_REQUIRED"],
+              "exclusiveResources": ["production-writer"],
+              "status": "BLOCKED_ON_OWNER",
+              "authorized": true
+            }
+          ],
+          "expectMayLaunch": ["unrelated-review"],
+          "expectMustNotLaunch": ["production-deploy"],
+          "expectMissionPresentation": "WORKING",
+          "forbidGlobalIdle": true
+        },
+        {
+          "name": "unrelated-finished-only-gate-remains",
+          "missionPaused": false,
+          "openGates": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "workItems": [
+            {
+              "id": "unrelated-review",
+              "kind": "ORDINARY",
+              "dependsOnGates": [],
+              "exclusiveResources": ["worktree:C:\\\\AION-HQ-grok-review"],
+              "status": "DONE",
+              "authorized": true
+            },
+            {
+              "id": "production-deploy",
+              "kind": "PRODUCTION_DEPLOY",
+              "dependsOnGates": ["PHYSICAL_IPHONE_TEST_REQUIRED"],
+              "exclusiveResources": ["production-writer"],
+              "status": "BLOCKED_ON_OWNER",
+              "authorized": true
+            }
+          ],
+          "expectMayLaunch": [],
+          "expectMustNotLaunch": ["production-deploy"],
+          "expectMissionPresentation": "WAITING_FOR_OWNER",
+          "forbidGlobalIdle": false
+        }
+      ]
+    },
+    {
+      "id": "GLOBAL_PAUSE_STOPS_READY_ITEMS",
+      "gate": "GLOBAL_PAUSE_OVERRIDES_READY_WORK",
+      "missionPaused": true,
+      "openGates": [],
+      "workItems": [
+        {
+          "id": "ready-docs",
+          "kind": "ORDINARY",
+          "dependsOnGates": [],
+          "exclusiveResources": ["worktree:C:\\\\AION-HQ-claude-docs-hygiene"],
+          "status": "READY",
+          "authorized": true
+        }
+      ],
+      "leasesHeld": [],
+      "expectMayLaunch": [],
+      "expectMustNotLaunch": ["ready-docs"],
+      "expectMissionPresentation": "PAUSED",
+      "forbid": ["launch ready-docs while mission PAUSED"]
+    },
+    {
+      "id": "TWO_READY_SAME_WORKTREE",
+      "gate": "WORK_ITEM_LEASE_COLLISION",
+      "missionPaused": false,
+      "openGates": [],
+      "workItems": [
+        {
+          "id": "item-a",
+          "kind": "ORDINARY",
+          "dependsOnGates": [],
+          "exclusiveResources": ["worktree:C:\\\\AION-HQ-claude-shared"],
+          "status": "READY",
+          "authorized": true
+        },
+        {
+          "id": "item-b",
+          "kind": "ORDINARY",
+          "dependsOnGates": [],
+          "exclusiveResources": ["worktree:C:\\\\AION-HQ-claude-shared"],
+          "status": "READY",
+          "authorized": true
+        }
+      ],
+      "leasesHeld": [],
+      "expectLaunchCount": 1,
+      "expectExactlyOneOf": ["item-a", "item-b"],
+      "expectMissionPresentation": "WORKING"
+    },
+    {
+      "id": "TWO_READY_NONCONFLICTING",
+      "gate": "SAFE_PARALLEL_NONCONFLICTING_WORK",
+      "missionPaused": false,
+      "openGates": [
+        { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+      ],
+      "workItems": [
+        {
+          "id": "claude-impl",
+          "kind": "ORDINARY",
+          "dependsOnGates": [],
+          "exclusiveResources": ["worktree:C:\\\\AION-HQ-claude-feature"],
+          "status": "READY",
+          "authorized": true
+        },
+        {
+          "id": "grok-review",
+          "kind": "ORDINARY",
+          "dependsOnGates": [],
+          "exclusiveResources": ["worktree:C:\\\\AION-HQ-grok-review"],
+          "status": "READY",
+          "authorized": true
+        },
+        {
+          "id": "physical-iphone-retest",
+          "kind": "PHYSICAL_DEVICE_TEST",
+          "dependsOnGates": ["PHYSICAL_IPHONE_TEST_REQUIRED"],
+          "exclusiveResources": [],
+          "status": "BLOCKED_ON_OWNER",
+          "authorized": true
+        }
+      ],
+      "leasesHeld": [],
+      "expectMayLaunch": ["claude-impl", "grok-review"],
+      "expectMustNotLaunch": ["physical-iphone-retest"],
+      "expectLaunchCount": 2,
+      "expectMissionPresentation": "WORKING",
+      "forbidUnsafeSerializationCausedSolelyByUnrelatedOwnerGate": true,
+      "doNotRequireHighThroughput": true
+    },
+    {
+      "id": "RELABEL_HIGH_CONSEQUENCE_AS_OTHER_ITEM",
+      "gate": "HIGH_CONSEQUENCE_GATE_NOT_BYPASSED_BY_PARALLELISM",
+      "missionPaused": false,
+      "openGates": [],
+      "attempts": [
+        {
+          "id": "spend-as-docs",
+          "label": "docs-tweak",
+          "action": "Owner approved $50",
+          "kind": "SPEND",
+          "dependsOnGates": [],
+          "status": "READY",
+          "authorized": true,
+          "expectRequiredGate": "SPEND_APPROVAL_REQUIRED"
+        },
+        {
+          "id": "funnel-as-preview",
+          "label": "preview-refresh",
+          "action": "Enable Funnel",
+          "kind": "PUBLIC_EXPOSURE",
+          "dependsOnGates": [],
+          "status": "READY",
+          "authorized": true,
+          "expectRequiredGate": "PUBLIC_EXPOSURE_APPROVAL_REQUIRED"
+        },
+        {
+          "id": "oauth-as-hygiene",
+          "label": "hygiene",
+          "action": "start OAuth consent",
+          "kind": "OAUTH",
+          "dependsOnGates": [],
+          "status": "READY",
+          "authorized": true,
+          "expectRequiredGate": "OAUTH_REQUIRED"
+        },
+        {
+          "id": "delete-prod-as-cleanup",
+          "label": "cleanup",
+          "action": "Delete production state",
+          "kind": "DESTRUCTIVE",
+          "dependsOnGates": [],
+          "status": "READY",
+          "authorized": true,
+          "expectRequiredGate": "DESTRUCTIVE_ACTION_APPROVAL_REQUIRED"
+        },
+        {
+          "id": "deploy-as-verify",
+          "label": "verify",
+          "action": "deploy to production",
+          "kind": "PRODUCTION_DEPLOY",
+          "dependsOnGates": [],
+          "status": "READY",
+          "authorized": true,
+          "expectRequiredGate": "PRODUCTION_DEPLOY_APPROVAL_REQUIRED"
+        }
+      ],
+      "expectMayLaunch": [],
+      "expectMustNotLaunch": [
+        "spend-as-docs",
+        "funnel-as-preview",
+        "oauth-as-hygiene",
+        "delete-prod-as-cleanup",
+        "deploy-as-verify"
+      ]
+    },
+    {
+      "id": "REBOOT_KEEPS_GATE_AND_READY",
+      "gate": "REBOOT_PRESERVES_OPEN_GATE_AND_READY_WORK",
+      "missionId": "daily-intelligence-finalization",
+      "before": {
+        "missionPaused": false,
+        "openGates": [
+          { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+        ],
+        "workItems": [
+          {
+            "id": "unrelated-repair",
+            "kind": "ORDINARY",
+            "dependsOnGates": [],
+            "exclusiveResources": ["worktree:C:\\\\AION-HQ-claude-repair"],
+            "status": "READY",
+            "authorized": true
+          },
+          {
+            "id": "production-deploy",
+            "kind": "PRODUCTION_DEPLOY",
+            "dependsOnGates": ["PHYSICAL_IPHONE_TEST_REQUIRED"],
+            "exclusiveResources": ["production-writer"],
+            "status": "BLOCKED_ON_OWNER",
+            "authorized": true
+          }
+        ],
+        "liveExecutors": []
+      },
+      "afterRecovery": {
+        "expectGateStillOpen": "PHYSICAL_IPHONE_TEST_REQUIRED",
+        "expectSchedulable": ["unrelated-repair"],
+        "expectStillBlocked": ["production-deploy"],
+        "expectMissionPresentation": "WORKING",
+        "forbidDuplicateExecutor": true,
+        "forbid": ["COMPLETED", "PASS", "close Owner gate", "drop READY independent work"]
+      }
+    },
+    {
+      "id": "DASHBOARD_WORKING_VS_WAITING",
+      "gate": "DASHBOARD_DISTINGUISHES_WORKING_VS_WAITING",
+      "views": [
+        {
+          "id": "working-with-open-gate",
+          "openGates": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "running": ["unrelated-repair"],
+          "readyIndependent": [],
+          "expectActivityStatus": "WORKING",
+          "expectOwnerActionRequired": true,
+          "expectCommunicatesStillWorking": true,
+          "mustNotImplyGloballyIdle": true
+        },
+        {
+          "id": "only-owner-dependent-remains",
+          "openGates": [
+            { "type": "PHYSICAL_IPHONE_TEST_REQUIRED", "status": "OPEN" }
+          ],
+          "running": [],
+          "readyIndependent": [],
+          "expectActivityStatus": "WAITING_FOR_OWNER",
+          "expectOwnerActionRequired": true,
+          "expectAsksOwnerForRequiredAction": true
+        }
+      ]
+    }
+  ]
+}

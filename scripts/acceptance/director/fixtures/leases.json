@@ -40,6 +40,24 @@
       "id": "DUPLICATE_EXECUTOR",
       "gate": "DUPLICATE_EXECUTOR_PREVENTION",
       "expect": "same lease + same role cannot spawn second live process"
+    },
+    {
+      "id": "WORK_ITEM_SAME_RESOURCE",
+      "gate": "WORK_ITEM_LEASE_COLLISION",
+      "resource": "worktree",
+      "items": ["ready-a", "ready-b"],
+      "path": "C:\\\\AION-HQ-claude-shared",
+      "expect": "only one launches"
+    },
+    {
+      "id": "SAFE_PARALLEL_NONCONFLICTING",
+      "gate": "SAFE_PARALLEL_NONCONFLICTING_WORK",
+      "items": [
+        { "id": "claude", "resource": "C:\\\\AION-HQ-claude-feature" },
+        { "id": "grok", "resource": "C:\\\\AION-HQ-grok-review" }
+      ],
+      "unrelatedOpenGate": "PHYSICAL_IPHONE_TEST_REQUIRED",
+      "expect": "both may launch; unrelated Owner gate is not a serializer"
     }
   ]
 }

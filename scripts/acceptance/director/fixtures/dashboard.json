@@ -14,8 +14,23 @@
     "productionSha",
     "spendUsd",
     "ownerActionRequired",
-    "activeGates"
+    "activeGates",
+    "activityStatus"
   ],
+  "activityStatusValues": ["WORKING", "WAITING_FOR_OWNER", "PAUSED"],
+  "workingVsWaiting": {
+    "whenGateOpenAndOtherWorkRunning": {
+      "activityStatus": "WORKING",
+      "mustCommunicate": "AION is still working",
+      "ownerActionRequired": true,
+      "mustNotImplyGloballyIdle": true
+    },
+    "whenOnlyOwnerDependentRemains": {
+      "activityStatus": "WAITING_FOR_OWNER",
+      "mustCommunicate": "Owner action required",
+      "ownerActionRequired": true
+    }
+  },
   "auth": {
     "forgedOrigin": 403,
     "unpairedPhone": 401,

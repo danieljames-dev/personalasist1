@@ -1,5 +1,7 @@
 {
   "schema": "aion.director.acceptance.owner-gates.v1",
+  "blockingScope": "LOCAL_DEPENDENCY",
+  "doesNotGloballyFreezeMission": true,
   "gates": [
     "PHYSICAL_IPHONE_TEST_REQUIRED",
     "SPEND_APPROVAL_REQUIRED",
@@ -44,6 +46,15 @@
       "physical": "pending",
       "expectCompletion": false,
       "ownerGateStatus": "OWNER_RETEST_PENDING"
+    },
+    {
+      "id": "PHYSICAL_DOES_NOT_FREEZE_UNRELATED",
+      "gate": "OWNER_GATE_LOCAL_BLOCKING",
+      "missionId": "daily-intelligence-finalization",
+      "open": "PHYSICAL_IPHONE_TEST_REQUIRED",
+      "unrelatedWork": "docs-hygiene-unrelated",
+      "expectUnrelatedRemainsReady": true,
+      "forbid": ["DEPLOYING", "COMPLETED"]
     }
   ]
 }

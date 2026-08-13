@@ -1,6 +1,8 @@
 {
   "schema": "aion.director.acceptance.catalog.v1",
-  "version": 1,
+  "version": 2,
+  "addendum": "owner-gates-local-dependency-blocks",
+  "previousFrozenHead": "d7b780408c65ab2201351fabcda759810e22401c",
   "waitingFor": "CLAUDE_DIRECTOR_SHA",
   "doNotTestMovingTip": true,
   "designHeadExpected": "1e0abab87ee8faf157598399e02e9ad77252c837",
@@ -108,6 +110,16 @@
     { "id": 82, "gate": "DIRECTOR_DOWN_RETURNS_503", "tier": "COMMAND_CENTER_BRIDGE", "assets": ["dashboard.json"] },
     { "id": 83, "gate": "CONSOLE_ONLY_EMERGENCY_STOP", "tier": "COMMAND_CENTER_BRIDGE", "assets": ["dashboard.json"] },
     { "id": 84, "gate": "HANDOFF_PRODUCTION_MUTATED_LIE_REJECTED", "tier": "AUTOMATED", "assets": ["git-truth-lies.json"] },
-    { "id": 85, "gate": "NO_INFINITE_REPAIR_LOOP_SAME_SHA", "tier": "AUTOMATED", "assets": ["retry-loop.json"] }
+    { "id": 85, "gate": "NO_INFINITE_REPAIR_LOOP_SAME_SHA", "tier": "AUTOMATED", "assets": ["retry-loop.json"] },
+    { "id": 86, "gate": "OWNER_GATE_LOCAL_BLOCKING", "tier": "AUTOMATED", "assets": ["work-items.json"] },
+    { "id": 87, "gate": "OWNER_GATE_DEPENDENT_WORK_BLOCKED", "tier": "AUTOMATED", "assets": ["work-items.json"] },
+    { "id": 88, "gate": "OWNER_GATE_RESOLUTION_UNBLOCKS_DEPENDENT", "tier": "AUTOMATED", "assets": ["work-items.json"] },
+    { "id": 89, "gate": "WAITING_FOR_OWNER_ONLY_WHEN_NO_READY_WORK", "tier": "AUTOMATED", "assets": ["work-items.json"] },
+    { "id": 90, "gate": "GLOBAL_PAUSE_OVERRIDES_READY_WORK", "tier": "AUTOMATED", "assets": ["work-items.json"] },
+    { "id": 91, "gate": "WORK_ITEM_LEASE_COLLISION", "tier": "AUTOMATED", "assets": ["work-items.json", "leases.json"] },
+    { "id": 92, "gate": "SAFE_PARALLEL_NONCONFLICTING_WORK", "tier": "AUTOMATED", "assets": ["work-items.json", "leases.json"] },
+    { "id": 93, "gate": "HIGH_CONSEQUENCE_GATE_NOT_BYPASSED_BY_PARALLELISM", "tier": "AUTOMATED", "assets": ["work-items.json"] },
+    { "id": 94, "gate": "REBOOT_PRESERVES_OPEN_GATE_AND_READY_WORK", "tier": "AUTOMATED", "assets": ["work-items.json", "crash-recovery.json"] },
+    { "id": 95, "gate": "DASHBOARD_DISTINGUISHES_WORKING_VS_WAITING", "tier": "COMMAND_CENTER_BRIDGE", "assets": ["work-items.json", "dashboard.json"] }
   ]
 }

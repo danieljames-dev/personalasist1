@@ -27,5 +27,8 @@
     "PHYSICAL_IPHONE_TEST_REQUIRED recorded PASS",
     "if deploy authorized: post-deploy SHA check"
   ],
-  "hardGate": "FIRST_REAL_MISSION_DOES_NOT_DEPLOY while physical pending"
+  "hardGate": "FIRST_REAL_MISSION_DOES_NOT_DEPLOY while physical pending",
+  "ownerGateBlockingScope": "LOCAL_DEPENDENCY",
+  "physicalGateBlocks": ["production-deploy", "mission-completion"],
+  "physicalGateDoesNotBlock": ["unrelated-authorized-independent-work"]
 }

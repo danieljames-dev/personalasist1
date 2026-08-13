@@ -35,4 +35,11 @@ Does not modify Claude's implementation.
 `PASS` `FAIL` `BLOCKED` `OWNER_RETEST_PENDING`
 
 Automated Director PASS + physical iPhone still pending is allowed:
-Director's correct action is to **stop at the Owner gate**.
+Director's correct action is to **stop work that depends on that gate**.
+It must **not** freeze unrelated authorized work solely because the gate is open.
+`WAITING_FOR_OWNER` is only the mission presentation when no independent READY/RUNNING work remains.
+
+## Addendum (95 gates)
+
+Gates 86–95 (`work-items.json`) freeze Owner gates as local dependency blocks.
+Do not weaken gates 1–85. Do not inspect a future Claude SHA to reshape these fixtures.

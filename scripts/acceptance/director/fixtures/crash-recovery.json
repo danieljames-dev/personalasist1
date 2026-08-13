@@ -61,6 +61,19 @@
       "expectRecoveredState": "INTERRUPTED",
       "expectNext": "VERIFYING",
       "forbid": ["treat as PASS", "COMPLETED"]
+    },
+    {
+      "id": "REBOOT_OPEN_GATE_AND_INDEPENDENT_READY",
+      "gate": "REBOOT_PRESERVES_OPEN_GATE_AND_READY_WORK",
+      "durableState": "WORKING",
+      "openGate": "PHYSICAL_IPHONE_TEST_REQUIRED",
+      "independentReadyWork": ["unrelated-repair"],
+      "dependentBlockedWork": ["production-deploy"],
+      "missionId": "daily-intelligence-finalization",
+      "expectRecoveredState": "WORKING",
+      "expectGateStillOpen": true,
+      "expectIndependentWorkSchedulable": true,
+      "forbid": ["COMPLETED", "PASS", "spawn duplicate executor", "drop READY independent work", "close Owner gate"]
     }
   ]
 }

@@ -15,6 +15,6 @@ OWNER_GATE_STATUS =
 RECOMMEND_DIRECTOR_INTEGRATION =
 ```
 
-Physical iPhone pending does **not** fail automated Director acceptance if Director correctly stops at that gate and does not deploy.
+Physical iPhone pending does **not** fail automated Director acceptance if Director blocks **dependent** work (especially deploy) and does not complete the mission. Unrelated authorized work may continue. The dashboard must say AION is still working while that work runs, and must ask the Owner only when remaining work is gate-blocked.
 
 Fill gate matrix from `scripts/acceptance/director/out/`.

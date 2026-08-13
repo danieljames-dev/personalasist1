@@ -80,6 +80,117 @@ function legalTransition(legal, from, to) {
   return Array.isArray(legal[from]) && legal[from].includes(to);
 }
 
+const WORK_ITEM_KIND_TO_GATE = {
+  SPEND: "SPEND_APPROVAL_REQUIRED",
+  OAUTH: "OAUTH_REQUIRED",
+  PUBLIC_EXPOSURE: "PUBLIC_EXPOSURE_APPROVAL_REQUIRED",
+  DESTRUCTIVE: "DESTRUCTIVE_ACTION_APPROVAL_REQUIRED",
+  PRODUCTION_DEPLOY: "PRODUCTION_DEPLOY_APPROVAL_REQUIRED",
+  PHYSICAL_DEVICE_TEST: "PHYSICAL_IPHONE_TEST_REQUIRED",
+};
+
+function openGateTypes(openGates) {
+  return (openGates || [])
+    .filter((g) => {
+      const status = typeof g === "string" ? "OPEN" : (g.status || "OPEN");
+      return status === "OPEN";
+    })
+    .map((g) => (typeof g === "string" ? g : g.type));
+}
+
+function classifyWorkItemKind(item) {
+  if (item.kind && item.kind !== "ORDINARY") return item.kind;
+  const t = `${item.action || ""} ${item.label || ""}`;
+  if (/\boauth\b|consent/i.test(t)) return "OAUTH";
+  if (/\bdeploy\b[\s\S]{0,40}\bproduction\b|\bproduction\b[\s\S]{0,40}\bdeploy\b/i.test(t)) {
+    return "PRODUCTION_DEPLOY";
+  }
+  const c = classifyHighConsequence(t);
+  if (c === "FORBIDDEN_GIT") return "DESTRUCTIVE";
+  return c;
+}
+
+function itemBlockedByOpenGates(item, openTypes) {
+  const declared = item.dependsOnGates || [];
+  const hits = declared.filter((g) => openTypes.includes(g));
+  const kind = classifyWorkItemKind(item);
+  const required = WORK_ITEM_KIND_TO_GATE[kind];
+  if (required && !declared.includes(required)) hits.push(required);
+  else if (required && openTypes.includes(required) && !hits.includes(required)) hits.push(required);
+  return hits;
+}
+
+function itemMayLaunch(item, ctx) {
+  if (ctx.missionPaused) return { ok: false, reason: "PAUSED" };
+  if (item.status === "DONE" || item.status === "RUNNING") return { ok: false, reason: item.status };
+  const open = openGateTypes(ctx.openGates);
+  const blocks = itemBlockedByOpenGates(item, open);
+  if (blocks.length) return { ok: false, reason: "OWNER_GATE", gates: blocks };
+  if (item.status === "BLOCKED_ON_OWNER") return { ok: false, reason: "OWNER_GATE" };
+  if (item.status === "READY" || !item.status) return { ok: true, reason: "READY" };
+  return { ok: false, reason: item.status || "UNKNOWN" };
+}
+
+function scheduleWorkItems(ctx) {
+  const launched = [];
+  const blocked = [];
+  const held = new Set(ctx.leasesHeld || []);
+  for (const item of ctx.workItems || []) {
+    const verdict = itemMayLaunch(item, ctx);
+    if (!verdict.ok) {
+      if (item.status !== "DONE" && item.status !== "RUNNING") blocked.push(item.id);
+      continue;
+    }
+    const resources = item.exclusiveResources || [];
+    if (resources.some((r) => held.has(r))) {
+      blocked.push(item.id);
+      continue;
+    }
+    launched.push(item.id);
+    for (const resource of resources) held.add(resource);
+  }
+
+  const open = openGateTypes(ctx.openGates);
+  const independentActive = (ctx.workItems || []).some((item) => {
+    if (itemBlockedByOpenGates(item, open).length) return false;
+    if (item.status === "BLOCKED_ON_OWNER") return false;
+    return item.status === "READY" || item.status === "RUNNING" || launched.includes(item.id);
+  });
+  const dependentUnfinished = (ctx.workItems || []).some((item) => {
+    if (item.status === "DONE") return false;
+    return itemBlockedByOpenGates(item, open).length > 0 || item.status === "BLOCKED_ON_OWNER";
+  });
+
+  let presentation = "WORKING";
+  if (ctx.missionPaused) presentation = "PAUSED";
+  else if (independentActive) presentation = "WORKING";
+  else if (open.length && dependentUnfinished) presentation = "WAITING_FOR_OWNER";
+
+  return { launched, blocked, presentation };
+}
+
+function trustedOwnerResolution(resolution) {
+  return resolution?.provenance === "OWNER_DIRECTIVE"
+    && (resolution.decision === "PASS" || resolution.decision === "APPROVED");
+}
+
+function applyGateResolution(openGates, resolution, accepted) {
+  if (!accepted) return [...(openGates || [])];
+  return (openGates || []).filter((g) => (typeof g === "string" ? g : g.type) !== resolution.type);
+}
+
+function dependentStatusAfterResolution(item, openGatesAfter, alreadySatisfied) {
+  const remaining = (item.dependsOnGates || []).filter((g) => {
+    if ((alreadySatisfied || []).includes(g)) return false;
+    return openGateTypes(openGatesAfter).includes(g);
+  });
+  const kind = classifyWorkItemKind(item);
+  const required = WORK_ITEM_KIND_TO_GATE[kind];
+  if (required && remaining.includes(required)) return "BLOCKED_ON_OWNER";
+  if (remaining.length) return "BLOCKED_ON_OWNER";
+  return "READY";
+}
+
 function probeExe(exe, args, extraEnv = {}) {
   if (!exe || !existsSync(exe)) return { ok: false, reason: "missing" };
   const r = spawnSync(exe, args, {
@@ -155,6 +266,25 @@ function suiteFixtures() {
   const catalog = load("gate-catalog.json");
   out.push(result("catalog.version", catalog.schema ? "PASS" : "FAIL"));
   out.push(result("catalog.count-80-plus", catalog.gates.length >= 80 ? "PASS" : "FAIL", String(catalog.gates.length)));
+  out.push(result("catalog.count-95", catalog.gates.length === 95 ? "PASS" : "FAIL", String(catalog.gates.length)));
+  const added = [86, 87, 88, 89, 90, 91, 92, 93, 94, 95].map((n) => catalog.gates.find((g) => g.id === n)?.gate);
+  const expectedNew = [
+    "OWNER_GATE_LOCAL_BLOCKING",
+    "OWNER_GATE_DEPENDENT_WORK_BLOCKED",
+    "OWNER_GATE_RESOLUTION_UNBLOCKS_DEPENDENT",
+    "WAITING_FOR_OWNER_ONLY_WHEN_NO_READY_WORK",
+    "GLOBAL_PAUSE_OVERRIDES_READY_WORK",
+    "WORK_ITEM_LEASE_COLLISION",
+    "SAFE_PARALLEL_NONCONFLICTING_WORK",
+    "HIGH_CONSEQUENCE_GATE_NOT_BYPASSED_BY_PARALLELISM",
+    "REBOOT_PRESERVES_OPEN_GATE_AND_READY_WORK",
+    "DASHBOARD_DISTINGUISHES_WORKING_VS_WAITING",
+  ];
+  out.push(result("catalog.addendum-86-95",
+    expectedNew.every((name, i) => added[i] === name) ? "PASS" : "FAIL",
+    added.join(",")));
+  out.push(result("catalog.existing-85-untouched-count",
+    catalog.gates.filter((g) => g.id >= 1 && g.id <= 85).length === 85 ? "PASS" : "FAIL"));
   out.push(result("catalog.waiting-for-immutable-sha",
     catalog.waitingFor === "CLAUDE_DIRECTOR_SHA" && catalog.doNotTestMovingTip === true ? "PASS" : "FAIL"));
   out.push(result("catalog.do-not-weaken", catalog.doNotWeakenToAccommodateClaude === true ? "PASS" : "FAIL"));
@@ -162,7 +292,7 @@ function suiteFixtures() {
     "authority-adversarial.json", "git-truth-lies.json", "crash-recovery.json",
     "retry-loop.json", "owner-gates.json", "capacity.json", "first-mission.json",
     "leases.json", "transitions.json", "dashboard.json", "logging.json",
-    "executors.json", "handoff.schema.json",
+    "executors.json", "handoff.schema.json", "work-items.json",
   ];
   for (const f of requiredFiles) {
     out.push(result(`fixture.present:${f}`, existsSync(join(FIX, f)) ? "PASS" : "FAIL"));
@@ -172,6 +302,7 @@ function suiteFixtures() {
     "DIRECTOR_STATE_OUTSIDE_WORKTREE", "DIRECTOR_BUSINESS_STATE_WRITER",
     "FIRST_REAL_MISSION_DOES_NOT_DEPLOY", "NO_INFINITE_AGENT_LOOP",
     "WEB_AUTHORITY_ESCALATION", "HANDOFF_NOT_TRUSTED_WITHOUT_GIT",
+    "OWNER_GATE_LOCAL_BLOCKING",
   ];
   out.push(result("catalog.hard-gates-present", need.every((g) => ids.includes(g)) ? "PASS" : "FAIL"));
   return out;
@@ -283,6 +414,10 @@ function suiteLeases() {
   out.push(result("INTEGRATION_LEASE_EXCLUSIVE", fx.cases.some((c) => c.resource === "integration") ? "PASS" : "FAIL"));
   out.push(result("PRODUCTION_WRITER_LEASE_EXCLUSIVE", fx.cases.some((c) => c.resource === "production-writer") ? "PASS" : "FAIL"));
   out.push(result("DUPLICATE_EXECUTOR_PREVENTION", fx.cases.some((c) => c.id === "DUPLICATE_EXECUTOR") ? "PASS" : "FAIL"));
+  out.push(result("WORK_ITEM_LEASE_COLLISION_FIXTURE",
+    fx.cases.some((c) => c.gate === "WORK_ITEM_LEASE_COLLISION") ? "PASS" : "FAIL"));
+  out.push(result("SAFE_PARALLEL_NONCONFLICTING_FIXTURE",
+    fx.cases.some((c) => c.gate === "SAFE_PARALLEL_NONCONFLICTING_WORK") ? "PASS" : "FAIL"));
   return out;
 }
 
@@ -332,6 +467,8 @@ function suiteOwnerGates() {
   const auto = fx.cases.find((c) => c.id === "AUTOMATED_PASS_DOES_NOT_CLOSE_IPHONE");
   out.push(result("automated-pass-not-completion",
     auto && auto.expectCompletion === false && auto.ownerGateStatus === "OWNER_RETEST_PENDING" ? "PASS" : "FAIL"));
+  out.push(result("owner-gate.local-dependency-scope",
+    fx.blockingScope === "LOCAL_DEPENDENCY" && fx.doesNotGloballyFreezeMission === true ? "PASS" : "FAIL"));
   return out;
 }
 
@@ -370,6 +507,191 @@ function suiteDashboardLogging() {
   out.push(result("RAW_LOG_NOT_IN_STATE_JSON",
     log.stateJsonMustNotContain.includes("stdout") ? "PASS" : "FAIL"));
   out.push(result("NO_SECRET_LOGGING", (log.secretPatterns || []).length >= 3 ? "PASS" : "FAIL"));
+  out.push(result("DASHBOARD_DISTINGUISHES_WORKING_VS_WAITING",
+    dash.requiredFields.includes("activityStatus")
+      && dash.workingVsWaiting?.whenGateOpenAndOtherWorkRunning?.activityStatus === "WORKING"
+      && dash.workingVsWaiting?.whenOnlyOwnerDependentRemains?.activityStatus === "WAITING_FOR_OWNER"
+      && dash.workingVsWaiting?.whenGateOpenAndOtherWorkRunning?.mustNotImplyGloballyIdle === true
+      ? "PASS" : "FAIL"));
+  return out;
+}
+
+function expectSchedule(caseId, ctx, expect) {
+  const got = scheduleWorkItems(ctx);
+  const out = [];
+  if (expect.expectMayLaunch) {
+    const ok = expect.expectMayLaunch.every((id) => got.launched.includes(id));
+    out.push(result(`${caseId}.may-launch`, ok ? "PASS" : "FAIL",
+      `launched=${got.launched.join(",") || "∅"} expect=${expect.expectMayLaunch.join(",")}`));
+  }
+  if (expect.expectMustNotLaunch) {
+    const ok = expect.expectMustNotLaunch.every((id) => !got.launched.includes(id));
+    out.push(result(`${caseId}.must-not-launch`, ok ? "PASS" : "FAIL",
+      `launched=${got.launched.join(",") || "∅"} forbid=${expect.expectMustNotLaunch.join(",")}`));
+  }
+  if (typeof expect.expectLaunchCount === "number") {
+    out.push(result(`${caseId}.launch-count`,
+      got.launched.length === expect.expectLaunchCount ? "PASS" : "FAIL",
+      `got=${got.launched.length} expect=${expect.expectLaunchCount}`));
+  }
+  if (expect.expectExactlyOneOf) {
+    const n = expect.expectExactlyOneOf.filter((id) => got.launched.includes(id)).length;
+    out.push(result(`${caseId}.exactly-one`, n === 1 ? "PASS" : "FAIL",
+      `launched=${got.launched.join(",")}`));
+  }
+  if (expect.expectMissionPresentation) {
+    out.push(result(`${caseId}.presentation`,
+      got.presentation === expect.expectMissionPresentation ? "PASS" : "FAIL",
+      `got=${got.presentation} expect=${expect.expectMissionPresentation}`));
+  }
+  return out;
+}
+
+function suiteWorkItems() {
+  const fx = load("work-items.json");
+  const first = load("first-mission.json");
+  const out = [];
+  out.push(result("work-items.principle",
+    fx.rules?.gateBlocksOnlyDependents === true
+      && fx.rules?.unrelatedReadyWorkMayContinue === true
+      && fx.rules?.waitingForOwnerOnlyWhenNoIndependentReadyOrRunningWork === true
+      && fx.clarifiedBeforeClaudeFinalSha === true
+      ? "PASS" : "FAIL"));
+  out.push(result("first-mission.local-gate-scope",
+    first.ownerGateBlockingScope === "LOCAL_DEPENDENCY"
+      && (first.physicalGateBlocks || []).includes("production-deploy")
+      && (first.physicalGateDoesNotBlock || []).includes("unrelated-authorized-independent-work")
+      ? "PASS" : "FAIL"));
+
+  const byGate = (name) => fx.cases.find((c) => c.gate === name);
+
+  const local = byGate("OWNER_GATE_LOCAL_BLOCKING");
+  out.push(result("OWNER_GATE_LOCAL_BLOCKING", local ? "PASS" : "FAIL", local?.id || "missing"));
+  if (local) out.push(...expectSchedule(`work.${local.id}`, local, local));
+
+  const dep = byGate("OWNER_GATE_DEPENDENT_WORK_BLOCKED");
+  out.push(result("OWNER_GATE_DEPENDENT_WORK_BLOCKED", dep ? "PASS" : "FAIL", dep?.id || "missing"));
+  if (dep) out.push(...expectSchedule(`work.${dep.id}`, dep, dep));
+
+  const resolve = byGate("OWNER_GATE_RESOLUTION_UNBLOCKS_DEPENDENT");
+  let resolveOk = Boolean(resolve?.steps?.length);
+  if (resolve) {
+    for (const step of resolve.steps) {
+      const accepted = trustedOwnerResolution(step.resolution);
+      const acceptOk = accepted === step.expectResolutionAccepted;
+      const openAfter = applyGateResolution(step.openGatesBefore, step.resolution, accepted);
+      const status = dependentStatusAfterResolution(
+        resolve.dependentItem,
+        openAfter,
+        step.alreadySatisfiedGates,
+      );
+      const statusOk = status === step.expectStatusAfter;
+      if (!acceptOk || !statusOk) resolveOk = false;
+      out.push(result(`work.resolve.${step.id}`,
+        acceptOk && statusOk ? "PASS" : "FAIL",
+        `accepted=${accepted} status=${status}`));
+    }
+  }
+  out.push(result("OWNER_GATE_RESOLUTION_UNBLOCKS_DEPENDENT", resolveOk ? "PASS" : "FAIL"));
+
+  const waiting = byGate("WAITING_FOR_OWNER_ONLY_WHEN_NO_READY_WORK");
+  let waitingOk = Boolean(waiting?.phases?.length === 2);
+  if (waiting) {
+    for (const phase of waiting.phases) {
+      const rows = expectSchedule(`work.waiting.${phase.name}`, phase, phase);
+      out.push(...rows);
+      if (rows.some((r) => r.status === "FAIL")) waitingOk = false;
+      if (phase.forbidGlobalIdle === true && phase.expectMissionPresentation === "WAITING_FOR_OWNER") {
+        waitingOk = false;
+        out.push(result(`work.waiting.${phase.name}.no-global-idle`, "FAIL",
+          "unrelated ready work must not present WAITING_FOR_OWNER"));
+      }
+    }
+  }
+  out.push(result("WAITING_FOR_OWNER_ONLY_WHEN_NO_READY_WORK", waitingOk ? "PASS" : "FAIL"));
+
+  const paused = byGate("GLOBAL_PAUSE_OVERRIDES_READY_WORK");
+  out.push(result("GLOBAL_PAUSE_OVERRIDES_READY_WORK",
+    paused && paused.missionPaused === true ? "PASS" : "FAIL"));
+  if (paused) out.push(...expectSchedule(`work.${paused.id}`, paused, paused));
+
+  const collision = byGate("WORK_ITEM_LEASE_COLLISION");
+  out.push(result("WORK_ITEM_LEASE_COLLISION", collision ? "PASS" : "FAIL"));
+  if (collision) out.push(...expectSchedule(`work.${collision.id}`, collision, collision));
+
+  const parallel = byGate("SAFE_PARALLEL_NONCONFLICTING_WORK");
+  out.push(result("SAFE_PARALLEL_NONCONFLICTING_WORK",
+    parallel && parallel.forbidUnsafeSerializationCausedSolelyByUnrelatedOwnerGate === true
+      && parallel.doNotRequireHighThroughput === true
+      ? "PASS" : "FAIL"));
+  if (parallel) out.push(...expectSchedule(`work.${parallel.id}`, parallel, parallel));
+
+  const bypass = byGate("HIGH_CONSEQUENCE_GATE_NOT_BYPASSED_BY_PARALLELISM");
+  let bypassOk = Boolean(bypass?.attempts?.length);
+  if (bypass) {
+    const items = bypass.attempts.map((a) => ({
+      id: a.id,
+      kind: a.kind,
+      action: a.action,
+      label: a.label,
+      dependsOnGates: a.dependsOnGates || [],
+      status: a.status || "READY",
+      authorized: true,
+    }));
+    const scheduled = scheduleWorkItems({
+      missionPaused: bypass.missionPaused === true,
+      openGates: bypass.openGates || [],
+      workItems: items,
+      leasesHeld: [],
+    });
+    const noneLaunched = (bypass.expectMustNotLaunch || []).every((id) => !scheduled.launched.includes(id));
+    if (!noneLaunched) bypassOk = false;
+    out.push(result("work.bypass.none-launch", noneLaunched ? "PASS" : "FAIL",
+      `launched=${scheduled.launched.join(",") || "∅"}`));
+    for (const attempt of bypass.attempts) {
+      const kind = classifyWorkItemKind(attempt);
+      const required = WORK_ITEM_KIND_TO_GATE[kind];
+      const ok = required === attempt.expectRequiredGate;
+      if (!ok) bypassOk = false;
+      out.push(result(`work.bypass.${attempt.id}`, ok ? "PASS" : "FAIL",
+        `kind=${kind} required=${required}`));
+    }
+  }
+  out.push(result("HIGH_CONSEQUENCE_GATE_NOT_BYPASSED_BY_PARALLELISM", bypassOk ? "PASS" : "FAIL"));
+
+  const reboot = byGate("REBOOT_PRESERVES_OPEN_GATE_AND_READY_WORK");
+  let rebootOk = Boolean(reboot?.before && reboot.afterRecovery);
+  if (reboot) {
+    const recovered = scheduleWorkItems(reboot.before);
+    const gateOpen = openGateTypes(reboot.before.openGates).includes(reboot.afterRecovery.expectGateStillOpen);
+    const schedulable = (reboot.afterRecovery.expectSchedulable || []).every((id) => recovered.launched.includes(id));
+    const stillBlocked = (reboot.afterRecovery.expectStillBlocked || []).every((id) => !recovered.launched.includes(id));
+    const presentationOk = recovered.presentation === reboot.afterRecovery.expectMissionPresentation;
+    const noDup = reboot.afterRecovery.forbidDuplicateExecutor === true
+      && (reboot.before.liveExecutors || []).length === 0;
+    rebootOk = gateOpen && schedulable && stillBlocked && presentationOk && noDup;
+    out.push(result("work.reboot.gate-open", gateOpen ? "PASS" : "FAIL"));
+    out.push(result("work.reboot.ready-still-schedulable", schedulable ? "PASS" : "FAIL",
+      `launched=${recovered.launched.join(",")}`));
+    out.push(result("work.reboot.dependent-still-blocked", stillBlocked ? "PASS" : "FAIL"));
+    out.push(result("work.reboot.presentation", presentationOk ? "PASS" : "FAIL", recovered.presentation));
+    out.push(result("work.reboot.no-duplicate-executor", noDup ? "PASS" : "FAIL"));
+  }
+  out.push(result("REBOOT_PRESERVES_OPEN_GATE_AND_READY_WORK", rebootOk ? "PASS" : "FAIL"));
+
+  const dash = byGate("DASHBOARD_DISTINGUISHES_WORKING_VS_WAITING");
+  let dashOk = Boolean(dash?.views?.length === 2);
+  if (dash) {
+    for (const view of dash.views) {
+      const independentActive = (view.running || []).length > 0 || (view.readyIndependent || []).length > 0;
+      const presentation = independentActive ? "WORKING" : "WAITING_FOR_OWNER";
+      const ok = presentation === view.expectActivityStatus && view.expectOwnerActionRequired === true;
+      if (!ok) dashOk = false;
+      out.push(result(`work.dashboard.${view.id}`, ok ? "PASS" : "FAIL", presentation));
+    }
+  }
+  out.push(result("work-items.dashboard-views", dashOk ? "PASS" : "FAIL"));
+
   return out;
 }
 
@@ -477,6 +799,7 @@ async function main() {
   all.push(...suiteLeases());
   all.push(...suiteFirstMission());
   all.push(...suiteOwnerGates());
+  all.push(...suiteWorkItems());
   all.push(...suiteCapacity());
   all.push(...suiteDashboardLogging());
   all.push(...suiteHandoffSchema());
