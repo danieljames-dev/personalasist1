@@ -171,8 +171,10 @@ export type UntrustedSourceKindV1 = "WEB_PAGE" | "EMAIL" | "DOCUMENT" | "CRM_NOT
  * being on an instruction path at all; this is observation, not defence.
  */
 const INJECTION_SHAPES: RegExp[] = [
-  /\bignore (?:all )?(?:your |the )?(?:previous |prior )?instructions?\b/i,
-  /\bdisregard (?:your |the )?(?:previous |above )?(?:instructions?|rules?|policy)\b/i,
+  // "ignore" and "disregard" cover the same ground and must accept the same objects. They did not:
+  // "ignore your previous policy" slipped past because only "disregard" allowed a policy — and a
+  // page saying that is exactly the sort the Owner should be told about.
+  /\b(?:ignore|disregard|forget) (?:all )?(?:your |the )?(?:previous |prior |above )?(?:instructions?|rules?|polic(?:y|ies)|guidelines?)\b/i,
   /\byou are now\b.{0,40}\b(?:authorized|allowed|permitted)\b/i,
   /\b(?:system|developer) (?:prompt|message)\b/i,
   /\bnew instructions?:\b/i,

@@ -375,6 +375,7 @@ import {
   type SynthesisPortV1,
 } from "./grounded-synthesis.js";
 import { retrieveOwnerMemory, answerFromOwnerMemory } from "./owner-archive-memory.js";
+import { shouldResearchWeb, buildWebSource, type WebSourceV1 } from "./web-research.js";
 import {
   archiveCoverageNote,
   planSeedIngest,
@@ -399,6 +400,9 @@ import {
   type MetricoolPostFixtureV1,
 } from "./connectors/metricool-connector.js";
 import type { CrmDocumentV1, EmailDraftV1 } from "./contracts.js";
+
+/** A line break, named so it survives tooling that rewrites escape sequences in source. */
+const NEWLINE = String.fromCharCode(10);
 
 type AssistantPorts = {
   repository: StateRepositoryV1;
@@ -11124,6 +11128,7 @@ export class AionAssistantV1 {
     const reading = understandGoal(text);
     const OWNED: PracticalGoalV1[] = [
       "LOT_POPULATION", "OWNER_HISTORY", "WHAT_IS_UNKNOWN", "VEHICLE_BUYER_MATCH",
+      "CURRENT_WEB_FACT", "VERIFY_INSTEAD_OF_GUESS",
     ];
     if (!OWNED.includes(reading.goal)) return null;
 
@@ -11150,7 +11155,9 @@ export class AionAssistantV1 {
       physicallyVerifiedVehicleIds: verifiedIds,
       hasAttachments: false,
       now,
-      webResearchAllowed: false,
+      // Only when a provider is actually configured. Claiming the option exists and then failing to
+      // use it would be a worse answer than saying plainly that it does not.
+      webResearchAllowed: Boolean(this.ports.research),
     };
     const plan = planTools(reading.goal, context);
 
@@ -11228,6 +11235,99 @@ export class AionAssistantV1 {
           sourceRefs: [],
           observedAt: null,
         });
+      }
+    }
+
+    if (reading.goal === "CURRENT_WEB_FACT" || reading.goal === "VERIFY_INSTEAD_OF_GUESS") {
+      /*
+       * Questions whose answer may have changed since anything local was written.
+       *
+       * The rule that matters is the negative one: if current information cannot actually be
+       * fetched, AION says so rather than answering from what a model happens to remember. Stale
+       * recall presented as a current fact is the failure mode this whole path exists to prevent,
+       * and it is worse than an admitted gap because the Owner cannot tell the difference.
+       */
+      /*
+       * The goal router has already decided this is a question about the world rather than about
+       * AION's own records — internal questions reach their own goals and never arrive here. So the
+       * older subject-matter trigger is consulted for one thing only: its veto on questions that are
+       * really about stored state. Requiring it to independently re-confirm volatility meant
+       * "has it changed recently?" routed correctly and was then refused a lookup by a second
+       * opinion, which is how a correct route still produces a stale answer.
+       */
+      const trigger = shouldResearchWeb(text);
+      const aboutOwnRecords = !trigger.shouldResearch && /grounded records/i.test(trigger.why);
+      const provider = this.ports.research;
+      if (aboutOwnRecords) {
+        body = `That one doesn't need looking up — ${trigger.why}.`;
+        items.push({
+          tool: "public_web_research", claim: trigger.why,
+          evidenceClass: "INFERENCE", sourceRefs: [], observedAt: null,
+        });
+      } else if (!provider) {
+        body = "I can't verify that against anything current right now — web lookup isn't available "
+          + "on this machine. I'd rather tell you that than repeat something I might be remembering "
+          + "from months ago.";
+        items.push({
+          tool: "public_web_research",
+          claim: "current verification is unavailable",
+          evidenceClass: "UNKNOWN", sourceRefs: [], observedAt: null,
+        });
+      } else {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20_000);
+        try {
+          const run = await provider.run({
+            question: text,
+            scope: "public-web" as never,
+            limits: { maxSources: 4, maxBytes: 200_000, maxSeconds: 20 } as never,
+            seedReferences: [],
+            signal: controller.signal,
+          });
+          const sourcesFound: WebSourceV1[] = (run.sources ?? []).slice(0, 4).map((source) =>
+            buildWebSource({
+              url: String((source as { url?: string }).url ?? ""),
+              title: String((source as { title?: string }).title ?? ""),
+              text: String((source as { excerpt?: string }).excerpt ?? ""),
+              retrievedAt: now,
+            }),
+          );
+          if (sourcesFound.length === 0) {
+            body = "I looked, but nothing current came back that I'd trust enough to repeat.";
+            items.push({
+              tool: "public_web_research", claim: "no current source found",
+              evidenceClass: "UNKNOWN", sourceRefs: [], observedAt: now,
+            });
+          } else {
+            const lines = [`Here's what's current, and where it came from:`];
+            for (const source of sourcesFound) {
+              const when = source.retrievedAt.slice(0, 10);
+              lines.push(`· ${source.publisher} (checked ${when})${source.snippets[0] ? ` — ${source.snippets[0]}` : ""}`);
+              items.push({
+                tool: "public_web_research",
+                claim: `${source.publisher}: ${source.snippets[0] ?? source.title}`,
+                evidenceClass: "PUBLIC_WEB_FACT",
+                sourceRefs: [source.url],
+                observedAt: source.retrievedAt,
+              });
+              sources.push({ type: "web", id: source.url, label: source.publisher });
+            }
+            // A page that tries to issue instructions is still just a page.
+            if (sourcesFound.some((source) => source.containsInstructionAttempt)) {
+              lines.push("");
+              lines.push("One of those pages contained instructions aimed at an assistant. I read it as text, nothing more.");
+            }
+            body = lines.join(NEWLINE);
+          }
+        } catch {
+          body = "I couldn't reach anything current just now, so I'd rather not guess.";
+          items.push({
+            tool: "public_web_research", claim: "current verification failed",
+            evidenceClass: "UNKNOWN", sourceRefs: [], observedAt: null,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
       }
     }
 

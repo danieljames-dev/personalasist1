@@ -204,6 +204,50 @@ const DIRECTION_OBJECT = new RegExp(
   "i",
 );
 
+/**
+ * Asking whether something is still true.
+ *
+ * The same lesson as the direction frames, learned again: enumerating whole sentences leaves out the
+ * phrasings nobody thought of. *"Does Tailscale still require this, or has it changed recently?"*
+ * matched none of the literal current-information patterns and fell through to a handler about
+ * overdue follow-ups — a confident answer about the wrong subject, from stale knowledge, which is
+ * the exact failure this path exists to prevent.
+ *
+ * Two shapes count. Either the sentence asks about the present state of something outside AION
+ * ("what's current", "has it changed", "does it still exist"), or it asks for verification instead
+ * of recall ("can you check", "look it up", "find out"). Both mean: do not answer from memory.
+ */
+const CURRENCY_FRAME = new RegExp(
+  [
+    String.raw`\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:current|latest|newest)\b`,
+    String.raw`\b(?:has|have|did|does)\b[^?]{0,40}\b(?:changed?|updated?)\b`,
+    String.raw`\bstill\s+(?:exists?|works?|required?|available|supported|true|the\s+case|require)\b`,
+    String.raw`\b(?:current|currently|latest|nowadays|these\s+days|right\s+now)\b[^?]{0,40}\b(?:price|version|api|rule|regulation|trend|says?|policy|option|detail|model)\b`,
+  ].join("|"),
+  "i",
+);
+
+const VERIFICATION_FRAME = new RegExp(
+  [
+    String.raw`\bcan\s+you\s+(?:check|find\s+out|look\s+(?:it\s+)?up|verify|confirm)\b`,
+    String.raw`\b(?:look\s+it\s+up|find\s+out|check\s+for\s+real|double[-\s]?check)\b`,
+    String.raw`\b(?:instead\s+of|rather\s+than)\s+guessing\b`,
+    String.raw`\bfind\s+(?:me\s+)?(?:a\s+)?free\b`,
+    String.raw`\bsearch\s+(?:the\s+web|online)\b`,
+  ].join("|"),
+  "i",
+);
+
+/** True when answering from memory would risk presenting something stale as current. */
+export function asksForCurrentInformation(text: string): boolean {
+  return CURRENCY_FRAME.test(String(text ?? ""));
+}
+
+/** True when the Owner is explicitly asking AION to verify rather than recall. */
+export function asksForVerification(text: string): boolean {
+  return VERIFICATION_FRAME.test(String(text ?? ""));
+}
+
 /** True when the sentence asks what the Owner should put his effort into. */
 export function asksForDirection(text: string): boolean {
   const message = String(text ?? "");
@@ -235,6 +279,16 @@ export function understandGoal(text: string): GoalReadingV1 {
       ? "PRIORITIZE_VEHICLES"
       : "PLAN_MY_DAY";
     scores.set(goal, (scores.get(goal) ?? 0) + 3);
+  }
+
+  // Temporal and verification questions, scored compositionally for the same reason as direction.
+  // Weighted above the literal signals so "what does Toyota currently say about this model?" is a
+  // question about the world rather than a question about the car in front of him.
+  if (asksForCurrentInformation(message)) {
+    scores.set("CURRENT_WEB_FACT", (scores.get("CURRENT_WEB_FACT") ?? 0) + 4);
+  }
+  if (asksForVerification(message)) {
+    scores.set("VERIFY_INSTEAD_OF_GUESS", (scores.get("VERIFY_INSTEAD_OF_GUESS") ?? 0) + 4);
   }
 
   if (scores.size === 0) {
