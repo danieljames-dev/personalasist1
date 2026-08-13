@@ -881,3 +881,27 @@ export function alreadyAdvised(body: string, offer: string): boolean {
   for (const word of offerWords) if (bodyWords.has(word)) shared += 1;
   return shared / offerWords.size >= ADVICE_OVERLAP_THRESHOLD;
 }
+
+/**
+ * The gaps a model must be told about rather than left to fill.
+ *
+ * Naming an unknown explicitly is what makes "AWD is unverified" a legitimate sentence and "it has
+ * AWD" a rejected one. Silence about a field is how a small model decides the field is its to
+ * invent.
+ */
+export function packetUnknownsFor(
+  goal: PracticalGoalV1,
+  vehicle: { trim?: string | null; mileage?: number | null; exteriorColor?: string | null } | null,
+): string[] {
+  const unknowns: string[] = [];
+  if (!vehicle) return unknowns;
+  // Drivetrain is never carried on the dealer record, so it is always unknown unless separately read.
+  unknowns.push("drivetrain (AWD/FWD) is not recorded");
+  if (!vehicle.trim) unknowns.push("trim is not recorded");
+  if (vehicle.mileage == null) unknowns.push("mileage is not recorded");
+  if (!vehicle.exteriorColor) unknowns.push("exterior colour is not recorded");
+  if (goal === "CUSTOMER_FIT" || goal === "VEHICLE_BUYER_MATCH") {
+    unknowns.push("whether the customer has seen this vehicle");
+  }
+  return unknowns;
+}

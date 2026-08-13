@@ -412,6 +412,51 @@ function progressFinish(token, error) {
   progressBoard.set(token, entry);
 }
 
+/**
+ * The local-model seam, implemented against Ollama on loopback.
+ *
+ * Everything that decides whether to call, what the model may see and whether its answer survives
+ * lives in the domain and is tested without a model running. This adapter owns the transport and
+ * nothing else — which is why it is allowed to be this small.
+ *
+ * Bounded by an abort signal rather than trusting the model to be brief: a phone turn that waits on
+ * a slow generation has already failed the Owner, and the deterministic answer is sitting ready.
+ */
+function createOllamaSynthesisPort(baseUrl = "http://127.0.0.1:11434") {
+  return {
+    async synthesize({ model, system, user, timeoutMs }) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 12_000));
+      try {
+        const response = await globalThis.fetch(new URL("/api/chat", baseUrl).toString(), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model,
+            stream: false,
+            // Low temperature because this is phrasing over settled facts, not ideation.
+            options: { temperature: 0.2, num_predict: 400 },
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+          }),
+        });
+        if (!response.ok) return { text: "" };
+        const parsed = await response.json();
+        // `thinking` is a separate field on reasoning models and is deliberately ignored: it is not
+        // an answer and it carries no authority.
+        return { text: String(parsed?.message?.content ?? "") };
+      } catch {
+        return { text: "" };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 /** Bearer material is read from a header only. A token in a URL would leak into logs and history. */
 function bearerToken(request) {
   const header = request.headers.authorization;
@@ -518,6 +563,9 @@ export async function createAionServer(options = {}) {
     capabilities: options.capabilities ?? new StaticCapabilityRegistryV1([new LocalEchoCapabilityV1(), new DeveloperAgentCapabilityV1(developerAgents, repositoryRoot), new VerificationCapabilityV1(verificationRunner)]),
     importer: options.importer ?? new LocalArchiveImportSourceV1(),
     backup: options.backup ?? new NodePrivateBackupV1(exportRoot), developerAgents,
+    // Grounded synthesis phrases an answer AION has already established. Overridable so tests can
+    // exercise the seam without a model, and absent means every reply is composed deterministically.
+    synthesis: options.synthesis ?? createOllamaSynthesisPort(),
     authority,
     codeSandbox,
     /*

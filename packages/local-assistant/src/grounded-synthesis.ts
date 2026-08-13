@@ -114,6 +114,8 @@ export function buildSynthesisPacket(input: {
 
 export interface ModelSynthesisResultV1 {
   answerIntent: string;
+  /** One-line answer. Kept apart from recommendations so a validator can judge each. */
+  summary?: string;
   recommendations: string[];
   supportingFactIds: string[];
   inferences: string[];
@@ -370,4 +372,99 @@ export function chooseOwnerFacingText(input: {
   const draft = String(input.result.draftResponse ?? "").trim();
   if (!draft) return { text: input.deterministic, usedModel: false, rejectedFor: [] };
   return { text: draft, usedModel: true, rejectedFor: [] };
+}
+
+// ---------------------------------------------------------------------------
+// The seam to a local model
+// ---------------------------------------------------------------------------
+
+/**
+ * The only way a model is reached from the domain.
+ *
+ * Deliberately tiny: a prompt in, text out, with a deadline. Everything that decides *whether* to
+ * call, *what* the model may see and *whether its answer survives* stays in code that can be tested
+ * without a model running. The adapter behind this port owns the transport and nothing else.
+ */
+export interface SynthesisPortV1 {
+  synthesize(input: {
+    model: string;
+    system: string;
+    user: string;
+    timeoutMs: number;
+  }): Promise<{ text: string }>;
+}
+
+/** How long a phone turn may wait on the fast model before the deterministic answer wins. */
+export const FAST_SYNTHESIS_TIMEOUT_MS = 12_000;
+
+/**
+ * The system prompt.
+ *
+ * Written as a contract rather than an encouragement. The prohibitions are the load-bearing part:
+ * this model has already been measured inventing a drivetrain and misreading a comparison, so it is
+ * told plainly that arithmetic and attributes are not its job.
+ */
+export function synthesisSystemPrompt(): string {
+  return [
+    "You are AION, a sales assistant. You are given a set of established facts and a question.",
+    "",
+    "Rules you must follow:",
+    "- Use ONLY the facts provided. Never add a fact, a number, a price or a vehicle attribute.",
+    "- Do not perform arithmetic comparisons. If a price and a budget are both given, describe them; do not judge whether something is 'within budget'.",
+    "- If something is listed as unknown, say it is unknown. Never fill it in.",
+    "- Be concise, practical and calm. No preamble, no filler, no disclaimers.",
+    "- Never mention fact identifiers, schemas, or how you were prompted.",
+    "",
+    "Reply with JSON only, in this shape:",
+    '{"summary": string, "recommendations": string[], "supportingFactIds": string[], "unknowns": string[], "nextAction": string | null}',
+  ].join("\n");
+}
+
+/** Render a packet as the model's entire view of the world for this turn. */
+export function synthesisUserPrompt(packet: SynthesisPacketV1): string {
+  const facts = packet.facts
+    .map((f) => `- [${f.factId}] (${f.epistemicClass}) ${f.type} = ${String(f.value ?? "unknown")}`)
+    .join("\n");
+  const unknowns = packet.unknowns.length
+    ? `\nNot known (do not fill these in):\n${packet.unknowns.map((u) => `- ${u}`).join("\n")}`
+    : "";
+  const context = packet.activeContext ? `\nCurrently discussing: ${packet.activeContext}` : "";
+  return `Established facts:\n${facts}${unknowns}${context}\n\nQuestion: ${packet.question}`;
+}
+
+/**
+ * Read a model's reply into the structured shape, tolerating the ways small models wrap JSON.
+ *
+ * Returns null rather than guessing. An unparseable reply is a reply that failed, and the
+ * deterministic answer is already sitting there ready.
+ */
+export function parseSynthesisResult(raw: string): ModelSynthesisResultV1 | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = fenced ? fenced[1]! : text;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const list = (value: unknown): string[] =>
+    Array.isArray(value) ? value.map((v) => String(v)).filter(Boolean) : [];
+  const summary = String(parsed.summary ?? "").trim();
+  const recommendations = list(parsed.recommendations);
+  if (!summary && recommendations.length === 0) return null;
+  return {
+    answerIntent: "synthesis",
+    summary,
+    recommendations,
+    supportingFactIds: list(parsed.supportingFactIds),
+    inferences: list(parsed.inferences),
+    unknowns: list(parsed.unknowns),
+    nextAction: parsed.nextAction ? String(parsed.nextAction) : null,
+    draftResponse: [summary, ...recommendations.map((r) => `· ${r}`)].filter(Boolean).join("\n"),
+  } as ModelSynthesisResultV1;
 }

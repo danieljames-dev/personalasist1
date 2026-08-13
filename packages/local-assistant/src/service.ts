@@ -357,9 +357,22 @@ import {
   availableTextModelsFrom,
   type EvidenceItemV1,
   type OrchestrationResultV1,
+  packetUnknownsFor,
   type PracticalGoalV1,
 } from "./conversation-orchestrator.js";
 import { answerLotScopeQuestion } from "./lot-scope-reasoning.js";
+import {
+  buildSynthesisPacket,
+  validateSynthesis,
+  chooseOwnerFacingText,
+  parseSynthesisResult,
+  synthesisSystemPrompt,
+  synthesisUserPrompt,
+  describePriceAgainstBudget,
+  FAST_SYNTHESIS_TIMEOUT_MS,
+  type EvidenceFactV1,
+  type SynthesisPortV1,
+} from "./grounded-synthesis.js";
 import { retrieveOwnerMemory, answerFromOwnerMemory } from "./owner-archive-memory.js";
 import {
   archiveCoverageNote,
@@ -405,6 +418,11 @@ type AssistantPorts = {
   authority?: WriterAuthorityPortV1;
   /** Optional. Absent means AION has no way to research anything, which is the default. */
   research?: ResearchProviderV1;
+  /**
+   * Optional local-model seam for grounded synthesis. Absent means every answer is composed
+   * deterministically, which is a complete answer rather than a degraded one.
+   */
+  synthesis?: SynthesisPortV1;
   /** Optional. Absent means AION cannot build or preview anything, which is also the default. */
   pipeline?: BuildPipelinePortV1;
   /** Optional. Absent means AION can rent nothing and spend nothing, which is also the default. */
@@ -10897,6 +10915,72 @@ export class AionAssistantV1 {
   }
 
   /**
+   * Let a local model phrase an answer, but never let it decide what is true.
+   *
+   * The order is the safety property. Evidence is gathered deterministically, bounded into a packet,
+   * and only then shown to a model; whatever comes back is checked by code that does arithmetic and
+   * set membership rather than language. A reply that fails any check is discarded in favour of the
+   * deterministic text, which was already complete — so a rejected synthesis costs the Owner nothing
+   * but nicer phrasing.
+   *
+   * There is no repair loop. One attempt, then the grounded answer. A model that has just invented a
+   * drivetrain is not more trustworthy on its second try, and the Owner is standing on a lot.
+   */
+  async #synthesizeGrounded(input: {
+    question: string;
+    goal: PracticalGoalV1;
+    deterministic: string;
+    facts: readonly EvidenceFactV1[];
+    unknowns: readonly string[];
+    activeContext?: string | null;
+    availableTextModels: readonly string[];
+  }): Promise<{ text: string; usedModel: boolean; model: string | null; rejectedFor: string[]; ms: number }> {
+    const started = Date.now();
+    const port = this.ports.synthesis;
+    // The fast model is the only one that belongs in an interactive turn: the reasoning model was
+    // measured at ~39 seconds for a short answer, which is not a phone experience.
+    const model = input.availableTextModels.find((m) => /qwen/i.test(m)) ?? null;
+    if (!port || !model || input.facts.length === 0) {
+      return { text: input.deterministic, usedModel: false, model: null, rejectedFor: [], ms: Date.now() - started };
+    }
+
+    const packet = buildSynthesisPacket({
+      question: input.question,
+      goal: input.goal,
+      activeContext: input.activeContext ?? null,
+      facts: input.facts,
+      unknowns: input.unknowns,
+    });
+
+    let raw = "";
+    try {
+      const answer = await port.synthesize({
+        model,
+        system: synthesisSystemPrompt(),
+        user: synthesisUserPrompt(packet),
+        timeoutMs: FAST_SYNTHESIS_TIMEOUT_MS,
+      });
+      raw = String(answer?.text ?? "");
+    } catch {
+      return { text: input.deterministic, usedModel: false, model, rejectedFor: ["UNAVAILABLE"], ms: Date.now() - started };
+    }
+
+    const result = parseSynthesisResult(raw);
+    if (!result) {
+      return { text: input.deterministic, usedModel: false, model, rejectedFor: ["UNPARSEABLE"], ms: Date.now() - started };
+    }
+    const validation = validateSynthesis(result, packet);
+    const chosen = chooseOwnerFacingText({ deterministic: input.deterministic, result, validation });
+    return {
+      text: chosen.text,
+      usedModel: chosen.usedModel,
+      model,
+      rejectedFor: chosen.rejectedFor,
+      ms: Date.now() - started,
+    };
+  }
+
+  /**
    * The conversational layer in front of the narrow handlers.
    *
    * This deliberately does not take over the whole of Chat. The existing handlers are correct for
@@ -11113,6 +11197,30 @@ export class AionAssistantV1 {
       }
     }
 
+    // Facts the model may see, in the typed shape the validators check against. Built from the same
+    // evidence already gathered, so nothing reaches the model that AION did not establish itself.
+    const synthesisFacts: EvidenceFactV1[] = [];
+    if (activeVehicle) {
+      const price = latestPrice(activeVehicle);
+      if (price != null) {
+        synthesisFacts.push({
+          factId: "vehicle-price", type: "vehicle.price", value: price,
+          sourceRef: activeVehicle.id, observedAt: activeVehicle.lastOnlineAt ?? null,
+          confidence: 95, epistemicClass: "WEBSITE_FACT",
+        });
+      }
+      const label = [activeVehicle.year, activeVehicle.make, activeVehicle.model, activeVehicle.trim]
+        .filter(Boolean).join(" ");
+      if (label) {
+        synthesisFacts.push({
+          factId: "vehicle-identity", type: "vehicle.identity", value: label,
+          sourceRef: activeVehicle.id, observedAt: null, confidence: 99,
+          epistemicClass: verifiedIds.includes(activeVehicle.id) ? "PHYSICAL_OBSERVATION" : "WEBSITE_FACT",
+        });
+      }
+    }
+    const synthesisUnknowns = packetUnknownsFor(reading.goal, activeVehicle);
+
     const packet = buildEvidencePacket({ goal: reading.goal, items });
     const tier = routeReasoningTier({
       goal: reading.goal,
@@ -11132,13 +11240,31 @@ export class AionAssistantV1 {
       reading, plan, packet, tier, proactive, body,
     });
 
+    // Phrasing only, and only when there is something grounded to phrase. The deterministic reply is
+    // the floor and wins any disagreement.
+    const synthesis = await this.#synthesizeGrounded({
+      question: text,
+      goal: reading.goal,
+      deterministic: result.reply,
+      facts: synthesisFacts,
+      unknowns: synthesisUnknowns,
+      activeContext: activeVehicle
+        ? [activeVehicle.year, activeVehicle.make, activeVehicle.model].filter(Boolean).join(" ")
+        : null,
+      availableTextModels: this.#availableTextModels(state),
+    });
+
     return {
       intent: "OWNER_CONVERSATION",
       confidence: reading.ambiguous ? "medium" : "high",
-      reply: result.reply,
+      reply: synthesis.text,
       sources,
       action: "owner.conversation",
       data: {
+        modelUsed: synthesis.usedModel,
+        modelName: synthesis.usedModel ? synthesis.model : null,
+        modelRejectedFor: synthesis.rejectedFor,
+        modelSynthesisMs: synthesis.ms,
         goal: result.reading.goal,
         goalDescription: describeGoal(result.reading.goal),
         toolsUsed: result.toolsUsed,
