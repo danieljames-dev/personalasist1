@@ -377,6 +377,12 @@ import {
 import { retrieveOwnerMemory, answerFromOwnerMemory } from "./owner-archive-memory.js";
 import { shouldResearchWeb, buildWebSource, type WebSourceV1 } from "./web-research.js";
 import {
+  decideAutonomy,
+  describeAutonomyDecision,
+  type ActionOriginV1,
+  type AutonomyDecisionV1,
+} from "./autonomy-runtime.js";
+import {
   archiveCoverageNote,
   planSeedIngest,
   seedFactToKnowledgeInput,
@@ -11104,6 +11110,37 @@ export class AionAssistantV1 {
   }
 
   /**
+   * Whether AION may carry out something without asking again.
+   *
+   * Exposed as a service method rather than buried in a handler because the answer has to be
+   * inspectable: the Owner should be able to see why a step was taken or refused, and a test should
+   * be able to drive the same seam the runtime uses. The decision is deterministic — no model is
+   * consulted, because a model asked for permission answers in whichever direction the surrounding
+   * text leans, which is the exact property an injected instruction relies on.
+   */
+  async assessAutonomy(input: {
+    origin: ActionOriginV1;
+    proposedAction: string;
+    ownerDirective?: string | null;
+    candidate?: { name: string; description: string; licence?: string | null } | null;
+  }): Promise<AutonomyDecisionV1 & { ownerFacing: string }> {
+    const decision = decideAutonomy({
+      origin: input.origin,
+      proposedAction: input.proposedAction,
+      ownerDirective: input.ownerDirective ?? null,
+      candidate: input.candidate ?? null,
+    });
+    await this.mutate((draft: AssistantStateV1) => {
+      this.activity(
+        draft, "approval", "autonomy.decision",
+        `${decision.allowed ? "Proceeding" : "Stopping"}: ${decision.reason}`.slice(0, 300),
+        null, decision.allowed ? "success" : "failed",
+      );
+    });
+    return { ...decision, ownerFacing: describeAutonomyDecision(decision) };
+  }
+
+  /**
    * The conversational layer in front of the narrow handlers.
    *
    * This deliberately does not take over the whole of Chat. The existing handlers are correct for
@@ -11459,19 +11496,42 @@ export class AionAssistantV1 {
       reading, plan, packet, tier, proactive, body,
     });
 
+    /*
+     * Some answers must not be paraphrased at all.
+     *
+     * The full Owner-day run caught this: model prose replaced the population answer wholesale, and
+     * with it went the separation between what was physically verified, what the website lists, and
+     * what is still unknown. Every sentence the model produced was defensible on its own; what was
+     * lost was the structure — which, in that answer, is the entire content. The same holds for the
+     * list of what is not known, where a fluent summary quietly turns gaps into prose.
+     *
+     * It happened twice in one run — the population answer and then the archive answer, whose
+     * content is retrieved facts plus an honest statement of how little they cover. So the rule is
+     * an allowlist rather than a growing list of exemptions: naming where phrasing genuinely helps
+     * is a decision that can be reviewed, whereas chasing the places it does harm is a race.
+     *
+     * Phrasing help is welcome where phrasing is the difficulty; not where the shape of the answer
+     * is the answer.
+     */
+    const MAY_REPHRASE: PracticalGoalV1[] = [
+      "VEHICLE_BUYER_MATCH", "PLAN_MY_DAY", "PRIORITIZE_VEHICLES", "CUSTOMER_FIT", "DRAFT_MESSAGE",
+    ];
+
     // Phrasing only, and only when there is something grounded to phrase. The deterministic reply is
     // the floor and wins any disagreement.
-    const synthesis = await this.#synthesizeGrounded({
-      question: text,
-      goal: reading.goal,
-      deterministic: result.reply,
-      facts: synthesisFacts,
-      unknowns: synthesisUnknowns,
-      activeContext: activeVehicle
-        ? [activeVehicle.year, activeVehicle.make, activeVehicle.model].filter(Boolean).join(" ")
-        : null,
-      availableTextModels: this.#availableTextModels(state),
-    });
+    const synthesis = !MAY_REPHRASE.includes(reading.goal)
+      ? { text: result.reply, usedModel: false, model: null, rejectedFor: ["STRUCTURE_IS_THE_ANSWER"], ms: 0 }
+      : await this.#synthesizeGrounded({
+        question: text,
+        goal: reading.goal,
+        deterministic: result.reply,
+        facts: synthesisFacts,
+        unknowns: synthesisUnknowns,
+        activeContext: activeVehicle
+          ? [activeVehicle.year, activeVehicle.make, activeVehicle.model].filter(Boolean).join(" ")
+          : null,
+        availableTextModels: this.#availableTextModels(state),
+      });
 
     return {
       intent: "OWNER_CONVERSATION",
