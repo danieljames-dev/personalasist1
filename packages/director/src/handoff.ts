@@ -745,7 +745,8 @@ export function findHandoffContradictions(input: {
   handoff: ExecutorHandoffV1;
   observedHeadAfter?: string | null;
   observedBranch?: string | null;
-  productionActuallyMutated?: boolean | null;
+  /** Authorisation flag, not a production-filesystem observation. */
+  authorisedProductionMutation?: boolean | null;
 }): HandoffContradictionV1[] {
   const found: HandoffContradictionV1[] = [];
 
@@ -768,16 +769,16 @@ export function findHandoffContradictions(input: {
   }
 
   if (
-    typeof input.productionActuallyMutated === "boolean"
-    && input.productionActuallyMutated !== input.handoff.productionMutated
+    typeof input.authorisedProductionMutation === "boolean"
+    && input.authorisedProductionMutation !== input.handoff.productionMutated
   ) {
     found.push({
       field: "productionMutated",
       claimed: String(input.handoff.productionMutated),
-      observed: String(input.productionActuallyMutated),
-      detail: input.productionActuallyMutated
-        ? "production changed during a run that reported leaving it alone"
-        : "the report claims production was mutated; observation and authorisation say it was not",
+      observed: String(input.authorisedProductionMutation),
+      detail: input.authorisedProductionMutation
+        ? "the handoff claims production was left alone; mutation was authorised and the claims disagree"
+        : "handoff claims production was mutated; that was not authorised",
     });
   }
 

@@ -533,6 +533,8 @@ export function interpretWindowsOrphanScanOutput(input: {
   readonly stderr: string;
   /** Spawn floor. Used to decide whether an unread orphan is in this run's window. */
   readonly createdNotBefore?: string;
+  /** This run's nonce. A parentless other-nonce row after the floor is undecidable. */
+  readonly runNonce?: string;
 }): OrphanScanInterpretationV1 {
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
@@ -604,10 +606,13 @@ export function interpretWindowsOrphanScanOutput(input: {
 
   // A row whose membership cannot be decided is UNKNOWN, not absent.
   for (const sighting of sightings) {
-    if (sighting.nonceReadable !== false) continue;
-    if (sighting.parentPresent !== false) continue;
-    if (!provenCreatedAtOrAfterFloor(sighting.creationDate, input.createdNotBefore)) continue;
-    return { outcome: "UNAVAILABLE", reason: "undecidable process-tree membership" };
+    if (parentlessAfterFloorMakesScanUndecidable(
+      sighting,
+      input.runNonce ?? "",
+      input.createdNotBefore ?? "",
+    )) {
+      return { outcome: "UNAVAILABLE", reason: "undecidable process-tree membership" };
+    }
   }
 
   return { outcome: "SCANNED", sightings, reason: "cim" };
@@ -664,6 +669,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       stdout: stripBom(String(result.stdout ?? "")).trim(),
       stderr: String(result.stderr ?? "").trim(),
       createdNotBefore: query.createdNotBefore,
+      runNonce,
     });
     if (interpreted.outcome === "UNAVAILABLE") {
       throw new Error(`orphan scan unavailable: ${interpreted.reason}`);
@@ -792,6 +798,28 @@ export function createdAtOrAfterFloor(
  * Whether `candidate` is *proven* at or after `floor`. An unplaceable operand
  * does not establish the claim — UNKNOWN stays UNKNOWN, so this returns false.
  */
+/**
+ * A parentless process created inside this run's window, whose nonce is not
+ * this run's nonce, cannot be shown to be outside the tree. Empty is a lie;
+ * UNAVAILABLE is honest. A parentless row from before the floor is an ordinary
+ * system service and does not make the scan undecidable.
+ */
+export function parentlessAfterFloorMakesScanUndecidable(
+  sighting: {
+    readonly parentPresent?: boolean;
+    readonly runNonce?: string | null;
+    readonly creationDate?: string;
+  },
+  runNonce: string,
+  createdNotBefore: string,
+): boolean {
+  if (sighting.parentPresent !== false) return false;
+  const nonce = asUsableToken(sighting.runNonce);
+  const target = asUsableToken(runNonce);
+  if (target !== null && nonce === target) return false;
+  return provenCreatedAtOrAfterFloor(sighting.creationDate, createdNotBefore);
+}
+
 export function provenCreatedAtOrAfterFloor(
   candidate: string | undefined,
   floor: string | undefined,
@@ -1083,6 +1111,10 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string
     "    $n = $null;",
     "  };",
     "  if ($isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
+    "  # Durable containment is a kill-on-close Job Object plus",
+    "  # JOBOBJECT_BASIC_PROCESS_ID_LIST. Including every parentless CIM row",
+    "  # here makes a live host scan UNAVAILABLE. Membership of a parentless",
+    "  # after-floor row is decided in interpret/collect, not by emptying the scan.",
     "  if ($n -eq $target -or $isDesc -or (-not $nonceReadable -and -not $parentPresent)) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent });",

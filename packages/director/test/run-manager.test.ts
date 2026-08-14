@@ -8,12 +8,13 @@
  * launches; writer-release inferred from UNKNOWN or from someone else's death.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
-import { createFixedClock } from "../src/bounded-log.js";
+import { createFixedClock, RUN_LOG_BYTES } from "../src/bounded-log.js";
+import { buildExecutorLaunch } from "../src/executor-adapters.js";
 import type { GitCommandResultV1, GitRunner } from "../src/git-truth.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
@@ -486,10 +487,10 @@ test("an artifact outside the run root fails the artifacts conjunct", async () =
     handoff: goodHandoff({ artifacts: ["C:\\Windows\\System32\\cmd.exe"] }),
   });
   assert.equal(result.ok, false);
-  assert.equal(finding(result, "artifactsInsideRunRoot").ok, false);
-  assert.match(finding(result, "artifactsInsideRunRoot").reason, /outside|artifact/i);
+  assert.equal(finding(result, "declaredArtifactsInsideRunRoot").ok, false);
+  assert.match(finding(result, "declaredArtifactsInsideRunRoot").reason, /outside|artifact/i);
   assert.ok(
-    result.conjunction.failedConjuncts.includes("artifactsInsideRunRoot")
+    result.conjunction.failedConjuncts.includes("declaredArtifactsInsideRunRoot")
       || result.conjunction.failedConjuncts.includes("handoffParsed"),
     String(result.conjunction.failedConjuncts),
   );
@@ -2483,15 +2484,15 @@ test("exit 0 with a throwing scanner fails executorTreeIsGone", async () => {
   assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"));
 });
 
-test("a clean run passes all nine success conjuncts", async () => {
+test("a clean run passes all ten success conjuncts", async () => {
   const result = await runWith({ neverWait: true });
   assert.equal(result.ok, true, result.reason);
-  assert.equal(result.conjunction.findings.length, 9);
+  assert.equal(result.conjunction.findings.length, 10);
   assert.deepEqual(result.conjunction.failedConjuncts, []);
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
 
-test("an artifact whose realpath escapes the run root fails artifactsInsideRunRoot", async () => {
+test("an artifact whose realpath escapes the run root fails declaredArtifactsInsideRunRoot", async () => {
   const result = await runWith({
     neverWait: true,
     resolveArtifactPath: (absolutePath) => (
@@ -2499,18 +2500,18 @@ test("an artifact whose realpath escapes the run root fails artifactsInsideRunRo
     ),
   });
   assert.equal(result.ok, false);
-  assert.equal(finding(result, "artifactsInsideRunRoot").ok, false);
+  assert.equal(finding(result, "declaredArtifactsInsideRunRoot").ok, false);
 });
 
-test("an artifact that resolves inside the run root keeps artifactsInsideRunRoot true", async () => {
+test("an artifact that resolves inside the run root keeps declaredArtifactsInsideRunRoot true", async () => {
   const result = await runWith({
     neverWait: true,
     resolveArtifactPath: (absolutePath) => absolutePath,
   });
-  assert.equal(finding(result, "artifactsInsideRunRoot").ok, true, result.reason);
+  assert.equal(finding(result, "declaredArtifactsInsideRunRoot").ok, true, result.reason);
 });
 
-test("an artifact whose realpath throws fails artifactsInsideRunRoot", async () => {
+test("an artifact whose realpath throws fails declaredArtifactsInsideRunRoot", async () => {
   const result = await runWith({
     neverWait: true,
     resolveArtifactPath: () => {
@@ -2518,7 +2519,7 @@ test("an artifact whose realpath throws fails artifactsInsideRunRoot", async () 
     },
   });
   assert.equal(result.ok, false);
-  assert.equal(finding(result, "artifactsInsideRunRoot").ok, false);
+  assert.equal(finding(result, "declaredArtifactsInsideRunRoot").ok, false);
 });
 
 test("a replay refusal does not overwrite a successful result.json", async () => {
@@ -2703,7 +2704,7 @@ test("launchRun without a role uses the implementer permission list", async () =
         runId: "run-impl",
         missionId: "mission-1",
         workItemId: "work-1",
-        executor: "grok",
+        executor: "claude",
         worktree: dir,
         branch: "executor/oracle",
         cwd: dir,
@@ -2720,7 +2721,7 @@ test("launchRun without a role uses the implementer permission list", async () =
         spawn,
         git: matchingGit(),
         probe: sequentialProbe([
-          foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\grok.exe" }),
+          foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\claude.exe" }),
           HOLDER_GONE,
         ]),
         capacity: memoryCapacity(),
@@ -2728,15 +2729,12 @@ test("launchRun without a role uses the implementer permission list", async () =
         wait: async () => undefined,
         killTree: () => undefined,
         scanOrphans: () => [],
-        discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
-        discoveryFs: { isFile: (path) => path === "C:\\Tools\\grok.exe", readDir: () => [] },
+        discoveryEnv: { AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
+        discoveryFs: { isFile: (path) => path === "C:\\Tools\\claude.exe", readDir: () => [] },
       },
     );
     assert.equal(result.spawned, true, result.reason);
-    const mode = spawnedArgv.indexOf("--permission-mode");
-    assert.equal(spawnedArgv[mode + 1], "bypassPermissions");
-    assert.ok(spawnedArgv.includes("--always-approve"));
-    assert.ok(spawnedArgv.includes("--no-plan"));
+    assert.deepEqual(spawnedArgv, ["-p", promptPath]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -3237,4 +3235,223 @@ test("a result.json that records spawned false does not block a later spawn", as
   });
   const result = await runWith({ neverWait: true, fs });
   assert.equal(result.spawned, true, result.reason);
+});
+
+test("a flood past RUN_LOG_BYTES fails the run and runs the kill ladder", async () => {
+  const stdout = new PassThrough();
+  let exited = false;
+  let resolveExit: ((value: { code: number | null; signal: string | null }) => void) | null = null;
+  const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+    resolveExit = resolve;
+  });
+  let softKills = 0;
+  let treeKills = 0;
+  const handle: SpawnHandleV1 = {
+    pid: RECORDED.pid,
+    stdout,
+    stderr: Readable.from([""]),
+    kill() {
+      softKills += 1;
+      if (!exited) {
+        exited = true;
+        resolveExit?.({ code: 0, signal: "SIGTERM" });
+      }
+    },
+    exit,
+    get exited() {
+      return exited;
+    },
+  };
+  const chunk = Buffer.alloc(64 * 1024, 0x78);
+  queueMicrotask(() => {
+    let sent = 0;
+    const writeMore = (): void => {
+      while (sent <= RUN_LOG_BYTES) {
+        sent += chunk.length;
+        if (!stdout.write(chunk)) {
+          stdout.once("drain", writeMore);
+          return;
+        }
+      }
+      stdout.end();
+    };
+    writeMore();
+  });
+  const result = await runWith({
+    spawn: trackingSpawn(() => handle),
+    wait: async () => {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    },
+    killTree: () => {
+      treeKills += 1;
+    },
+    request: {
+      lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-flood" },
+      timeoutMs: 60_000,
+    },
+  });
+  assert.equal(result.ok, false, result.reason);
+  assert.equal(finding(result, "logStayedWithinBudget").ok, false);
+  assert.ok(
+    result.cancel.stages.length > 0 || treeKills > 0 || softKills > 0,
+    "the kill ladder must have run",
+  );
+});
+
+test("a parentless other-nonce row after the floor fails executorTreeIsGone", async () => {
+  const result = await runWith({
+    neverWait: true,
+    scanOrphans: () => [{
+      pid: 460,
+      parentPresent: false,
+      nonceReadable: true,
+      runNonce: "other",
+      creationDate: T0,
+    }],
+  });
+  assert.equal(finding(result, "executorTreeIsGone").ok, false);
+  assert.equal(result.ok, false, result.reason);
+});
+
+test("launchRun refuses a reviewer role on the implementer executor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aion-role-mismatch-"));
+  const promptPath = join(dir, "PROMPT.md");
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(promptPath, "review\n");
+  try {
+    let spawns = 0;
+    const result = await launchRun(
+      {
+        runId: "run-review-claude",
+        missionId: "mission-1",
+        workItemId: "work-1",
+        executor: "claude",
+        worktree: dir,
+        branch: "executor/oracle",
+        cwd: dir,
+        runNonce: NONCE,
+        runRoot: join(dir, "run"),
+        promptPath,
+        timeoutMs: 30_000,
+        lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-review-claude" },
+        authorisedProductionMutated: false,
+        role: "ADVERSARIAL_REVIEW",
+      },
+      {
+        clock: createFixedClock(NOW),
+        fs: createNodeRunFileSystem(),
+        spawn: (_exe, _argv, _options, permit) => {
+          requireSpawnPermit(permit);
+          spawns += 1;
+          return alreadyExitedProcess();
+        },
+        git: matchingGit(),
+        probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
+        capacity: memoryCapacity(),
+        leases: memoryLeases(),
+        wait: async () => undefined,
+        killTree: () => undefined,
+        scanOrphans: () => [],
+        discoveryEnv: { AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
+        discoveryFs: { isFile: (path) => path === "C:\\Tools\\claude.exe", readDir: () => [] },
+      },
+    );
+    assert.equal(result.spawned, false, result.reason);
+    assert.equal(spawns, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a wrong-case role is refused rather than granted write authority", () => {
+  const dir = mkdtempSync(join(tmpdir(), "aion-role-case-"));
+  const promptPath = join(dir, "PROMPT.md");
+  writeFileSync(promptPath, "review\n");
+  try {
+    const result = buildExecutorLaunch("grok", {
+      promptPath,
+      cwd: dir,
+      runNonce: NONCE,
+      role: "adversarial_review" as never,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.launch, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a spawned run persists the resolved role on the intent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aion-role-intent-"));
+  const promptPath = join(dir, "PROMPT.md");
+  const { writeFileSync, readFileSync } = await import("node:fs");
+  writeFileSync(promptPath, "review\n");
+  try {
+    const result = await launchRun(
+      {
+        runId: "run-role-intent",
+        missionId: "mission-1",
+        workItemId: "work-1",
+        executor: "grok",
+        worktree: dir,
+        branch: "executor/oracle",
+        cwd: dir,
+        runNonce: NONCE,
+        runRoot: join(dir, "run"),
+        promptPath,
+        timeoutMs: 30_000,
+        lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-role-intent" },
+        authorisedProductionMutated: false,
+        role: "ADVERSARIAL_REVIEW",
+      },
+      {
+        clock: createFixedClock(NOW),
+        fs: createNodeRunFileSystem(),
+        spawn: (_exe, _argv, _options, permit) => {
+          requireSpawnPermit(permit);
+          return alreadyExitedProcess();
+        },
+        git: matchingGit(),
+        probe: sequentialProbe([
+          foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\grok.exe" }),
+          HOLDER_GONE,
+        ]),
+        capacity: memoryCapacity(),
+        leases: memoryLeases(),
+        wait: async () => undefined,
+        killTree: () => undefined,
+        scanOrphans: () => [],
+        discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
+        discoveryFs: { isFile: (path) => path === "C:\\Tools\\grok.exe", readDir: () => [] },
+      },
+    );
+    assert.equal(result.spawned, true, result.reason);
+    const raw = readFileSync(join(dir, "run", "intent.json"), "utf8");
+    const parsed = runIntentFrom(JSON.parse(raw) as unknown);
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) assert.equal(parsed.intent.role, "ADVERSARIAL_REVIEW");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("productionClaimAgrees does not claim production was observed", async () => {
+  const result = await runWith({ neverWait: true });
+  const prod = finding(result, "productionClaimAgrees");
+  assert.equal(prod.ok, true, result.reason);
+  assert.match(prod.reason, /not observed/i);
+  assert.doesNotMatch(prod.reason, /production was observed/i);
+});
+
+test("declaredArtifactsInsideRunRoot names declared artifacts, not every file written", async () => {
+  const result = await runWith({
+    neverWait: true,
+    handoff: goodHandoff({ artifacts: [] }),
+  });
+  const art = finding(result, "declaredArtifactsInsideRunRoot");
+  assert.equal(art.ok, true, result.reason);
+  assert.match(art.reason, /declared/i);
+  assert.doesNotMatch(art.reason, /^every artifact is inside the run root$/);
 });

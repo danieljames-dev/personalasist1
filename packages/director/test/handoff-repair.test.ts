@@ -277,7 +277,7 @@ test("contradictions against observation are still found", () => {
     handoff: result.handoff!,
     observedHeadAfter: "c".repeat(40),
     observedBranch: "main",
-    productionActuallyMutated: true,
+    authorisedProductionMutation: true,
   });
   const fields = contradictions.map((c) => c.field);
   assert.ok(fields.includes("headAfter"), "a SHA nobody can find is not a SHA");
@@ -320,7 +320,7 @@ test("a handoff agreeing with observation is trustworthy", () => {
     handoff,
     observedHeadAfter: "b".repeat(40),
     observedBranch: "executor/claude-director-v01",
-    productionActuallyMutated: false,
+    authorisedProductionMutation: false,
   });
   assert.deepEqual(contradictions, []);
 });

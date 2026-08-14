@@ -15,7 +15,7 @@
  * environment does this executor take?
  */
 import { statSync } from "node:fs";
-import type { ExecutorNameV1 } from "./executors.js";
+import { isExecutorRole, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
 import { isResolvedHostPath } from "./host-path.js";
 
 /**
@@ -38,14 +38,15 @@ export interface AdapterInputV1 {
   readonly promptPath: string;
   readonly cwd: string;
   readonly runNonce: string;
-  /** When `ADVERSARIAL_REVIEW`, Grok is launched so it cannot write. Other roles stay measured. */
-  readonly role?: string;
+  /** Enumerated role. Unknown values are a refusal, never the implementer default. */
+  readonly role?: ExecutorRoleV1;
 }
 
 export type AdapterRefusalCodeV1 =
   | "MISSING_CWD"
   | "MISSING_PROMPT"
   | "EMPTY_NONCE"
+  | "INVALID_ROLE"
   | "NOT_IMPLEMENTED";
 
 export interface AdapterLaunchV1 {
@@ -239,13 +240,16 @@ interface ValidatedInput {
   readonly promptPath: string;
   readonly cwd: string;
   readonly runNonce: string;
-  readonly role?: string;
+  readonly role?: ExecutorRoleV1;
 }
 
 function validateInput(input: AdapterInputV1): AdapterResultV1 & { ok: false } | ValidatedInput & { ok: true } {
   const runNonce = asUsableToken(input.runNonce);
   if (runNonce === null) {
     return refused("EMPTY_NONCE", "run nonce is empty or contains control bytes");
+  }
+  if (input.role !== undefined && !isExecutorRole(input.role)) {
+    return refused("INVALID_ROLE", "role is not an enumerated executor role");
   }
 
   const promptPath = asUsablePath(input.promptPath);

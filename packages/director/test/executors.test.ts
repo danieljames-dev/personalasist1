@@ -59,3 +59,19 @@ test("&&, $(, |, > and a newline in a non-path token are still refused", () => {
   assert.equal(argvIsSafe(["--flag", "a>b"]).safe, false);
   assert.equal(argvIsSafe(["--flag", "a\nb"]).safe, false);
 });
+
+test("multi-character operators are refused even when the token parses as a path", () => {
+  assert.equal(argvIsSafe(["C:/wt-a && calc.exe"]).safe, false);
+  assert.equal(argvIsSafe(["C:/x$(calc).txt"]).safe, false);
+  assert.equal(argvIsSafe(["C:/x`calc`.txt"]).safe, false);
+  assert.equal(argvIsSafe(["C:/wt-a"]).safe, true);
+  assert.equal(argvIsSafe(["\\\\host\\C$\\x"]).safe, true);
+  assert.equal(argvIsSafe([
+    "--prompt-file", "C:\\wt\\PROMPT.md",
+    "--cwd", "C:\\wt",
+    "--permission-mode", "bypassPermissions",
+    "--always-approve",
+    "--no-plan",
+    "--max-turns", "50",
+  ]).safe, true);
+});

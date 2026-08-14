@@ -73,6 +73,10 @@ const ROUTING: Readonly<Record<ExecutorRoleV1, ExecutorNameV1>> = {
   SAFE_PROJECT_SCRIPT: "local",
 };
 
+export function isExecutorRole(value: unknown): value is ExecutorRoleV1 {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(ROUTING, value);
+}
+
 export function routeRole(role: ExecutorRoleV1): ExecutorNameV1 {
   return ROUTING[role];
 }
@@ -104,6 +108,11 @@ export function argvIsSafe(argv: readonly string[]): { safe: boolean; offending:
 function tokenCarriesShellMetacharacters(token: string): boolean {
   // Consume `=>` as one token so a leftover `>` is still a redirect.
   const withoutArrows = token.replace(/=>/g, "");
+  // Multi-character operators are never legal path names. Test them on every
+  // token before the host-path exemption, which exists only for `&`, `$`, `;`.
+  if (/\$\(|&&|\|\|/.test(withoutArrows) || withoutArrows.includes("`")) {
+    return true;
+  }
   if (inspectHostPath(token).identifiable) {
     return PATH_ILLEGAL_SHELL.test(withoutArrows);
   }

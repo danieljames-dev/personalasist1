@@ -158,9 +158,28 @@ export function createFixedClock(now: IsoTimestamp): ClockV1 {
  * Not a confidentiality guarantee. Novel encodings, wrapped tokens, and anything that does not
  * match the shapes below will pass through.
  */
+/** Same terminator the holdback and the redactor use. One spelling. */
+const PRIVATE_KEY_END_LINE = /-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/;
+
+export function privateKeyBlockIsClosed(text: string): boolean {
+  return PRIVATE_KEY_END_LINE.test(text);
+}
+
+export function firstUnterminatedPemBegin(pending: string): number {
+  const marker = "-----BEGIN ";
+  let from = 0;
+  while (from < pending.length) {
+    const begin = pending.indexOf(marker, from);
+    if (begin < 0) return -1;
+    if (!privateKeyBlockIsClosed(pending.slice(begin))) return begin;
+    from = begin + marker.length;
+  }
+  return -1;
+}
+
 export function redactLogText(text: string): string {
   let out = text.replace(
-    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----\r?\n[\s\S]*?-----END \1-----/g,
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----\r?\n[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
   out = out.replace(
@@ -342,8 +361,8 @@ function fileImageOf(state: StreamState): Buffer {
  * is not a second spelling of "block open".
  */
 function splitHoldback(pending: string): { emit: string; hold: string } {
-  const begin = pending.lastIndexOf("-----BEGIN ");
-  if (begin >= 0 && !/-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/.test(pending.slice(begin))) {
+  const begin = firstUnterminatedPemBegin(pending);
+  if (begin >= 0) {
     const held = pending.slice(begin);
     if (held.length > MAX_PEM_HOLD) {
       return { emit: pending, hold: "" };

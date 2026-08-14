@@ -14,6 +14,7 @@ import {
   FILE_LOG_BYTES,
   LIVE_TAIL_BYTES,
   RUN_LOG_BYTES,
+  redactLogText,
   truncationMarker,
   type BoundedLogV1,
   type MemoryLogSinkV1,
@@ -379,4 +380,27 @@ test("a 1 MiB non-secret flood still completes promptly", () => {
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 15_000, `1 MiB flood took ${elapsed}ms`);
   assert.ok(log.liveTail("stdout").length > 0);
+});
+
+test("an unterminated key is not released when a later BEGIN arrives", () => {
+  const { log, stdout } = logger();
+  log.write("stdout", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA_SECRET_BODY\n");
+  log.write("stdout", "-----BEGIN CERTIFICATE-----\n");
+  const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
+  assert.equal(text.includes("MIIEowIBAAKCAQEA_SECRET_BODY"), false);
+});
+
+test("a mismatched PRIVATE KEY end label still redacts the body", () => {
+  const block = [
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "MIIEowIBAAKCAQEA_SECRET_BODY_LINE_1",
+    "SECRET_BODY_LINE_2",
+    "-----END PRIVATE KEY-----",
+    "",
+  ].join("\n");
+  const { log, stdout } = logger();
+  log.write("stdout", block);
+  const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
+  assert.equal(text.includes("MIIEowIBAAKCAQEA_SECRET_BODY_LINE_1"), false);
+  assert.equal(redactLogText(block).includes("MIIEowIBAAKCAQEA_SECRET_BODY_LINE_1"), false);
 });

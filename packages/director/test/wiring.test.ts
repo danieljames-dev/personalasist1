@@ -281,6 +281,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
         timeoutMs: 30_000,
         lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-launch-1" },
         authorisedProductionMutated: false,
+        role: "ADVERSARIAL_REVIEW",
       },
       {
         clock: createFixedClock("2026-08-13T12:00:00.000Z"),

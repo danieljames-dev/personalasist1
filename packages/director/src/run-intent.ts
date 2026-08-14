@@ -30,6 +30,7 @@ import {
   processIdentityFrom,
   type ExecutorProcessIdentityV1,
 } from "./process-identity.js";
+import { isExecutorRole, type ExecutorRoleV1 } from "./executors.js";
 import { validatePathSegment } from "./store-contract.js";
 
 export const RUN_INTENT_SCHEMA_V1 = "aion.director.run-intent.v1" as const;
@@ -64,6 +65,7 @@ export interface RunIntentV1 {
   /** Always false on a record this module wrote. Stated so a 2am reader does not have to guess. */
   readonly secretsPresent: false;
   readonly promptPath?: string;
+  readonly role?: ExecutorRoleV1;
 }
 
 export interface PersistRunIntentInputV1 {
@@ -79,6 +81,7 @@ export interface PersistRunIntentInputV1 {
   readonly runNonce: string;
   readonly now: IsoTimestamp;
   readonly promptPath?: string;
+  readonly role?: ExecutorRoleV1;
 }
 
 /**
@@ -579,6 +582,15 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
     promptPath = path;
   }
 
+  const roleRaw = own(parsed, "role");
+  let role: ExecutorRoleV1 | undefined;
+  if (roleRaw !== undefined && roleRaw !== null) {
+    if (!isExecutorRole(roleRaw)) {
+      return { ok: false, reason: "role is not an enumerated executor role" };
+    }
+    role = roleRaw;
+  }
+
   const intent: RunIntentV1 = {
     schema: RUN_INTENT_SCHEMA_V1,
     runId,
@@ -597,6 +609,7 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
     processIdentity,
     secretsPresent: false,
     ...(promptPath !== undefined ? { promptPath } : {}),
+    ...(role !== undefined ? { role } : {}),
   };
   return { ok: true, intent };
 }
@@ -707,6 +720,10 @@ function buildIntent(input: PersistRunIntentInputV1): BuiltIntentV1 {
     promptPath = input.promptPath;
   }
 
+  if (input.role !== undefined && !isExecutorRole(input.role)) {
+    return refused("role is not an enumerated executor role");
+  }
+
   const intent: RunIntentV1 = {
     schema: RUN_INTENT_SCHEMA_V1,
     runId: input.runId,
@@ -725,6 +742,7 @@ function buildIntent(input: PersistRunIntentInputV1): BuiltIntentV1 {
     processIdentity: null,
     secretsPresent: false,
     ...(promptPath !== undefined ? { promptPath } : {}),
+    ...(input.role !== undefined ? { role: input.role } : {}),
   };
 
   if (containsSecret(serialiseIntent(intent))) {

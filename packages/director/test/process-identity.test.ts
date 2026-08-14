@@ -751,3 +751,43 @@ test("unreadable rows with live parents or older creation still yield a performe
   });
   assert.equal(interpreted.outcome, "SCANNED");
 });
+
+test("a parentless other-nonce row after the floor makes the scan UNAVAILABLE", () => {
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      processes: [{
+        pid: 460,
+        parentPresent: false,
+        nonceReadable: true,
+        runNonce: "other",
+        creationDate: "2026-08-14T14:00:05.000Z",
+      }],
+    }),
+    stderr: "",
+    createdNotBefore: "2026-08-14T14:00:00.000Z",
+    runNonce: NONCE_A,
+  });
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
+});
+
+test("a parentless row created before the floor does not make the scan undecidable", () => {
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      processes: [{
+        pid: 4,
+        parentPresent: false,
+        nonceReadable: true,
+        runNonce: "other",
+        creationDate: "2020-01-01T00:00:00.000Z",
+      }],
+    }),
+    stderr: "",
+    createdNotBefore: "2026-08-14T14:00:00.000Z",
+    runNonce: NONCE_A,
+  });
+  assert.equal(interpreted.outcome, "SCANNED");
+});

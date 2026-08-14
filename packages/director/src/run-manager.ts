@@ -50,7 +50,7 @@ import {
   type ExecutorDiscoveryResultV1,
   type FileSystemProbe,
 } from "./executor-discovery.js";
-import { argvIsSafe, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
+import { argvIsSafe, routeRole, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
 import {
   collectGitTruth,
   verifyGitTruth,
@@ -90,6 +90,7 @@ import {
   isPlaceableInstant,
   isUsablePid,
   normaliseRunNonce,
+  parentlessAfterFloorMakesScanUndecidable,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type OrphanVerdictV1,
@@ -121,12 +122,13 @@ export type SuccessConjunctNameV1 =
   | "processExitedWithKnownSuccessCode"
   | "handoffParsed"
   | "identitiesMatch"
-  | "artifactsInsideRunRoot"
+  | "declaredArtifactsInsideRunRoot"
   | "gitAgreesWithHandoff"
   | "spendIsZero"
   | "productionClaimAgrees"
   | "executorTreeIsGone"
-  | "runCompletedWithinBudget";
+  | "runCompletedWithinBudget"
+  | "logStayedWithinBudget";
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -275,6 +277,7 @@ export interface ExecuteRunRequestV1 {
   readonly authorisedProductionMutated: boolean;
   readonly knownSuccessExitCodes?: readonly number[];
   readonly childEnv?: Readonly<Record<string, string>>;
+  readonly role?: ExecutorRoleV1;
 }
 
 /**
@@ -510,14 +513,16 @@ export function evaluateSuccessConjunction(input: {
   readonly gitAfter: GitObservationV1 | null;
   readonly gitVerdict: GitVerdictV1 | null;
   readonly authorisedProductionMutated: boolean;
-  /** Physical containment after realpath, not "the handoff parsed". */
-  readonly artifactsInsideRunRoot: boolean;
-  readonly artifactsInsideRunRootReason: string;
+  /** Declared artifacts realpath'd inside the run root. Not every file written. */
+  readonly declaredArtifactsInsideRunRoot: boolean;
+  readonly declaredArtifactsInsideRunRootReason: string;
   /** Holder gone AND scan performed AND no live sighting remains. */
   readonly executorTreeGone: boolean;
   readonly executorTreeReason: string;
   /** The Director cancelled this run for exceeding its budget. */
   readonly timedOut: boolean;
+  /** The bounded log did not demand a halt. */
+  readonly logStayedWithinBudget: boolean;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -551,7 +556,7 @@ export function evaluateSuccessConjunction(input: {
     : findHandoffContradictions({
       handoff,
       ...(observedBranch !== undefined ? { observedBranch } : {}),
-      productionActuallyMutated: input.authorisedProductionMutated,
+      authorisedProductionMutation: input.authorisedProductionMutated,
     });
 
   const statusContradiction = contradictions.find((item) => item.field === "status");
@@ -593,8 +598,8 @@ export function evaluateSuccessConjunction(input: {
     identitiesReason = `workItemId ${reportedWorkItem} is not the dispatched ${input.expectedWorkItemId}`;
   }
 
-  const artifactsOk = input.artifactsInsideRunRoot === true;
-  const artifactsReason = input.artifactsInsideRunRootReason;
+  const artifactsOk = input.declaredArtifactsInsideRunRoot === true;
+  const artifactsReason = input.declaredArtifactsInsideRunRootReason;
 
   const gitContradiction = contradictions.find((item) => item.field === "headAfter" || item.field === "branch");
   let gitOk = false;
@@ -636,7 +641,7 @@ export function evaluateSuccessConjunction(input: {
       : "handoff claims production was left alone; mutation was authorised and the claims disagree";
   } else {
     productionOk = true;
-    productionReason = "production-mutation claim agrees with what was authorised";
+    productionReason = "compared the handoff production claim with the authorisation flag; production itself was not observed";
   }
 
   const findings: ConjunctFindingV1[] = [
@@ -647,7 +652,7 @@ export function evaluateSuccessConjunction(input: {
       reason: handoffParsedReason,
     },
     { name: "identitiesMatch", ok: identitiesOk, reason: identitiesReason },
-    { name: "artifactsInsideRunRoot", ok: artifactsOk, reason: artifactsReason },
+    { name: "declaredArtifactsInsideRunRoot", ok: artifactsOk, reason: artifactsReason },
     { name: "gitAgreesWithHandoff", ok: gitOk, reason: gitReason },
     { name: "spendIsZero", ok: spendOk, reason: spendReason },
     { name: "productionClaimAgrees", ok: productionOk, reason: productionReason },
@@ -662,6 +667,13 @@ export function evaluateSuccessConjunction(input: {
       reason: input.timedOut === true
         ? "the Director cancelled the run for exceeding its budget"
         : "the run completed within its budget",
+    },
+    {
+      name: "logStayedWithinBudget",
+      ok: input.logStayedWithinBudget === true,
+      reason: input.logStayedWithinBudget === true
+        ? "the run log stayed within its byte budget"
+        : "the run log exceeded its byte budget; the executor must be halted",
     },
   ];
 
@@ -699,6 +711,13 @@ export async function launchRun(
 
   // Default is the implementer list. State it: absent role is IMPLEMENT.
   const role: ExecutorRoleV1 = request.role ?? "IMPLEMENT";
+  if (routeRole(role) !== request.executor) {
+    return refusedBeforeSpawn(
+      request,
+      deps,
+      `role ${role} is routed to ${routeRole(role)}, not ${request.executor}`,
+    );
+  }
   const adapted = buildExecutorLaunch(request.executor, {
     promptPath: request.promptPath,
     cwd: request.cwd,
@@ -711,6 +730,7 @@ export async function launchRun(
 
   return executeRun({
     ...request,
+    role,
     runNonce,
     executablePath: discovery.executablePath,
     argv: adapted.launch.argv,
@@ -749,11 +769,12 @@ function refusedBeforeSpawn(
     gitAfter: null,
     gitVerdict: null,
     authorisedProductionMutated: request.authorisedProductionMutated,
-    artifactsInsideRunRoot: false,
-    artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
+    declaredArtifactsInsideRunRoot: false,
+    declaredArtifactsInsideRunRootReason: "no parsed handoff whose declared artifacts can be confined to the run root",
     executorTreeGone: true,
     executorTreeReason: "this launch never created a process",
     timedOut: false,
+    logStayedWithinBudget: true,
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -806,11 +827,12 @@ export async function executeRun(
     gitAfter: null,
     gitVerdict: null,
     authorisedProductionMutated: request.authorisedProductionMutated,
-    artifactsInsideRunRoot: false,
-    artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
+    declaredArtifactsInsideRunRoot: false,
+    declaredArtifactsInsideRunRootReason: "no parsed handoff whose declared artifacts can be confined to the run root",
     executorTreeGone: true,
     executorTreeReason: "this run never created a process",
     timedOut: false,
+    logStayedWithinBudget: true,
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -852,11 +874,12 @@ export async function executeRun(
       gitAfter: null,
       gitVerdict: null,
       authorisedProductionMutated: request.authorisedProductionMutated,
-      artifactsInsideRunRoot: false,
-      artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
+      declaredArtifactsInsideRunRoot: false,
+      declaredArtifactsInsideRunRootReason: "no parsed handoff whose declared artifacts can be confined to the run root",
       executorTreeGone: false,
       executorTreeReason: "the run threw before the process tree could be observed",
       timedOut: timedOutFlag,
+      logStayedWithinBudget: true,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
@@ -1164,6 +1187,7 @@ export async function executeRun(
       runNonce,
       now: deps.clock.now(),
       ...(request.promptPath !== undefined ? { promptPath: request.promptPath } : {}),
+      ...(request.role !== undefined ? { role: request.role } : {}),
     };
     let permit: SpawnPermitV1 | null = null;
     let child: SpawnHandleV1;
@@ -1403,10 +1427,22 @@ export async function executeRun(
 
     const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
     const log = createBoundedLog({ clock: deps.clock, sinks });
-    const stdoutDone = pumpStream(child.stdout, (chunk) => log.write("stdout", chunk)).catch(() => undefined);
-    const stderrDone = pumpStream(child.stderr, (chunk) => log.write("stderr", chunk)).catch(() => undefined);
+    let haltRequested = false;
+    let resolveHalt: (() => void) | null = null;
+    const haltSignal = new Promise<void>((resolve) => {
+      resolveHalt = resolve;
+    });
+    const writeAndWatch = (stream: "stdout" | "stderr") => (chunk: Uint8Array): void => {
+      const written = log.write(stream, chunk);
+      if (written.mustHalt && !haltRequested) {
+        haltRequested = true;
+        resolveHalt?.();
+      }
+    };
+    const stdoutDone = pumpStream(child.stdout, writeAndWatch("stdout")).catch(() => undefined);
+    const stderrDone = pumpStream(child.stderr, writeAndWatch("stderr")).catch(() => undefined);
 
-    // 6. Timeout / cancel ladder.
+    // 6. Timeout / cancel ladder. mustHalt resolves the race immediately.
     let exitCode: number | null = null;
 
     const exitWon = child.exited;
@@ -1414,15 +1450,18 @@ export async function executeRun(
       const ended = await child.exit;
       exitCode = ended.code;
     } else {
-      const raced = await raceExit(child, request.timeoutMs, deps.wait, () => {
-        if (heldLease === null) return;
-        const renewed = heartbeat(heldLease, deps.clock.now());
-        heldLease = persistLeaseHolder(leaseStore, renewed, renewed.pid, null, runNonce, renewed);
-      });
+      const raced = await Promise.race([
+        raceExit(child, request.timeoutMs, deps.wait, () => {
+          if (heldLease === null) return;
+          const renewed = heartbeat(heldLease, deps.clock.now());
+          heldLease = persistLeaseHolder(leaseStore, renewed, renewed.pid, null, runNonce, renewed);
+        }),
+        haltSignal.then(() => ({ tag: "halt" as const })),
+      ]);
       if (raced.tag === "exit") {
         exitCode = raced.exit.code;
       } else {
-        timedOut = true;
+        if (raced.tag === "timeout") timedOut = true;
         const cancelled = await cancelLadder(
           child,
           deps,
@@ -1436,7 +1475,10 @@ export async function executeRun(
       }
     }
 
-    if (log.report().mustHalt && !child.exited) {
+    const streamsSettledEarly = await settleStreams(stdoutDone, stderrDone, deps.wait);
+    if (!streamsSettledEarly) log.markDrainIncomplete();
+    log.flush();
+    if (log.report().mustHalt && cancelStages.length === 0) {
       const cancelled = await cancelLadder(
         child,
         deps,
@@ -1449,9 +1491,6 @@ export async function executeRun(
       if (cancelled.exitCode !== null) exitCode = cancelled.exitCode;
     }
 
-    const streamsSettled = await settleStreams(stdoutDone, stderrDone, deps.wait);
-    if (!streamsSettled) log.markDrainIncomplete();
-    log.flush();
     const logReport = log.report();
     const output = `${log.liveTail("stdout").toString("utf8")}\n${log.liveTail("stderr").toString("utf8")}`;
 
@@ -1548,11 +1587,12 @@ export async function executeRun(
       gitAfter,
       gitVerdict,
       authorisedProductionMutated: request.authorisedProductionMutated,
-      artifactsInsideRunRoot: artifactCheck.ok,
-      artifactsInsideRunRootReason: artifactCheck.reason,
+      declaredArtifactsInsideRunRoot: artifactCheck.ok,
+      declaredArtifactsInsideRunRootReason: artifactCheck.reason,
       executorTreeGone: tree.ok,
       executorTreeReason: tree.reason,
       timedOut,
+      logStayedWithinBudget: logReport.mustHalt !== true,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
@@ -1721,7 +1761,7 @@ function artifactsConfinedToRunRoot(input: {
     const artifactProblems = input.parsed.problems.filter((problem) => /artifact/i.test(problem));
     return {
       ok: false,
-      reason: artifactProblems[0] ?? "no parsed handoff whose artifacts can be confined to the run root",
+      reason: artifactProblems[0] ?? "no parsed handoff whose declared artifacts can be confined to the run root",
     };
   }
   try {
@@ -1729,10 +1769,10 @@ function artifactsConfinedToRunRoot(input: {
     for (const artifact of input.handoff.artifacts) {
       const candidate = input.resolve(join(input.runRoot, artifact));
       if (!artifactPathWithinRoot(rootReal, candidate)) {
-        return { ok: false, reason: `artifact ${artifact} resolves outside the run root` };
+        return { ok: false, reason: `declared artifact ${artifact} resolves outside the run root` };
       }
     }
-    return { ok: true, reason: "every artifact is inside the run root" };
+    return { ok: true, reason: "every declared artifact is inside the run root" };
   } catch {
     return { ok: false, reason: "an artifact path could not be resolved" };
   }
@@ -1797,6 +1837,11 @@ function collectWriterOrphans(input: {
       createdNotBefore,
       ...(holderPid !== undefined ? { holderPid } : {}),
     })];
+    for (const sighting of sightings) {
+      if (parentlessAfterFloorMakesScanUndecidable(sighting, input.runNonce, createdNotBefore)) {
+        return { performed: false, sightings: [], liveSightings: [] };
+      }
+    }
     const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(
       sighting,
       input.runNonce,
