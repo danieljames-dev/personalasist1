@@ -32,6 +32,7 @@ import { dirname } from "node:path";
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
+  isUsablePid,
   processIdentityFrom,
   type ExecutorProcessIdentityV1,
 } from "./process-identity.js";
@@ -59,6 +60,8 @@ export interface RunIntentV1 {
   readonly cwd: string;
   readonly runNonce: string;
   readonly intendedAt: IsoTimestamp;
+  readonly spawnAttemptedAt: IsoTimestamp | null;
+  readonly spawnPid: number | null;
   readonly spawnObservedAt: IsoTimestamp | null;
   readonly processIdentity: ExecutorProcessIdentityV1 | null;
   /** Always false on a record this module wrote. Stated so a 2am reader does not have to guess. */
@@ -142,6 +145,8 @@ export interface RebootAnswersV1 {
   readonly argv: readonly string[] | null;
   readonly runNonce: string | null;
   readonly intentWrittenAt: IsoTimestamp | null;
+  readonly spawnAttemptedAt: IsoTimestamp | null;
+  readonly spawnPid: number | null;
   readonly spawnObservedAt: IsoTimestamp | null;
 }
 
@@ -227,6 +232,75 @@ export function requireSpawnPermit(value: unknown): SpawnPermitV1 {
     throw new Error("spawn is refused: no durable run intent permit");
   }
   return value;
+}
+
+/**
+ * Record that `spawn` returned, under the permit that authorised it.
+ *
+ * This is written before identity capture. A probe that cannot see the process (access-denied,
+ * another account, an elevated executor) must not leave the intent looking like nothing started.
+ * `started` after a reboot is this record, not a successful probe.
+ */
+export function recordSpawnAttempt(input: {
+  readonly permit: SpawnPermitV1;
+  readonly pid: number;
+  readonly now: IsoTimestamp;
+  readonly store?: IntentStoreV1;
+}): PersistRunIntentResultV1 {
+  if (!isSpawnPermit(input.permit)) {
+    return refused("spawn attempt is refused: no durable run intent permit");
+  }
+  if (!isIsoTimestamp(input.now)) {
+    return refused("spawnAttemptedAt is not an ISO-8601 instant in UTC");
+  }
+
+  const store = input.store ?? createNodeIntentStore();
+  const current = readRunIntent(input.permit.intentPath, store);
+  if (!current.ok) {
+    return refused(`cannot record spawn attempt against an unreadable intent: ${current.reason}`);
+  }
+
+  const pid = isUsablePid(input.pid) ? input.pid : null;
+
+  if (current.intent.spawnAttemptedAt !== null || current.intent.spawnPid !== null) {
+    if (current.intent.spawnPid !== null && pid !== null && current.intent.spawnPid !== pid) {
+      return refused("a different spawn pid is already recorded; refusing to overwrite it");
+    }
+    return {
+      ok: true,
+      permit: makePermit(current.path, current.intent),
+      intent: current.intent,
+      reason: "spawn attempt already recorded",
+    };
+  }
+
+  const updated: RunIntentV1 = {
+    ...current.intent,
+    spawnAttemptedAt: input.now,
+    spawnPid: pid,
+  };
+  const serialised = serialiseIntent(updated);
+
+  try {
+    store.writeDurable(current.path, serialised);
+  } catch (error) {
+    return refused(`recording spawn attempt failed: ${errorMessage(error)}`);
+  }
+
+  const readBack = readRunIntent(current.path, store);
+  if (!readBack.ok) {
+    return refused(`spawn attempt read-back failed: ${readBack.reason}`);
+  }
+  if (readBack.intent.spawnAttemptedAt === null) {
+    return refused("spawn attempt read-back has no spawnAttemptedAt; the start is not recorded");
+  }
+
+  return {
+    ok: true,
+    permit: makePermit(readBack.path, readBack.intent),
+    intent: readBack.intent,
+    reason: "spawn attempt is durable",
+  };
 }
 
 /**
@@ -373,6 +447,26 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
   const intendedAt = own(parsed, "intendedAt");
   if (!isIsoTimestamp(intendedAt)) return { ok: false, reason: "intendedAt is not an ISO-8601 instant in UTC" };
 
+  const rawAttempted = own(parsed, "spawnAttemptedAt");
+  let spawnAttemptedAt: IsoTimestamp | null;
+  if (rawAttempted === null || rawAttempted === undefined) {
+    spawnAttemptedAt = null;
+  } else if (isIsoTimestamp(rawAttempted)) {
+    spawnAttemptedAt = rawAttempted;
+  } else {
+    return { ok: false, reason: "spawnAttemptedAt is not an ISO-8601 instant in UTC" };
+  }
+
+  const rawSpawnPid = own(parsed, "spawnPid");
+  let spawnPid: number | null;
+  if (rawSpawnPid === null || rawSpawnPid === undefined) {
+    spawnPid = null;
+  } else if (isUsablePid(rawSpawnPid)) {
+    spawnPid = rawSpawnPid;
+  } else {
+    return { ok: false, reason: "spawnPid is not a positive integer" };
+  }
+
   const rawSpawned = own(parsed, "spawnObservedAt");
   let spawnObservedAt: IsoTimestamp | null;
   if (rawSpawned === null || rawSpawned === undefined) {
@@ -415,6 +509,8 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
     cwd,
     runNonce,
     intendedAt,
+    spawnAttemptedAt,
+    spawnPid,
     spawnObservedAt,
     processIdentity,
     secretsPresent: false,
@@ -426,9 +522,10 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
 /**
  * The reboot questions, answered from the record alone.
  *
- * `supposedToRun` is the existence of an executable and argv. `started` is a recorded process
- * identity — not a live probe, which a reboot may not be able to make, and not a missing file,
- * which is how "we never tried" used to look.
+ * `supposedToRun` is the existence of an executable and argv. `started` is a recorded spawn
+ * attempt — the pid and time written when `spawn` returned — not a successful identity probe,
+ * which a reboot may not be able to make, and not a missing file, which is how "we never tried"
+ * used to look. Absence of `processIdentity` is not "never started".
  */
 export function answersAfterReboot(intent: RunIntentV1 | null | undefined): RebootAnswersV1 {
   if (intent === null || intent === undefined) {
@@ -443,12 +540,14 @@ export function answersAfterReboot(intent: RunIntentV1 | null | undefined): Rebo
       argv: null,
       runNonce: null,
       intentWrittenAt: null,
+      spawnAttemptedAt: null,
+      spawnPid: null,
       spawnObservedAt: null,
     };
   }
   return {
     supposedToRun: intent.executablePath !== "" && Array.isArray(intent.argv),
-    started: intent.processIdentity !== null,
+    started: intent.spawnAttemptedAt !== null || intent.spawnPid !== null || intent.processIdentity !== null,
     worktree: intent.worktree,
     branch: intent.branch,
     missionId: intent.missionId,
@@ -457,6 +556,8 @@ export function answersAfterReboot(intent: RunIntentV1 | null | undefined): Rebo
     argv: intent.argv,
     runNonce: intent.runNonce,
     intentWrittenAt: intent.intendedAt,
+    spawnAttemptedAt: intent.spawnAttemptedAt,
+    spawnPid: intent.spawnPid,
     spawnObservedAt: intent.spawnObservedAt,
   };
 }
@@ -536,6 +637,8 @@ function buildIntent(input: PersistRunIntentInputV1): BuiltIntentV1 {
     cwd: input.cwd,
     runNonce,
     intendedAt: input.now,
+    spawnAttemptedAt: null,
+    spawnPid: null,
     spawnObservedAt: null,
     processIdentity: null,
     secretsPresent: false,

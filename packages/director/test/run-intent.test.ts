@@ -16,6 +16,7 @@ import {
   isSpawnPermit,
   persistRunIntent,
   readRunIntent,
+  recordSpawnAttempt,
   recordSpawnObservation,
   requireSpawnPermit,
   RUN_INTENT_SCHEMA_V1,
@@ -109,10 +110,12 @@ test("a crash between persist and spawn leaves a readable intent with no process
     if (!reloaded.ok) return;
     assert.equal(reloaded.intent.processIdentity, null);
     assert.equal(reloaded.intent.spawnObservedAt, null);
+    assert.equal(reloaded.intent.spawnAttemptedAt, null);
+    assert.equal(reloaded.intent.spawnPid, null);
 
     const answers = answersAfterReboot(reloaded.intent);
     assert.equal(answers.supposedToRun, true, "the file must say a launch was decided");
-    assert.equal(answers.started, false, "no recorded identity means it never started");
+    assert.equal(answers.started, false, "no spawn attempt and no identity means it never started");
   });
 });
 
@@ -195,6 +198,8 @@ test("after a reboot the intent answers each question a person has to ask", () =
     const beforeSpawn = answersAfterReboot(readRunIntent(input.intentPath).intent);
     assert.equal(beforeSpawn.supposedToRun, true);
     assert.equal(beforeSpawn.started, false);
+    assert.equal(beforeSpawn.spawnAttemptedAt, null);
+    assert.equal(beforeSpawn.spawnPid, null);
     assert.equal(beforeSpawn.worktree, dir);
     assert.equal(beforeSpawn.branch, "executor/grok-director-d2");
     assert.equal(beforeSpawn.missionId, "mission-1");
@@ -215,7 +220,7 @@ test("after a reboot the intent answers each question a person has to ask", () =
 
     const afterSpawn = answersAfterReboot(readRunIntent(input.intentPath).intent);
     assert.equal(afterSpawn.supposedToRun, true);
-    assert.equal(afterSpawn.started, true, "a recorded identity is the only 'it started' signal");
+    assert.equal(afterSpawn.started, true, "a recorded identity still means it started");
     assert.equal(afterSpawn.spawnObservedAt, SPAWNED_AT);
     assert.equal(afterSpawn.worktree, dir);
     assert.equal(afterSpawn.branch, "executor/grok-director-d2");
@@ -238,4 +243,34 @@ test("an absent intent answers supposedToRun false, not 'we do not know so try a
   assert.equal(answers.started, false);
   assert.equal(answers.worktree, null);
   assert.equal(answers.missionId, null);
+});
+
+test("a spawn whose identity cannot be captured is still a started run", () => {
+  // Defect: processIdentity stayed null and started was inferred from that, so recovery relaunched.
+  withDir((dir) => {
+    const persisted = persistRunIntent(inputIn(dir));
+    assert.equal(persisted.ok, true, persisted.ok ? "" : persisted.reason);
+    if (!persisted.ok) return;
+
+    const attempted = recordSpawnAttempt({
+      permit: persisted.permit,
+      pid: 4812,
+      now: SPAWNED_AT,
+    });
+    assert.equal(attempted.ok, true, attempted.ok ? "" : attempted.reason);
+    if (!attempted.ok) return;
+
+    const reloaded = readRunIntent(inputIn(dir).intentPath);
+    assert.equal(reloaded.ok, true, reloaded.ok ? "" : reloaded.reason);
+    if (!reloaded.ok) return;
+    assert.equal(reloaded.intent.processIdentity, null);
+    assert.equal(reloaded.intent.spawnObservedAt, null);
+    assert.equal(reloaded.intent.spawnAttemptedAt, SPAWNED_AT);
+    assert.equal(reloaded.intent.spawnPid, 4812);
+
+    const answers = answersAfterReboot(reloaded.intent);
+    assert.equal(answers.started, true, "started is the spawn returning, not a successful probe");
+    assert.equal(answers.spawnPid, 4812);
+    assert.equal(answers.spawnAttemptedAt, SPAWNED_AT);
+  });
 });

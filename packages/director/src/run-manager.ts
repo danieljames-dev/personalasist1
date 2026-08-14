@@ -73,12 +73,15 @@ import {
 import {
   captureProcessIdentity,
   holderLiveness,
+  identityFromObservation,
+  livenessGrants,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type ProcessObservationV1,
 } from "./process-identity.js";
 import {
   persistRunIntent,
+  recordSpawnAttempt,
   recordSpawnObservation,
   type IntentStoreV1,
   type RunIntentV1,
@@ -175,8 +178,9 @@ export interface OrphanSightingV1 {
 }
 
 /**
- * Post-exit liveness question. Production always asks about the recorded spawn identity.
- * Tests inject a different subject to prove DEAD_CONFIRMED about someone else grants nothing.
+ * Post-exit liveness question. Production probes the recorded pid and builds the
+ * compared identity from what the probe returned. Tests may inject a different
+ * observation; they cannot make the compared value be the recorded record.
  */
 export interface WriterLivenessQuestionV1 {
   readonly subject: ExecutorProcessIdentityV1;
@@ -263,16 +267,16 @@ export interface WriterReleaseEvidenceInputV1 {
 }
 
 /**
- * `productionWriterLeaseReleasedByThisRun` may be true only from:
+ * `productionWriterLeaseReleasedByThisRun` may be true only from an explicit
+ * release of *this run's recorded* PRODUCTION_WRITER lease id.
  *
- * - an explicit release of *this run's recorded* PRODUCTION_WRITER lease id, or
- * - `DEAD_CONFIRMED` liveness asked about *this exact* process identity
- *   (pid AND creationDate AND runNonce)
+ * Liveness never sets the field. {@link livenessGrants} is the single rule:
+ * `writerFinished` is false for `DEAD_CONFIRMED`, `UNKNOWN`, and `ALIVE`. A
+ * process that is gone is not a writer that completed, and a dead parent is
+ * not a dead tree. Lease kinds other than PRODUCTION_WRITER never qualify.
  *
- * Everything else is false: `UNKNOWN`, a missing probe, executor prose, an exit code,
- * a worktree lease release, or DEAD_CONFIRMED about a different identity. This field
- * has been got wrong by correlating a state name, an event name, and a launch
- * precondition. See the `DEPLOY_COMPLETED` branch in `mission.ts`.
+ * `livenessAskedAbout` is the identity the probe observed, not the recorded
+ * record compared to itself. See the `DEPLOY_COMPLETED` branch in `mission.ts`.
  */
 export function writerReleaseEvidence(input: WriterReleaseEvidenceInputV1): boolean {
   if (
@@ -284,12 +288,8 @@ export function writerReleaseEvidence(input: WriterReleaseEvidenceInputV1): bool
     return true;
   }
 
-  if (input.liveness !== "DEAD_CONFIRMED") return false;
-  if (input.recordedIdentity === null || input.livenessAskedAbout === null) return false;
-
-  return input.livenessAskedAbout.pid === input.recordedIdentity.pid
-    && input.livenessAskedAbout.creationDate === input.recordedIdentity.creationDate
-    && input.livenessAskedAbout.runNonce === input.recordedIdentity.runNonce;
+  if (input.liveness === null) return false;
+  return livenessGrants(input.liveness).writerFinished;
 }
 
 export function evaluateSuccessConjunction(input: {
@@ -748,7 +748,17 @@ export async function executeRun(
       });
     }
 
-    // 5. Identity, then the bounded log.
+    // 5. Record that spawn returned, then try to capture identity.
+    // An unobservable process (access-denied, elevated executor) still started.
+    // processIdentity === null must not mean "never spawned".
+    const attempted = recordSpawnAttempt({
+      permit,
+      pid: child.pid,
+      now: deps.clock.now(),
+      store: intentStore,
+    });
+    if (attempted.ok && attempted.permit !== null) permit = attempted.permit;
+
     const captured = captureProcessIdentity(deps.probe, { pid: child.pid, runNonce: request.runNonce });
     const processIdentity = captured.ok ? captured.identity : null;
     if (processIdentity !== null) {
@@ -918,7 +928,7 @@ function resolveWriterLiveness(
     : { subject: recorded, observation: deps.probe.observe(recorded.pid) };
   return {
     liveness: holderLiveness(asked.subject, asked.observation),
-    askedAbout: asked.subject,
+    askedAbout: identityFromObservation(asked.observation),
   };
 }
 

@@ -147,6 +147,29 @@ test("the prompt travels as a file path, and argv is the adapter's measured list
   }
 });
 
+test("a reviewer gets the permission mode that cannot write", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aion-launch-review-"));
+  const promptPath = join(cwd, "PROMPT.md");
+  writeFileSync(promptPath, "review the assigned work", "utf8");
+  try {
+    const review = buildLaunchPlan({
+      discovery: grokDiscovery(),
+      role: "ADVERSARIAL_REVIEW",
+      cwd,
+      promptPath,
+      timeoutMs: 1000,
+      runNonce: "nonce-review-1",
+    });
+    assert.equal(review.ok, true, review.reason);
+    const modeIndex = review.plan!.argv.indexOf("--permission-mode");
+    assert.ok(modeIndex >= 0, "reviewer argv must name a permission mode");
+    assert.equal(review.plan!.argv[modeIndex + 1], "dontAsk", "a review that can write is not a review");
+    assert.equal(review.plan!.argv.includes("--always-approve"), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("argv carrying shell syntax is refused even though no shell is used", () => {
   const attacks = [
     ["--prompt-file", "C:/p.md; rm -rf /"],

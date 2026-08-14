@@ -14,6 +14,7 @@ import {
   createWindowsProcessProbe,
   detectOrphan,
   holderLiveness,
+  identityFromObservation,
   livenessGrants,
   processIdentityFrom,
   type ExecutorProcessIdentityV1,
@@ -131,6 +132,19 @@ test("DEAD_CONFIRMED may reclaim and still must not conclude the writer finished
   const granted = livenessGrants("DEAD_CONFIRMED");
   assert.equal(granted.reclaim, true);
   assert.equal(granted.writerFinished, false, "a gone process is not a finished writer");
+});
+
+test("the observed identity is taken from the probe, never filled in from the recorded record", () => {
+  const stranger = found({ pid: 9999, creationDate: T1, runNonce: NONCE_B, executablePath: NODE });
+  const observed = identityFromObservation(stranger);
+  assert.ok(observed);
+  assert.equal(observed.pid, 9999);
+  assert.equal(observed.creationDate, T1);
+  assert.equal(observed.runNonce, NONCE_B);
+  assert.notEqual(observed.pid, RECORDED.pid);
+  assert.equal(identityFromObservation({ outcome: "NOT_FOUND", reason: "gone" }), null);
+  assert.equal(identityFromObservation({ outcome: "UNAVAILABLE", reason: "access-denied" }), null);
+  assert.equal(identityFromObservation(found({ omitNonce: true })), null);
 });
 
 test("ALIVE grants neither reclaim nor writer-finished", () => {

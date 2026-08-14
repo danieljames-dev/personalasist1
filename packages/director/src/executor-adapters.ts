@@ -38,6 +38,8 @@ export interface AdapterInputV1 {
   readonly promptPath: string;
   readonly cwd: string;
   readonly runNonce: string;
+  /** When `ADVERSARIAL_REVIEW`, Grok is launched so it cannot write. Other roles stay measured. */
+  readonly role?: string;
 }
 
 export type AdapterRefusalCodeV1 =
@@ -187,14 +189,21 @@ function buildGrokLaunch(input: ValidatedInput): AdapterLaunchV1 {
   // --no-plan is required. Without it Grok 1.0.3 emits a plan, ends its turn and exits 0 having
   // written nothing. Four D2 launches were lost to this before it was found, and every one of
   // them reported success by exit code. Do not remove it as noise.
-  return launchOf(input, [
+  //
+  // A reviewer that can write is not a review. The measured implementer list stays
+  // `bypassPermissions` + `--always-approve`. ADVERSARIAL_REVIEW is dontAsk and must not
+  // carry --always-approve.
+  const reviewOnly = input.role === "ADVERSARIAL_REVIEW";
+  const permissionMode = reviewOnly ? "dontAsk" : "bypassPermissions";
+  const argv = [
     "--prompt-file", input.promptPath,
     "--cwd", input.cwd,
-    "--permission-mode", "bypassPermissions",
-    "--always-approve",
+    "--permission-mode", permissionMode,
+    ...(reviewOnly ? [] : ["--always-approve"]),
     "--no-plan",
     "--max-turns", String(GROK_MAX_TURNS),
-  ]);
+  ];
+  return launchOf(input, argv);
 }
 
 function buildClaudeLaunch(input: ValidatedInput): AdapterLaunchV1 {
@@ -230,6 +239,7 @@ interface ValidatedInput {
   readonly promptPath: string;
   readonly cwd: string;
   readonly runNonce: string;
+  readonly role?: string;
 }
 
 function validateInput(input: AdapterInputV1): AdapterResultV1 & { ok: false } | ValidatedInput & { ok: true } {
@@ -263,7 +273,13 @@ function validateInput(input: AdapterInputV1): AdapterResultV1 & { ok: false } |
     );
   }
 
-  return { ok: true, promptPath, cwd, runNonce };
+  return {
+    ok: true,
+    promptPath,
+    cwd,
+    runNonce,
+    ...(input.role !== undefined ? { role: input.role } : {}),
+  };
 }
 
 function refused(code: AdapterRefusalCodeV1, reason: string): AdapterResultV1 & { ok: false } {

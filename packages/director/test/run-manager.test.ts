@@ -18,9 +18,11 @@ import type { GitCommandResultV1, GitRunner } from "../src/git-truth.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
   acquireLease,
+  type LeaseKindV1,
   type LeaseV1,
 } from "../src/leases.js";
 import type { ExecutorProcessIdentityV1, HostProcessProbe, ProcessObservationV1 } from "../src/process-identity.js";
+import { answersAfterReboot, runIntentFrom } from "../src/run-intent.js";
 import {
   CANCEL_HARD_MS,
   CANCEL_SOFT_MS,
@@ -310,7 +312,11 @@ function trackingSpawn(factory: () => SpawnHandleV1): SpawnFnV1 & { calls: numbe
     assert.equal(options.env.AION_RUN_NONCE, NONCE);
     return factory();
   };
-  return Object.assign(spawn, tracked);
+  Object.defineProperties(spawn, {
+    calls: { get: () => tracked.calls },
+    lastShell: { get: () => tracked.lastShell },
+  });
+  return spawn as SpawnFnV1 & { calls: number; lastShell: boolean | null };
 }
 
 async function runWith(
@@ -636,6 +642,146 @@ test("an explicit release of this run's recorded production-writer lease id is t
     }),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
+});
+
+test("DEAD_CONFIRMED of this run's identity is not writer-release evidence", async () => {
+  // Defect: a launcher shim that exits 0 while its grandchild is still writing set the field
+  // because the parent was DEAD_CONFIRMED. A dead parent is not a dead tree.
+  const result = await runWith({
+    neverWait: true,
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "parent gone" },
+    ]),
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    leases: {
+      list: () => [],
+      save() {
+        // No explicit release. Death of the recorded holder must not substitute.
+      },
+    },
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(
+    writerReleaseEvidence({
+      recordedLeaseKind: "PRODUCTION_WRITER",
+      recordedLeaseId: "lease-pw-1",
+      releasedLeaseId: null,
+      recordedIdentity: RECORDED,
+      liveness: "DEAD_CONFIRMED",
+      livenessAskedAbout: RECORDED,
+    }),
+    false,
+  );
+});
+
+test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease", async () => {
+  // Defect: the DEAD_CONFIRMED branch never checked lease kind. A WORKTREE run that
+  // never held a production writer lease still persisted the field as true.
+  const kinds: ReadonlyArray<{ kind: LeaseKindV1; resource: string; leaseId: string }> = [
+    { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-dead" },
+    { kind: "BRANCH", resource: "executor/oracle", leaseId: "lease-br-dead" },
+    { kind: "INTEGRATION", resource: "default", leaseId: "lease-in-dead" },
+    { kind: "PREVIEW", resource: "default", leaseId: "lease-pr-dead" },
+  ];
+  for (const lease of kinds) {
+    const result = await runWith({
+      neverWait: true,
+      probe: sequentialProbe([
+        foundObservation(RECORDED),
+        { outcome: "NOT_FOUND", reason: "gone" },
+      ]),
+      request: { lease },
+    });
+    assert.equal(
+      result.productionWriterLeaseReleasedByThisRun,
+      false,
+      `${lease.kind} must not set the production-writer field`,
+    );
+    assert.equal(
+      writerReleaseEvidence({
+        recordedLeaseKind: lease.kind,
+        recordedLeaseId: lease.leaseId,
+        releasedLeaseId: lease.leaseId,
+        recordedIdentity: RECORDED,
+        liveness: "DEAD_CONFIRMED",
+        livenessAskedAbout: RECORDED,
+      }),
+      false,
+      `${lease.kind} explicit release is not a production-writer release`,
+    );
+  }
+  assert.equal(
+    writerReleaseEvidence({
+      recordedLeaseKind: null,
+      recordedLeaseId: "lease-none",
+      releasedLeaseId: "lease-none",
+      recordedIdentity: RECORDED,
+      liveness: "DEAD_CONFIRMED",
+      livenessAskedAbout: RECORDED,
+    }),
+    false,
+  );
+});
+
+test("a probe that returns a different pid does not set the writer-release fact", async () => {
+  // Defect: resolveWriterLiveness compared the recorded identity to itself whenever
+  // askWriterLiveness was not injected, so a reused pid still granted the field.
+  const result = await runWith({
+    neverWait: true,
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      {
+        outcome: "FOUND",
+        reason: "reused-slot",
+        pid: OTHER_IDENTITY.pid,
+        creationDate: OTHER_IDENTITY.creationDate,
+        executablePath: OTHER_IDENTITY.executablePath,
+        runNonce: OTHER_IDENTITY.runNonce,
+      },
+    ]),
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    leases: {
+      list: () => [],
+      save() {
+        // No explicit release and no injected askWriterLiveness.
+      },
+    },
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+});
+
+test("an unobservable spawn is recorded as attempted, not as never started", async () => {
+  // Defect: captureProcessIdentity failure left processIdentity null and never
+  // recorded a spawn, so answersAfterReboot().started was false and recovery relaunched.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const spawn = trackingSpawn(() => exitingProcess());
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    spawn,
+    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }) },
+  });
+  assert.equal(spawn.calls, 1, result.reason);
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.processIdentity, null);
+
+  const raw = fs.files.get(join(RUN_ROOT, "intent.json"));
+  assert.ok(raw, "intent.json must exist after spawn");
+  const parsed = runIntentFrom(JSON.parse(raw) as unknown);
+  assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.reason);
+  if (!parsed.ok) return;
+  assert.equal(parsed.intent.spawnAttemptedAt, NOW);
+  assert.equal(parsed.intent.spawnPid, RECORDED.pid);
+  assert.equal(parsed.intent.processIdentity, null);
+  assert.equal(parsed.intent.spawnObservedAt, null);
+
+  const answers = answersAfterReboot(parsed.intent);
+  assert.equal(answers.started, true, "a spawn that returned must not look like it never started");
+  assert.equal(answers.spawnPid, RECORDED.pid);
+  assert.equal(answers.spawnAttemptedAt, NOW);
 });
 
 // ---------------------------------------------------------------------------

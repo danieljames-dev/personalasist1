@@ -57,6 +57,18 @@ test("Grok 1.0.3 argv is the measured flag list, including --no-plan", () => {
   });
 });
 
+test("a reviewer Grok launch uses the permission mode that cannot write", () => {
+  withFixture((input) => {
+    const result = adapterNamed("grok").build({ ...input, role: "ADVERSARIAL_REVIEW" });
+    assert.equal(result.ok, true, result.ok ? "" : result.reason);
+    assert.ok(result.launch);
+    const modeIndex = result.launch.argv.indexOf("--permission-mode");
+    assert.ok(modeIndex >= 0);
+    assert.equal(result.launch.argv[modeIndex + 1], "dontAsk", "a review that can write is not a review");
+    assert.equal(result.launch.argv.includes("--always-approve"), false);
+  });
+});
+
 test("Claude 2.1.231 argv is -p and the prompt file path", () => {
   withFixture((input) => {
     const result = adapterNamed("claude").build(input);

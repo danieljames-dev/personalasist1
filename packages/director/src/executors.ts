@@ -255,8 +255,8 @@ export interface LaunchPlanV1 {
  *
  * The old body chose flags from a capability bitset (reviewer permission mode, long-form
  * print, optional prompt-file). That list is what launched four Grok runs that exited 0
- * having written nothing. The adapter list is the one that was measured. Role is accepted
- * so the signature stays stable; it does not select flags.
+ * having written nothing. The adapter list is the one that was measured. Role is forwarded
+ * so the adapter can refuse write permission for ADVERSARIAL_REVIEW; it does not rebuild argv.
  *
  * `runNonce` is required by the adapter (it must not appear on argv). Callers that have not
  * minted one yet must pass the nonce they will persist on the intent.
@@ -278,6 +278,7 @@ export function buildLaunchPlan(input: {
     promptPath: input.promptPath,
     cwd: input.cwd,
     runNonce: input.runNonce,
+    role: input.role,
   });
   if (!built.ok || built.launch === null) {
     return { ok: false, plan: null, reason: built.reason };

@@ -242,6 +242,23 @@ export function livenessGrants(liveness: ProcessLivenessV1): LivenessGrantV1 {
 }
 
 /**
+ * The identity a probe actually saw, not the identity we recorded at spawn.
+ *
+ * A comparison that uses the recorded record as both sides cannot fail. Missing fields stay
+ * missing: a FOUND observation that did not produce a nonce is not given the recorded one.
+ */
+export function identityFromObservation(observation: ProcessObservationV1): ExecutorProcessIdentityV1 | null {
+  if (observation.outcome !== "FOUND") return null;
+  if (!isUsablePid(observation.pid)) return null;
+  const creationDate = asUsableToken(observation.creationDate);
+  const executablePath = asUsableToken(observation.executablePath);
+  const runNonce = asUsableToken(observation.runNonce);
+  if (creationDate === null || executablePath === null || runNonce === null) return null;
+  if (!isResolvedHostPath(executablePath)) return null;
+  return { pid: observation.pid, creationDate, executablePath, runNonce };
+}
+
+/**
  * Orphan: a nonce or executable mismatch, or a dead parent with a live child.
  *
  * `UNKNOWN` never produces an orphan finding. A probe that could not answer is not evidence the
