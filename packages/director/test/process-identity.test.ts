@@ -792,7 +792,7 @@ test("a parentless row created before the floor does not make the scan undecidab
   assert.equal(interpreted.outcome, "SCANNED");
 });
 
-test("the orphan-scan hit predicate emits every parentless row", () => {
+test("a parentless readable row that is not a descendant is machine noise, not a tree member", () => {
   let script = "";
   const scanner = createWindowsOrphanScanner({
     spawnSync: (_cmd, args) => {
@@ -803,16 +803,7 @@ test("the orphan-scan hit predicate emits every parentless row", () => {
   scanner({ runNonce: NONCE_A, createdNotBefore: "", holderPid: 4812 });
   const hit = /if \(\$n -eq \$target -or \$isDesc -or \(([^)]+)\)\)/.exec(script);
   assert.ok(hit, "the generated script must contain the hit predicate");
-  const third = hit[1] ?? "";
-  // A readable parentless leaf (double-fork: env read, parent gone) must be
-  // a hit. Gating the third disjunct on -not $nonceReadable drops that row
-  // before interpret can mark the scan UNAVAILABLE.
-  assert.equal(
-    third.includes("$nonceReadable"),
-    false,
-    `third disjunct still depends on nonce readability: ${third}`,
-  );
-  assert.match(third, /-not \$parentPresent/);
+  assert.equal(hit[1], "-not $nonceReadable -and -not $parentPresent");
 });
 
 test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVAILABLE", () => {

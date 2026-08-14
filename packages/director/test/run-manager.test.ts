@@ -2492,6 +2492,15 @@ test("a clean run passes all ten success conjuncts", async () => {
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
 
+test("executorTreeIsGone success names that no process of this run's tree was found", async () => {
+  const result = await runWith({ neverWait: true });
+  assert.equal(finding(result, "executorTreeIsGone").ok, true, result.reason);
+  assert.equal(
+    finding(result, "executorTreeIsGone").reason,
+    "no process of this run's tree was found",
+  );
+});
+
 test("an artifact whose realpath escapes the run root fails declaredArtifactsInsideRunRoot", async () => {
   const result = await runWith({
     neverWait: true,

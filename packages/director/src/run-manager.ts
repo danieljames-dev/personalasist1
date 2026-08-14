@@ -1699,6 +1699,34 @@ function persistLeaseHolder(
   return updated;
 }
 
+/**
+ * The eighth success conjunct: whether this run's executor tree was observed
+ * gone enough that the next run may take the writer lease.
+ *
+ * KNOWN LIMIT. What is proven: no process carrying this run's nonce remains;
+ * no descendant of the recorded holder in the CIM ParentProcessId chain
+ * remains; no parentless row created inside this run's window whose
+ * environment could not be read remains; the recorded holder is
+ * DEAD_CONFIRMED or the owned handle settled after a capture-time NOT_FOUND.
+ *
+ * What is not proven: a child that double-forks and scrubs the grandchild's
+ * environment breaks both proxies at once — one intervening exit breaks the
+ * ancestry chain and a readable environment with no nonce defeats the
+ * environment test. Executed evidence: holder -> mid -> leaf, mid exits
+ * (standard daemonize double-fork); the live leaf's CIM ParentProcessId is
+ * the dead mid (absent from the rows); the orphan scan returns [] and this
+ * function reports success. That is not "the executor process tree is gone".
+ *
+ * The durable fix: assign the child to a Windows Job Object created with
+ * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and enumerate
+ * JOBOBJECT_BASIC_PROCESS_ID_LIST for membership. The handle must be held
+ * open for the life of the run, so it needs a sidecar process that outlives
+ * the spawn (Add-Type P/Invoke is already used in process-identity, so no
+ * native addon is required). Do not attempt it in this commit.
+ *
+ * The conjunct key stays `executorTreeIsGone`. The reason string is the
+ * honest claim.
+ */
 function describeExecutorTree(input: {
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly observation: ProcessObservationV1 | null;
@@ -1748,7 +1776,7 @@ function describeExecutorTree(input: {
       reason: `leftover processes remain after kill: ${input.leftoverRemaining.map((item) => item.pid).join(", ")}`,
     };
   }
-  return { ok: true, reason: "the executor process tree is gone" };
+  return { ok: true, reason: "no process of this run's tree was found" };
 }
 
 function artifactsConfinedToRunRoot(input: {
