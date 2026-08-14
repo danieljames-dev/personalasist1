@@ -69,13 +69,63 @@ const withTruth = (deploymentTruth: DeploymentTruthV1): MissionContextV1 => ({ .
 // ---------------------------------------------------------------------------
 
 /**
- * Breadth-first over (state x truth), reporting every route on which `permits` allowed a write.
+ * A machine the search can drive: same shape as `advance`, so a defective one is substitutable.
  *
- * `permits` is a parameter so the same search can be pointed at a deliberately defective rule. A
- * search that has never been shown to fail is not evidence of anything, and the model this replaces
- * passed a green 1,704-test suite while 26 routes were open.
+ * The previous version of this harness took a `permits` *predicate* and used it only to compute a
+ * label, while every transition still came from the real `advance`. It therefore counted refusals as
+ * routes: with an always-permit rule it reported 70 "routes" of which 69 were refusals relabelled,
+ * and the shortest had length 1 — emitted at the start node before any move was made. All three of
+ * its assertions passed against that garbage. A harness whose entire job is proving the other tests
+ * have teeth is the last place a label may stand in for an execution.
  */
-function findSecondDeploys(permits: (truth: DeploymentTruthV1) => boolean): { routes: string[][]; visited: number; reached: number } {
+type MissionMachineV1 = (
+  state: MissionStateV1,
+  event: (typeof MISSION_EVENT_KINDS)[number],
+  resumeState: MissionStateV1 | null,
+  options: { context: MissionContextV1 },
+) => ReturnType<typeof advance>;
+
+/** The accepted machine. */
+const acceptedMachine: MissionMachineV1 = (state, event, resumeState, options) =>
+  advance(state, event, resumeState, options);
+
+/**
+ * The machine as it behaved before durable deployment truth existed.
+ *
+ * Deployment was permitted by the five prerequisites alone — reaching `READY_FOR_DEPLOYMENT` with a
+ * satisfied board was the whole of the authority to write production. It really moves: the search
+ * below sees `ok: true` and a transition to `DEPLOYING`, so a counterexample it reports is a sequence
+ * of moves the defective machine actually made, not a refusal wearing a label.
+ */
+const breadcrumbMachine: MissionMachineV1 = (state, event, resumeState, options) => {
+  const real = advance(state, event, resumeState, options);
+  if (event !== "DEPLOY_STARTED" || real.ok) return real;
+  const board = options.context;
+  const prerequisitesMet = board.unresolvedRequiredGates === 0
+    && board.postIntegrationVerificationPassed
+    && board.deploymentDependenciesSatisfied
+    && board.deploymentAuthorityPresent
+    && board.productionWriterLeaseAvailable;
+  if (state !== "READY_FOR_DEPLOYMENT" || !prerequisitesMet) return real;
+  return {
+    ...real,
+    ok: true,
+    to: "DEPLOYING",
+    reason: "the pre-repair machine deployed on prerequisites alone",
+    deploymentTruth: "MAY_HAVE_WRITTEN",
+    missing: [],
+  };
+};
+
+/**
+ * Drive `machine` breadth-first over (state x truth) and return the sequences on which it really
+ * wrote production a second time.
+ *
+ * A counterexample requires all three: the event was `DEPLOY_STARTED`, the machine returned
+ * `ok: true` with `to === "DEPLOYING"`, and the truth it started from was one the accepted model
+ * calls unsafe. A refusal is never a counterexample.
+ */
+function findSecondDeploys(machine: MissionMachineV1): { routes: string[][]; visited: number; reached: number } {
   type Node = { state: MissionStateV1; truth: DeploymentTruthV1 };
   const key = (n: Node) => `${n.state}|${n.truth}`;
   const start: Node = { state: "DEPLOYING", truth: "MAY_HAVE_WRITTEN" };
@@ -89,18 +139,12 @@ function findSecondDeploys(permits: (truth: DeploymentTruthV1) => boolean): { ro
     visited += 1;
     if (TERMINAL_STATES.includes(node.state)) continue;
     for (const event of MISSION_EVENT_KINDS) {
-      // The machine is asked with an all-true context so nothing *else* can be what stops a deploy;
-      // the defective rule is simulated by overriding only the truth question.
-      const moved = advance(node.state, event, null, { context: withTruth(node.truth) });
-      const wouldDeploy = event === "DEPLOY_STARTED" && permits(node.truth);
-      if (!moved.ok || !moved.to) {
-        if (!wouldDeploy) continue;
-        // The real machine refused, but the rule under test would have allowed it: that is the route.
-        routes.push([...path, `${event} -> DEPLOYING (permitted by the rule under test)`]);
-        continue;
-      }
+      const moved = machine(node.state, event, null, { context: withTruth(node.truth) });
+      if (!moved.ok || !moved.to) continue; // a refusal is not a route
       const trail = [...path, `${event} -> ${moved.to}`];
-      if (wouldDeploy) routes.push(trail);
+      if (event === "DEPLOY_STARTED" && moved.to === "DEPLOYING" && !deploymentPermittedByTruth(node.truth)) {
+        routes.push(trail);
+      }
       const next: Node = { state: moved.to, truth: moved.deploymentTruth ?? node.truth };
       if (seen.has(key(next))) continue;
       seen.add(key(next));
@@ -110,64 +154,52 @@ function findSecondDeploys(permits: (truth: DeploymentTruthV1) => boolean): { ro
   return { routes, visited, reached: seen.size };
 }
 
-test("the search finds the known defect when the breadcrumb rule is put back", () => {
-  // A breadcrumb-style rule: deployment is permitted whenever the mission is not literally sitting in
-  // INTERRUPTED with a recorded origin — i.e. exactly the "one checkpoint" shape that failed. The
-  // search must light up. If this ever returns zero, the search has stopped working and the passing
-  // result in the next test means nothing.
-  const breadcrumb = () => true;
-  const { routes } = findSecondDeploys(breadcrumb);
-  assert.ok(routes.length > 0, "the search must be able to find a second-deploy route at all");
-  assert.ok(
-    routes.length >= 5,
-    `a rule that never blocks should expose many routes, found ${routes.length}`,
-  );
-  // And the shortest one should be short — the independent explorer's was four moves.
+test("the search finds a real counterexample when the defective machine is substituted", () => {
+  // Executed against a machine that genuinely moves, so every reported route is a sequence of moves
+  // that machine actually made. If this ever returns zero the search has stopped working, and the
+  // passing result in the next test means nothing.
+  const { routes, visited } = findSecondDeploys(breadcrumbMachine);
+  assert.ok(routes.length > 0, "the defective machine must be caught writing production twice");
   const shortest = routes.reduce((a, b) => (b.length < a.length ? b : a));
-  assert.ok(shortest.length <= 8, `shortest route was ${shortest.length} moves: ${shortest.join(" | ")}`);
+
+  // Printed, not merely asserted. A count above zero is what the broken version of this harness also
+  // reported; an actual executable move sequence is the thing that distinguishes a real search from a
+  // relabelled refusal, so it belongs in the run output where a reader can check it without re-deriving it.
+  console.log(`DEFECTIVE_SECOND_DEPLOY_ROUTES = ${routes.length}`);
+  console.log("SHORTEST_DEFECTIVE_ROUTE =");
+  for (const step of shortest) console.log(`  ${step}`);
+  console.log(`ACCEPTED_SECOND_DEPLOY_ROUTES = ${findSecondDeploys(acceptedMachine).routes.length}`);
+  assert.ok(shortest.length >= 2, `a counterexample is a sequence of moves, not a start node: ${shortest.join(" | ")}`);
+  assert.ok(
+    shortest[shortest.length - 1]?.startsWith("DEPLOY_STARTED -> DEPLOYING"),
+    "every counterexample must end on the move that writes production",
+  );
+  assert.ok(visited > 50, `the search only visited ${visited} nodes, which is not a search`);
+});
+
+test("the accepted machine yields no counterexample the same search finds in the defective one", () => {
+  // Same function, same seeds, same traversal — only the machine differs. That is what makes the
+  // zero below evidence rather than an absence of effort.
+  const defective = findSecondDeploys(breadcrumbMachine);
+  const accepted = findSecondDeploys(acceptedMachine);
+  assert.ok(defective.routes.length > 0, "control: the search must be capable of finding routes");
+  assert.deepEqual(
+    accepted.routes, [],
+    `accepted machine wrote production twice:\n${accepted.routes.map((r) => r.join("\n  ")).join("\n---\n")}`,
+  );
+  assert.ok(accepted.reached > 20, `only ${accepted.reached} distinct (state, truth) pairs were reachable`);
 });
 
 test("no sequence of legal events reaches a second deployment while production is uncertain", () => {
-  // Breadth-first over (state x truth). Truth advances exactly as `advance` says it does, so the
-  // search walks the real machine rather than a summary of it. Any reachable DEPLOY_STARTED from a
-  // non-deployable truth is a counterexample, and the path is reported so it can be read.
-  type Node = { state: MissionStateV1; truth: DeploymentTruthV1 };
-  const key = (n: Node) => `${n.state}|${n.truth}`;
-
-  const start: Node = { state: "DEPLOYING", truth: "MAY_HAVE_WRITTEN" };
-  const seen = new Set<string>([key(start)]);
-  const queue: { node: Node; path: string[] }[] = [{ node: start, path: [] }];
-  const counterexamples: string[][] = [];
-  let visited = 0;
-
-  while (queue.length > 0) {
-    const { node, path } = queue.shift()!;
-    visited += 1;
-    if (TERMINAL_STATES.includes(node.state)) continue;
-    for (const event of MISSION_EVENT_KINDS) {
-      const moved = advance(node.state, event, null, { context: withTruth(node.truth) });
-      if (!moved.ok || !moved.to) continue;
-      const next: Node = { state: moved.to, truth: moved.deploymentTruth ?? node.truth };
-      const trail = [...path, `${event} -> ${moved.to}`];
-      // The whole property in one line: the event that launches a production write is only legal from
-      // a deployable truth. Keyed on the *event*, not on arriving at the state — a mission already in
-      // DEPLOYING that receives a production observation stays in DEPLOYING without writing anything,
-      // and counting that as a second deploy would make the search fail for the wrong reason.
-      if (event === "DEPLOY_STARTED" && !deploymentPermittedByTruth(node.truth)) counterexamples.push(trail);
-      if (seen.has(key(next))) continue;
-      seen.add(key(next));
-      queue.push({ node: next, path: trail });
-    }
-  }
-
+  // The property itself, through the same harness the control test proved has teeth.
+  const { routes, visited, reached } = findSecondDeploys(acceptedMachine);
   assert.deepEqual(
-    counterexamples, [],
-    `reached DEPLOYING while production was uncertain:\n${counterexamples.map((c) => c.join("\n  ")).join("\n---\n")}`,
+    routes, [],
+    `reached DEPLOYING while production was uncertain:\n${routes.map((r) => r.join("\n  ")).join("\n---\n")}`,
   );
-  // The search must actually have explored something; a guard that silently visits one node would
-  // report success forever. The old model's counterexamples were found within four moves.
   assert.ok(visited > 50, `the search only visited ${visited} nodes, which is not a search`);
-  assert.ok(seen.size > 20, `only ${seen.size} distinct (state, truth) pairs were reachable`);
+  assert.ok(reached > 20, `only ${reached} distinct (state, truth) pairs were reachable`);
+
 });
 
 test("the shortest route the independent explorer found is refused", () => {
