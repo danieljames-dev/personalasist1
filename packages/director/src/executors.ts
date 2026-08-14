@@ -92,11 +92,13 @@ export function routeRole(role: ExecutorRoleV1): ExecutorNameV1 {
  * as a unit and removed before the redirect check, so a lone `>` stays a metacharacter. A lookbehind
  * on `=` would treat every `>` after `=` the same way; the exception is the arrow, not the `=`.
  *
- * Tokens that already name one fixed host place are exempt from `& $ \` ;` — those are legal NTFS
+ * Tokens that already name one fixed host place are exempt from `& $` — those are legal NTFS
  * name characters (`R&D`, `\\host\C$`). `< > |` and newlines are not legal names and stay refused.
+ * `;` is a command separator; no argv this Director emits contains one, so a token that
+ * parses as a host path and contains `;` is refused like any other token.
  */
 const SHELL_METACHARACTERS = /[;&|`$<\n\r]|\$\(|&&|\|\|/;
-const PATH_ILLEGAL_SHELL = /[|<>\n\r]/;
+const PATH_ILLEGAL_SHELL = /[;|<>\n\r]/;
 
 export function argvIsSafe(argv: readonly string[]): { safe: boolean; offending: string | null } {
   for (const token of argv) {
@@ -108,9 +110,9 @@ export function argvIsSafe(argv: readonly string[]): { safe: boolean; offending:
 function tokenCarriesShellMetacharacters(token: string): boolean {
   // Consume `=>` as one token so a leftover `>` is still a redirect.
   const withoutArrows = token.replace(/=>/g, "");
-  // Multi-character operators are never legal path names. Test them on every
-  // token before the host-path exemption, which exists only for `&`, `$`, `;`.
-  if (/\$\(|&&|\|\|/.test(withoutArrows) || withoutArrows.includes("`")) {
+  // Multi-character operators and `;` are never legal in argv. Test them on
+  // every token before the host-path exemption, which exists only for `&`, `$`.
+  if (/\$\(|&&|\|\|/.test(withoutArrows) || withoutArrows.includes("`") || withoutArrows.includes(";")) {
     return true;
   }
   if (inspectHostPath(token).identifiable) {

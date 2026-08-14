@@ -791,3 +791,70 @@ test("a parentless row created before the floor does not make the scan undecidab
   });
   assert.equal(interpreted.outcome, "SCANNED");
 });
+
+test("the orphan-scan hit predicate emits every parentless row", () => {
+  let script = "";
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: (_cmd, args) => {
+      script = String(args[3] ?? "");
+      return { status: 0, stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}", stderr: "" };
+    },
+  });
+  scanner({ runNonce: NONCE_A, createdNotBefore: "", holderPid: 4812 });
+  const hit = /if \(\$n -eq \$target -or \$isDesc -or \(([^)]+)\)\)/.exec(script);
+  assert.ok(hit, "the generated script must contain the hit predicate");
+  const third = hit[1] ?? "";
+  // A readable parentless leaf (double-fork: env read, parent gone) must be
+  // a hit. Gating the third disjunct on -not $nonceReadable drops that row
+  // before interpret can mark the scan UNAVAILABLE.
+  assert.equal(
+    third.includes("$nonceReadable"),
+    false,
+    `third disjunct still depends on nonce readability: ${third}`,
+  );
+  assert.match(third, /-not \$parentPresent/);
+});
+
+test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVAILABLE", () => {
+  // Row the fixed script emits for a double-fork leaf: env readable, no
+  // nonce, parent is the dead mid (not in the CIM snapshot).
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      unreadable: 0,
+      processes: [{
+        pid: 14436,
+        creationDate: "2026-08-14T14:00:05.000Z",
+        runNonce: null,
+        parentPid: 13828,
+        nonceReadable: true,
+        parentPresent: false,
+      }],
+    }),
+    stderr: "",
+    createdNotBefore: "2026-08-14T14:00:00.000Z",
+    runNonce: NONCE_A,
+  });
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
+});
+
+test("a parentless row carrying this run's nonce after the floor stays SCANNED", () => {
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      processes: [{
+        pid: 14436,
+        parentPresent: false,
+        nonceReadable: true,
+        runNonce: NONCE_A,
+        creationDate: "2026-08-14T14:00:05.000Z",
+      }],
+    }),
+    stderr: "",
+    createdNotBefore: "2026-08-14T14:00:00.000Z",
+    runNonce: NONCE_A,
+  });
+  assert.equal(interpreted.outcome, "SCANNED");
+});

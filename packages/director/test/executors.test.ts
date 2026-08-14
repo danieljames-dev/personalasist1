@@ -75,3 +75,18 @@ test("multi-character operators are refused even when the token parses as a path
     "--max-turns", "50",
   ]).safe, true);
 });
+
+test("a semicolon inside an identifiable host path is refused", () => {
+  assert.equal(inspectHostPath("C:/wt-a; calc.exe").identifiable, true);
+  assert.equal(argvIsSafe(["C:/wt-a; calc.exe"]).safe, false);
+  assert.equal(argvIsSafe(["C:/R&D/notes.md"]).safe, true);
+  assert.equal(argvIsSafe([String.raw`\\host\C$\x`]).safe, true);
+  assert.equal(argvIsSafe([
+    "--prompt-file", "C:\\wt\\PROMPT.md",
+    "--cwd", "C:\\wt",
+    "--permission-mode", "bypassPermissions",
+    "--always-approve",
+    "--no-plan",
+    "--max-turns", "50",
+  ]).safe, true);
+});
