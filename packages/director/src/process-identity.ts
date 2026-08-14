@@ -277,7 +277,8 @@ export function detectOrphan(input: {
   }
 
   if (observed.outcome === "FOUND") {
-    if (observed.runNonce !== undefined && observed.runNonce !== null && observed.runNonce !== recorded.runNonce) {
+    const observedNonce = asUsableToken(observed.runNonce);
+    if (observedNonce !== null && observedNonce !== recorded.runNonce) {
       return {
         orphan: true,
         kind: "NONCE_MISMATCH",
@@ -557,6 +558,17 @@ export function isUsablePid(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER;
 }
 
+/**
+ * The single spelling of a run nonce: trimmed, no control bytes.
+ *
+ * Persist, the child environment, and the orphan scan must all see this token.
+ * Comparing a raw request string to a trimmed record is how a live grandchild
+ * used to disappear from the writer-release decision.
+ */
+export function normaliseRunNonce(value: unknown): string | null {
+  return asUsableToken(value);
+}
+
 function asUsableToken(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -592,6 +604,17 @@ function parentPidField(value: unknown): { parentPid: number } | Record<string, 
   return isUsablePid(value) ? { parentPid: value } : {};
 }
 
+/**
+ * Best-effort nonce from a CIM row. This is not a source the writer-exit
+ * proof can rely on.
+ *
+ * The adapter puts `AION_RUN_NONCE` in the child environment and forbids it
+ * on argv. Win32_Process.CommandLine therefore does not carry it. Reading
+ * another process's environment block needs PROCESS_VM_READ of the PEB;
+ * that fails for protected occupants (pid 4 / System has no executablePath
+ * either), elevated children, and WOW64 mismatches. Absence here must not
+ * be treated as identity agreement.
+ */
 function nonceFromThisProcess(
   pid: number,
   commandLine: unknown,

@@ -21,7 +21,12 @@ import {
   type LeaseKindV1,
   type LeaseV1,
 } from "../src/leases.js";
-import type { ExecutorProcessIdentityV1, HostProcessProbe, ProcessObservationV1 } from "../src/process-identity.js";
+import {
+  createWindowsProcessProbe,
+  type ExecutorProcessIdentityV1,
+  type HostProcessProbe,
+  type ProcessObservationV1,
+} from "../src/process-identity.js";
 import { answersAfterReboot, runIntentFrom } from "../src/run-intent.js";
 import {
   CANCEL_HARD_MS,
@@ -30,7 +35,9 @@ import {
   createNodeSpawner,
   createNodeWait,
   executeRun,
+  isWriterExitProof,
   killProcessTreeStandIn,
+  proveWriterExit,
   writerReleaseEvidence,
   type CapacityGateV1,
   type ExecuteRunRequestV1,
@@ -40,6 +47,7 @@ import {
   type SpawnFnV1,
   type SpawnHandleV1,
   type SuccessConjunctNameV1,
+  type WriterExitProofInputV1,
 } from "../src/run-manager.js";
 
 const NOW = "2026-08-13T12:00:00.000Z";
@@ -67,6 +75,22 @@ const OTHER_IDENTITY: ExecutorProcessIdentityV1 = {
   executablePath: "C:\\Tools\\other.exe",
   runNonce: "nonce-other",
 };
+
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+
+function writerProofInput(over: Partial<WriterExitProofInputV1> = {}): WriterExitProofInputV1 {
+  return {
+    recordedLeaseKind: "PRODUCTION_WRITER",
+    recordedLeaseId: "lease-pw-1",
+    releasedLeaseId: "lease-pw-1",
+    recordedIdentity: RECORDED,
+    observation: HOLDER_GONE,
+    probedPid: RECORDED.pid,
+    orphanScanPerformed: true,
+    orphanSightings: [],
+    ...over,
+  };
+}
 
 function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -573,8 +597,9 @@ test("a held lease with free capacity does not spawn", async () => {
 // Entry criterion 3 — writer release evidence
 // ---------------------------------------------------------------------------
 
-test("UNKNOWN liveness does not set the writer-release fact", async () => {
-  // Defect: a failed probe, or "we could not see a writer", recorded as the writer finished.
+test("UNKNOWN liveness with a landed production-writer release is not an exit proof", async () => {
+  // Defect: `if (liveness === "ALIVE") return false` let UNKNOWN and null fall through
+  // to true once the lease release had landed.
   const result = await runWith({
     neverWait: true,
     probe: sequentialProbe([
@@ -582,41 +607,29 @@ test("UNKNOWN liveness does not set the writer-release fact", async () => {
       { outcome: "UNAVAILABLE", reason: "access-denied" },
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    leases: {
-      list: () => [],
-      save() {
-        // Release does not land. The fact must not be inferred from UNKNOWN instead.
-      },
-    },
+    scanOrphans: () => [],
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
-    writerReleaseEvidence({
-      recordedLeaseKind: "PRODUCTION_WRITER",
-      recordedLeaseId: "lease-pw-1",
-      releasedLeaseId: null,
-      recordedIdentity: RECORDED,
-      liveness: "UNKNOWN",
-      livenessAskedAbout: RECORDED,
-      stillRunning: false,
-      orphanScan: { performed: true, liveSightings: [] },
-    }),
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
+      observation: { outcome: "UNAVAILABLE", reason: "access-denied" },
+    }))),
     false,
   );
 });
 
-test("DEAD_CONFIRMED for a different identity does not set the writer-release fact", async () => {
-  // Defect: any DEAD_CONFIRMED — including death of a different pid/nonce — set the fact.
+test("a liveness answer about a different identity does not produce an exit proof", async () => {
+  // Defect: askWriterLiveness supplied subject OTHER + NOT_FOUND. holderLiveness used
+  // the caller subject, identityFromObservation(NOT_FOUND) was null, the guard skipped,
+  // and a landed release set the field.
   const result = await runWith({
     neverWait: true,
-    probe: probeFound(RECORDED),
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      foundObservation(RECORDED),
+    ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    leases: {
-      list: () => [],
-      save() {
-        // No explicit release of this run's recorded lease id.
-      },
-    },
+    scanOrphans: () => [],
     askWriterLiveness: () => ({
       subject: OTHER_IDENTITY,
       observation: { outcome: "NOT_FOUND", reason: "gone" },
@@ -624,23 +637,17 @@ test("DEAD_CONFIRMED for a different identity does not set the writer-release fa
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
-    writerReleaseEvidence({
-      recordedLeaseKind: "PRODUCTION_WRITER",
-      recordedLeaseId: "lease-pw-1",
-      releasedLeaseId: "lease-pw-1",
-      recordedIdentity: RECORDED,
-      liveness: "DEAD_CONFIRMED",
-      livenessAskedAbout: OTHER_IDENTITY,
-      stillRunning: false,
-      orphanScan: { performed: true, liveSightings: [] },
-    }),
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
+      observation: { outcome: "NOT_FOUND", reason: "gone" },
+      probedPid: OTHER_IDENTITY.pid,
+    }))),
     false,
   );
 });
 
-test("a production-writer lease release is evidence only after confirmed exit and an empty orphan scan", async () => {
-  // Was: "an explicit release of this run's recorded production-writer lease id is the fact itself".
-  // That encoded the defect: releasedLeaseId === heldLease.leaseId with no process observation.
+test("a production-writer lease release is evidence only after a constructed exit proof", async () => {
+  // Was: a bag of fields with releasedLeaseId === recordedLeaseId set the boolean.
+  // The field is now true only when proveWriterExit returns a branded proof.
   const result = await runWith({
     neverWait: true,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
@@ -651,21 +658,22 @@ test("a production-writer lease release is evidence only after confirmed exit an
     scanOrphans: () => [],
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
-  const proven = {
-    recordedLeaseKind: "PRODUCTION_WRITER" as const,
-    recordedLeaseId: "lease-pw-1",
-    releasedLeaseId: "lease-pw-1",
-    recordedIdentity: RECORDED,
-    liveness: "DEAD_CONFIRMED" as const,
-    livenessAskedAbout: null,
-    stillRunning: false,
-    orphanScan: { performed: true, liveSightings: [] as const },
-  };
-  assert.equal(writerReleaseEvidence(proven), true);
-  assert.equal(writerReleaseEvidence({ ...proven, stillRunning: null }), false);
+  const proof = proveWriterExit(writerProofInput());
+  assert.ok(proof);
+  assert.equal(isWriterExitProof(proof), true);
+  assert.equal(writerReleaseEvidence(proof), true);
+  assert.equal(writerReleaseEvidence(null), false);
+  assert.equal(writerReleaseEvidence(writerProofInput()), false, "a field bag is not a proof");
   assert.equal(
-    writerReleaseEvidence({ ...proven, orphanScan: { performed: false, liveSightings: [] } }),
+    writerReleaseEvidence(proveWriterExit(writerProofInput({ orphanScanPerformed: false }))),
     false,
+  );
+  assert.equal(
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
+      observation: foundObservation(RECORDED),
+    }))),
+    false,
+    "ALIVE is not DEAD_CONFIRMED",
   );
 });
 
@@ -688,16 +696,7 @@ test("DEAD_CONFIRMED of this run's identity is not writer-release evidence", asy
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
-    writerReleaseEvidence({
-      recordedLeaseKind: "PRODUCTION_WRITER",
-      recordedLeaseId: "lease-pw-1",
-      releasedLeaseId: null,
-      recordedIdentity: RECORDED,
-      liveness: "DEAD_CONFIRMED",
-      livenessAskedAbout: RECORDED,
-      stillRunning: false,
-      orphanScan: { performed: true, liveSightings: [] },
-    }),
+    writerReleaseEvidence(proveWriterExit(writerProofInput({ releasedLeaseId: null }))),
     false,
   );
 });
@@ -719,6 +718,7 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
         { outcome: "NOT_FOUND", reason: "gone" },
       ]),
       request: { lease },
+      scanOrphans: () => [],
     });
     assert.equal(
       result.productionWriterLeaseReleasedByThisRun,
@@ -726,31 +726,21 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
       `${lease.kind} must not set the production-writer field`,
     );
     assert.equal(
-      writerReleaseEvidence({
+      writerReleaseEvidence(proveWriterExit(writerProofInput({
         recordedLeaseKind: lease.kind,
         recordedLeaseId: lease.leaseId,
         releasedLeaseId: lease.leaseId,
-        recordedIdentity: RECORDED,
-        liveness: "DEAD_CONFIRMED",
-        livenessAskedAbout: RECORDED,
-        stillRunning: false,
-        orphanScan: { performed: true, liveSightings: [] },
-      }),
+      }))),
       false,
       `${lease.kind} explicit release is not a production-writer release`,
     );
   }
   assert.equal(
-    writerReleaseEvidence({
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
       recordedLeaseKind: null,
       recordedLeaseId: "lease-none",
       releasedLeaseId: "lease-none",
-      recordedIdentity: RECORDED,
-      liveness: "DEAD_CONFIRMED",
-      livenessAskedAbout: RECORDED,
-      stillRunning: false,
-      orphanScan: { performed: true, liveSightings: [] },
-    }),
+    }))),
     false,
   );
 });
@@ -838,16 +828,12 @@ test("a production writer that ignores kill and survives killTree does not relea
     "PRODUCTION_WRITER must stay held while the child is alive",
   );
   assert.equal(
-    writerReleaseEvidence({
-      recordedLeaseKind: "PRODUCTION_WRITER",
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
       recordedLeaseId: "lease-pw-survive",
       releasedLeaseId: "lease-pw-survive",
-      recordedIdentity: RECORDED,
-      liveness: "ALIVE",
-      livenessAskedAbout: RECORDED,
-      stillRunning: true,
-      orphanScan: { performed: true, liveSightings: [{ pid: hung.pid, runNonce: NONCE }] },
-    }),
+      observation: foundObservation(RECORDED),
+      orphanSightings: [{ pid: hung.pid, runNonce: NONCE }],
+    }))),
     false,
   );
 });
@@ -872,17 +858,133 @@ test("a clean parent exit with a live nonce-bearing child is not writer-release 
     "a live child carrying the nonce must leave the production-writer lease held",
   );
   assert.equal(
-    writerReleaseEvidence({
-      recordedLeaseKind: "PRODUCTION_WRITER",
-      recordedLeaseId: "lease-pw-1",
-      releasedLeaseId: "lease-pw-1",
-      recordedIdentity: RECORDED,
-      liveness: "DEAD_CONFIRMED",
-      livenessAskedAbout: null,
-      stillRunning: false,
-      orphanScan: { performed: true, liveSightings: [{ pid: 7777, runNonce: NONCE, creationDate: T0 }] },
-    }),
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
+      orphanSightings: [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+    }))),
     false,
+  );
+});
+
+test("FOUND without executablePath does not produce an exit proof", async () => {
+  // Defect: Windows observe(4) is FOUND + creationDate + name "System" and no
+  // executablePath → holderLiveness UNKNOWN → the ALIVE denylist fell through to true.
+  const result = await runWith({
+    neverWait: true,
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      {
+        outcome: "FOUND",
+        reason: "cim",
+        pid: RECORDED.pid,
+        creationDate: RECORDED.creationDate,
+        name: "System",
+      },
+    ]),
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    scanOrphans: () => [],
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
+      observation: {
+        outcome: "FOUND",
+        reason: "cim",
+        pid: RECORDED.pid,
+        creationDate: RECORDED.creationDate,
+        name: "System",
+      },
+    }))),
+    false,
+  );
+});
+
+test("a mismatched runNonce does not produce an exit proof", async () => {
+  // Defect: identityFromObservation is null on real CIM output (nonce lives in
+  // the environment, never argv), so the identity guard never ran. A FOUND
+  // occupant with a different nonce is UNKNOWN, and UNKNOWN plus a landed
+  // release used to set the field.
+  const result = await runWith({
+    neverWait: true,
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      {
+        outcome: "FOUND",
+        reason: "injected",
+        pid: RECORDED.pid,
+        creationDate: RECORDED.creationDate,
+        executablePath: RECORDED.executablePath,
+        runNonce: "a-totally-different-run",
+      },
+    ]),
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    scanOrphans: () => [],
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(
+    writerReleaseEvidence(proveWriterExit(writerProofInput({
+      observation: {
+        outcome: "FOUND",
+        reason: "injected",
+        pid: RECORDED.pid,
+        creationDate: RECORDED.creationDate,
+        executablePath: RECORDED.executablePath,
+        runNonce: "a-totally-different-run",
+      },
+    }))),
+    false,
+  );
+});
+
+test("a throwing liveness probe denies the field and still writes a durable result", async () => {
+  // Defect: resolveWriterLiveness did not wrap probe.observe. A WMI-down throw
+  // rejected executeRun after finally had already released the PRODUCTION_WRITER
+  // lease, and no result.json was written.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  let observes = 0;
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    probe: {
+      observe() {
+        observes += 1;
+        if (observes === 1) return foundObservation(RECORDED);
+        throw new Error("RPC server unavailable");
+      },
+    },
+    scanOrphans: () => [],
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  const raw = fs.files.get(join(RUN_ROOT, "result.json"));
+  assert.ok(raw, "a throwing probe must still write result.json");
+  const parsed = JSON.parse(raw) as { productionWriterLeaseReleasedByThisRun: boolean };
+  assert.equal(parsed.productionWriterLeaseReleasedByThisRun, false);
+});
+
+test("a padded request nonce still identifies a live grandchild as an orphan", async () => {
+  // Defect: persist trimmed the nonce, the env and scan query used the raw
+  // request string, and the inline compare never matched the recorded token.
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: {
+      lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" },
+      runNonce: `  ${NONCE}  `,
+    },
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "parent gone" },
+    ]),
+    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-1"),
+    "a live grandchild of the normalised nonce must leave the writer lease held",
   );
 });
 
@@ -977,6 +1079,59 @@ test("a real node process is spawned with shell false and its exit is collected"
     assert.equal(result.exitCode, 0);
     assert.equal(result.conjunction.findings[0]?.name, "processExitedWithKnownSuccessCode");
     assert.equal(finding(result, "processExitedWithKnownSuccessCode").ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release produce the proof", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aion-writer-exit-"));
+  try {
+    const hostProbe = createWindowsProcessProbe();
+    let captureDone = false;
+    const probe: HostProcessProbe = {
+      observe(pid) {
+        if (!captureDone) {
+          captureDone = true;
+          return hostProbe.observe(pid);
+        }
+        return { outcome: "NOT_FOUND", reason: "exited" };
+      },
+    };
+    const leases = memoryLeases();
+    const result = await executeRun(
+      request({
+        cwd: dir,
+        worktree: dir,
+        runRoot: join(dir, "run"),
+        executablePath: process.execPath,
+        argv: ["-e", "setTimeout(() => process.exit(0), 8000)"],
+        runNonce: "nonce-real-exit-proof",
+        timeoutMs: 15_000,
+        lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-real" },
+      }),
+      {
+        clock: createFixedClock(NOW),
+        fs: createNodeRunFileSystem(),
+        spawn: createNodeSpawner(),
+        git: matchingGit(),
+        probe,
+        capacity: memoryCapacity(),
+        leases,
+        wait: createNodeWait(),
+        killTree: killProcessTreeStandIn,
+        scanOrphans: () => [],
+      },
+    );
+    assert.equal(result.spawned, true, result.reason);
+    assert.equal(result.exitCode, 0, result.reason);
+    assert.ok(result.processIdentity, "identity must be captured while the child is alive");
+    assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
+    assert.equal(
+      leases.list().some((item) => item.leaseId === "lease-pw-real"),
+      false,
+      "the production-writer lease must have been released",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

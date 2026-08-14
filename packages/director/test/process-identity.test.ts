@@ -17,6 +17,7 @@ import {
   identityFromObservation,
   interpretWindowsProbeOutput,
   livenessGrants,
+  normaliseRunNonce,
   processIdentityFrom,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -165,6 +166,19 @@ test("a pid-only observation cannot confirm the holder", () => {
 // ---------------------------------------------------------------------------
 // Orphans
 // ---------------------------------------------------------------------------
+
+test("detectOrphan compares the normalised nonce, not the raw spelling", () => {
+  const padded = found({ runNonce: `  ${NONCE_A}  ` });
+  const orphan = detectOrphan({ recorded: RECORDED, observed: padded });
+  assert.equal(orphan.orphan, false);
+  assert.notEqual(orphan.kind, "NONCE_MISMATCH");
+});
+
+test("normaliseRunNonce is the single spelling used for persist, env, and scan", () => {
+  assert.equal(normaliseRunNonce(`  ${NONCE_A}  `), NONCE_A);
+  assert.equal(normaliseRunNonce(""), null);
+  assert.equal(normaliseRunNonce("\u0000x"), null);
+});
 
 test("a live occupant whose nonce is not the recorded nonce is an orphan, not the holder", () => {
   // Defect: pid + creationDate + exe match, nonce ignored, reclaim or attach proceeds.
