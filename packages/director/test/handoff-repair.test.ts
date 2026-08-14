@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  parseHandoff, findHandoffContradictions, handoffIsTrustworthy, artifactPathWithinRoot,
+  parseHandoff, findHandoffContradictions, artifactPathWithinRoot,
   HANDOFF_SCHEMA_V1, HANDOFF_MAX_BYTES, HANDOFF_MAX_ARTIFACTS,
   type ExecutorHandoffV1,
 } from "../src/handoff.js";
@@ -283,7 +283,7 @@ test("contradictions against observation are still found", () => {
   assert.ok(fields.includes("headAfter"), "a SHA nobody can find is not a SHA");
   assert.ok(fields.includes("branch"), "a run on another branch is not this run");
   assert.ok(fields.includes("productionMutated"), "production moving during a run that denied it");
-  assert.equal(handoffIsTrustworthy(contradictions), false);
+  assert.notEqual(contradictions.length, 0);
 });
 
 test("any spend at all contradicts the envelope the run was launched under", () => {
@@ -323,7 +323,6 @@ test("a handoff agreeing with observation is trustworthy", () => {
     productionActuallyMutated: false,
   });
   assert.deepEqual(contradictions, []);
-  assert.equal(handoffIsTrustworthy(contradictions), true);
 });
 
 test("a malformed handoff names every problem, not just the first", () => {

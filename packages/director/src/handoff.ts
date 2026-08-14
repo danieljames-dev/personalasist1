@@ -767,12 +767,17 @@ export function findHandoffContradictions(input: {
     });
   }
 
-  if (input.productionActuallyMutated === true && input.handoff.productionMutated === false) {
+  if (
+    typeof input.productionActuallyMutated === "boolean"
+    && input.productionActuallyMutated !== input.handoff.productionMutated
+  ) {
     found.push({
       field: "productionMutated",
-      claimed: "false",
-      observed: "true",
-      detail: "production changed during a run that reported leaving it alone",
+      claimed: String(input.handoff.productionMutated),
+      observed: String(input.productionActuallyMutated),
+      detail: input.productionActuallyMutated
+        ? "production changed during a run that reported leaving it alone"
+        : "the report claims production was mutated; observation and authorisation say it was not",
     });
   }
 
@@ -807,9 +812,4 @@ export function findHandoffContradictions(input: {
   }
 
   return found;
-}
-
-/** True when the handoff and the observations agree well enough to act on. */
-export function handoffIsTrustworthy(contradictions: readonly HandoffContradictionV1[]): boolean {
-  return contradictions.length === 0;
 }

@@ -29,8 +29,6 @@ import { spawnSync } from "node:child_process";
 import type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
 import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
 
-export type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
-
 /** Control bytes, NUL first. Written as escapes; a raw control byte in source is how it reaches a file. */
 const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 

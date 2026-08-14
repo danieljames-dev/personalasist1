@@ -10,10 +10,17 @@
  */
 export * from "./contracts.js";
 export * from "./mission.js";
+export * from "./mission-creation.js";
 export * from "./gates.js";
 export * from "./git-truth.js";
 export * from "./handoff.js";
 export * from "./leases.js";
 export * from "./executors.js";
+export * from "./executor-discovery.js";
+export * from "./executor-adapters.js";
+export * from "./run-intent.js";
+export * from "./process-identity.js";
+export * from "./bounded-log.js";
+export * from "./run-manager.js";
 export * from "./work-items.js";
 export * from "./store-contract.js";

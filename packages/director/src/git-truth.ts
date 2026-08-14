@@ -244,8 +244,22 @@ function normalizePath(path: string): string {
 }
 
 export function verifyGitTruth(
-  snapshot: GitSnapshotV1,
+  source: GitSnapshotV1 | GitObservationV1,
   expectation: GitExpectationV1 = {},
+): GitVerdictV1 {
+  if (isGitObservation(source)) {
+    return verifyGitObservation(source, expectation);
+  }
+  return verifyGitSnapshot(source, expectation);
+}
+
+function isGitObservation(value: GitSnapshotV1 | GitObservationV1): value is GitObservationV1 {
+  return "schema" in value && value.schema === GIT_OBSERVATION_SCHEMA_V1;
+}
+
+function verifyGitSnapshot(
+  snapshot: GitSnapshotV1,
+  expectation: GitExpectationV1,
 ): GitVerdictV1 {
   const findings: GitFindingV1[] = [];
 
@@ -394,6 +408,175 @@ export function verifyGitTruth(
     ok: findings.every((finding) => !finding.blocking),
     findings,
     snapshot,
+  };
+}
+
+/**
+ * Judge a collector observation. Absence is never agreement: UNAVAILABLE status is not a
+ * clean tree, UNAVAILABLE HEAD is not the claimed SHA, and a missing upstream is not
+ * "local equals remote".
+ */
+function verifyGitObservation(
+  observation: GitObservationV1,
+  expectation: GitExpectationV1,
+): GitVerdictV1 {
+  const snapshot = snapshotFromObservation(observation);
+  const findings: GitFindingV1[] = [];
+
+  if (expectation.maxSnapshotAgeMs !== undefined) {
+    const readAt = Date.parse(observation.collectedAt);
+    const now = expectation.now ? Date.parse(expectation.now) : Number.NaN;
+    const ageMs = now - readAt;
+    if (!Number.isFinite(ageMs)) {
+      findings.push({
+        kind: "SNAPSHOT_AGE_UNKNOWN",
+        detail: `freshness was required within ${expectation.maxSnapshotAgeMs}ms but the observation's age cannot be established from collectedAt=${observation.collectedAt} and now=${expectation.now ?? "(absent)"}`,
+        blocking: true,
+      });
+    } else if (ageMs < 0) {
+      findings.push({
+        kind: "SNAPSHOT_AGE_UNKNOWN",
+        detail: `the observation was collected ${-ageMs}ms after the instant it is being judged at; the clocks disagree and an age cannot be trusted`,
+        blocking: true,
+      });
+    } else if (ageMs > expectation.maxSnapshotAgeMs) {
+      findings.push({
+        kind: "STALE_SNAPSHOT",
+        detail: `the reading is ${ageMs}ms old and freshness within ${expectation.maxSnapshotAgeMs}ms was required; this describes the repository as it was, not as it is`,
+        blocking: true,
+      });
+    }
+  }
+
+  const branchNamed = expectation.expectedBranch !== undefined && expectation.expectedBranch !== null;
+  const requireAttached = branchNamed || expectation.requireAttachedBranch === true;
+
+  if (observation.branch.outcome === "UNAVAILABLE" && requireAttached) {
+    findings.push({
+      kind: "BRANCH_MISMATCH",
+      detail: `branch is unavailable; a missing reading is not attachment to ${expectation.expectedBranch ?? "a branch"}: ${observation.branch.reason}`,
+      blocking: true,
+    });
+  } else if (observation.branch.outcome === "DETACHED" && requireAttached) {
+    findings.push({
+      kind: "DETACHED_HEAD",
+      detail: "HEAD is detached; a commit here belongs to no branch and a push would not carry it",
+      blocking: true,
+    });
+  } else if (
+    observation.branch.outcome === "ATTACHED"
+    && branchNamed
+    && observation.branch.name !== expectation.expectedBranch
+  ) {
+    findings.push({
+      kind: "BRANCH_MISMATCH",
+      detail: `on ${observation.branch.name}, expected ${expectation.expectedBranch}`,
+      blocking: true,
+    });
+  }
+
+  if (observation.head.outcome === "UNAVAILABLE") {
+    if (expectation.expectedHead) {
+      findings.push({
+        kind: "HEAD_MISMATCH",
+        detail: `HEAD is unavailable; a missing reading is not ${expectation.expectedHead}: ${observation.head.reason}`,
+        blocking: true,
+      });
+    }
+    if (expectation.claimedHead) {
+      findings.push({
+        kind: "CLAIMED_HEAD_MISMATCH",
+        detail: `executor claimed ${expectation.claimedHead}, repository HEAD is unavailable: ${observation.head.reason}`,
+        blocking: true,
+      });
+    }
+  } else {
+    if (expectation.expectedHead && observation.head.sha !== expectation.expectedHead) {
+      findings.push({
+        kind: "HEAD_MISMATCH",
+        detail: `HEAD is ${observation.head.sha}, expected ${expectation.expectedHead}`,
+        blocking: true,
+      });
+    }
+    if (expectation.claimedHead && observation.head.sha !== expectation.claimedHead) {
+      findings.push({
+        kind: "CLAIMED_HEAD_MISMATCH",
+        detail: `executor claimed ${expectation.claimedHead}, repository shows ${observation.head.sha}`,
+        blocking: true,
+      });
+    }
+  }
+
+  if (expectation.mustDescendFrom && expectation.descendsFromExpected === false) {
+    const headText = observation.head.outcome === "FOUND" ? observation.head.sha : "unavailable HEAD";
+    findings.push({
+      kind: "NOT_A_DESCENDANT",
+      detail: `${headText} does not descend from ${expectation.mustDescendFrom}; this is not a fast-forward`,
+      blocking: true,
+    });
+  }
+
+  if (expectation.requireClean) {
+    if (observation.status.outcome === "UNAVAILABLE") {
+      findings.push({
+        kind: "DIRTY_WORKTREE",
+        detail: `a clean worktree was required but status is unavailable; a missing reading is not a clean tree: ${observation.status.reason}`,
+        blocking: true,
+      });
+    } else if (observation.status.outcome === "DIRTY") {
+      findings.push({
+        kind: "DIRTY_WORKTREE",
+        detail: `${observation.status.dirtyPaths.length} uncommitted path(s): ${observation.status.dirtyPaths.slice(0, 4).join(", ")}`,
+        blocking: true,
+      });
+    }
+  }
+
+  if (expectation.requireLocalEqualsRemote) {
+    if (observation.upstream.outcome === "TRACKING") {
+      if (observation.upstream.ahead !== 0 || observation.upstream.behind !== 0) {
+        findings.push({
+          kind: "LOCAL_REMOTE_DIVERGED",
+          detail: `local is ahead ${observation.upstream.ahead} and behind ${observation.upstream.behind} ${observation.upstream.name}; a push reporting success is not proof`,
+          blocking: true,
+        });
+      }
+    } else {
+      const missing = observation.upstream.outcome === "NO_UPSTREAM"
+        ? "no upstream is configured"
+        : observation.upstream.outcome === "NOT_APPLICABLE"
+          ? "upstream does not apply (HEAD is detached)"
+          : "the upstream reading is unavailable";
+      findings.push({
+        kind: "REMOTE_STATE_UNKNOWN",
+        detail: `local was required to equal remote but ${missing}; a missing reading is an unanswered question, not agreement`,
+        blocking: true,
+      });
+    }
+  }
+
+  return {
+    schema: GIT_TRUTH_SCHEMA_V1,
+    ok: findings.every((finding) => !finding.blocking),
+    findings,
+    snapshot,
+  };
+}
+
+function snapshotFromObservation(observation: GitObservationV1): GitSnapshotV1 {
+  const attachedBranch = observation.branch.outcome === "ATTACHED" ? observation.branch.name : null;
+  const head = observation.head.outcome === "FOUND" ? observation.head.sha : "";
+  const dirtyPaths = observation.status.outcome === "DIRTY" ? observation.status.dirtyPaths : [];
+  return {
+    worktreePath: observation.worktreePath,
+    attachedBranch,
+    head,
+    localBranchHead: attachedBranch !== null && head !== "" ? head : null,
+    remoteBranchHead: null,
+    originMainHead: null,
+    dirtyPaths,
+    largeTrackedFiles: [],
+    readAt: observation.collectedAt,
   };
 }
 
@@ -594,6 +777,8 @@ export interface GitCommandResultV1 {
   readonly stderr: string;
   /** Spawn failure (ENOENT, timeout). Null when Git itself ran and produced a status. */
   readonly error: string | null;
+  /** Directory the runner executed this command in. Absent means the runner did not say. */
+  readonly cwd?: string | null;
 }
 
 /**
@@ -604,6 +789,13 @@ export interface GitCommandResultV1 {
  */
 export interface GitRunner {
   run(argv: readonly string[]): GitCommandResultV1;
+  /**
+   * Directory Git commands actually execute in.
+   *
+   * The collector records this, never a caller-supplied label. A runner that does not
+   * know where it ran must omit this rather than invent the caller's string.
+   */
+  readonly inspectedWorktree?: string;
 }
 
 export type GitHeadObservationV1 =
@@ -655,7 +847,6 @@ export interface CollectGitTruthInputV1 {
  * plausible empty success.
  */
 export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResultV1 {
-  const worktreePath = input.worktreePath;
   const collectedAt = input.now;
   const runner = input.runner;
 
@@ -669,6 +860,11 @@ export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResult
   const status = observeStatus(statusCmd);
 
   const upstream = observeUpstream(runner, branch);
+
+  // The record names the directory Git was actually run against. The caller-supplied
+  // worktreePath is a label and is not copied: a runner that inspected somewhere else
+  // (or nowhere) must not produce a record claiming C:/claimed.
+  const worktreePath = inspectedWorktreeOf(runner, [headCmd, branchCmd, statusCmd]);
 
   const observation: GitObservationV1 = {
     schema: GIT_OBSERVATION_SCHEMA_V1,
@@ -708,6 +904,7 @@ export function createNodeGitRunner(input: {
   const exe = input.gitExecutable ?? "git";
   const cwd = input.worktreePath;
   return {
+    inspectedWorktree: cwd,
     run(argv: readonly string[]): GitCommandResultV1 {
       let result: ReturnType<typeof spawnSync>;
       try {
@@ -725,6 +922,7 @@ export function createNodeGitRunner(input: {
           stdout: "",
           stderr: "",
           error: error instanceof Error ? error.message : String(error),
+          cwd,
         };
       }
       return {
@@ -733,9 +931,25 @@ export function createNodeGitRunner(input: {
         stdout: String(result.stdout ?? ""),
         stderr: String(result.stderr ?? ""),
         error: result.error ? result.error.message : null,
+        cwd,
       };
     },
   };
+}
+
+function inspectedWorktreeOf(
+  runner: GitRunner,
+  commands: readonly GitCommandResultV1[],
+): string {
+  const fromRunner = typeof runner.inspectedWorktree === "string" ? runner.inspectedWorktree.trim() : "";
+  if (fromRunner !== "") return fromRunner;
+
+  const fromCommands = commands
+    .map((command) => (typeof command.cwd === "string" ? command.cwd.trim() : ""))
+    .filter((cwd) => cwd !== "");
+  if (fromCommands.length === 0) return "";
+  const first = fromCommands[0]!;
+  return fromCommands.every((cwd) => cwd === first) ? first : "";
 }
 
 function invokeGit(runner: GitRunner, argv: readonly string[]): GitCommandResultV1 {

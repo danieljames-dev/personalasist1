@@ -17,7 +17,7 @@ import {
   LARGE_TRACKED_FILE_BYTES, describeVerdict, type GitSnapshotV1,
 } from "../src/git-truth.js";
 import {
-  parseHandoff, findHandoffContradictions, handoffIsTrustworthy, HANDOFF_SCHEMA_V1,
+  parseHandoff, findHandoffContradictions, HANDOFF_SCHEMA_V1,
 } from "../src/handoff.js";
 import {
   acquireLease, heartbeat, releaseLease, reclaimStaleLease, conflicts, LEASE_TTL_MS,
@@ -332,7 +332,7 @@ test("the claims with the worst consequences are the ones checked hardest", () =
   const fields = contradictions.map((c) => c.field);
   assert.ok(fields.includes("headAfter"), "a SHA nobody can find is not a SHA");
   assert.ok(fields.includes("productionMutated"), "production moving during a run that denied it");
-  assert.equal(handoffIsTrustworthy(contradictions), false);
+  assert.notEqual(contradictions.length, 0);
 });
 
 test("any spend at all contradicts the envelope the run was launched under", () => {
@@ -351,7 +351,6 @@ test("a handoff agreeing with observation is trustworthy", () => {
     productionActuallyMutated: false,
   });
   assert.deepEqual(contradictions, []);
-  assert.equal(handoffIsTrustworthy(contradictions), true);
 });
 
 // ---------------------------------------------------------------------------

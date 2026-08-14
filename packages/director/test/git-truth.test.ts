@@ -12,6 +12,7 @@ import test from "node:test";
 import {
   collectGitTruth,
   createNodeGitRunner,
+  verifyGitTruth,
   type GitCommandResultV1,
   type GitRunner,
 } from "../src/git-truth.js";
@@ -223,12 +224,35 @@ test("upstream argv keeps @{upstream} as one element and is never a shell string
 // Real runner against this repository
 // ---------------------------------------------------------------------------
 
+test("the verdict engine accepts the collector observation and fires DIRTY_WORKTREE", () => {
+  const runner = attachedClean({ statusPorcelain: " M README.md\n" });
+  const collected = collectGitTruth({ runner, worktreePath: "C:/claimed-label", now: NOW });
+  const verdict = verifyGitTruth(collected.observation, { requireClean: true });
+  assert.equal(verdict.ok, false);
+  assert.ok(
+    verdict.findings.some((finding) => finding.kind === "DIRTY_WORKTREE"),
+    JSON.stringify(verdict.findings),
+  );
+});
+
+test("the recorded worktree is the directory Git ran in, not a caller-supplied label", () => {
+  const runner = attachedClean();
+  const collected = collectGitTruth({
+    runner,
+    worktreePath: "C:/claimed-never-inspected",
+    now: NOW,
+  });
+  assert.notEqual(collected.observation.worktreePath, "C:/claimed-never-inspected");
+  assert.equal(collected.observation.worktreePath, "");
+});
+
 test("the real Git runner observes this worktree by argv, not by a shell string", () => {
   const worktreePath = process.cwd();
   const runner = createNodeGitRunner({ worktreePath });
   const collected = collectGitTruth({ runner, worktreePath, now: NOW });
 
   assert.equal(collected.observation.head.outcome, "FOUND", collected.reason);
+  assert.equal(collected.observation.worktreePath, worktreePath);
   if (collected.observation.head.outcome !== "FOUND") return;
   assert.match(collected.observation.head.sha, /^[0-9a-f]{40}$/);
 

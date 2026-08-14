@@ -22,6 +22,7 @@
  * and the file *path* goes in argv; argv itself contains only tokens the Director created.
  */
 import type { IsoTimestamp } from "./contracts.js";
+import { buildExecutorLaunch } from "./executor-adapters.js";
 
 export const EXECUTOR_SCHEMA_V1 = "aion.director.executor.v1" as const;
 
@@ -245,19 +246,20 @@ export interface LaunchPlanV1 {
   promptPath: string;
 }
 
-/** Roles where a reviewer must not be able to write. */
-const READ_ONLY_ROLES: readonly ExecutorRoleV1[] = [
-  "INDEPENDENT_ACCEPTANCE", "ADVERSARIAL_REVIEW", "RESEARCH",
-  "PRE_INTEGRATION_REHEARSAL", "POST_CLEANUP_RECHECK",
-];
-
 /**
  * Build the exact command line.
  *
- * The prompt is already on disk before this is called. What goes into argv is a path the Director
- * created, a session id it generated, and flags it chose — never a byte of retrieved text. A
- * reviewer role additionally gets the narrowest permission mode the installed binary supports,
- * because a review that can write is not a review.
+ * Argv is decided in one place: the measured adapters. This wrapper keeps the existing
+ * `{ discovery, role, cwd, promptPath, timeoutMs }` callers compiling and maps their result
+ * onto {@link LaunchPlanV1}. It does not invent a second flag list.
+ *
+ * The old body chose flags from a capability bitset (reviewer permission mode, long-form
+ * print, optional prompt-file). That list is what launched four Grok runs that exited 0
+ * having written nothing. The adapter list is the one that was measured. Role is accepted
+ * so the signature stays stable; it does not select flags.
+ *
+ * `runNonce` is required by the adapter (it must not appear on argv). Callers that have not
+ * minted one yet must pass the nonce they will persist on the intent.
  */
 export function buildLaunchPlan(input: {
   discovery: ExecutorDiscoveryV1;
@@ -266,44 +268,31 @@ export function buildLaunchPlan(input: {
   promptPath: string;
   sessionId?: string | null;
   timeoutMs: number;
+  runNonce: string;
 }): { ok: boolean; plan: LaunchPlanV1 | null; reason: string } {
   if (!input.discovery.available || !input.discovery.path) {
     return { ok: false, plan: null, reason: `${input.discovery.executor} is not available: ${input.discovery.reason}` };
   }
 
-  const caps = input.discovery.capabilities;
-  const argv: string[] = [];
-
-  if (input.discovery.executor === "claude") {
-    // Claude takes the prompt on stdin under --print; the caller pipes the file.
-    argv.push("--print");
-    if (caps.outputFormat) argv.push("--output-format", "json");
-    if (caps.sessionId && input.sessionId) argv.push("--session-id", input.sessionId);
-  } else if (input.discovery.executor === "grok") {
-    if (!caps.promptFile) {
-      return { ok: false, plan: null, reason: "this grok build cannot take a prompt file, and a prompt will not be passed as an argument" };
-    }
-    argv.push("--prompt-file", input.promptPath);
-    if (caps.outputFormat) argv.push("--output-format", "json");
-    if (caps.cwd) argv.push("--cwd", input.cwd);
-    if (caps.permissionMode) {
-      // dontAsk gives read-only tools with no interactive prompt — the correct shape for a reviewer.
-      argv.push("--permission-mode", READ_ONLY_ROLES.includes(input.role) ? "dontAsk" : "acceptEdits");
-    }
-  } else {
-    return { ok: false, plan: null, reason: "local work does not launch an external executor" };
+  const built = buildExecutorLaunch(input.discovery.executor, {
+    promptPath: input.promptPath,
+    cwd: input.cwd,
+    runNonce: input.runNonce,
+  });
+  if (!built.ok || built.launch === null) {
+    return { ok: false, plan: null, reason: built.reason };
   }
 
   return {
     ok: true,
-    reason: "ready",
+    reason: built.reason,
     plan: {
       executable: input.discovery.path,
-      argv,
-      cwd: input.cwd,
+      argv: [...built.launch.argv],
+      cwd: built.launch.cwd,
       timeoutMs: input.timeoutMs,
       shell: false,
-      promptPath: input.promptPath,
+      promptPath: built.launch.promptPath,
     },
   };
 }

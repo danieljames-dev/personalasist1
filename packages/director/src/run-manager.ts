@@ -40,14 +40,27 @@ import {
   type ClockV1,
   type LogSinkV1,
 } from "./bounded-log.js";
-import type { IsoTimestamp } from "./contracts.js";
-import { classifyExecutorExit } from "./executor-adapters.js";
-import type { ExecutorNameV1 } from "./executors.js";
-import { collectGitTruth, type GitObservationV1, type GitRunner } from "./git-truth.js";
+import { buildExecutorLaunch, classifyExecutorExit } from "./executor-adapters.js";
 import {
-  artifactPathWithinRoot,
+  discoverClaudeExecutor,
+  discoverGrokExecutor,
+  type DiscoveryEnvironment,
+  type ExecutorDiscoveryResultV1,
+  type FileSystemProbe,
+} from "./executor-discovery.js";
+import type { ExecutorNameV1 } from "./executors.js";
+import {
+  collectGitTruth,
+  verifyGitTruth,
+  type GitObservationV1,
+  type GitRunner,
+  type GitVerdictV1,
+} from "./git-truth.js";
+import {
+  findHandoffContradictions,
   parseHandoff,
   type ExecutorHandoffV1,
+  type HandoffParseV1,
 } from "./handoff.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
@@ -185,6 +198,11 @@ export interface RunManagerDepsV1 {
   readonly askWriterLiveness?: (recorded: ExecutorProcessIdentityV1) => WriterLivenessQuestionV1;
 }
 
+export interface LaunchRunDepsV1 extends RunManagerDepsV1 {
+  readonly discoveryEnv: DiscoveryEnvironment;
+  readonly discoveryFs: FileSystemProbe;
+}
+
 export interface ExecuteRunRequestV1 {
   readonly runId: string;
   readonly missionId: string;
@@ -208,6 +226,14 @@ export interface ExecuteRunRequestV1 {
   readonly knownSuccessExitCodes?: readonly number[];
   readonly childEnv?: Readonly<Record<string, string>>;
 }
+
+/**
+ * A launch request. Discovery and the adapter decide executable and argv; the caller
+ * does not supply a pre-built command line.
+ */
+export type LaunchRunRequestV1 = Omit<ExecuteRunRequestV1, "executablePath" | "argv"> & {
+  readonly promptPath: string;
+};
 
 export interface RunResultV1 {
   readonly schema: typeof RUN_RESULT_SCHEMA_V1;
@@ -272,12 +298,14 @@ export function evaluateSuccessConjunction(input: {
   readonly knownSuccessExitCodes?: readonly number[];
   readonly executor: ExecutorNameV1;
   readonly output: string;
-  readonly handoffRaw: string | null;
+  readonly parsed: HandoffParseV1;
+  readonly reportedWorkItemId: string | null;
   readonly expectedMissionId: string;
   readonly expectedRunId: string;
   readonly expectedWorkItemId: string;
   readonly runRoot: string;
   readonly gitAfter: GitObservationV1 | null;
+  readonly gitVerdict: GitVerdictV1 | null;
   readonly authorisedProductionMutated: boolean;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
@@ -300,85 +328,108 @@ export function evaluateSuccessConjunction(input: {
           ? `exit ${input.exitCode} classified as ${classified.kind}, not a completed run`
           : "process exited with a known-success code";
 
-  const rawObject = input.handoffRaw === null ? null : extractJsonObject(input.handoffRaw);
-  const artifacts = artifactsFrom(rawObject);
-  // Structural parse with artifacts stripped so an outside path is the artifacts
-  // conjunct, not "no handoff". Containment is artifactPathWithinRoot from handoff.ts.
-  const parsed = input.handoffRaw === null
-    ? { ok: false as const, handoff: null, problems: ["no handoff text"] }
-    : parseHandoff(structuralHandoff(rawObject, input.handoffRaw));
+  const parsed = input.parsed;
+  const handoff = parsed.ok ? parsed.handoff : null;
+  const reportedWorkItem = input.reportedWorkItemId;
 
-  const reportedWorkItem = workItemIdFrom(rawObject);
+  const observedBranch = input.gitAfter !== null && input.gitAfter.branch.outcome === "ATTACHED"
+    ? input.gitAfter.branch.name
+    : undefined;
+  const contradictions = handoff === null
+    ? []
+    : findHandoffContradictions({
+      handoff,
+      ...(observedBranch !== undefined ? { observedBranch } : {}),
+      productionActuallyMutated: input.authorisedProductionMutated,
+    });
 
-  const identitiesOk = parsed.ok
-    && parsed.handoff !== null
-    && parsed.handoff.missionId === input.expectedMissionId
-    && parsed.handoff.runId === input.expectedRunId
+  const statusContradiction = contradictions.find((item) => item.field === "status");
+  const selfTiming = contradictions.find((item) => item.field === "finishedAt");
+  const handoffParsedOk = handoff !== null
+    && handoff.status === "PASS"
+    && statusContradiction === undefined
+    && selfTiming === undefined;
+
+  let handoffParsedReason: string;
+  if (handoff === null) {
+    handoffParsedReason = `handoff did not parse: ${parsed.problems.join("; ")}`;
+  } else if (handoff.status !== "PASS") {
+    handoffParsedReason = `handoff status is ${handoff.status}, not PASS`;
+  } else if (statusContradiction !== undefined) {
+    handoffParsedReason = statusContradiction.detail;
+  } else if (selfTiming !== undefined) {
+    handoffParsedReason = selfTiming.detail;
+  } else {
+    handoffParsedReason = "handoff parsed";
+  }
+
+  const identitiesOk = handoff !== null
+    && handoff.missionId === input.expectedMissionId
+    && handoff.runId === input.expectedRunId
     && reportedWorkItem !== null
     && reportedWorkItem === input.expectedWorkItemId;
 
   let identitiesReason = "mission id, run id and work item match what was dispatched";
-  if (!parsed.ok || parsed.handoff === null) {
+  if (handoff === null) {
     identitiesReason = "no parsed handoff to bind to the dispatched ids";
-  } else if (parsed.handoff.missionId !== input.expectedMissionId) {
-    identitiesReason = `missionId ${parsed.handoff.missionId} is not the dispatched ${input.expectedMissionId}`;
-  } else if (parsed.handoff.runId !== input.expectedRunId) {
-    identitiesReason = `runId ${parsed.handoff.runId} is not the dispatched ${input.expectedRunId}`;
+  } else if (handoff.missionId !== input.expectedMissionId) {
+    identitiesReason = `missionId ${handoff.missionId} is not the dispatched ${input.expectedMissionId}`;
+  } else if (handoff.runId !== input.expectedRunId) {
+    identitiesReason = `runId ${handoff.runId} is not the dispatched ${input.expectedRunId}`;
   } else if (reportedWorkItem === null) {
     identitiesReason = "handoff does not name the dispatched work item";
   } else if (reportedWorkItem !== input.expectedWorkItemId) {
     identitiesReason = `workItemId ${reportedWorkItem} is not the dispatched ${input.expectedWorkItemId}`;
   }
 
+  const artifactProblems = parsed.problems.filter((problem) => /artifact/i.test(problem));
   let artifactsOk = false;
   let artifactsReason: string;
-  if (!parsed.ok || parsed.handoff === null) {
-    artifactsReason = "no parsed handoff whose artifacts can be confined to the run root";
-  } else if (!isResolvedHostPath(input.runRoot)) {
-    artifactsReason = "run root is not an identifiable absolute path; containment cannot be decided";
+  if (handoff !== null) {
+    artifactsOk = true;
+    artifactsReason = "every artifact is inside the run root";
+  } else if (artifactProblems.length > 0) {
+    artifactsReason = artifactProblems[0]!;
   } else {
-    const outside: string[] = [];
-    for (const artifact of artifacts) {
-      if (!artifactPathWithinRoot(input.runRoot, artifact)) outside.push(artifact);
-    }
-    artifactsOk = outside.length === 0;
-    artifactsReason = artifactsOk
-      ? "every artifact is inside the run root"
-      : `artifact resolves outside the run root: ${outside[0]}`;
+    artifactsReason = "no parsed handoff whose artifacts can be confined to the run root";
   }
 
+  const gitContradiction = contradictions.find((item) => item.field === "headAfter" || item.field === "branch");
   let gitOk = false;
   let gitReason: string;
-  if (!parsed.ok || parsed.handoff === null) {
+  if (handoff === null) {
     gitReason = "no parsed handoff whose headAfter can be compared to Git";
-  } else if (input.gitAfter === null) {
+  } else if (input.gitAfter === null || input.gitVerdict === null) {
     gitReason = "Git was not observed; absence is not agreement with the handoff";
-  } else if (input.gitAfter.head.outcome !== "FOUND") {
-    gitReason = "Git HEAD is unavailable; a missing reading is not agreement";
-  } else if (input.gitAfter.head.sha !== parsed.handoff.headAfter) {
-    gitReason = `executor claimed ${parsed.handoff.headAfter}, repository shows ${input.gitAfter.head.sha}`;
+  } else if (!input.gitVerdict.ok) {
+    gitReason = input.gitVerdict.findings.filter((finding) => finding.blocking).map((finding) => finding.detail).join("; ")
+      || "Git verdict failed";
+  } else if (gitContradiction !== undefined) {
+    gitReason = gitContradiction.detail;
   } else {
     gitOk = true;
-    gitReason = "Director Git observation agrees with the handoff headAfter";
+    gitReason = "Director Git observation agrees with the handoff";
   }
 
+  const spendContradiction = contradictions.find((item) => item.field === "spendUsd");
   let spendOk = false;
   let spendReason: string;
-  if (!parsed.ok || parsed.handoff === null) {
+  if (handoff === null) {
     spendReason = "no parsed handoff whose spend can be checked";
-  } else if (parsed.handoff.spendUsd !== 0) {
-    spendReason = `spendUsd is ${parsed.handoff.spendUsd}; the envelope permits 0`;
+  } else if (spendContradiction !== undefined) {
+    spendReason = `spendUsd is ${handoff.spendUsd}; the envelope permits 0`;
   } else {
     spendOk = true;
     spendReason = "spend is 0";
   }
 
+  const productionContradiction = contradictions.find((item) => item.field === "productionMutated");
   let productionOk = false;
   let productionReason: string;
-  if (!parsed.ok || parsed.handoff === null) {
+  if (handoff === null) {
     productionReason = "no parsed handoff whose production claim can be checked";
-  } else if (parsed.handoff.productionMutated !== input.authorisedProductionMutated) {
-    productionReason = parsed.handoff.productionMutated
+  } else if (productionContradiction !== undefined) {
+    productionReason = handoff.productionMutated
       ? "handoff claims production was mutated; that was not authorised"
       : "handoff claims production was left alone; mutation was authorised and the claims disagree";
   } else {
@@ -390,10 +441,8 @@ export function evaluateSuccessConjunction(input: {
     { name: "processExitedWithKnownSuccessCode", ok: exitOk, reason: exitReason },
     {
       name: "handoffParsed",
-      ok: parsed.ok && parsed.handoff !== null,
-      reason: parsed.ok && parsed.handoff !== null
-        ? "handoff parsed"
-        : `handoff did not parse: ${parsed.problems.join("; ")}`,
+      ok: handoffParsedOk,
+      reason: handoffParsedReason,
     },
     { name: "identitiesMatch", ok: identitiesOk, reason: identitiesReason },
     { name: "artifactsInsideRunRoot", ok: artifactsOk, reason: artifactsReason },
@@ -410,6 +459,104 @@ export function evaluateSuccessConjunction(input: {
   };
 }
 
+/**
+ * The reachable launch path: discovery → adapters → executeRun (intent, spawn, log, Git, conjunction).
+ *
+ * Callers that already have an executable and argv use {@link executeRun}. Everything that
+ * still has to find a binary and build argv comes through here, so the fail-closed ladder
+ * and the measured adapters are the ones that decide.
+ */
+export async function launchRun(
+  request: LaunchRunRequestV1,
+  deps: LaunchRunDepsV1,
+): Promise<RunResultV1> {
+  const discovery = discoverExecutor(request.executor, deps.discoveryEnv, deps.discoveryFs);
+  if (discovery.status !== "FOUND") {
+    const reason = discovery.status === "AMBIGUOUS"
+      ? `executor discovery ambiguous: ${discovery.reason}`
+      : `executor discovery: ${discovery.reason}`;
+    return refusedBeforeSpawn(request, deps, reason);
+  }
+
+  const adapted = buildExecutorLaunch(request.executor, {
+    promptPath: request.promptPath,
+    cwd: request.cwd,
+    runNonce: request.runNonce,
+  });
+  if (!adapted.ok || adapted.launch === null) {
+    return refusedBeforeSpawn(request, deps, `executor adapter: ${adapted.reason}`);
+  }
+
+  return executeRun({
+    ...request,
+    executablePath: discovery.executablePath,
+    argv: adapted.launch.argv,
+    childEnv: { ...adapted.launch.env, ...(request.childEnv ?? {}) },
+    promptPath: adapted.launch.promptPath,
+  }, deps);
+}
+
+function discoverExecutor(
+  name: ExecutorNameV1,
+  env: DiscoveryEnvironment,
+  probe: FileSystemProbe,
+): ExecutorDiscoveryResultV1 {
+  if (name === "claude") return discoverClaudeExecutor(env, probe);
+  if (name === "grok") return discoverGrokExecutor(env, probe);
+  return { status: "UNAVAILABLE", reason: "the local in-process executor is not implemented and will not pretend to run" };
+}
+
+function refusedBeforeSpawn(
+  request: LaunchRunRequestV1,
+  deps: LaunchRunDepsV1,
+  reason: string,
+): RunResultV1 {
+  const emptyParsed: HandoffParseV1 = { ok: false, handoff: null, problems: ["no handoff text"] };
+  const conjunction = evaluateSuccessConjunction({
+    exitCode: null,
+    stillRunning: false,
+    executor: request.executor,
+    output: "",
+    parsed: emptyParsed,
+    reportedWorkItemId: null,
+    expectedMissionId: request.missionId,
+    expectedRunId: request.runId,
+    expectedWorkItemId: request.workItemId,
+    runRoot: request.runRoot,
+    gitAfter: null,
+    gitVerdict: null,
+    authorisedProductionMutated: request.authorisedProductionMutated,
+    ...(request.knownSuccessExitCodes !== undefined
+      ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
+      : {}),
+  });
+  const resultPath = join(request.runRoot, "result.json");
+  const result: RunResultV1 = {
+    schema: RUN_RESULT_SCHEMA_V1,
+    resultPath,
+    ok: false,
+    spawned: false,
+    reason,
+    conjunction,
+    exitCode: null,
+    processIdentity: null,
+    intent: null,
+    handoff: null,
+    gitAfter: null,
+    lease: null,
+    productionWriterLeaseReleasedByThisRun: false,
+    cancel: { timedOut: false, stages: [] },
+    log: null,
+  };
+  try {
+    deps.fs.mkdirp(request.runRoot);
+    deps.fs.writeDurable(resultPath, `${JSON.stringify(result, null, 2)}\n`);
+  } catch {
+    // In-memory result is authoritative if the write fails.
+  }
+  return result;
+}
+
 export async function executeRun(
   request: ExecuteRunRequestV1,
   deps: RunManagerDepsV1,
@@ -421,17 +568,20 @@ export async function executeRun(
   const gitAfterPath = join(runRoot, "git-after.json");
 
   const emptyCancel: CancelReportV1 = { timedOut: false, stages: [] };
+  const emptyParsed: HandoffParseV1 = { ok: false, handoff: null, problems: ["no handoff text"] };
   const emptyConjunction = evaluateSuccessConjunction({
     exitCode: null,
     stillRunning: false,
     executor: request.executor,
     output: "",
-    handoffRaw: null,
+    parsed: emptyParsed,
+    reportedWorkItemId: null,
     expectedMissionId: request.missionId,
     expectedRunId: request.runId,
     expectedWorkItemId: request.workItemId,
     runRoot,
     gitAfter: null,
+    gitVerdict: null,
     authorisedProductionMutated: request.authorisedProductionMutated,
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
@@ -666,10 +816,21 @@ export async function executeRun(
       // Git was still observed in memory. A write failure does not invent agreement.
     }
 
-    // 8. Handoff: the file the executor was told to write, else the stdout tail.
+    // 8. One parse. The file the executor was told to write, else the stdout tail.
+    // artifactRoot is the run root so a path the real parser rejects cannot become SUCCESS.
     const handoffRaw = readHandoffText(deps.fs, handoffPath, log.liveTail("stdout").toString("utf8"));
-    const parsed = handoffRaw === null ? null : parseHandoff(handoffRaw);
-    const handoff = parsed !== null && parsed.ok ? parsed.handoff : null;
+    const parsed: HandoffParseV1 = handoffRaw === null
+      ? { ok: false, handoff: null, problems: ["no handoff text"] }
+      : parseHandoff(handoffRaw, { artifactRoot: runRoot });
+    const handoff = parsed.ok ? parsed.handoff : null;
+    const reportedWorkItemId = workItemIdFrom(handoffRaw === null ? null : extractJsonObject(handoffRaw));
+
+    const gitVerdict = verifyGitTruth(gitAfter, {
+      ...(handoff !== null ? { claimedHead: handoff.headAfter } : {}),
+      ...(request.branch !== null ? { expectedBranch: request.branch } : {}),
+      requireClean: true,
+      requireAttachedBranch: request.branch !== null,
+    });
 
     // 9. The conjunction. Each finding is kept so a failure names the conjunct.
     const conjunction = evaluateSuccessConjunction({
@@ -677,12 +838,14 @@ export async function executeRun(
       stillRunning,
       executor: request.executor,
       output,
-      handoffRaw,
+      parsed,
+      reportedWorkItemId,
       expectedMissionId: request.missionId,
       expectedRunId: request.runId,
       expectedWorkItemId: request.workItemId,
       runRoot,
       gitAfter,
+      gitVerdict,
       authorisedProductionMutated: request.authorisedProductionMutated,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
@@ -891,11 +1054,6 @@ function intentStoreFromFs(fs: RunFileSystemV1): IntentStoreV1 {
   };
 }
 
-function structuralHandoff(rawObject: unknown, fallbackText: string): unknown {
-  if (!isPlainObject(rawObject)) return fallbackText;
-  return { ...rawObject, artifacts: [] };
-}
-
 function extractJsonObject(raw: string): unknown {
   const text = raw.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
@@ -917,13 +1075,6 @@ function workItemIdFrom(value: unknown): string | null {
   const trimmed = raw.trim();
   if (trimmed === "" || CONTROL_BYTES.test(trimmed)) return null;
   return trimmed;
-}
-
-function artifactsFrom(value: unknown): readonly string[] {
-  if (!isPlainObject(value)) return [];
-  const raw = value.artifacts;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((entry): entry is string => typeof entry === "string");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1061,8 +1212,4 @@ export function killProcessTreeStandIn(pid: number): void {
     shell: false,
     timeout: 10_000,
   });
-}
-
-export function createFixedClock(now: IsoTimestamp): ClockV1 {
-  return { now: () => now };
 }

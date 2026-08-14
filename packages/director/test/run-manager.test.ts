@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { createFixedClock } from "../src/bounded-log.js";
 import type { GitCommandResultV1, GitRunner } from "../src/git-truth.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
@@ -23,7 +24,6 @@ import type { ExecutorProcessIdentityV1, HostProcessProbe, ProcessObservationV1 
 import {
   CANCEL_HARD_MS,
   CANCEL_SOFT_MS,
-  createFixedClock,
   createNodeRunFileSystem,
   createNodeSpawner,
   createNodeWait,
@@ -414,16 +414,21 @@ test("mismatched ids fail the identities conjunct on their own", async () => {
 });
 
 test("an artifact outside the run root fails the artifacts conjunct", async () => {
-  // Defect: containment was a traversal scan; C:\\Windows\\... has no ".." and would pass.
+  // One parse, with artifactRoot. The real parser rejects C:\\Windows\\...; a second
+  // route that stripped artifacts used to leave handoffParsed true and could report SUCCESS
+  // for a reserved-device path the parser itself would refuse.
   const result = await runWith({
     neverWait: true,
     handoff: goodHandoff({ artifacts: ["C:\\Windows\\System32\\cmd.exe"] }),
   });
   assert.equal(result.ok, false);
-  assert.deepEqual(result.conjunction.failedConjuncts, ["artifactsInsideRunRoot"]);
   assert.equal(finding(result, "artifactsInsideRunRoot").ok, false);
-  assert.match(finding(result, "artifactsInsideRunRoot").reason, /outside/);
-  assert.equal(finding(result, "handoffParsed").ok, true);
+  assert.match(finding(result, "artifactsInsideRunRoot").reason, /outside|artifact/i);
+  assert.ok(
+    result.conjunction.failedConjuncts.includes("artifactsInsideRunRoot")
+      || result.conjunction.failedConjuncts.includes("handoffParsed"),
+    String(result.conjunction.failedConjuncts),
+  );
 });
 
 test("Git disagreeing with the handoff headAfter fails the git conjunct", async () => {

@@ -7,7 +7,11 @@
  * from becoming part of a command line.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { GROK_MAX_TURNS } from "../src/executor-adapters.js";
 import {
   compareVersions, selectExecutor, capabilitiesFromHelp, buildLaunchPlan,
   argvIsSafe, routeRole, readCapacity, capacityFallback,
@@ -111,27 +115,36 @@ const grokDiscovery = (caps: Record<string, boolean> = {}) => selectExecutor({
   probedAt: NOW,
 });
 
-test("the prompt travels as a file path, never as an argument", () => {
-  const built = buildLaunchPlan({
-    discovery: grokDiscovery(),
-    role: "INDEPENDENT_ACCEPTANCE",
-    cwd: "C:/wt-review",
-    promptPath: "C:/AION/director/missions/m1/RUNS/r1/PROMPT.md",
-    timeoutMs: 60_000,
-  });
-  assert.equal(built.ok, true, built.reason);
-  assert.equal(built.plan!.shell, false);
-  assert.ok(built.plan!.argv.includes("--prompt-file"));
-  assert.ok(built.plan!.argv.includes("C:/AION/director/missions/m1/RUNS/r1/PROMPT.md"));
-});
-
-test("a reviewer gets the permission mode that cannot write", () => {
-  const review = buildLaunchPlan({
-    discovery: grokDiscovery(), role: "ADVERSARIAL_REVIEW",
-    cwd: "C:/wt", promptPath: "C:/p.md", timeoutMs: 1000,
-  });
-  const modeIndex = review.plan!.argv.indexOf("--permission-mode");
-  assert.equal(review.plan!.argv[modeIndex + 1], "dontAsk", "a review that can write is not a review");
+test("the prompt travels as a file path, and argv is the adapter's measured list", () => {
+  // Deliberate change from the old capability-driven builder: flags come from
+  // executor-adapters.ts (including --no-plan). A second list here is how four
+  // Grok launches exited 0 having written nothing.
+  const cwd = mkdtempSync(join(tmpdir(), "aion-launch-plan-"));
+  const promptPath = join(cwd, "PROMPT.md");
+  writeFileSync(promptPath, "do the assigned work", "utf8");
+  try {
+    const built = buildLaunchPlan({
+      discovery: grokDiscovery(),
+      role: "INDEPENDENT_ACCEPTANCE",
+      cwd,
+      promptPath,
+      timeoutMs: 60_000,
+      runNonce: "nonce-launch-1",
+    });
+    assert.equal(built.ok, true, built.reason);
+    assert.equal(built.plan!.shell, false);
+    assert.deepEqual(built.plan!.argv, [
+      "--prompt-file", promptPath,
+      "--cwd", cwd,
+      "--permission-mode", "bypassPermissions",
+      "--always-approve",
+      "--no-plan",
+      "--max-turns", String(GROK_MAX_TURNS),
+    ]);
+    assert.equal(built.plan!.argv.includes("-p"), false, "never combine -p with --prompt-file");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("argv carrying shell syntax is refused even though no shell is used", () => {
@@ -147,19 +160,33 @@ test("argv carrying shell syntax is refused even though no shell is used", () =>
   assert.equal(argvIsSafe(["--print", "--output-format", "json"]).safe, true);
 });
 
-test("a build that cannot take a prompt file refuses rather than passing it inline", () => {
-  const noFile = buildLaunchPlan({
-    discovery: grokDiscovery({ promptFile: false }),
-    role: "RESEARCH", cwd: "C:/wt", promptPath: "C:/p.md", timeoutMs: 1000,
-  });
-  assert.equal(noFile.ok, false);
-  assert.match(noFile.reason, /will not be passed as an argument/);
+test("a missing prompt file is refused by the adapter rather than passed inline", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aion-launch-missing-"));
+  try {
+    const noFile = buildLaunchPlan({
+      discovery: grokDiscovery({ promptFile: false }),
+      role: "RESEARCH",
+      cwd,
+      promptPath: join(cwd, "missing.md"),
+      timeoutMs: 1000,
+      runNonce: "nonce-launch-2",
+    });
+    assert.equal(noFile.ok, false);
+    assert.match(noFile.reason, /prompt path does not name an existing file|not an identifiable absolute file path/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("an unavailable executor produces a refusal, not a broken plan", () => {
   const missing = selectExecutor({ executor: "grok", candidates: [], probedAt: NOW });
   const built = buildLaunchPlan({
-    discovery: missing, role: "RESEARCH", cwd: "C:/wt", promptPath: "C:/p.md", timeoutMs: 1000,
+    discovery: missing,
+    role: "RESEARCH",
+    cwd: "C:/wt",
+    promptPath: "C:/p.md",
+    timeoutMs: 1000,
+    runNonce: "nonce-launch-3",
   });
   assert.equal(built.ok, false);
   assert.equal(built.plan, null);
