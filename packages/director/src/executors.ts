@@ -307,9 +307,12 @@ export function buildLaunchPlan(input: {
  * Belt and braces: the Director spawns with `shell: false`, so metacharacters are inert. This exists
  * so that a future call site which reintroduces a shell cannot also quietly reintroduce injection —
  * the argv would already have been rejected here.
+ *
+ * `=>` is the JS arrow that `node -e` scripts use (and that p2-e2e actually emits). It is matched
+ * as a unit and removed before the redirect check, so a lone `>` stays a metacharacter. A lookbehind
+ * on `=` would treat every `>` after `=` the same way; the exception is the arrow, not the `=`.
  */
-// `>` is a redirect unless it is the arrow in `=>`, which node -e scripts use.
-const SHELL_METACHARACTERS = /[;&|`$<\n\r]|\$\(|&&|\|\||(?<![=])>/;
+const SHELL_METACHARACTERS = /[;&|`$<\n\r]|\$\(|&&|\|\|/;
 
 /**
  * The live discovery ladder only returns a `.exe`. Trailing dots/spaces on the
@@ -324,9 +327,15 @@ export function isDirectlySpawnableWindowsExe(filePath: string): boolean {
 
 export function argvIsSafe(argv: readonly string[]): { safe: boolean; offending: string | null } {
   for (const token of argv) {
-    if (SHELL_METACHARACTERS.test(String(token))) return { safe: false, offending: String(token) };
+    if (tokenCarriesShellMetacharacters(String(token))) return { safe: false, offending: String(token) };
   }
   return { safe: true, offending: null };
+}
+
+function tokenCarriesShellMetacharacters(token: string): boolean {
+  // Consume `=>` as one token so a leftover `>` is still a redirect.
+  const withoutArrows = token.replace(/=>/g, "");
+  return SHELL_METACHARACTERS.test(withoutArrows) || withoutArrows.includes(">");
 }
 
 // ---------------------------------------------------------------------------

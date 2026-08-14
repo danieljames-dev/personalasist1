@@ -139,6 +139,63 @@ test("DEAD_CONFIRMED without an observation of the recorded pid does not reclaim
   assert.equal(refused.remaining.length, 1);
 });
 
+const expiredPidOnlyWriter = (): LeaseV1 => acquireLease({
+  existing: [], leaseId: "l-pw", kind: "PRODUCTION_WRITER", resource: "default",
+  missionId: "m1", runId: "r1", pid: 12224, now: LONG_AGO,
+}).lease!;
+
+test("FOUND of a pid-only holder is not a death certificate", () => {
+  const refused = reclaimStaleLease({
+    existing: [expiredPidOnlyWriter()], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "FOUND", pid: 12224 },
+    now: NOW,
+  });
+  assert.equal(refused.ok, false, "a process occupying the recorded pid is not evidence the holder is gone");
+  assert.equal(refused.refusal, "IDENTITY_UNVERIFIABLE");
+  assert.equal(refused.remaining.length, 1);
+});
+
+test("UNAVAILABLE of a pid-only holder is not a death certificate", () => {
+  const refused = reclaimStaleLease({
+    existing: [expiredPidOnlyWriter()], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "UNAVAILABLE", pid: 12224 },
+    now: NOW,
+  });
+  assert.equal(refused.ok, false, "an unanswered probe is not evidence the holder is gone");
+  assert.equal(refused.refusal, "LIVENESS_UNKNOWN");
+  assert.equal(refused.remaining.length, 1);
+});
+
+test("NOT_EXPIRED, HOLDER_ALIVE, and LIVENESS_UNKNOWN still refuse first, in that order", () => {
+  const occupied = { outcome: "FOUND" as const, pid: 12224 };
+  const live = acquireLease({
+    existing: [], leaseId: "l-pw-live", kind: "PRODUCTION_WRITER", resource: "default",
+    missionId: "m1", runId: "r1", pid: 12224, now: NOW,
+  }).lease!;
+  const notExpired = reclaimStaleLease({
+    existing: [live], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "DEAD_CONFIRMED", holderObservation: occupied, now: NOW,
+  });
+  assert.equal(notExpired.ok, false);
+  assert.equal(notExpired.refusal, "NOT_EXPIRED");
+
+  const alive = reclaimStaleLease({
+    existing: [expiredPidOnlyWriter()], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "ALIVE", holderObservation: occupied, now: NOW,
+  });
+  assert.equal(alive.ok, false);
+  assert.equal(alive.refusal, "HOLDER_ALIVE");
+
+  const unknown = reclaimStaleLease({
+    existing: [expiredPidOnlyWriter()], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "UNKNOWN", holderObservation: occupied, now: NOW,
+  });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.refusal, "LIVENESS_UNKNOWN");
+});
+
 test("NOT_FOUND of the recorded pid reclaims an expired lease", () => {
   const held = staleLease({ identity: { pid: 100, runToken: "run-a" } });
   const reclaimed = reclaimStaleLease({
@@ -198,6 +255,19 @@ test("the retired boolean keeps its old meaning so existing callers do not silen
 // ---------------------------------------------------------------------------
 
 const RECORDED: ProcessIdentityV1 = { pid: 100, startedAt: "2026-08-13T09:58:00.000Z", runToken: "run-a" };
+
+test("FOUND of a different occupant of a strongly identified slot still reclaims", () => {
+  const reclaimed = reclaimStaleLease({
+    existing: [staleLease({ identity: RECORDED })], kind: "WORKTREE", resource: "C:/wt-a",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "FOUND", pid: 100 },
+    observedIdentity: { pid: 100, startedAt: "2026-08-13T11:30:00.000Z", runToken: "run-b" },
+    now: NOW,
+  });
+  assert.equal(reclaimed.ok, true, "a later start on the same slot is PID reuse; the holder is gone");
+  assert.equal(reclaimed.refusal, null);
+  assert.deepEqual(reclaimed.remaining, []);
+});
 
 test("a probe of a different process cannot retire this lease", () => {
   const refused = reclaimStaleLease({

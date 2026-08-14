@@ -202,6 +202,13 @@ test("argv carrying shell syntax is refused even though no shell is used", () =>
   assert.equal(argvIsSafe(["--print", "--output-format", "json"]).safe, true);
 });
 
+test("a lone redirect is refused; the JS arrow is not treated as one", () => {
+  assert.equal(argvIsSafe(["-e", "setTimeout(() => process.exit(0), 8000)"]).safe, true);
+  assert.equal(argvIsSafe(["-e", "process.exit(0)"]).safe, true);
+  assert.equal(argvIsSafe(["--prompt-file", "C:/out>log"]).safe, false, "a lone > is a redirect");
+  assert.equal(argvIsSafe(["-e", "2>=1"]).safe, false, ">= is not the arrow; leftover > stays a metacharacter");
+});
+
 test("a missing prompt file is refused by the adapter rather than passed inline", () => {
   const cwd = mkdtempSync(join(tmpdir(), "aion-launch-missing-"));
   try {

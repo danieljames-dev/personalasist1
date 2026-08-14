@@ -167,7 +167,7 @@ export function processIdentityMatches(
 }
 
 /** Whether a lease recorded anything a probe can be held to beyond a PID. */
-function hasStrongIdentity(identity: ProcessIdentityV1 | undefined): boolean {
+function hasStrongIdentity(identity: ProcessIdentityV1 | undefined): identity is ProcessIdentityV1 {
   return identity !== undefined && (identity.runToken !== undefined || identity.startedAt !== undefined);
 }
 
@@ -298,7 +298,14 @@ export interface ReclaimResultV1 {
  * recorded holder pid (or, when the lease recorded a start time or a run token, to a matching
  * identity). A liveness enum with nothing observed is not a probe. `ALIVE` refuses however long
  * the heartbeat has been silent, because a busy machine is not a dead run, and `UNKNOWN` refuses
- * because a failed probe is not a death certificate. `NOT_FOUND` of the recorded pid is sufficient.
+ * because a failed probe is not a death certificate.
+ *
+ * When the lease records a pid the observation is read, not merely checked for presence.
+ * `NOT_FOUND` of that pid is sufficient. `UNAVAILABLE` is an unanswered probe and is not a death
+ * certificate. `FOUND` means the slot is occupied: that grants only when a recorded strong identity
+ * plus an `observedIdentity` of the same pid produce a genuine different-process verdict — the
+ * occupant is not the holder. A pid-only lease cannot tell a reused slot from the holder still
+ * running, so `FOUND` refuses.
  */
 export function reclaimStaleLease(input: {
   existing: readonly LeaseV1[];
@@ -317,7 +324,8 @@ export function reclaimStaleLease(input: {
   /**
    * Host observation of a specific pid. Required (or `observedIdentity` about the
    * same pid) when the held lease records a pid and the caller asserts `DEAD_CONFIRMED`.
-   * `NOT_FOUND` of that pid is sufficient evidence the holder is gone.
+   * The outcome is what decides: `NOT_FOUND` of that pid is sufficient; `UNAVAILABLE`
+   * and `FOUND` are not, unless `FOUND` is independently a different occupant.
    */
   holderObservation?: HolderObservationV1;
   now: IsoTimestamp;
@@ -326,6 +334,12 @@ export function reclaimStaleLease(input: {
   if (!held) return { ok: true, remaining: [...input.existing], reason: "nothing held", refusal: null };
 
   const unchanged = [...input.existing];
+  const granted: ReclaimResultV1 = {
+    ok: true,
+    remaining: input.existing.filter((lease) => lease.leaseId !== held.leaseId),
+    reason: "holder confirmed gone; lease reclaimed",
+    refusal: null,
+  };
   const liveness: ProcessLivenessV1 =
     input.holderLiveness ??
     (input.holderProcessAlive === undefined ? "UNKNOWN" : input.holderProcessAlive ? "ALIVE" : "DEAD_CONFIRMED");
@@ -350,7 +364,7 @@ export function reclaimStaleLease(input: {
     };
   }
 
-  // DEAD_CONFIRMED from here. A recorded pid requires a look at that pid.
+  // DEAD_CONFIRMED from here. A recorded pid requires a look at that pid, and the look is read.
   const recordedPid = held.pid;
   if (isRecordedHolderPid(recordedPid)) {
     const observation = input.holderObservation;
@@ -366,12 +380,34 @@ export function reclaimStaleLease(input: {
         refusal: "HOLDER_UNOBSERVED",
       };
     }
-    if (observation !== undefined && observation.outcome === "NOT_FOUND" && observation.pid === recordedPid) {
+    if (observation !== undefined && observation.pid === recordedPid) {
+      if (observation.outcome === "NOT_FOUND") {
+        return granted;
+      }
+      if (observation.outcome === "UNAVAILABLE") {
+        return {
+          ok: false,
+          remaining: unchanged,
+          reason: "the holder probe could not answer; an unanswered probe is not evidence the run is gone",
+          refusal: "LIVENESS_UNKNOWN",
+        };
+      }
+      if (observation.outcome === "FOUND") {
+        if (occupantIsNotRecordedHolder(held.processIdentity, observedId, recordedPid)) {
+          return granted;
+        }
+        return {
+          ok: false,
+          remaining: unchanged,
+          reason: "the recorded pid is occupied and the occupant cannot be shown to be a different process",
+          refusal: "IDENTITY_UNVERIFIABLE",
+        };
+      }
       return {
-        ok: true,
-        remaining: input.existing.filter((lease) => lease.leaseId !== held.leaseId),
-        reason: "holder confirmed gone; lease reclaimed",
-        refusal: null,
+        ok: false,
+        remaining: unchanged,
+        reason: "the holder observation outcome was not examined; an unexamined probe is not evidence the run is gone",
+        refusal: "LIVENESS_UNKNOWN",
       };
     }
   }
@@ -397,16 +433,27 @@ export function reclaimStaleLease(input: {
     }
   }
 
-  return {
-    ok: true,
-    remaining: input.existing.filter((lease) => lease.leaseId !== held.leaseId),
-    reason: "holder confirmed gone; lease reclaimed",
-    refusal: null,
-  };
+  return granted;
 }
 
 function isRecordedHolderPid(pid: number | null): pid is number {
   return typeof pid === "number" && Number.isInteger(pid) && pid > 0;
+}
+
+/**
+ * True when the occupant of `recordedPid` is proven to be a different process than the holder.
+ * Same-slot `MISMATCH` is PID reuse. A different observed pid, or no strong recorded identity,
+ * cannot distinguish reuse from the holder still running.
+ */
+function occupantIsNotRecordedHolder(
+  recorded: ProcessIdentityV1 | undefined,
+  observed: ProcessIdentityV1 | undefined,
+  recordedPid: number,
+): boolean {
+  if (!hasStrongIdentity(recorded) || observed === undefined) return false;
+  if (observed.pid !== recordedPid) return false;
+  if (recorded.pid !== null && recorded.pid !== recordedPid) return false;
+  return processIdentityMatches(recorded, observed) === "MISMATCH";
 }
 
 /** Leases a run holds, for release when it ends. */
