@@ -772,7 +772,7 @@ test("unreadable rows with live parents or older creation still yield a performe
   assert.equal(interpreted.outcome, "SCANNED");
 });
 
-test("a parentless other-nonce row after the floor makes the scan UNAVAILABLE", () => {
+test("a parentless other-nonce row after the floor stays SCANNED (foreign nonce is not this run)", () => {
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({

@@ -16,7 +16,7 @@
  */
 import { statSync } from "node:fs";
 import { CONTROL_BYTES } from "./control-bytes.js";
-import { isExecutorRole, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
+import { isExecutorRole, NON_WRITING_ROLES, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
 import { isResolvedHostPath } from "./host-path.js";
 
 /**
@@ -107,7 +107,7 @@ export function executorArgvFor(
 ): readonly string[] | null {
   if (name === "local") return null;
   if (name === "claude") return ["-p", input.promptPath];
-  const reviewOnly = input.role === "ADVERSARIAL_REVIEW";
+  const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
   const permissionMode = reviewOnly ? "dontAsk" : "bypassPermissions";
   return [
     "--prompt-file", input.promptPath,
@@ -212,8 +212,8 @@ function buildGrokLaunch(input: ValidatedInput): AdapterLaunchV1 {
   // them reported success by exit code. Do not remove it as noise.
   //
   // A reviewer that can write is not a review. The measured implementer list stays
-  // `bypassPermissions` + `--always-approve`. ADVERSARIAL_REVIEW is dontAsk and must not
-  // carry --always-approve.
+  // `bypassPermissions` + `--always-approve`. Every NON_WRITING_ROLES member is
+  // dontAsk and must not carry --always-approve.
   const argv = executorArgvFor("grok", input);
   if (argv === null) return launchOf(input, []);
   return launchOf(input, argv);

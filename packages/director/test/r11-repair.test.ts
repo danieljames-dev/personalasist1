@@ -860,7 +860,16 @@ test("E1 a write role that commits nothing is not success", async () => {
 test("E1-liveness a review role that commits nothing can still succeed", async () => {
   const result = await runWith({
     neverWait: true,
-    request: { role: "INDEPENDENT_ACCEPTANCE" },
+    request: {
+      role: "INDEPENDENT_ACCEPTANCE",
+      argv: [
+        "--prompt-file", `${CWD}\\PROMPT.md`,
+        "--cwd", CWD,
+        "--permission-mode", "dontAsk",
+        "--no-plan",
+        "--max-turns", String(GROK_MAX_TURNS),
+      ],
+    },
     git: matchingGit(HEAD_AFTER),
   });
   assert.equal(result.ok, true, result.reason);

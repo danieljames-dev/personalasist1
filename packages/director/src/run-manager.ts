@@ -39,6 +39,7 @@ import {
   createBoundedLog,
   createMemoryLogSink,
   type BoundedLogReportV1,
+  type BoundedLogV1,
   type ClockV1,
   type LogSinkV1,
 } from "./bounded-log.js";
@@ -50,7 +51,15 @@ import {
   type ExecutorDiscoveryResultV1,
   type FileSystemProbe,
 } from "./executor-discovery.js";
-import { argvIsSafe, routeRole, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
+import {
+  argvIsSafe,
+  isExecutorRole,
+  NON_WRITING_ROLES,
+  routeRole,
+  WRITE_ROLES,
+  type ExecutorNameV1,
+  type ExecutorRoleV1,
+} from "./executors.js";
 import {
   collectGitTruth,
   verifyGitTruth,
@@ -93,6 +102,7 @@ import {
   isBrokerHostName,
   processRowCouldBelongToThisRun,
   processRowMakesScanUndecidable,
+  rowHasPositiveRunIdentity,
   placeableInstantMs,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -134,13 +144,6 @@ export type SuccessConjunctNameV1 =
   | "logStayedWithinBudget"
   | "reviewLeftTreeUnchanged"
   | "writeMovedHead";
-
-const WRITE_ROLES: ReadonlySet<ExecutorRoleV1> = new Set([
-  "IMPLEMENT",
-  "REPAIR",
-  "INTEGRATE",
-  "DEPLOY",
-]);
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -309,8 +312,8 @@ export interface ExecuteRunRequestV1 {
 export type LaunchRunRequestV1 = Omit<ExecuteRunRequestV1, "executablePath" | "argv"> & {
   readonly promptPath: string;
   /**
-   * Defaults to `IMPLEMENT` (measured implementer argv). `ADVERSARIAL_REVIEW`
-   * is the only role that must not receive write permission.
+   * Defaults to `IMPLEMENT` (measured implementer argv). Every role in
+   * {@link NON_WRITING_ROLES} receives `dontAsk` and no `--always-approve`.
    */
   readonly role?: ExecutorRoleV1;
 };
@@ -549,6 +552,12 @@ export function evaluateSuccessConjunction(input: {
   readonly logStayedWithinBudget: boolean;
   readonly role?: ExecutorRoleV1;
   readonly spawnedAtFloor?: string | null;
+  /**
+   * False when this conjunction describes a run that never created a process.
+   * HEAD conjuncts must then say so rather than borrowing the "role is not a …"
+   * wording. Omitted means a process existed (live evaluation).
+   */
+  readonly processWasCreated?: boolean;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -687,25 +696,36 @@ export function evaluateSuccessConjunction(input: {
   const beforeSha = observedHeadSha(input.gitBefore ?? null);
   const afterSha = observedHeadSha(input.gitAfter);
   const role = input.role;
+  const processWasCreated = input.processWasCreated !== false;
   let reviewOk = true;
   let reviewReason = "role is not a review that must leave the tree unchanged";
-  if (role === "ADVERSARIAL_REVIEW") {
+  let writeMovedOk = true;
+  let writeMovedReason = "role is not a write role that must advance HEAD";
+
+  if (!processWasCreated) {
+    const named = role !== undefined ? ` for role ${role}` : "";
+    reviewReason = `no process was created, so HEAD movement was not evaluated${named}`;
+    writeMovedReason = `no process was created, so HEAD movement was not evaluated${named}`;
+  } else if (role !== undefined && !isExecutorRole(role)) {
+    reviewOk = false;
+    reviewReason = `role ${String(role)} is not an enumerated executor role`;
+    writeMovedOk = false;
+    writeMovedReason = `role ${String(role)} is not an enumerated executor role`;
+  } else if (role !== undefined && NON_WRITING_ROLES.has(role)) {
     if (beforeSha === null || afterSha === null) {
       reviewOk = false;
       reviewReason = beforeSha === null
-        ? "review git-before HEAD is UNAVAILABLE; UNKNOWN does not license a review verdict"
-        : "review git-after HEAD is UNAVAILABLE; UNKNOWN does not license a review verdict";
+        ? `${role} git-before HEAD is UNAVAILABLE; UNKNOWN does not license a review verdict`
+        : `${role} git-after HEAD is UNAVAILABLE; UNKNOWN does not license a review verdict`;
     } else if (beforeSha !== afterSha) {
       reviewOk = false;
-      reviewReason = "ADVERSARIAL_REVIEW moved HEAD; a reviewer that writes is not a review";
+      reviewReason = `${role} moved HEAD; a reviewer that writes is not a review`;
     } else {
-      reviewReason = "ADVERSARIAL_REVIEW left HEAD unchanged";
+      reviewReason = `${role} left HEAD unchanged`;
     }
   }
 
-  let writeMovedOk = true;
-  let writeMovedReason = "role is not a write role that must advance HEAD";
-  if (role !== undefined && WRITE_ROLES.has(role)) {
+  if (processWasCreated && role !== undefined && isExecutorRole(role) && WRITE_ROLES.has(role)) {
     if (beforeSha === null || afterSha === null) {
       writeMovedOk = false;
       writeMovedReason = beforeSha === null
@@ -791,6 +811,9 @@ export async function launchRun(
 
   // Default is the implementer list. State it: absent role is IMPLEMENT.
   const role: ExecutorRoleV1 = request.role ?? "IMPLEMENT";
+  if (!isExecutorRole(role)) {
+    return refusedBeforeSpawn(request, deps, "role is not an enumerated executor role");
+  }
   if (routeRole(role) !== request.executor) {
     return refusedBeforeSpawn(
       request,
@@ -909,6 +932,8 @@ function refusedBeforeSpawn(
     executorTreeReason: "this launch never created a process",
     timedOut: false,
     logStayedWithinBudget: true,
+    processWasCreated: false,
+    ...(request.role !== undefined ? { role: request.role } : {}),
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -970,6 +995,8 @@ export async function executeRun(
     executorTreeReason: "this run never created a process",
     timedOut: false,
     logStayedWithinBudget: true,
+    processWasCreated: false,
+    ...(request.role !== undefined ? { role: request.role } : {}),
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -999,6 +1026,8 @@ export async function executeRun(
   let capacityHeld = false;
   let stillRunning = false;
   let spawnOccurred = false;
+  let spawnedChild: SpawnHandleV1 | null = null;
+  let boundedLog: BoundedLogV1 | null = null;
   let cancelStages: CancelStageV1[] = [];
   let timedOut = false;
   let processIdentity: ExecutorProcessIdentityV1 | null = null;
@@ -1031,6 +1060,7 @@ export async function executeRun(
       executorTreeReason: "the run threw before the process tree could be observed",
       timedOut: timedOutFlag,
       logStayedWithinBudget: true,
+      ...(request.role !== undefined ? { role: request.role } : {}),
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
@@ -1066,6 +1096,24 @@ export async function executeRun(
   try {
     // 1. timeout, cwd, nonce, argv, then the launch-path predicate.
     // Pure input checks — nothing acquired yet.
+    if (request.role !== undefined && !isExecutorRole(request.role)) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "role is not an enumerated executor role",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
     if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
       return finish({
         ok: false,
@@ -1506,6 +1554,7 @@ export async function executeRun(
       }
       permit = launched.permit;
       child = launched.launched;
+      spawnedChild = child;
     } catch (error) {
       return finish({
         ok: false,
@@ -1710,6 +1759,7 @@ export async function executeRun(
 
     const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
     const log = createBoundedLog({ clock: deps.clock, sinks });
+    boundedLog = log;
     let haltRequested = false;
     let resolveHalt: (() => void) | null = null;
     const haltSignal = new Promise<void>((resolve) => {
@@ -1967,6 +2017,23 @@ export async function executeRun(
     });
   } finally {
     releaseHeld();
+    releaseChildStreams(spawnedChild, boundedLog);
+  }
+}
+
+function releaseChildStreams(child: SpawnHandleV1 | null, log: BoundedLogV1 | null): void {
+  try {
+    log?.flush();
+  } catch {
+    // Flush errors must not escape executeRun.
+  }
+  for (const stream of [child?.stdout, child?.stderr]) {
+    if (stream == null) continue;
+    try {
+      if (!stream.destroyed) stream.destroy();
+    } catch {
+      // Destroy errors must not escape executeRun.
+    }
   }
 }
 
@@ -2018,14 +2085,16 @@ function persistLeaseHolder(
  *
  * Proven when the scan is SCANNED: no process carrying this run's nonce
  * remains; no descendant of the recorded holder in the CIM ParentProcessId
- * chain remains; no parentless row created at or after the spawn floor whose
- * nonce is not this run's remains (that row makes the scan UNAVAILABLE, and
- * UNAVAILABLE withholds the writer lease). The recorded holder is
+ * chain remains. A nonce-less parentless row makes the scan UNAVAILABLE only
+ * when it sits in the closed window [createdNotBefore, holderExitedAt] or
+ * its dead parent pid was previously observed in this run. A parentless row
+ * born after holderExitedAt, before the floor, or with a live parent is host
+ * noise and stays SCANNED. holderExitedAt is absent at cancel-time scans, so
+ * the closed-interval tie does not fire there. The recorded holder is
  * DEAD_CONFIRMED or the owned handle settled after a capture-time NOT_FOUND.
  *
- * A parentless nonce-less row from *before* the floor is host noise and is
- * not emitted. An unplaceable floor makes the scan UNAVAILABLE rather than
- * falling back to a narrower emit predicate.
+ * An unplaceable floor makes the scan UNAVAILABLE rather than falling back
+ * to a narrower emit predicate.
  */
 function describeExecutorTree(input: {
   readonly recorded: ExecutorProcessIdentityV1 | null;
@@ -2070,6 +2139,12 @@ function describeExecutorTree(input: {
       reason: `live process-tree sightings remain: ${input.orphanScan.liveSightings.map((item) => item.pid).join(", ")}`,
     };
   }
+  // leftoverConfirmed is a reporting conjunct, not a release conjunct.
+  // proveWriterExit does not require it: a later collectWriterOrphans that
+  // completed as SCANNED with no live sightings is the release fact. A sweep
+  // re-scan throw must not mint "tree gone" on the success conjunction (the
+  // Director could not confirm the kill), but it also must not un-mint a
+  // proof that the later scan already justified. Two helpers, two questions.
   if (!input.leftoverConfirmed) {
     return { ok: false, reason: "leftover kill could not be confirmed by a re-scan" };
   }
@@ -2124,6 +2199,10 @@ function writeResultIfPermitted(
   try {
     existing = fs.isFile(resultPath);
   } catch {
+    // Unreadable presence is not absence. Do not invent a first write over a
+    // record we could not stat, unless this run already spawned (the result
+    // must be persisted).
+    if (!spawned) return;
     existing = false;
   }
   if (existing && !spawned) return;
@@ -2206,24 +2285,37 @@ function collectWriterOrphans(input: {
 }
 
 /**
- * "Not proven absent" for this run. A sighting is this run's tree if its
- * nonce matches or it is in the recorded holder's ParentProcessId chain.
+ * "Not proven absent" for this run. Name/ancestry/nonce ordering is the
+ * same exported helpers {@link processRowCouldBelongToThisRun} uses: a
+ * broker image name may only exclude a row that failed every positive test.
  * A foreign process with a different nonce and no ancestry is not ours.
  */
 export function writerSightingNotProvenAbsent(
   sighting: OrphanSightingV1,
   runNonce: string,
-  tree: { readonly holderPid: number | null; readonly rows: readonly OrphanSightingV1[] } = {
+  tree: {
+    readonly holderPid: number | null;
+    readonly rows: readonly OrphanSightingV1[];
+    readonly createdNotBefore?: string;
+    readonly holderExitedAt?: string;
+    readonly observedPids?: ReadonlySet<number>;
+  } = {
     holderPid: null,
     rows: [],
   },
 ): boolean {
+  const ctx = {
+    runNonce,
+    createdNotBefore: tree.createdNotBefore ?? "",
+    ...(tree.holderPid !== null ? { holderPid: tree.holderPid } : {}),
+    ...(tree.holderExitedAt !== undefined ? { holderExitedAt: tree.holderExitedAt } : {}),
+    observedPids: tree.observedPids ?? new Set<number>(),
+    rows: tree.rows,
+  };
+  // Same exported helper processRowCouldBelongToThisRun uses for the
+  // positive facts. A name may only exclude a row that failed those.
+  if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
   if (isBrokerHostName(sighting.name)) return false;
-  // Ancestry is a fact this Director walked. A nonce the child wrote cannot
-  // discharge a descendant of the recorded holder.
-  if (tree.holderPid !== null && descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid)) {
-    return true;
-  }
   if (sighting.nonceReadable === false) return true;
   const nonce = normaliseRunNonce(sighting.runNonce);
   if (nonce === null) return true;
@@ -2443,7 +2535,9 @@ function readHandoffText(fs: RunFileSystemV1, handoffPath: string, stdout: strin
   try {
     present = fs.isFile(handoffPath);
   } catch {
-    present = false;
+    // Unreadable presence is not absence. Do not invent a handoff from stdout
+    // over a file we could not stat.
+    return null;
   }
   if (present) {
     try {
@@ -2699,20 +2793,28 @@ function leaseIdentityFromObservation(observation: ProcessObservationV1): Proces
   };
 }
 
+/** ENOENT/ENOTDIR are absence. Every other stat failure is unreadability. */
+export function statErrorMeansAbsent(error: unknown): boolean {
+  const code = errorCode(error);
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 export function createNodeRunFileSystem(): RunFileSystemV1 {
   return {
     isDirectory(absolutePath) {
       try {
         return statSync(absolutePath).isDirectory();
-      } catch {
-        return false;
+      } catch (error) {
+        if (statErrorMeansAbsent(error)) return false;
+        throw error;
       }
     },
     isFile(absolutePath) {
       try {
         return statSync(absolutePath).isFile();
-      } catch {
-        return false;
+      } catch (error) {
+        if (statErrorMeansAbsent(error)) return false;
+        throw error;
       }
     },
     readUtf8(absolutePath) {

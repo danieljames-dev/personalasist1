@@ -57,7 +57,7 @@ export type ExecutorRoleV1 =
  * No model is consulted to make this choice. Asking one to route every ordinary run would add
  * latency, cost and a failure mode, to answer a question whose answer is fixed.
  */
-const ROUTING: Readonly<Record<ExecutorRoleV1, ExecutorNameV1>> = {
+export const ROUTING: Readonly<Record<ExecutorRoleV1, ExecutorNameV1>> = {
   IMPLEMENT: "claude",
   REPAIR: "claude",
   INTEGRATE: "claude",
@@ -73,6 +73,38 @@ const ROUTING: Readonly<Record<ExecutorRoleV1, ExecutorNameV1>> = {
   HEALTH: "local",
   SAFE_PROJECT_SCRIPT: "local",
 };
+
+/**
+ * Exhaustive partition of {@link ExecutorRoleV1}. Adding a role without
+ * classifying it fails typecheck. WRITE_ROLES and NON_WRITING_ROLES are
+ * derived from this table so they cannot drift from each other.
+ */
+export const ROLE_KIND = {
+  IMPLEMENT: "WRITE",
+  REPAIR: "WRITE",
+  INTEGRATE: "WRITE",
+  DEPLOY: "WRITE",
+  INDEPENDENT_ACCEPTANCE: "NON_WRITING",
+  ADVERSARIAL_REVIEW: "NON_WRITING",
+  RESEARCH: "NON_WRITING",
+  PRE_INTEGRATION_REHEARSAL: "NON_WRITING",
+  POST_CLEANUP_RECHECK: "NON_WRITING",
+  GIT_VERIFY: "LOCAL",
+  BUILD: "LOCAL",
+  TEST: "LOCAL",
+  HEALTH: "LOCAL",
+  SAFE_PROJECT_SCRIPT: "LOCAL",
+} as const satisfies Record<ExecutorRoleV1, "WRITE" | "NON_WRITING" | "LOCAL">;
+
+function rolesOfKind(kind: (typeof ROLE_KIND)[ExecutorRoleV1]): ReadonlySet<ExecutorRoleV1> {
+  return new Set(
+    (Object.keys(ROLE_KIND) as ExecutorRoleV1[]).filter((role) => ROLE_KIND[role] === kind),
+  );
+}
+
+export const WRITE_ROLES: ReadonlySet<ExecutorRoleV1> = rolesOfKind("WRITE");
+export const NON_WRITING_ROLES: ReadonlySet<ExecutorRoleV1> = rolesOfKind("NON_WRITING");
+export const LOCAL_ROLES: ReadonlySet<ExecutorRoleV1> = rolesOfKind("LOCAL");
 
 export function isExecutorRole(value: unknown): value is ExecutorRoleV1 {
   return typeof value === "string" && Object.prototype.hasOwnProperty.call(ROUTING, value);

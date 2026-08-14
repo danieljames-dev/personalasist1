@@ -262,6 +262,16 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     }
   }
 
+  function accountHoldbackDrop(state: StreamState, droppedBytes: number): void {
+    if (droppedBytes <= 0) return;
+    const instant = lastWriteAt ?? deps.clock.now();
+    state.droppedLiveBytes += droppedBytes;
+    state.droppedFileBytes += droppedBytes;
+    state.liveTruncated = true;
+    state.fileTruncated = true;
+    state.truncatedAt ??= instant;
+  }
+
   function emitPending(stream: LogStreamV1, force: boolean): void {
     const state = streams[stream];
     if (force) {
@@ -270,14 +280,16 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     }
     if (state.pending.length === 0) return;
     if (force) {
-      const emit = redactOpenPrivateKey(state.pending);
+      const redacted = redactOpenPrivateKey(state.pending);
       state.pending = "";
-      if (emit.length === 0) return;
-      ingestRedacted(stream, Buffer.from(redactLogText(emit), "utf8"));
+      accountHoldbackDrop(state, redacted.droppedBytes);
+      if (redacted.text.length === 0) return;
+      ingestRedacted(stream, Buffer.from(redactLogText(redacted.text), "utf8"));
       return;
     }
-    const split = splitHoldback(state.pending);
+    const split = splitHoldback(state);
     state.pending = split.hold;
+    accountHoldbackDrop(state, split.droppedBytes);
     if (split.emit.length === 0) return;
     ingestRedacted(stream, Buffer.from(redactLogText(split.emit), "utf8"));
   }
@@ -332,7 +344,11 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     write,
     flush,
     markDrainIncomplete() {
-      write("stdout", "\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n");
+      lastWriteAt = deps.clock.now();
+      ingestRedacted(
+        "stdout",
+        Buffer.from("\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n", "utf8"),
+      );
     },
     liveTail(stream) {
       const name = asLogStream(stream);
@@ -373,6 +389,8 @@ interface StreamState {
   droppedLiveBytes: number;
   droppedFileBytes: number;
   truncatedAt: IsoTimestamp | null;
+  /** Set only when splitHoldback takes the MAX_PEM_HOLD overflow path. Never reset. */
+  pemOverflow: boolean;
 }
 
 function emptyStream(): StreamState {
@@ -386,6 +404,7 @@ function emptyStream(): StreamState {
     droppedLiveBytes: 0,
     droppedFileBytes: 0,
     truncatedAt: null,
+    pemOverflow: false,
   };
 }
 
@@ -407,28 +426,36 @@ function fileImageOf(state: StreamState): Buffer {
  * newline. Otherwise the entire unterminated last line is held. Incomplete-starter scanning
  * is not a second spelling of "block open".
  */
-function splitHoldback(pending: string): { emit: string; hold: string } {
+function splitHoldback(state: StreamState): { emit: string; hold: string; droppedBytes: number } {
+  const pending = state.pending;
   const begin = firstUnterminatedPemBegin(pending);
   if (begin >= 0) {
     const held = pending.slice(begin);
     if (held.length > MAX_PEM_HOLD) {
+      state.pemOverflow = true;
       const tailStart = Math.max(begin, pending.length - SECRET_TAIL_BYTES);
+      const redacted = redactOpenPrivateKey(pending.slice(0, tailStart));
       return {
-        emit: redactOpenPrivateKey(pending.slice(0, tailStart)),
+        emit: redacted.text,
         hold: pending.slice(tailStart),
+        droppedBytes: redacted.droppedBytes,
       };
     }
-    return { emit: pending.slice(0, begin), hold: held };
+    return { emit: pending.slice(0, begin), hold: held, droppedBytes: 0 };
   }
 
   // Overflow tail: BEGIN was already redacted; emit END without the body.
-  if (!PRIVATE_KEY_BEGIN_LINE.test(pending)) {
+  // Gated on pemOverflow so a bare END line on a stream that never overflowed
+  // cannot delete the preceding ordinary output.
+  if (state.pemOverflow && !PRIVATE_KEY_BEGIN_LINE.test(pending)) {
     const endFinder = /-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/;
     const endMatch = endFinder.exec(pending);
     if (endMatch !== null && endMatch.index !== undefined) {
+      const discarded = pending.slice(0, endMatch.index);
       return {
         emit: pending.slice(endMatch.index),
         hold: "",
+        droppedBytes: Buffer.byteLength(discarded, "utf8"),
       };
     }
   }
@@ -451,7 +478,7 @@ function splitHoldback(pending: string): { emit: string; hold: string } {
       hold = "";
     }
   }
-  return { emit, hold };
+  return { emit, hold, droppedBytes: 0 };
 }
 
 const SECRET_STARTERS = ["ghp_", "github_pat_", "sk-", "AKIA", "Bearer ", "Authorization:", "-----BEGIN "] as const;
@@ -482,11 +509,15 @@ function secretHoldStart(hold: string): number {
   return longestSecretStarterPrefixSuffix(hold);
 }
 
-function redactOpenPrivateKey(pending: string): string {
+function redactOpenPrivateKey(pending: string): { text: string; droppedBytes: number } {
   const begin = firstUnterminatedPemBegin(pending);
-  if (begin < 0) return pending;
+  if (begin < 0) return { text: pending, droppedBytes: 0 };
   const held = pending.slice(begin);
   const match = new RegExp(`^${PRIVATE_KEY_BEGIN_LINE.source}`).exec(held);
-  if (match === null) return pending;
-  return `${pending.slice(0, begin)}-----BEGIN ${match[1]}-----\n[REDACTED]\n`;
+  if (match === null) return { text: pending, droppedBytes: 0 };
+  const discarded = held.slice(match[0].length);
+  return {
+    text: `${pending.slice(0, begin)}-----BEGIN ${match[1]}-----\n[REDACTED]\n`,
+    droppedBytes: Buffer.byteLength(discarded, "utf8"),
+  };
 }

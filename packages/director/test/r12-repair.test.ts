@@ -654,6 +654,9 @@ test("B2/D1 processRowMakesScanUndecidable is the one plausibility gate", () => 
     }, ctx),
     true,
   );
+  // Parent 1 was never observed. Before the closed-interval parentless
+  // union this was host noise (false). A parentless in-window row is now
+  // undecidable even when the scanner missed the launcher.
   assert.equal(
     processRowMakesScanUndecidable({
       pid: 9,
@@ -661,7 +664,7 @@ test("B2/D1 processRowMakesScanUndecidable is the one plausibility gate", () => 
       parentPid: 1,
       creationDate: "2026-08-14T14:00:05.000Z",
     }, ctx),
-    false,
+    true,
   );
   assert.equal(
     processRowMakesScanUndecidable({

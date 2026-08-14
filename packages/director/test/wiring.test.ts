@@ -18,6 +18,7 @@ import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import type { LeaseV1 } from "../src/leases.js";
 import type { ExecutorProcessIdentityV1, ProcessObservationV1 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
+import { modulesReachableFrom } from "../src/src-reachability.js";
 import {
   createNodeRunFileSystem,
   executeRun,
@@ -85,15 +86,25 @@ function modulesCalling(files: Map<string, string>, name: string): string[] {
   return hits.sort();
 }
 
-test("every src module is imported by a non-test module, or is the package entry", () => {
+test("every src module is reachable by a transitive import walk from index.ts", () => {
   const files = sourceFiles();
   assert.ok(files.has("index.ts"), "src/index.ts is the package entry");
 
+  const importsByModule = new Map<string, string[]>();
+  for (const [from, source] of files) {
+    importsByModule.set(from, importsOf(source).filter((target) => files.has(target)));
+  }
+  const reachable = modulesReachableFrom("index.ts", importsByModule);
+  const orphans = [...files.keys()].filter((name) => !reachable.has(name)).sort();
+  assert.deepEqual(orphans, [], `src modules not reachable from index.ts: ${orphans.join(", ")}`);
+});
+
+test("weaker: every src module is imported by some module, including tests", () => {
+  const files = sourceFiles();
   const importedBy = new Map<string, string[]>();
   for (const name of files.keys()) importedBy.set(name, []);
 
   for (const [from, source] of files) {
-    if (from === "index.ts") continue;
     for (const target of importsOf(source)) {
       if (!files.has(target)) continue;
       importedBy.get(target)!.push(from);
@@ -115,7 +126,23 @@ test("every src module is imported by a non-test module, or is the package entry
     if (name === "index.ts") continue;
     if ((importedBy.get(name) ?? []).length === 0) orphans.push(name);
   }
-  assert.deepEqual(orphans, [], `unreachable src modules: ${orphans.join(", ")}`);
+  assert.deepEqual(orphans, [], `src modules with no importer even counting tests: ${orphans.join(", ")}`);
+});
+
+test("modulesReachableFrom reports a synthetic module that no production root imports", () => {
+  const graph = new Map<string, readonly string[]>([
+    ["index.ts", ["run-manager.ts", "mission-creation.ts"]],
+    ["run-manager.ts", ["leases.ts"]],
+    ["mission-creation.ts", []],
+    ["leases.ts", []],
+    ["orphan-only-tested.ts", []],
+  ]);
+  const reachable = modulesReachableFrom("index.ts", graph);
+  assert.equal(reachable.has("index.ts"), true);
+  assert.equal(reachable.has("run-manager.ts"), true);
+  assert.equal(reachable.has("leases.ts"), true);
+  assert.equal(reachable.has("mission-creation.ts"), true);
+  assert.equal(reachable.has("orphan-only-tested.ts"), false);
 });
 
 test("index.ts does not export a launch path that bypasses the adapter", async () => {

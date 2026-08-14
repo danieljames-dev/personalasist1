@@ -32,6 +32,7 @@ export {
   evaluateSuccessConjunction,
   writerSightingNotProvenAbsent,
   createNodeRunFileSystem,
+  statErrorMeansAbsent,
   createNodeSpawner,
   wrapChildProcess,
   createNodeWait,
@@ -65,3 +66,4 @@ export type {
 export * from "./lease-store.js";
 export * from "./work-items.js";
 export * from "./store-contract.js";
+export * from "./src-reachability.js";
