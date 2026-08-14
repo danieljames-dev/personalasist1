@@ -97,7 +97,6 @@ function writerProofInput(over: Partial<WriterExitProofInputV1> = {}): WriterExi
     processStillRunning: false,
     recordedLeaseKind: "PRODUCTION_WRITER",
     recordedLeaseId: "lease-pw-1",
-    releasedLeaseId: "lease-pw-1",
     recordedIdentity: RECORDED,
     observation: HOLDER_GONE,
     probedPid: RECORDED.pid,
@@ -757,10 +756,6 @@ test("DEAD_CONFIRMED of this run's identity is not writer-release evidence", asy
     },
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
-  assert.equal(
-    writerReleaseEvidence(proveWriterExit(writerProofInput({ releasedLeaseId: null }))),
-    false,
-  );
 });
 
 test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease", async () => {
@@ -791,7 +786,6 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
       proveWriterExit(writerProofInput({
         recordedLeaseKind: lease.kind,
         recordedLeaseId: lease.leaseId,
-        releasedLeaseId: lease.leaseId,
       })),
       `${lease.kind} holder-gone proof must mint; the reported field stays kind-scoped`,
     );
@@ -800,7 +794,6 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
     writerReleaseEvidence(proveWriterExit(writerProofInput({
       recordedLeaseKind: null,
       recordedLeaseId: "lease-none",
-      releasedLeaseId: "lease-none",
     }))),
     false,
   );
@@ -891,7 +884,6 @@ test("a production writer that ignores kill and survives killTree does not relea
   assert.equal(
     writerReleaseEvidence(proveWriterExit(writerProofInput({
       recordedLeaseId: "lease-pw-survive",
-      releasedLeaseId: "lease-pw-survive",
       observation: foundObservation(RECORDED),
       orphanSightings: [{ pid: hung.pid, runNonce: NONCE }],
     }))),
@@ -1818,7 +1810,6 @@ test("productionWriterLeaseReleasedByThisRun stays false for non-writer kinds wh
     const proof = proveWriterExit(writerProofInput({
       recordedLeaseKind: lease.kind,
       recordedLeaseId: lease.leaseId,
-      releasedLeaseId: lease.leaseId,
     }));
     assert.ok(proof, `${lease.kind} must mint`);
     const result = await runWith({
@@ -3049,7 +3040,6 @@ test("proveWriterExit denies when liveSightings is omitted or null", () => {
     processStillRunning: false as const,
     recordedLeaseKind: "PRODUCTION_WRITER" as const,
     recordedLeaseId: "L",
-    releasedLeaseId: "L",
     recordedIdentity: null,
     observation: null,
     probedPid: null,

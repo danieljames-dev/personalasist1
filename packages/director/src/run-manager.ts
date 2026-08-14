@@ -93,7 +93,6 @@ import {
   normaliseRunNonce,
   parentlessAfterFloorMakesScanUndecidable,
   placeableInstantMs,
-  provenCreatedAtOrAfterFloor,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type OrphanVerdictV1,
@@ -382,7 +381,6 @@ export interface WriterExitProofInputV1 {
   readonly processStillRunning: boolean;
   readonly recordedLeaseKind: LeaseKindV1 | null;
   readonly recordedLeaseId: string | null;
-  readonly releasedLeaseId: string | null;
   readonly recordedIdentity: ExecutorProcessIdentityV1 | null;
   /** Observation of `probedPid`. Liveness is computed from this, never taken as input. */
   readonly observation: ProcessObservationV1 | null;
@@ -437,7 +435,7 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
     // A missing kind is "no lease was recorded". Any of the five kinds may mint;
     // the reported writer-release field stays scoped to PRODUCTION_WRITER.
     if (input.recordedLeaseKind === null) return null;
-    if (input.recordedLeaseId === null || input.releasedLeaseId === null) return null;
+    if (input.recordedLeaseId === null) return null;
     if (!input.orphanScanPerformed) return null;
     if (input.orphanSightings === null) return null;
     if (input.liveSightings === null || input.liveSightings === undefined) return null;
@@ -1718,7 +1716,6 @@ export async function executeRun(
       processStillRunning: stillRunning,
       recordedLeaseKind: heldLease.kind,
       recordedLeaseId: heldLease.leaseId,
-      releasedLeaseId: heldLease.leaseId,
       recordedIdentity: processIdentity,
       observation,
       probedPid: processIdentity === null ? null : processIdentity.pid,
@@ -2046,19 +2043,12 @@ function killNonceBearingLeftovers(input: {
     if (leftover.pid === input.childPid) continue;
     if (!writerSightingNotProvenAbsent(leftover, input.runNonce, tree)) continue;
     if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
-    const leftoverNonce = normaliseRunNonce(leftover.runNonce);
-    if (leftoverNonce === input.runNonce) {
-      if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
-      input.killTree(leftover.pid);
-      killed = true;
-      continue;
-    }
-    // Ancestry-only: a PID slot is not a process. Kill only when the recorded
-    // holder is still identity-MATCH and the leftover started at or after that
-    // holder's creationDate. A reused slot's older children are strangers.
-    if (input.recorded === null) continue;
-    if (!provenCreatedAtOrAfterFloor(leftover.creationDate, input.recorded.creationDate)) continue;
-    continue;
+    // A leftover is killed only when its normalised nonce equals this run's
+    // nonce and it was created at or after the spawn floor. Ancestry alone
+    // never authorises a kill: a PID slot is not a process.
+    if (normaliseRunNonce(leftover.runNonce) !== input.runNonce) continue;
+    input.killTree(leftover.pid);
+    killed = true;
   }
   let remaining: readonly OrphanSightingV1[];
   try {

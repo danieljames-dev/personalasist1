@@ -18,6 +18,7 @@ import { argvIsSafe } from "../src/executors.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
   acquireLease,
+  reclaimStaleLease,
   releaseLease,
   type LeaseV1,
 } from "../src/leases.js";
@@ -399,6 +400,43 @@ test("A1-liveness a WORKTREE lease and a PRODUCTION_WRITER lease coexist", () =>
   });
   assert.equal(wt.ok, true, wt.reason);
   assert.equal(pw.ok, true, pw.reason);
+});
+
+test("R2 an expired PRODUCTION_WRITER under one token is found by a reclaim naming another", () => {
+  const longAgo = "2026-08-13T10:00:00.000Z";
+  const held = acquireLease({
+    existing: [],
+    leaseId: "lease-pw-token-default",
+    kind: "PRODUCTION_WRITER",
+    resource: "default",
+    missionId: "m1",
+    runId: "run-old",
+    pid: 12224,
+    now: longAgo,
+  }).lease!;
+
+  const foundThenJudged = reclaimStaleLease({
+    existing: [held],
+    kind: "PRODUCTION_WRITER",
+    resource: "prod",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "FOUND", pid: 12224 },
+    now: NOW,
+  });
+  assert.equal(foundThenJudged.ok, false, "a singleton under a different token must be found, not missed");
+  assert.equal(foundThenJudged.refusal, "IDENTITY_UNVERIFIABLE");
+  assert.equal(foundThenJudged.remaining.length, 1);
+
+  const reclaimed = reclaimStaleLease({
+    existing: [held],
+    kind: "PRODUCTION_WRITER",
+    resource: "prod",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "NOT_FOUND", pid: 12224 },
+    now: NOW,
+  });
+  assert.equal(reclaimed.ok, true, "once found, NOT_FOUND of the recorded pid still reclaims");
+  assert.deepEqual(reclaimed.remaining, []);
 });
 
 // ---------------------------------------------------------------------------

@@ -140,10 +140,6 @@ export {
   type ResourceIdentityModelV1,
 } from "./resource-identity.js";
 
-function sameResource(a: LeaseV1, kind: LeaseKindV1, resource: string): boolean {
-  return a.kind === kind && canonicalResource(a.kind, a.resource) === canonicalResource(kind, resource);
-}
-
 /** Same refusals validatePathSegment names: empty, control bytes, separators, `..`. */
 function leaseIdIsSafe(value: string): { ok: boolean; reason: string } {
   if (value === "") return { ok: false, reason: "an empty id addresses the parent directory" };
@@ -405,7 +401,8 @@ export function reclaimStaleLease(input: {
   holderObservation?: HolderObservationV1;
   now: IsoTimestamp;
 }): ReclaimResultV1 {
-  const held = input.existing.find((lease) => sameResource(lease, input.kind, input.resource));
+  const requested = { kind: input.kind, resource: input.resource };
+  const held = input.existing.find((lease) => conflicts(lease, requested));
   if (!held) return { ok: true, remaining: [...input.existing], reason: "nothing held", refusal: null };
 
   const unchanged = [...input.existing];
