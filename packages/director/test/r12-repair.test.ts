@@ -565,6 +565,7 @@ test("B2 a broker-parented no-nonce row after the floor makes the scan UNAVAILAB
     createdNotBefore: "2026-08-14T14:00:00.000Z",
     runNonce: NONCE,
     holderPid: 4812,
+    holderExitedAt: "2026-08-14T14:00:10.000Z",
   });
   assert.equal(interpreted.outcome, "UNAVAILABLE");
   assert.match(interpreted.reason, /undecidable/);
@@ -638,6 +639,7 @@ test("B2/D1 processRowMakesScanUndecidable is the one plausibility gate", () => 
     runNonce: NONCE,
     createdNotBefore: "2026-08-14T14:00:00.000Z",
     holderPid: 4812,
+    holderExitedAt: "2026-08-14T14:00:10.000Z",
     observedPids: new Set([4812]),
     rows: [] as { pid: number; parentPid?: number }[],
   };

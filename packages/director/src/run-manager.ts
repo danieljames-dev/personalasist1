@@ -247,6 +247,7 @@ export interface RunManagerDepsV1 {
     runNonce: string;
     createdNotBefore: string;
     holderPid?: number;
+    holderExitedAt?: string;
   }) => readonly OrphanSightingV1[];
   readonly logSinks?: { readonly stdout: LogSinkV1; readonly stderr: LogSinkV1 };
   /**
@@ -1009,6 +1010,7 @@ export async function executeRun(
   let timedOut = false;
   let processIdentity: ExecutorProcessIdentityV1 | null = null;
   let spawnedAtFloor: string | null = null;
+  let holderExitedAt: string | null = null;
   let gitBefore: GitObservationV1 | null = null;
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
   let exitProof: WriterExitProofV1 | null = null;
@@ -1554,6 +1556,7 @@ export async function executeRun(
       }
       const confirmedStopped = observation.outcome === "NOT_FOUND";
       stillRunning = !confirmedStopped;
+      if (confirmedStopped) holderExitedAt = deps.clock.now();
       try {
         killNonceBearingLeftovers({
           scanOrphans: deps.scanOrphans,
@@ -1564,6 +1567,7 @@ export async function executeRun(
           parentExited: confirmedStopped,
           holderPid: childPid,
           createdNotBefore: spawnedAtFloor ?? "",
+          ...(holderExitedAt !== null ? { holderExitedAt } : {}),
         });
       } catch {
         // A failed leftover kill is not a confirmed absence.
@@ -1574,6 +1578,7 @@ export async function executeRun(
         runNonce,
         holderPid: childPid,
         createdNotBefore: spawnedAtFloor ?? "",
+        ...(holderExitedAt !== null ? { holderExitedAt } : {}),
       });
       const reason = confirmedStopped
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
@@ -1667,6 +1672,7 @@ export async function executeRun(
     if (exitWon) {
       const ended = await child.exit;
       exitCode = ended.code;
+      holderExitedAt = deps.clock.now();
     } else {
       const raced = await Promise.race([
         raceExit(child, request.timeoutMs, deps.wait, () => {
@@ -1678,6 +1684,7 @@ export async function executeRun(
       ]);
       if (raced.tag === "exit") {
         exitCode = raced.exit.code;
+        holderExitedAt = deps.clock.now();
       } else {
         if (raced.tag === "timeout") timedOut = true;
         const cancelled = await cancelLadder(
@@ -1687,9 +1694,11 @@ export async function executeRun(
           runNonce,
           cancelStages,
           spawnedAtFloor ?? "",
+          holderExitedAt,
         );
         stillRunning = cancelled.stillRunning;
         exitCode = cancelled.exitCode;
+        if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
       }
     }
 
@@ -1704,15 +1713,18 @@ export async function executeRun(
         runNonce,
         cancelStages,
         spawnedAtFloor ?? "",
+        holderExitedAt,
       );
       stillRunning = cancelled.stillRunning;
       if (cancelled.exitCode !== null) exitCode = cancelled.exitCode;
+      if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
     }
 
     const logReport = log.report();
     const output = `${log.liveTail("stdout").toString("utf8")}\n${log.liveTail("stderr").toString("utf8")}`;
 
     // Nonce sweep on every exit path, not only timeout / mustHalt.
+    if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
     let leftoverSweep: LeftoverSweepV1 = { confirmed: false, remaining: [], killed: false };
     try {
       leftoverSweep = killNonceBearingLeftovers({
@@ -1724,6 +1736,7 @@ export async function executeRun(
         parentExited: child.exited,
         holderPid: processIdentity?.pid ?? childPid,
         createdNotBefore: spawnedAtFloor ?? "",
+        ...(holderExitedAt !== null ? { holderExitedAt } : {}),
       });
     } catch {
       leftoverSweep = { confirmed: false, remaining: [], killed: false };
@@ -1777,6 +1790,7 @@ export async function executeRun(
       runNonce,
       holderPid: processIdentity?.pid ?? childPid,
       createdNotBefore: spawnedAtFloor ?? "",
+      ...(holderExitedAt !== null ? { holderExitedAt } : {}),
     });
 
     const ownedHandleExit: OwnedHandleExitV1 = {
@@ -2075,14 +2089,17 @@ function collectWriterOrphans(input: {
   readonly runNonce: string;
   readonly holderPid?: number;
   readonly createdNotBefore: string;
+  readonly holderExitedAt?: string;
 }): WriterOrphanScanV1 {
   try {
     const createdNotBefore = input.createdNotBefore;
     const holderPid = input.holderPid ?? input.recorded?.pid;
+    const holderExitedAt = input.holderExitedAt;
     const sightings = [...resolveOrphanScanner(input.scanOrphans)({
       runNonce: input.runNonce,
       createdNotBefore,
       ...(holderPid !== undefined ? { holderPid } : {}),
+      ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     })];
     const observedPids = new Set<number>();
     if (isUsablePid(holderPid)) observedPids.add(holderPid);
@@ -2090,6 +2107,7 @@ function collectWriterOrphans(input: {
       runNonce: input.runNonce,
       createdNotBefore,
       ...(isUsablePid(holderPid) ? { holderPid } : {}),
+      ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids,
       rows: sightings,
     };
@@ -2150,6 +2168,7 @@ function killNonceBearingLeftovers(input: {
   readonly parentExited: boolean;
   readonly holderPid?: number;
   readonly createdNotBefore: string;
+  readonly holderExitedAt?: string;
 }): LeftoverSweepV1 {
   const createdNotBefore = input.createdNotBefore;
   const holderPid = input.holderPid ?? input.recorded?.pid ?? null;
@@ -2157,6 +2176,7 @@ function killNonceBearingLeftovers(input: {
     runNonce: input.runNonce,
     createdNotBefore,
     ...(holderPid !== null ? { holderPid } : {}),
+    ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
   };
   let leftovers: readonly OrphanSightingV1[];
   try {
@@ -2242,6 +2262,7 @@ async function cancelLadder(
   runNonce: string,
   stages: CancelStageV1[],
   createdNotBefore: string,
+  holderExitedAt?: string | null,
 ): Promise<{ stillRunning: boolean; exitCode: number | null }> {
   // SOFT: terminate the tracked root only. child.kill() is TerminateProcess on this PID.
   try {
@@ -2263,6 +2284,9 @@ async function cancelLadder(
   const stillAfterHard = !child.exited;
 
   // ORPHAN: after cancel, scan by AION_RUN_NONCE and spawn floor; kill leftovers.
+  const leftoverCeiling = child.exited
+    ? (holderExitedAt ?? deps.clock.now())
+    : holderExitedAt ?? undefined;
   const leftoverSweep = killNonceBearingLeftovers({
     scanOrphans: deps.scanOrphans,
     killTree: deps.killTree,
@@ -2272,6 +2296,7 @@ async function cancelLadder(
     parentExited: child.exited,
     holderPid: recorded?.pid ?? child.pid,
     createdNotBefore,
+    ...(leftoverCeiling ? { holderExitedAt: leftoverCeiling } : {}),
   });
   if (leftoverSweep.killed && !stages.includes("ORPHAN")) stages.push("ORPHAN");
 

@@ -570,6 +570,11 @@ export function interpretWindowsOrphanScanOutput(input: {
   readonly holderPid?: number;
   /** Pids this run has already observed (holder + earlier tree scans). */
   readonly observedPids?: readonly number[];
+  /**
+   * Observed holder-exit instant. Closes the broker-row window. Absent or
+   * unplaceable means a broker-parented row has no lifetime tie to this run.
+   */
+  readonly holderExitedAt?: string;
 }): OrphanScanInterpretationV1 {
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
@@ -653,10 +658,12 @@ export function interpretWindowsOrphanScanOutput(input: {
   for (const pid of input.observedPids ?? []) {
     if (isUsablePid(pid)) observedPids.add(pid);
   }
+  const holderExitedAt = asUsableToken(input.holderExitedAt) ?? undefined;
   const plausibility = {
     runNonce: input.runNonce ?? "",
     createdNotBefore: input.createdNotBefore ?? "",
     ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
+    ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     observedPids,
     rows: sightings,
   };
@@ -685,6 +692,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly runNonce: string;
   readonly createdNotBefore: string;
   readonly holderPid?: number;
+  readonly holderExitedAt?: string;
 }) => readonly NonceBearingProcessV1[] {
   const spawn = host?.spawnSync ?? spawnSync;
   return (query) => {
@@ -721,6 +729,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       );
     }
 
+    const holderExitedAt = asUsableToken(query.holderExitedAt) ?? undefined;
     const interpreted = interpretWindowsOrphanScanOutput({
       status: result.status,
       stdout: stripBom(String(result.stdout ?? "")).trim(),
@@ -728,6 +737,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       createdNotBefore: query.createdNotBefore,
       runNonce,
       ...(holderPid > 0 ? { holderPid, observedPids: [holderPid] } : {}),
+      ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     });
     if (interpreted.outcome === "UNAVAILABLE") {
       throw new Error(`orphan scan unavailable: ${interpreted.reason}`);
@@ -881,6 +891,13 @@ export type ProcessRowPlausibilityContextV1 = {
   readonly runNonce: string;
   readonly createdNotBefore: string;
   readonly holderPid?: number;
+  /**
+   * Observed holder-exit instant. A broker-parented row is tied to this run
+   * only when it is proven created in [createdNotBefore, holderExitedAt].
+   * Missing or unplaceable: no closed interval, so the broker branch is not
+   * a tie.
+   */
+  readonly holderExitedAt?: string;
   readonly observedPids: ReadonlySet<number>;
   readonly rows: readonly { readonly pid: number; readonly parentPid?: number }[];
 };
@@ -913,9 +930,9 @@ function rowIsInHolderChain(
  * One answer to "could this row belong to this run?".
  *
  * A row is plausible when its nonce matches, it is in the holder's pid chain,
- * it was created at or after the floor with no nonce and a broker parent, or
- * it was created at or after the floor with no nonce and a dead parent this
- * run actually observed. Everything else is host noise.
+ * it was created in [floor, holder exit] with no nonce and a broker parent,
+ * or it was created at or after the floor with no nonce and a dead parent
+ * this run actually observed. Everything else is host noise.
  */
 export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -926,7 +943,7 @@ export function processRowCouldBelongToThisRun(
   const noNonce = asUsableToken(sighting.runNonce) === null;
   if (!noNonce) return false;
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
-  if (isBrokerHostName(sighting.parentName)) return true;
+  if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
   return sighting.parentPresent === false
     && sighting.parentPid !== undefined
     && ctx.observedPids.has(sighting.parentPid);
@@ -946,10 +963,23 @@ export function processRowMakesScanUndecidable(
   if (!noNonce) return false;
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   const hasHolder = ctx.holderPid !== undefined && ctx.holderPid > 0;
-  if (hasHolder && isBrokerHostName(sighting.parentName)) return true;
+  if (hasHolder && brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
   return sighting.parentPresent === false
     && sighting.parentPid !== undefined
     && ctx.observedPids.has(sighting.parentPid);
+}
+
+/**
+ * A broker-parented row is this run's only when it was minted while the
+ * holder was actually alive. The floor alone is open-ended and covers the
+ * whole tail after exit, including this Director's own CIM side effects.
+ */
+function brokerParentedRowTiedToThisRun(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (!isBrokerHostName(sighting.parentName)) return false;
+  return provenCreatedAtOrBeforeCeiling(sighting.creationDate, ctx.holderExitedAt);
 }
 
 export function provenCreatedAtOrAfterFloor(
@@ -964,6 +994,25 @@ export function provenCreatedAtOrAfterFloor(
   const at = placeableInstantMs(candidate);
   if (at === null) return false;
   return at >= floorMs;
+}
+
+/**
+ * Whether `candidate` is *proven* at or before `ceiling`. An unplaceable
+ * operand does not establish the claim — UNKNOWN stays UNKNOWN, so this
+ * returns false. A missing ceiling is not a closed interval.
+ */
+export function provenCreatedAtOrBeforeCeiling(
+  candidate: string | undefined,
+  ceiling: string | undefined,
+): boolean {
+  const ceilingToken = asUsableToken(ceiling);
+  if (ceilingToken === null) return false;
+  const ceilingMs = placeableInstantMs(ceilingToken);
+  if (ceilingMs === null) return false;
+  if (candidate === undefined) return false;
+  const at = placeableInstantMs(candidate);
+  if (at === null) return false;
+  return at <= ceilingMs;
 }
 
 /**
