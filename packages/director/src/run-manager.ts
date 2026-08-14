@@ -42,7 +42,7 @@ import {
   type ClockV1,
   type LogSinkV1,
 } from "./bounded-log.js";
-import { buildExecutorLaunch, classifyExecutorExit } from "./executor-adapters.js";
+import { buildExecutorLaunch, classifyExecutorExit, executorArgvFor } from "./executor-adapters.js";
 import {
   discoverClaudeExecutor,
   discoverGrokExecutor,
@@ -91,7 +91,7 @@ import {
   holderLiveness,
   isUsablePid,
   normaliseRunNonce,
-  parentlessAfterFloorMakesScanUndecidable,
+  processRowMakesScanUndecidable,
   placeableInstantMs,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -99,8 +99,10 @@ import {
   type ProcessObservationV1,
 } from "./process-identity.js";
 import {
+  answersAfterReboot,
   assertSpawnPermitBinding,
   isSpawnPermitSpent,
+  readRunIntent,
   recordSpawnAttempt,
   recordSpawnObservation,
   spendSpawnPermit,
@@ -211,6 +213,7 @@ export interface OrphanSightingV1 {
   readonly parentPid?: number;
   readonly nonceReadable?: boolean;
   readonly parentPresent?: boolean;
+  readonly parentName?: string;
 }
 
 /**
@@ -257,6 +260,12 @@ export interface RunManagerDepsV1 {
    * false.
    */
   readonly askWriterLiveness?: (recorded: ExecutorProcessIdentityV1) => WriterLivenessQuestionV1;
+  /**
+   * Required to verify that `executeRun` is launching the discovered adapter
+   * argv. Omitted inputs fail the launch-path check closed.
+   */
+  readonly discoveryEnv?: DiscoveryEnvironment;
+  readonly discoveryFs?: FileSystemProbe;
 }
 
 export interface LaunchRunDepsV1 extends RunManagerDepsV1 {
@@ -815,6 +824,71 @@ function discoverExecutor(
   return { status: "UNAVAILABLE", reason: "the local in-process executor is not implemented and will not pretend to run" };
 }
 
+function argvEquals(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+/**
+ * One gate at the single spawn point: the request must be exactly what
+ * discoverExecutor + the adapter would produce. A file-URL import of
+ * executeRun with an arbitrary command is refused before anything is acquired.
+ */
+function launchPathMatchesDiscoveredAdapter(
+  request: ExecuteRunRequestV1,
+  deps: RunManagerDepsV1,
+  runNonce: string,
+): { ok: true } | { ok: false; reason: string } {
+  const env = deps.discoveryEnv ?? {};
+  const probe = deps.discoveryFs ?? { isFile: () => false, readDir: () => [] };
+  const discovery = discoverExecutor(request.executor, env, probe);
+  if (discovery.status !== "FOUND") {
+    const why = discovery.status === "AMBIGUOUS"
+      ? `executor discovery ambiguous: ${discovery.reason}`
+      : discovery.reason;
+    return { ok: false, reason: `launch path refused: ${why}` };
+  }
+  if (discovery.executablePath !== request.executablePath) {
+    return {
+      ok: false,
+      reason: "launch path refused: executablePath is not the discovered executor",
+    };
+  }
+  const promptPath = request.promptPath;
+  if (promptPath === undefined || promptPath.trim() === "") {
+    return {
+      ok: false,
+      reason: "launch path refused: promptPath is required to verify the adapter argv",
+    };
+  }
+  const expected = executorArgvFor(request.executor, {
+    promptPath,
+    cwd: request.cwd,
+    role: request.role ?? "IMPLEMENT",
+  });
+  if (expected === null) {
+    return { ok: false, reason: "launch path refused: adapter has no argv for this executor" };
+  }
+  if (!argvEquals(expected, request.argv)) {
+    return { ok: false, reason: "launch path refused: argv is not the adapter argv" };
+  }
+  if (runNonce.trim() === "") {
+    return { ok: false, reason: "launch path refused: run nonce is empty" };
+  }
+  return { ok: true };
+}
+
+function durableSpawnRequiresWithhold(fs: RunFileSystemV1, intentPath: string): boolean {
+  try {
+    if (!fs.isFile(intentPath)) return false;
+  } catch {
+    return true;
+  }
+  const read = readRunIntent(intentPath, intentStoreFromFs(fs));
+  if (!read.ok) return true;
+  return answersAfterReboot(read.intent).started === true;
+}
+
 function refusedBeforeSpawn(
   request: LaunchRunRequestV1,
   deps: LaunchRunDepsV1,
@@ -971,7 +1045,8 @@ export async function executeRun(
       if (adoptedExistingHolder && exitProof === null) {
         exitProof = proveAdoptedHolderDead(heldLease, deps.probe);
       }
-      const withhold = (spawnOccurred || adoptedExistingHolder) && exitProof === null;
+      const durableSpawn = durableSpawnRequiresWithhold(deps.fs, intentPath);
+      const withhold = (spawnOccurred || adoptedExistingHolder || durableSpawn) && exitProof === null;
       if (!withhold) {
         try {
           const before = leaseStore.list();
@@ -997,7 +1072,26 @@ export async function executeRun(
   };
 
   try {
-    // 1. cwd, then nonce, then argv. Pure input checks — nothing acquired yet.
+    // 1. timeout, cwd, nonce, argv, then the launch-path predicate.
+    // Pure input checks — nothing acquired yet.
+    if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `timeoutMs is not a finite positive duration (${String(request.timeoutMs)})`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
     let cwdOk = false;
     try {
       cwdOk = isResolvedHostPath(request.cwd) && deps.fs.isDirectory(request.cwd);
@@ -1061,6 +1155,25 @@ export async function executeRun(
         ok: false,
         spawned: false,
         reason: `argv is not safe: ${argvSafety.offending ?? "metacharacter"}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    const launchPath = launchPathMatchesDiscoveredAdapter(request, deps, runNonce);
+    if (!launchPath.ok) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: launchPath.reason,
         conjunction: emptyConjunction,
         exitCode: null,
         processIdentity: null,
@@ -1410,6 +1523,12 @@ export async function executeRun(
       });
     }
 
+    // Stamp the holder onto the lease before the durable spawn record so a
+    // crash cannot leave intent.spawnPid set while the lease still says
+    // pid:null. Must stay after the spawn; must not move any intent write
+    // before the spawn.
+    heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null, runNonce);
+
     const attempted = recordSpawnAttempt({
       permit,
       pid: childPid,
@@ -1476,7 +1595,6 @@ export async function executeRun(
       });
     }
     permit = attempted.permit;
-    heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null, runNonce);
 
     const captured = captureProcessIdentity(deps.probe, {
       pid: childPid,
@@ -1966,8 +2084,17 @@ function collectWriterOrphans(input: {
       createdNotBefore,
       ...(holderPid !== undefined ? { holderPid } : {}),
     })];
+    const observedPids = new Set<number>();
+    if (isUsablePid(holderPid)) observedPids.add(holderPid);
+    const plausibility = {
+      runNonce: input.runNonce,
+      createdNotBefore,
+      ...(isUsablePid(holderPid) ? { holderPid } : {}),
+      observedPids,
+      rows: sightings,
+    };
     for (const sighting of sightings) {
-      if (parentlessAfterFloorMakesScanUndecidable(sighting, input.runNonce, createdNotBefore)) {
+      if (processRowMakesScanUndecidable(sighting, plausibility)) {
         return { performed: false, sightings: [], liveSightings: [] };
       }
     }

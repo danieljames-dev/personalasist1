@@ -13,6 +13,7 @@ import {
   createBoundedLog,
   createFixedClock,
   createMemoryLogSink,
+  MAX_TOKEN_HOLD,
 } from "../src/bounded-log.js";
 import { argvIsSafe } from "../src/executors.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
@@ -31,6 +32,7 @@ import {
   type ProcessObservationV1,
 } from "../src/process-identity.js";
 import { requireSpawnPermit, type SpawnPermitV1 } from "../src/run-intent.js";
+import { GROK_MAX_TURNS } from "../src/executor-adapters.js";
 import {
   createNodeRunFileSystem,
   executeRun,
@@ -90,6 +92,17 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
   };
 }
 
+function grokImplementerArgv(promptPath = `${CWD}\\PROMPT.md`, cwd = CWD): string[] {
+  return [
+    "--prompt-file", promptPath,
+    "--cwd", cwd,
+    "--permission-mode", "bypassPermissions",
+    "--always-approve",
+    "--no-plan",
+    "--max-turns", String(GROK_MAX_TURNS),
+  ];
+}
+
 function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
   return {
     runId: "run-1",
@@ -99,10 +112,11 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     worktree: CWD,
     branch: "executor/oracle",
     executablePath: EXE,
-    argv: ["--prompt-file", `${CWD}\\PROMPT.md`, "--cwd", CWD, "--no-plan"],
+    argv: grokImplementerArgv(),
     cwd: CWD,
     runNonce: NONCE,
     runRoot: RUN_ROOT,
+    promptPath: `${CWD}\\PROMPT.md`,
     timeoutMs: 30_000,
     lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-1" },
     authorisedProductionMutated: false,
@@ -279,6 +293,11 @@ async function runWith(
     killTree: over.killTree ?? (() => undefined),
     scanOrphans: over.scanOrphans ?? (() => []),
     resolveArtifactPath: (absolutePath) => absolutePath,
+    discoveryEnv: { AION_GROK_PATH: EXE, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
+    discoveryFs: {
+      isFile: (path) => path === EXE || path === "C:\\Tools\\claude.exe",
+      readDir: () => [],
+    },
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
   };
   return executeRun(request(over.request), deps);
@@ -710,9 +729,11 @@ test("D1 the generated scan script emit predicate includes the floor-bounded par
   });
   scanner({ runNonce: NONCE, createdNotBefore: "2026-08-14T14:00:00.000Z", holderPid: 4812 });
   assert.match(script, /\$atOrAfterFloor/);
-  const hit = /if \(\$n -eq \$target -or \$isDesc -or \(([^)]+)\)\)/.exec(script);
-  assert.ok(hit, script);
-  assert.equal(hit[1], "-not $parentPresent -and -not $n -and $atOrAfterFloor");
+  assert.match(script, /\$isBroker/);
+  assert.match(
+    script,
+    /if \(\$n -eq \$target -or \$isDesc -or \(-not \$n -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
+  );
 });
 
 test("D1 the measured double-fork leaf row makes interpret UNAVAILABLE", () => {
@@ -733,6 +754,7 @@ test("D1 the measured double-fork leaf row makes interpret UNAVAILABLE", () => {
     stderr: "",
     createdNotBefore: "2026-08-14T14:00:00.000Z",
     runNonce: NONCE,
+    observedPids: [29496],
   });
   assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
@@ -820,7 +842,13 @@ test("D2 end-to-end an unreadable-nonce sighting withholds the writer lease", as
 
 test("E1 a write role that commits nothing is not success", async () => {
   const result = await runWith({
-    request: { role: "IMPLEMENT", executor: "claude" },
+    request: {
+      role: "IMPLEMENT",
+      executor: "claude",
+      executablePath: "C:\\Tools\\claude.exe",
+      argv: ["-p", `${CWD}\\PROMPT.md`],
+      promptPath: `${CWD}\\PROMPT.md`,
+    },
     git: matchingGit(HEAD_AFTER),
     handoff: goodHandoff({ executor: "claude", headAfter: HEAD_AFTER, headBefore: HEAD_AFTER }),
   });
@@ -977,10 +1005,10 @@ test("G2 a 64 KiB line with ghp_ straddling the hold overflow is redacted", () =
     sinks: { stdout, stderr: createMemoryLogSink() },
   });
   const token = "ghp_AAAABBBBCCCCDDDDEEEE";
-  const head = `${"x".repeat(65536 - 9)}"${token.slice(0, 8)}`;
+  const starter = "ghp_";
+  const head = `${"x".repeat(MAX_TOKEN_HOLD + 1 - 2)}${starter.slice(0, 2)}`;
   log.write("stdout", head);
-  log.write("stdout", token.slice(8, 9));
-  log.write("stdout", `${token.slice(9)}"}\n`);
+  log.write("stdout", `${starter.slice(2)}${token.slice(4)}"}\n`);
   log.flush();
   const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
   assert.equal(text.includes(token), false, text.slice(-80));
@@ -1049,7 +1077,6 @@ test("H director-cli launches at USD 0 against a local stub and returns ok:true"
       "--lease-resource", worktree,
       "--lease-id", "lease-cli-1",
       "--run-nonce", "nonce-cli-1",
-      "--orphan-scan", "empty",
     ], {
       cwd: join(here, "..", "..", "..", ".."),
       encoding: "utf8",
@@ -1058,7 +1085,7 @@ test("H director-cli launches at USD 0 against a local stub and returns ok:true"
         ...process.env,
         AION_GROK_PATH: stub,
         AION_HANDOFF_JSON: handoff,
-        AION_DIRECTOR_STORE: join(dir, "store"),
+        AION_DIRECTOR_ROOT: join(dir, "store"),
       },
       timeout: 60_000,
     });

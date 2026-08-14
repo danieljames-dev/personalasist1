@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { isAbsolute } from "node:path";
 import test from "node:test";
-import { claudeCodeCandidates, developerAgentCandidates, resolveDeveloperAgentBridge, resolveDeveloperAgentBridges } from "../../apps/aion/developer-agent.mjs";
+import { developerAgentCandidates, resolveClaudeCodeExecutable, resolveDeveloperAgentBridge, resolveDeveloperAgentBridges } from "../../apps/aion/developer-agent.mjs";
+import { discoverClaudeExecutor } from "../../packages/director/dist/index.js";
 
 const repositoryRoot = process.cwd();
 const absentEnvironment = { AION_DEVELOPER_AGENT_PATH: "C:\\synthetic\\definitely\\absent\\codex.exe", AION_CLAUDE_CODE_PATH: "C:\\synthetic\\definitely\\absent\\claude.exe" };
@@ -16,15 +17,17 @@ test("developer-agent discovery checks only a small fixed list of documented abs
   assert.equal(candidates.some((c) => /\.(?:cmd|ps1|bat|sh)$/u.test(c)), false, "shell shims are never used");
 });
 
-test("Claude Code discovery is an equally short list of documented executables, never a scan", () => {
-  const candidates = claudeCodeCandidates({}, "win32", "C:\\synthetic\\home");
-  assert.ok(candidates.length > 0 && candidates.length <= 8, "discovery stays a short explicit list, never a scan");
-  for (const candidate of candidates) {
-    assert.ok(isAbsolute(candidate), "every candidate is an absolute path");
-    assert.match(candidate, /claude\.exe$/u, "only a real executable is considered");
-  }
-  assert.equal(candidates.some((c) => /\.(?:cmd|ps1|bat|sh|js|mjs|cjs)$/u.test(c)), false, "shell shims and script entry points are never used");
-  assert.deepEqual(claudeCodeCandidates({}, "win32", "relative-home"), [], "an unusable home directory yields no candidate");
+test("Claude Code discovery is the Director ladder and does not fall through a bad override", () => {
+  const probe = { isFile: () => false, readDir: () => [] };
+  const shim = discoverClaudeExecutor({ AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.cmd" }, probe);
+  assert.equal(shim.status, "UNAVAILABLE");
+  assert.match(shim.reason, /shell shim|not an executable/i);
+  const missing = discoverClaudeExecutor({ AION_CLAUDE_CODE_PATH: "C:\\Tools\\nope\\claude.exe" }, probe);
+  assert.equal(missing.status, "UNAVAILABLE");
+  assert.match(missing.reason, /refusing to fall through/);
+  const relative = discoverClaudeExecutor({ AION_CLAUDE_CODE_PATH: "tools\\claude.exe" }, probe);
+  assert.equal(relative.status, "UNAVAILABLE");
+  assert.equal(resolveClaudeCodeExecutable({ AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.cmd" }, probe), null);
 });
 
 test("an owner override is honoured only when it is an explicit normalized absolute path", () => {
@@ -32,9 +35,18 @@ test("an owner override is honoured only when it is an explicit normalized absol
   assert.equal(relative.some((c) => c.includes("..")), false, "a relative override is rejected");
   const absolute = developerAgentCandidates({ AION_DEVELOPER_AGENT_PATH: "C:\\synthetic\\codex\\codex.exe", APPDATA: "C:\\synthetic\\AppData\\Roaming" }, "win32", "x64");
   assert.equal(absolute[0], "C:\\synthetic\\codex\\codex.exe", "an explicit override is checked first");
-  const claudeRelative = claudeCodeCandidates({ AION_CLAUDE_CODE_PATH: "..\\claude.exe" }, "win32", "C:\\synthetic\\home");
-  assert.equal(claudeRelative.some((c) => c.includes("..")), false, "a relative Claude override is rejected");
-  assert.equal(claudeCodeCandidates({ AION_CLAUDE_CODE_PATH: "C:\\synthetic\\claude\\claude.exe" }, "win32", "C:\\synthetic\\home")[0], "C:\\synthetic\\claude\\claude.exe");
+  const claudeRelative = discoverClaudeExecutor(
+    { AION_CLAUDE_CODE_PATH: "..\\claude.exe" },
+    { isFile: () => false, readDir: () => [] },
+  );
+  assert.equal(claudeRelative.status, "UNAVAILABLE", "a relative Claude override is rejected");
+  const claudeAbs = "C:\\synthetic\\claude\\claude.exe";
+  const claudeFound = discoverClaudeExecutor(
+    { AION_CLAUDE_CODE_PATH: claudeAbs },
+    { isFile: (path) => path === claudeAbs, readDir: () => [] },
+  );
+  assert.equal(claudeFound.status, "FOUND");
+  if (claudeFound.status === "FOUND") assert.equal(claudeFound.executablePath, claudeAbs);
 });
 
 /**

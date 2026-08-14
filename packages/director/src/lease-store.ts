@@ -27,7 +27,6 @@ import { writeAtomic } from "./atomic-write.js";
 import { DIRECTOR_ROOT_ENV } from "./contracts.js";
 import {
   LEASE_SCHEMA_V1,
-  reclaimStaleLease,
   type LeaseV1,
 } from "./leases.js";
 import { canonicalResource } from "./resource-identity.js";
@@ -105,32 +104,6 @@ export function createNodeLeaseStore(root: string): NodeLeaseStoreV1 {
   };
 
   return { list, save, root: resolved, locksDir };
-}
-
-/**
- * Reclaim a stale on-disk lease by delegating to {@link reclaimStaleLease}.
- * The store does not invent a second liveness rule.
- */
-export function reclaimNodeLeaseStore(input: {
-  readonly store: NodeLeaseStoreV1;
-  readonly kind: LeaseV1["kind"];
-  readonly resource: string;
-  readonly holderLiveness: Parameters<typeof reclaimStaleLease>[0]["holderLiveness"];
-  readonly now: string;
-  readonly observedIdentity?: Parameters<typeof reclaimStaleLease>[0]["observedIdentity"];
-  readonly holderObservation?: Parameters<typeof reclaimStaleLease>[0]["holderObservation"];
-}): ReturnType<typeof reclaimStaleLease> {
-  const result = reclaimStaleLease({
-    existing: input.store.list(),
-    kind: input.kind,
-    resource: input.resource,
-    ...(input.holderLiveness !== undefined ? { holderLiveness: input.holderLiveness } : {}),
-    now: input.now,
-    ...(input.observedIdentity !== undefined ? { observedIdentity: input.observedIdentity } : {}),
-    ...(input.holderObservation !== undefined ? { holderObservation: input.holderObservation } : {}),
-  });
-  if (result.ok) input.store.save(result.remaining);
-  return result;
 }
 
 function lockPathFor(locksDir: string, lease: LeaseV1): string {

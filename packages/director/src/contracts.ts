@@ -33,7 +33,6 @@ export const DIRECTOR_ROOT_ENV = "AION_DIRECTOR_ROOT";
  * would remove the boundary rather than reuse it.
  */
 export const DIRECTOR_BIND_HOST = "127.0.0.1";
-export const DIRECTOR_BIND_PORT = 31417;
 
 /**
  * The invariant that keeps the two halves apart.

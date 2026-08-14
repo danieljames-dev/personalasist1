@@ -50,7 +50,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // store's idea of which directory a path names, and that alias collision comes back as a lease held
 // under one spelling and a lock file created under another.
 import { CONTROL_BYTES } from "./control-bytes.js";
-import { compareCreationDates } from "./process-identity.js";
+import { compareCreationDates, observedCreationIsStrictlyLater } from "./process-identity.js";
 import { canonicalResource, resourceIsIdentifiable, type LeaseKindV1 } from "./resource-identity.js";
 
 export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
@@ -524,6 +524,11 @@ function isRecordedHolderPid(pid: number | null): pid is number {
  * True when the occupant of `recordedPid` is proven to be a different process than the holder.
  * Same-slot `MISMATCH` is PID reuse. A different observed pid, or no strong recorded identity,
  * cannot distinguish reuse from the holder still running.
+ *
+ * A startedAt disagreement uses {@link observedCreationIsStrictlyLater} — the same
+ * ordering rule as {@link holderLiveness}. An earlier or unorderable instant is
+ * not proof the holder died. A differing runToken is a different process
+ * regardless of instants.
  */
 function occupantIsNotRecordedHolder(
   recorded: ProcessIdentityV1 | undefined,
@@ -533,12 +538,17 @@ function occupantIsNotRecordedHolder(
   if (!hasStrongIdentity(recorded) || observed === undefined) return false;
   if (observed.pid !== recordedPid) return false;
   if (recorded.pid !== null && recorded.pid !== recordedPid) return false;
+  if (
+    recorded.runToken !== undefined
+    && observed.runToken !== undefined
+    && recorded.runToken !== observed.runToken
+  ) {
+    return true;
+  }
+  if (recorded.startedAt !== undefined && observed.startedAt !== undefined) {
+    return observedCreationIsStrictlyLater(recorded.startedAt, observed.startedAt);
+  }
   return processIdentityMatches(recorded, observed) === "MISMATCH";
-}
-
-/** Leases a run holds, for release when it ends. */
-export function leasesForRun(existing: readonly LeaseV1[], runId: OpaqueId): LeaseV1[] {
-  return existing.filter((lease) => lease.runId === runId);
 }
 
 /**

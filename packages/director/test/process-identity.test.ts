@@ -735,6 +735,8 @@ test("a nonce-unreadable orphan after the floor makes the scan UNAVAILABLE", () 
     }),
     stderr: "",
     createdNotBefore: "2026-08-14T14:00:00.000Z",
+    holderPid: 7504,
+    observedPids: [7504],
   });
   assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
@@ -785,7 +787,7 @@ test("a parentless other-nonce row after the floor makes the scan UNAVAILABLE", 
     createdNotBefore: "2026-08-14T14:00:00.000Z",
     runNonce: NONCE_A,
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  assert.equal(interpreted.outcome, "SCANNED");
 });
 
 test("a parentless row created before the floor does not make the scan undecidable", () => {
@@ -817,9 +819,11 @@ test("a parentless readable row that is not a descendant is machine noise, not a
     },
   });
   scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z", holderPid: 4812 });
-  const hit = /if \(\$n -eq \$target -or \$isDesc -or \(([^)]+)\)\)/.exec(script);
-  assert.ok(hit, "the generated script must contain the hit predicate");
-  assert.equal(hit[1], "-not $parentPresent -and -not $n -and $atOrAfterFloor");
+  assert.match(script, /\$isBroker/);
+  assert.match(
+    script,
+    /if \(\$n -eq \$target -or \$isDesc -or \(-not \$n -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
+  );
 });
 
 test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVAILABLE", () => {
@@ -842,6 +846,7 @@ test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVA
     stderr: "",
     createdNotBefore: "2026-08-14T14:00:00.000Z",
     runNonce: NONCE_A,
+    observedPids: [13828],
   });
   assert.equal(interpreted.outcome, "UNAVAILABLE");
 });

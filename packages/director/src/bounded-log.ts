@@ -117,7 +117,7 @@ const REDACTED = "[REDACTED]";
  */
 /** Line-sized token hold. Still bounded so a 16 MiB flood cannot be scanned unbounded. */
 const MAX_PEM_HOLD = 64 * 1024;
-const MAX_TOKEN_HOLD = MAX_PEM_HOLD;
+export const MAX_TOKEN_HOLD = MAX_PEM_HOLD;
 /** Tail kept when a line exceeds MAX_TOKEN_HOLD so a split secret still redacts. */
 const SECRET_TAIL_BYTES = 4 * 1024;
 
@@ -162,25 +162,29 @@ export function createFixedClock(now: IsoTimestamp): ClockV1 {
 /** Same terminator the holdback and the redactor use. One spelling. */
 const PRIVATE_KEY_END_LINE = /-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/;
 
+/** One private-key BEGIN line. Referenced by holdback, flush, and redaction. */
+const PRIVATE_KEY_BEGIN_LINE = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/;
+
 export function privateKeyBlockIsClosed(text: string): boolean {
   return PRIVATE_KEY_END_LINE.test(text);
 }
 
 export function firstUnterminatedPemBegin(pending: string): number {
-  const marker = "-----BEGIN ";
-  let from = 0;
-  while (from < pending.length) {
-    const begin = pending.indexOf(marker, from);
-    if (begin < 0) return -1;
-    if (!privateKeyBlockIsClosed(pending.slice(begin))) return begin;
-    from = begin + marker.length;
+  const finder = new RegExp(PRIVATE_KEY_BEGIN_LINE.source, "g");
+  let match: RegExpExecArray | null;
+  while ((match = finder.exec(pending)) !== null) {
+    if (!privateKeyBlockIsClosed(pending.slice(match.index))) return match.index;
   }
   return -1;
 }
 
 export function redactLogText(text: string): string {
+  const closedBlock = new RegExp(
+    `${PRIVATE_KEY_BEGIN_LINE.source}\\r?\\n[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
+    "g",
+  );
   let out = text.replace(
-    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----\r?\n[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    closedBlock,
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
   out = out.replace(
@@ -196,10 +200,14 @@ export function redactLogText(text: string): string {
   return out;
 }
 
+function asLogStream(stream: string): LogStreamV1 | null {
+  return stream === "stdout" || stream === "stderr" ? stream : null;
+}
+
 export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   const stdout = emptyStream();
   const stderr = emptyStream();
-  const streams: Record<LogStreamV1, StreamState> = { stdout, stderr };
+  const streams = Object.assign(Object.create(null), { stdout, stderr }) as Record<LogStreamV1, StreamState>;
   let runBytesIn = 0;
   let mustHalt = false;
   let haltReason: string | null = null;
@@ -261,13 +269,17 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   }
 
   function write(stream: LogStreamV1, chunk: string | Uint8Array): LogWriteResultV1 {
+    const name = asLogStream(stream);
+    if (name === null) {
+      throw new Error(`bounded log stream must be stdout or stderr, not ${String(stream)}`);
+    }
     const raw = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
     lastWriteAt = deps.clock.now();
     runBytesIn += raw.length;
-    streams[stream].pending += raw.toString("utf8");
-    emitPending(stream, false);
+    streams[name].pending += raw.toString("utf8");
+    emitPending(name, false);
     noteHaltIfNeeded();
-    const state = streams[stream];
+    const state = streams[name];
     return {
       mustHalt,
       haltReason,
@@ -302,10 +314,18 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
       write("stdout", "\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n");
     },
     liveTail(stream) {
-      return liveTailOf(streams[stream]);
+      const name = asLogStream(stream);
+      if (name === null) {
+        throw new Error(`bounded log stream must be stdout or stderr, not ${String(stream)}`);
+      }
+      return liveTailOf(streams[name]);
     },
     fileImage(stream) {
-      return fileImageOf(streams[stream]);
+      const name = asLogStream(stream);
+      if (name === null) {
+        throw new Error(`bounded log stream must be stdout or stderr, not ${String(stream)}`);
+      }
+      return fileImageOf(streams[name]);
     },
     report() {
       return {
@@ -396,6 +416,18 @@ function splitHoldback(pending: string): { emit: string; hold: string } {
 }
 
 const SECRET_STARTERS = ["ghp_", "github_pat_", "sk-", "AKIA", "Bearer ", "Authorization:", "-----BEGIN "] as const;
+const SECRET_STARTER_MAX = Math.max(...SECRET_STARTERS.map((item) => item.length));
+
+function longestSecretStarterPrefixSuffix(hold: string): number {
+  const limit = Math.min(SECRET_STARTER_MAX, hold.length);
+  for (let n = limit; n >= 1; n -= 1) {
+    const suffix = hold.slice(hold.length - n);
+    if (SECRET_STARTERS.some((starter) => starter.startsWith(suffix) && suffix.length < starter.length)) {
+      return hold.length - n;
+    }
+  }
+  return -1;
+}
 
 function secretHoldStart(hold: string): number {
   const windowStart = Math.max(0, hold.length - SECRET_TAIL_BYTES - 32);
@@ -407,14 +439,15 @@ function secretHoldStart(hold: string): number {
     const abs = windowStart + at;
     if (earliest < 0 || abs < earliest) earliest = abs;
   }
-  return earliest;
+  if (earliest >= 0) return earliest;
+  return longestSecretStarterPrefixSuffix(hold);
 }
 
 function redactOpenPrivateKey(pending: string): string {
   const begin = firstUnterminatedPemBegin(pending);
   if (begin < 0) return pending;
   const held = pending.slice(begin);
-  const match = /^-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/.exec(held);
+  const match = new RegExp(`^${PRIVATE_KEY_BEGIN_LINE.source}`).exec(held);
   if (match === null) return pending;
   return `${pending.slice(0, begin)}-----BEGIN ${match[1]}-----\n[REDACTED]\n`;
 }

@@ -1,10 +1,13 @@
 import { stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   ClaudeCodeCliDeveloperAgentBridgeV1, CodexCliDeveloperAgentBridgeV1,
   SelectableDeveloperAgentRegistryV1, UnavailableDeveloperAgentBridgeV1,
 } from "../../packages/local-assistant/dist/index.js";
+import {
+  createNodeFileSystemProbe,
+  discoverClaudeExecutor,
+} from "../../packages/director/dist/index.js";
 
 /**
  * Narrow, explicit developer-agent discovery for every supported bridge.
@@ -38,19 +41,13 @@ export function developerAgentCandidates(env = process.env, platform = process.p
 }
 
 /**
- * Documented Claude Code CLI install locations. The native installer places a real executable in
- * the user's local bin directory. Only genuine executables are considered: a shell shim and a
- * bare `cli.js` are both excluded, because AION spawns the program directly with no shell and no
- * interpreter of its own choosing.
+ * Claude Code resolution is the Director's discovery ladder. A named
+ * override is an instruction, not a hint: a bad override does not fall
+ * through to another binary.
  */
-export function claudeCodeCandidates(env = process.env, platform = process.platform, home = homedir()) {
-  const candidates = [];
-  const override = env.AION_CLAUDE_CODE_PATH?.trim();
-  if (override && isAbsolute(override) && resolve(override) === override) candidates.push(override);
-  const binary = platform === "win32" ? "claude.exe" : "claude";
-  if (home && isAbsolute(home)) candidates.push(join(home, ".local", "bin", binary));
-  if (platform !== "win32") candidates.push(join("/usr", "local", "bin", binary));
-  return candidates.filter((candidate) => !/\.(?:cmd|ps1|bat|sh|js|mjs|cjs)$/u.test(candidate));
+export function resolveClaudeCodeExecutable(env = process.env, probe = createNodeFileSystemProbe()) {
+  const found = discoverClaudeExecutor(env, probe);
+  return found.status === "FOUND" ? found.executablePath : null;
 }
 
 async function firstInstalled(candidates) {
@@ -73,7 +70,9 @@ async function firstInstalled(candidates) {
  */
 export async function resolveDeveloperAgentBridges(repositoryRoot, env = process.env, options = {}) {
   const bridges = [];
-  const claude = await firstInstalled(options.claudeCandidates ?? claudeCodeCandidates(env));
+  const claude = options.claudeCandidates !== undefined
+    ? await firstInstalled(options.claudeCandidates)
+    : resolveClaudeCodeExecutable(env, options.claudeProbe);
   if (claude) bridges.push(new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude));
   const codex = await firstInstalled(options.codexCandidates ?? developerAgentCandidates(env));
   if (codex) bridges.push(new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex));

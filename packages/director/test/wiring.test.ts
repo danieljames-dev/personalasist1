@@ -7,9 +7,9 @@
  * declaration first; the launch path is driven.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -41,7 +41,11 @@ function sourceFiles(): Map<string, string> {
 }
 
 function specifierToFile(specifier: string): string | null {
-  const base = specifier.replace(/^\.\//, "").replace(/\.js$/, "");
+  const base = specifier
+    .replace(/^\.\.\/src\//, "")
+    .replace(/^\.\//, "")
+    .replace(/\.js$/, "");
+  if (base.includes("/") || base.includes("\\")) return null;
   return `${base}.ts`;
 }
 
@@ -89,9 +93,20 @@ test("every src module is imported by a non-test module, or is the package entry
   for (const name of files.keys()) importedBy.set(name, []);
 
   for (const [from, source] of files) {
+    if (from === "index.ts") continue;
     for (const target of importsOf(source)) {
       if (!files.has(target)) continue;
       importedBy.get(target)!.push(from);
+    }
+  }
+
+  const testDir = join(here, "..", "..", "test");
+  for (const name of readdirSync(testDir)) {
+    if (!name.endsWith(".ts")) continue;
+    const source = readFileSync(join(testDir, name), "utf8");
+    for (const target of importsOf(source)) {
+      if (!files.has(target)) continue;
+      importedBy.get(target)!.push(`test/${name}`);
     }
   }
 
@@ -144,18 +159,54 @@ test("deleted discovery and launch-plan names are not on the public surface of i
   }
 });
 
+function walkCodeFiles(root: string, out: string[] = []): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    if (
+      name === "node_modules" || name === "dist" || name === "dist-test" || name === ".git"
+      || name === ".aion-local" || name === ".grok" || name === ".claude"
+    ) continue;
+    const full = join(root, name);
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      if (name === "test" || name === "tests") continue;
+      walkCodeFiles(full, out);
+      continue;
+    }
+    if (/\.test\.(ts|js|mjs|cjs)$/i.test(name)) continue;
+    if (!/\.(ts|js|mjs|cjs)$/i.test(name)) continue;
+    out.push(full);
+  }
+  return out;
+}
+
 test("there is exactly one discovery ladder, and the launch path uses it", () => {
-  const files = sourceFiles();
+  const repoRoot = join(here, "..", "..", "..", "..");
+  const self = fileURLToPath(import.meta.url);
   const readers: string[] = [];
-  for (const [name, source] of files) {
-    if (source.includes("AION_CLAUDE_CODE_PATH")) readers.push(name);
+  for (const file of walkCodeFiles(repoRoot)) {
+    if (file === self) continue;
+    const source = readFileSync(file, "utf8");
+    if (!source.includes("AION_CLAUDE_CODE_PATH")) continue;
+    readers.push(relative(repoRoot, file).replaceAll("\\", "/"));
   }
   assert.deepEqual(
     readers,
-    ["executor-discovery.ts"],
+    ["packages/director/src/executor-discovery.ts"],
     `AION_CLAUDE_CODE_PATH must be read only by the D2 ladder, saw ${readers.join(", ")}`,
   );
 
+  const files = sourceFiles();
   const launch = files.get("run-manager.ts") ?? "";
   assert.ok(calledIn(launch, "discoverClaudeExecutor"), "launchRun must call discoverClaudeExecutor");
   assert.ok(calledIn(launch, "discoverGrokExecutor"), "launchRun must call discoverGrokExecutor");
@@ -420,8 +471,16 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       worktree: cwd,
       branch: "executor/oracle",
       executablePath: exe,
-      argv: ["--prompt-file", `${cwd}\\PROMPT.md`, "--cwd", cwd, "--no-plan"],
+      argv: [
+        "--prompt-file", `${cwd}\\PROMPT.md`,
+        "--cwd", cwd,
+        "--permission-mode", "bypassPermissions",
+        "--always-approve",
+        "--no-plan",
+        "--max-turns", "50",
+      ],
       cwd,
+      promptPath: `${cwd}\\PROMPT.md`,
       runNonce: nonce,
       runRoot,
       timeoutMs: 30_000,
@@ -489,6 +548,11 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       wait: async () => undefined,
       killTree: () => undefined,
       scanOrphans: () => [{ pid: 7777, runNonce: nonce, creationDate: t0 }],
+      discoveryEnv: { AION_GROK_PATH: exe },
+      discoveryFs: {
+        isFile: (path) => path === exe,
+        readDir: () => [],
+      },
     },
   );
 

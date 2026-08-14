@@ -41,9 +41,10 @@ Usage:
   node apps/director-cli.mjs --run-id ID --mission-id ID --work-item-id ID
     --executor grok|claude --role ROLE --worktree PATH --cwd PATH
     --run-root PATH --prompt-path PATH --lease-kind KIND --lease-resource RES
-    --lease-id ID --run-nonce TOKEN [--orphan-scan empty|windows]
+    --lease-id ID --run-nonce TOKEN [--timeout-ms MS]
 
 Goes through launchRun only. Does not export or call executeRun.
+The lease store is the host-wide sandbox root (AION_DIRECTOR_ROOT or %TEMP%).
 `;
 
 export async function runDirectorCli(argv, io = console) {
@@ -58,8 +59,14 @@ export async function runDirectorCli(argv, io = console) {
   const runRoot = required(values, "run-root");
   mkdirSync(runRoot, { recursive: true });
 
-  const orphanScan = values.get("orphan-scan") ?? "windows";
-  const storeRoot = process.env.AION_DIRECTOR_STORE ?? join(runRoot, "director-store");
+  const rawTimeout = values.get("timeout-ms") ?? "30000";
+  const timeoutMs = Number(rawTimeout);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    io.error(`--timeout-ms must be a positive safe integer, got ${JSON.stringify(rawTimeout)}`);
+    return 2;
+  }
+
+  const storeRoot = director.sandboxDirectorStoreRoot();
 
   const deps = {
     clock: { now: nowIso },
@@ -80,7 +87,6 @@ export async function runDirectorCli(argv, io = console) {
     killTree: director.killProcessTreeStandIn,
     discoveryEnv: { ...process.env },
     discoveryFs: director.createNodeFileSystemProbe(),
-    ...(orphanScan === "empty" ? { scanOrphans: () => [] } : {}),
   };
 
   const result = await director.launchRun({
@@ -94,7 +100,7 @@ export async function runDirectorCli(argv, io = console) {
     runNonce: required(values, "run-nonce"),
     runRoot,
     promptPath: required(values, "prompt-path"),
-    timeoutMs: Number(values.get("timeout-ms") ?? 30_000),
+    timeoutMs,
     lease: {
       kind: required(values, "lease-kind"),
       resource: required(values, "lease-resource"),

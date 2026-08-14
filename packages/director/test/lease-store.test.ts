@@ -177,9 +177,17 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           executor: "grok",
           worktree: wt,
           branch: "executor/oracle",
-          executablePath: process.execPath,
-          argv: ["--no-plan"],
+          executablePath: "C:\\Tools\\grok.exe",
+          argv: [
+            "--prompt-file", `${wt}\\PROMPT.md`,
+            "--cwd", wt,
+            "--permission-mode", "bypassPermissions",
+            "--always-approve",
+            "--no-plan",
+            "--max-turns", "50",
+          ],
           cwd: wt,
+          promptPath: `${wt}\\PROMPT.md`,
           runNonce: `nonce-${runId}`,
           runRoot,
           timeoutMs: 5_000,
@@ -222,6 +230,11 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           killTree: () => undefined,
           scanOrphans: () => [],
           resolveArtifactPath: (absolutePath) => absolutePath,
+          discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
+          discoveryFs: {
+            isFile: (path) => path === "C:\\Tools\\grok.exe",
+            readDir: () => [],
+          },
         },
       );
     };

@@ -114,6 +114,8 @@ export interface NonceBearingProcessV1 {
   readonly nonceReadable?: boolean;
   /** True only when ParentProcessId names a row present in the same CIM snapshot. */
   readonly parentPresent?: boolean;
+  /** Win32_Process.Name of ParentProcessId, when that parent row was in the same snapshot. */
+  readonly parentName?: string;
 }
 
 export type OrphanScanInterpretationV1 =
@@ -276,15 +278,25 @@ export function holderLiveness(
       if (observedNonce !== null && observedNonce === recorded.runNonce) {
         return "UNKNOWN";
       }
-      const recordedMs = parseProcessTimestamp(recorded.creationDate);
-      const observedMs = parseProcessTimestamp(observation.creationDate);
-      if (recordedMs !== null && observedMs !== null && observedMs > recordedMs) {
+      if (observedCreationIsStrictlyLater(recorded.creationDate, observation.creationDate)) {
         return "DEAD_CONFIRMED";
       }
       return "UNKNOWN";
     }
   }
   return "UNKNOWN";
+}
+
+/**
+ * The one ordering rule for "the occupant of this slot started after the holder".
+ *
+ * An earlier instant, or one that cannot be placed on a timeline, is not proof of
+ * death or of a different process. Only a strictly later observed instant is.
+ */
+export function observedCreationIsStrictlyLater(recorded: string, observed: string): boolean {
+  const recordedMs = parseProcessTimestamp(recorded);
+  const observedMs = parseProcessTimestamp(observed);
+  return recordedMs !== null && observedMs !== null && observedMs > recordedMs;
 }
 
 /**
@@ -554,6 +566,10 @@ export function interpretWindowsOrphanScanOutput(input: {
   readonly createdNotBefore?: string;
   /** This run's nonce. A parentless other-nonce row after the floor is undecidable. */
   readonly runNonce?: string;
+  /** Holder pid for this run, if known. Used by the single plausibility predicate. */
+  readonly holderPid?: number;
+  /** Pids this run has already observed (holder + earlier tree scans). */
+  readonly observedPids?: readonly number[];
 }): OrphanScanInterpretationV1 {
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
@@ -586,6 +602,9 @@ export function interpretWindowsOrphanScanOutput(input: {
     return { outcome: "UNAVAILABLE", reason: why };
   }
 
+  if (!Object.prototype.hasOwnProperty.call(parsed, "processes") || parsed.processes === null) {
+    return { outcome: "UNAVAILABLE", reason: "scan did not return a process list" };
+  }
   const rows = asObjectArray(parsed.processes);
   if (rows === null) {
     return { outcome: "UNAVAILABLE", reason: "scan did not return a process list" };
@@ -595,7 +614,11 @@ export function interpretWindowsOrphanScanOutput(input: {
   // descendant of the recorded holder is UNKNOWN about that occupant, not
   // "not ours". Missing `unreadable` is treated as 0 so a well-formed empty
   // envelope from a host that could read every descendant stays SCANNED.
+  // A present non-number is not "missing": that is a malformed envelope.
   const unreadableRaw = parsed.unreadable;
+  if (unreadableRaw !== undefined && typeof unreadableRaw !== "number") {
+    return { outcome: "UNAVAILABLE", reason: "scan unreadable count is not a usable integer" };
+  }
   if (typeof unreadableRaw === "number") {
     if (!Number.isInteger(unreadableRaw) || unreadableRaw < 0) {
       return { outcome: "UNAVAILABLE", reason: "scan unreadable count is not a usable integer" };
@@ -613,6 +636,7 @@ export function interpretWindowsOrphanScanOutput(input: {
     const parentPid = isUsablePid(row.parentPid) ? row.parentPid : undefined;
     const nonceReadable = typeof row.nonceReadable === "boolean" ? row.nonceReadable : undefined;
     const parentPresent = typeof row.parentPresent === "boolean" ? row.parentPresent : undefined;
+    const parentName = asUsableToken(row.parentName) ?? undefined;
     sightings.push({
       pid: row.pid,
       ...(creationDate !== null ? { creationDate } : {}),
@@ -620,16 +644,25 @@ export function interpretWindowsOrphanScanOutput(input: {
       ...(parentPid !== undefined ? { parentPid } : {}),
       ...(nonceReadable !== undefined ? { nonceReadable } : {}),
       ...(parentPresent !== undefined ? { parentPresent } : {}),
+      ...(parentName !== undefined ? { parentName } : {}),
     });
   }
 
+  const observedPids = new Set<number>();
+  if (isUsablePid(input.holderPid)) observedPids.add(input.holderPid);
+  for (const pid of input.observedPids ?? []) {
+    if (isUsablePid(pid)) observedPids.add(pid);
+  }
+  const plausibility = {
+    runNonce: input.runNonce ?? "",
+    createdNotBefore: input.createdNotBefore ?? "",
+    ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
+    observedPids,
+    rows: sightings,
+  };
   // A row whose membership cannot be decided is UNKNOWN, not absent.
   for (const sighting of sightings) {
-    if (parentlessAfterFloorMakesScanUndecidable(
-      sighting,
-      input.runNonce ?? "",
-      input.createdNotBefore ?? "",
-    )) {
+    if (processRowMakesScanUndecidable(sighting, plausibility)) {
       return { outcome: "UNAVAILABLE", reason: "undecidable process-tree membership" };
     }
   }
@@ -694,6 +727,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       stderr: String(result.stderr ?? "").trim(),
       createdNotBefore: query.createdNotBefore,
       runNonce,
+      ...(holderPid > 0 ? { holderPid, observedPids: [holderPid] } : {}),
     });
     if (interpreted.outcome === "UNAVAILABLE") {
       throw new Error(`orphan scan unavailable: ${interpreted.reason}`);
@@ -823,25 +857,99 @@ export function createdAtOrAfterFloor(
  * does not establish the claim — UNKNOWN stays UNKNOWN, so this returns false.
  */
 /**
- * A parentless process created inside this run's window, whose nonce is not
- * this run's nonce, cannot be shown to be outside the tree. Empty is a lie;
- * UNAVAILABLE is honest. A parentless row from before the floor is an ordinary
- * system service and does not make the scan undecidable.
+ * Broker hosts that mint a fresh environment and a live parent, so neither
+ * nonce inheritance nor a live ParentProcessId chain can see the child.
+ * One list; the PowerShell emit predicate interpolates the same names.
  */
-export function parentlessAfterFloorMakesScanUndecidable(
-  sighting: {
-    readonly parentPresent?: boolean;
-    readonly runNonce?: string | null;
-    readonly creationDate?: string;
-  },
-  runNonce: string,
-  createdNotBefore: string,
-): boolean {
-  if (sighting.parentPresent !== false) return false;
+export const BROKER_HOST_PROCESS_NAMES = [
+  "WmiPrvSE.exe",
+  "dllhost.exe",
+  "svchost.exe",
+  "taskeng.exe",
+] as const;
+
+export type ProcessRowPlausibilityV1 = {
+  readonly pid?: number;
+  readonly parentPid?: number;
+  readonly parentPresent?: boolean;
+  readonly parentName?: string;
+  readonly runNonce?: string | null;
+  readonly creationDate?: string;
+};
+
+export type ProcessRowPlausibilityContextV1 = {
+  readonly runNonce: string;
+  readonly createdNotBefore: string;
+  readonly holderPid?: number;
+  readonly observedPids: ReadonlySet<number>;
+  readonly rows: readonly { readonly pid: number; readonly parentPid?: number }[];
+};
+
+function isBrokerHostName(name: string | undefined): boolean {
+  if (name === undefined || name === "") return false;
+  const lower = name.toLowerCase();
+  for (const host of BROKER_HOST_PROCESS_NAMES) {
+    if (host.toLowerCase() === lower) return true;
+  }
+  return false;
+}
+
+function nonceMatchesRun(sighting: ProcessRowPlausibilityV1, runNonce: string): boolean {
   const nonce = asUsableToken(sighting.runNonce);
   const target = asUsableToken(runNonce);
-  if (target !== null && nonce === target) return false;
-  return provenCreatedAtOrAfterFloor(sighting.creationDate, createdNotBefore);
+  return target !== null && nonce === target;
+}
+
+function rowIsInHolderChain(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (sighting.pid === undefined || !isUsablePid(sighting.pid)) return false;
+  if (ctx.holderPid === undefined || ctx.holderPid <= 0) return false;
+  return descendantPidsOf(ctx.holderPid, ctx.rows).has(sighting.pid);
+}
+
+/**
+ * One answer to "could this row belong to this run?".
+ *
+ * A row is plausible when its nonce matches, it is in the holder's pid chain,
+ * it was created at or after the floor with no nonce and a broker parent, or
+ * it was created at or after the floor with no nonce and a dead parent this
+ * run actually observed. Everything else is host noise.
+ */
+export function processRowCouldBelongToThisRun(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (nonceMatchesRun(sighting, ctx.runNonce)) return true;
+  if (rowIsInHolderChain(sighting, ctx)) return true;
+  const noNonce = asUsableToken(sighting.runNonce) === null;
+  if (!noNonce) return false;
+  if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
+  if (isBrokerHostName(sighting.parentName)) return true;
+  return sighting.parentPresent === false
+    && sighting.parentPid !== undefined
+    && ctx.observedPids.has(sighting.parentPid);
+}
+
+/**
+ * A plausible row we cannot classify as ours (no nonce match, not in the
+ * holder chain) makes the scan UNAVAILABLE. Called from interpret and from
+ * collectWriterOrphans — one definition.
+ */
+export function processRowMakesScanUndecidable(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (nonceMatchesRun(sighting, ctx.runNonce)) return false;
+  const noNonce = asUsableToken(sighting.runNonce) === null;
+  if (!noNonce) return false;
+  if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
+  const hasHolder = ctx.holderPid !== undefined && ctx.holderPid > 0;
+  if (hasHolder && isBrokerHostName(sighting.parentName)) return true;
+  return sighting.parentPresent === false
+    && sighting.parentPid !== undefined
+    && ctx.observedPids.has(sighting.parentPid);
 }
 
 export function provenCreatedAtOrAfterFloor(
@@ -1032,7 +1140,7 @@ function nonceFromThisProcess(
 }
 
 function asObjectArray(value: unknown): readonly Record<string, unknown>[] | null {
-  if (value === undefined || value === null) return [];
+  if (value === undefined || value === null) return null;
   if (Array.isArray(value)) {
     const rows: Record<string, unknown>[] = [];
     for (const item of value) {
@@ -1143,9 +1251,18 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedF
     "      $atOrAfterFloor = $cdUtc -ge $floorUtc;",
     "    } catch { $atOrAfterFloor = $false }",
     "  };",
-    "  if ($n -eq $target -or $isDesc -or (-not $parentPresent -and -not $n -and $atOrAfterFloor)) {",
+    "  $parentName = $null;",
+    "  if ($parentPresent) {",
+    "    foreach ($q in $rows) {",
+    "      if ([int]$q.ProcessId -eq $ppid) { $parentName = [string]$q.Name; break }",
+    "    }",
+    "  };",
+    `  $brokerNames = @(${BROKER_HOST_PROCESS_NAMES.map((name) => `'${name.replace(/'/g, "''")}'`).join(", ")});`,
+    "  $isBroker = $false;",
+    "  if ($parentName) { foreach ($b in $brokerNames) { if ($parentName -ieq $b) { $isBroker = $true } } };",
+    "  if ($n -eq $target -or $isDesc -or (-not $n -and $atOrAfterFloor -and ((-not $parentPresent) -or $isBroker))) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
-    "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent });",
+    "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent; parentName = $parentName });",
     "  }",
     "}",
     "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable } | ConvertTo-Json -Compress -Depth 5;",

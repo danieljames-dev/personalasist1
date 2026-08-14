@@ -96,6 +96,29 @@ export function buildExecutorLaunch(
   return EXECUTOR_ADAPTERS[name].build(input);
 }
 
+/**
+ * The one argv spelling. `buildExecutorLaunch` validates then returns this
+ * list. `executeRun` re-checks the request against it so a file-URL import
+ * cannot spawn an arbitrary command.
+ */
+export function executorArgvFor(
+  name: ExecutorNameV1,
+  input: Pick<AdapterInputV1, "promptPath" | "cwd" | "role">,
+): readonly string[] | null {
+  if (name === "local") return null;
+  if (name === "claude") return ["-p", input.promptPath];
+  const reviewOnly = input.role === "ADVERSARIAL_REVIEW";
+  const permissionMode = reviewOnly ? "dontAsk" : "bypassPermissions";
+  return [
+    "--prompt-file", input.promptPath,
+    "--cwd", input.cwd,
+    "--permission-mode", permissionMode,
+    ...(reviewOnly ? [] : ["--always-approve"]),
+    "--no-plan",
+    "--max-turns", String(GROK_MAX_TURNS),
+  ];
+}
+
 export function classifyExecutorExit(
   name: ExecutorNameV1,
   exitCode: number,
@@ -191,16 +214,8 @@ function buildGrokLaunch(input: ValidatedInput): AdapterLaunchV1 {
   // A reviewer that can write is not a review. The measured implementer list stays
   // `bypassPermissions` + `--always-approve`. ADVERSARIAL_REVIEW is dontAsk and must not
   // carry --always-approve.
-  const reviewOnly = input.role === "ADVERSARIAL_REVIEW";
-  const permissionMode = reviewOnly ? "dontAsk" : "bypassPermissions";
-  const argv = [
-    "--prompt-file", input.promptPath,
-    "--cwd", input.cwd,
-    "--permission-mode", permissionMode,
-    ...(reviewOnly ? [] : ["--always-approve"]),
-    "--no-plan",
-    "--max-turns", String(GROK_MAX_TURNS),
-  ];
+  const argv = executorArgvFor("grok", input);
+  if (argv === null) return launchOf(input, []);
   return launchOf(input, argv);
 }
 
@@ -208,7 +223,9 @@ function buildClaudeLaunch(input: ValidatedInput): AdapterLaunchV1 {
   // Claude 2.1.231, measured: -p/--print, then the prompt file path. Working directory is the
   // spawn cwd, not a flag — Claude has no --cwd, and a missing one is a spawn ENOENT on Windows,
   // which reads as an executable problem. That is why cwd is validated before this is returned.
-  return launchOf(input, ["-p", input.promptPath]);
+  const argv = executorArgvFor("claude", input);
+  if (argv === null) return launchOf(input, []);
+  return launchOf(input, argv);
 }
 
 function buildLocalLaunch(input: ValidatedInput): AdapterLaunchV1 {

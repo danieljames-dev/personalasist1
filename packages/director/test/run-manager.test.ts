@@ -8,13 +8,14 @@
  * launches; writer-release inferred from UNKNOWN or from someone else's death.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
 import { createFixedClock, RUN_LOG_BYTES } from "../src/bounded-log.js";
-import { buildExecutorLaunch } from "../src/executor-adapters.js";
+import { buildExecutorLaunch, GROK_MAX_TURNS } from "../src/executor-adapters.js";
 import type { GitCommandResultV1, GitRunner } from "../src/git-truth.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
@@ -49,6 +50,7 @@ import {
   isWriterExitProof,
   killProcessTreeStandIn,
   launchRun,
+  wrapChildProcess,
   proveWriterExit,
   RUN_RESULT_SCHEMA_V1,
   writerReleaseEvidence,
@@ -72,6 +74,7 @@ const OTHER_HEAD = "c".repeat(40);
 const CWD = "C:\\wt";
 const RUN_ROOT = "C:\\AION\\director\\RUNS\\run-1";
 const EXE = "C:\\Tools\\grok.exe";
+const PROMPT = "C:\\wt\\PROMPT.md";
 const NONCE = "nonce-run-1";
 const T0 = "2026-08-13T12:00:01.000Z";
 const T1 = "2026-08-13T13:00:00.000Z";
@@ -132,6 +135,39 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
   };
 }
 
+function grokImplementerArgv(promptPath = PROMPT, cwd = CWD): string[] {
+  return [
+    "--prompt-file", promptPath,
+    "--cwd", cwd,
+    "--permission-mode", "bypassPermissions",
+    "--always-approve",
+    "--no-plan",
+    "--max-turns", String(GROK_MAX_TURNS),
+  ];
+}
+
+function realNodeSpawn(script: string): SpawnFnV1 {
+  return (_exe, _argv, options, permit) => {
+    requireSpawnPermit(permit);
+    return wrapChildProcess(spawn(process.execPath, ["-e", script], {
+      cwd: options.cwd,
+      env: options.env,
+      shell: false,
+      windowsHide: true,
+    }));
+  };
+}
+
+function matchingDiscovery(exe = EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "discoveryFs"> {
+  return {
+    discoveryEnv: { AION_GROK_PATH: exe },
+    discoveryFs: {
+      isFile: (path) => path === exe,
+      readDir: () => [],
+    },
+  };
+}
+
 function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
   return {
     runId: "run-1",
@@ -141,10 +177,11 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     worktree: CWD,
     branch: "executor/oracle",
     executablePath: EXE,
-    argv: ["--prompt-file", `${CWD}\\PROMPT.md`, "--cwd", CWD, "--no-plan"],
+    argv: grokImplementerArgv(),
     cwd: CWD,
     runNonce: NONCE,
     runRoot: RUN_ROOT,
+    promptPath: PROMPT,
     timeoutMs: 30_000,
     lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-1" },
     authorisedProductionMutated: false,
@@ -403,6 +440,7 @@ async function runWith(
     ...(over.askWriterLiveness !== undefined ? { askWriterLiveness: over.askWriterLiveness } : {}),
     scanOrphans: over.scanOrphans ?? (() => []),
     resolveArtifactPath: over.resolveArtifactPath ?? ((absolutePath) => absolutePath),
+    ...matchingDiscovery(),
   };
   return executeRun(request(over.request), deps);
 }
@@ -1162,6 +1200,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
     wait: () => new Promise(() => {}),
     killTree: () => undefined,
     scanOrphans: () => [],
+    ...matchingDiscovery(),
   });
 
   await until(() => firstSpawn.calls === 1 && filesAtCrash.size > 0, "first persist and spawn");
@@ -1193,6 +1232,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
     wait: async () => undefined,
     killTree: () => undefined,
     scanOrphans: () => [],
+    ...matchingDiscovery(),
   });
 
   assert.equal(secondSpawn.calls, 0, second.reason);
@@ -1225,22 +1265,28 @@ test("createNodeSpawner refuses a forged permit before creating a process", () =
 test("a real node process is spawned with shell false and its exit is collected", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aion-run-mgr-"));
   try {
-    const spawn = createNodeSpawner();
     let seenShell: boolean | null = null;
-    const wrapped: SpawnFnV1 = (exe, argv, options, permit) => {
+    const wrapped: SpawnFnV1 = (_exe, _argv, options, permit) => {
       requireSpawnPermit(permit);
       seenShell = options.shell;
       assert.equal(options.shell, false);
       assert.equal(options.windowsHide, true);
-      return spawn(exe, argv, options, permit);
+      return wrapChildProcess(spawn(process.execPath, ["-e", "process.exit(0)"], {
+        cwd: options.cwd,
+        env: options.env,
+        shell: false,
+        windowsHide: true,
+      }));
     };
+    const promptPath = join(dir, "PROMPT.md");
     const result = await executeRun(
       request({
         cwd: dir,
         worktree: dir,
         runRoot: join(dir, "run"),
         executablePath: process.execPath,
-        argv: ["-e", "process.exit(0)"],
+        promptPath,
+        argv: grokImplementerArgv(promptPath, dir),
         runNonce: "nonce-real-node",
         timeoutMs: 15_000,
         lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-real-1" },
@@ -1258,6 +1304,7 @@ test("a real node process is spawned with shell false and its exit is collected"
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
         scanOrphans: () => [],
+        ...matchingDiscovery(process.execPath),
       },
     );
     assert.equal(seenShell, false);
@@ -1285,13 +1332,15 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
       },
     };
     const leases = memoryLeases();
+    const promptPath = join(dir, "PROMPT.md");
     const result = await executeRun(
       request({
         cwd: dir,
         worktree: dir,
         runRoot: join(dir, "run"),
         executablePath: process.execPath,
-        argv: ["-e", "setTimeout(() => process.exit(0), 8000)"],
+        promptPath,
+        argv: grokImplementerArgv(promptPath, dir),
         runNonce: "nonce-real-exit-proof",
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-real" },
@@ -1299,7 +1348,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
       {
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
-        spawn: createNodeSpawner(),
+        spawn: realNodeSpawn("setTimeout(() => process.exit(0), 8000)"),
         git: matchingGit(),
         probe,
         capacity: memoryCapacity(),
@@ -1307,6 +1356,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
         scanOrphans: () => [],
+        ...matchingDiscovery(process.execPath),
       },
     );
     assert.equal(result.spawned, true, result.reason);
@@ -1649,13 +1699,15 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
   const nonce = `nonce-live-scan-${process.pid}-${Date.now()}`;
   try {
     const leases = memoryLeases();
+    const promptPath = join(dir, "PROMPT.md");
     const first = await executeRun(
       request({
         cwd: dir,
         worktree: dir,
         runRoot: join(dir, "run-a"),
         executablePath: process.execPath,
-        argv: ["-e", "setTimeout(() => process.exit(0), 2000)"],
+        promptPath,
+        argv: grokImplementerArgv(promptPath, dir),
         runNonce: nonce,
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-1" },
@@ -1663,7 +1715,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
       {
         clock: { now: () => new Date().toISOString() },
         fs: createNodeRunFileSystem(),
-        spawn: createNodeSpawner(),
+        spawn: realNodeSpawn("setTimeout(() => process.exit(0), 2000)"),
         git: matchingGit(),
         probe: createWindowsProcessProbe(),
         capacity: memoryCapacity(),
@@ -1671,6 +1723,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
         scanOrphans: () => [],
+        ...matchingDiscovery(process.execPath),
       },
     );
     assert.equal(first.spawned, true, first.reason);
@@ -1690,7 +1743,8 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         worktree: dir,
         runRoot: join(dir, "run-b"),
         executablePath: process.execPath,
-        argv: ["-e", "process.exit(0)"],
+        promptPath,
+        argv: grokImplementerArgv(promptPath, dir),
         runNonce: `${nonce}-b`,
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-2" },
@@ -1698,7 +1752,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
       {
         clock: { now: () => new Date().toISOString() },
         fs: createNodeRunFileSystem(),
-        spawn: createNodeSpawner(),
+        spawn: realNodeSpawn("process.exit(0)"),
         git: matchingGit(),
         probe: createWindowsProcessProbe(),
         capacity: memoryCapacity(),
@@ -1706,6 +1760,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
         scanOrphans: () => [],
+        ...matchingDiscovery(process.execPath),
       },
     );
     assert.equal(second.spawned, true, second.reason);
@@ -1987,6 +2042,7 @@ test("injected dependency throws do not leak capacity or block a later run", asy
         killTree: () => undefined,
         scanOrphans: () => [],
         resolveArtifactPath: (absolutePath) => absolutePath,
+        ...matchingDiscovery(),
       };
       let escaped = false;
       try {
@@ -2092,8 +2148,11 @@ test("pre-spawn PRODUCTION_WRITER refusals release the lease so a later writer c
     });
     assert.equal(result.spawned, false);
     assert.match(result.reason, /already exists/);
-    assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-replay"), false);
-    await secondWriterAcquires(leases);
+    assert.equal(
+      leases.list().some((item) => item.leaseId === "lease-pw-replay"),
+      true,
+      "a recorded spawn is a live child until proven otherwise; do not drop the lease",
+    );
   }
 
   {
@@ -2233,7 +2292,7 @@ test("a real instant-exit production writer releases its own lease", async () =>
         dirs: [dir, join(dir, "run")],
         files: { [join(dir, "run", "handoff.json")]: JSON.stringify(goodHandoff()) },
       }),
-      spawn: createNodeSpawner(),
+      spawn: realNodeSpawn("process.exit(0)"),
       probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
       scanOrphans: () => [],
       wait: createNodeWait(),
@@ -2242,8 +2301,8 @@ test("a real instant-exit production writer releases its own lease", async () =>
         cwd: dir,
         worktree: dir,
         runRoot: join(dir, "run"),
-        executablePath: process.execPath,
-        argv: ["-e", "process.exit(0)"],
+        promptPath: join(dir, "PROMPT.md"),
+        argv: grokImplementerArgv(join(dir, "PROMPT.md"), dir),
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-instant" },
       },
@@ -2778,6 +2837,7 @@ test("a run longer than LEASE_TTL_MS keeps the lease unexpired via heartbeat", a
       killTree: () => undefined,
       scanOrphans: () => [],
       resolveArtifactPath: (absolutePath) => absolutePath,
+      ...matchingDiscovery(),
     },
   );
   await until(() => saves.some((item) => item.leaseId === "lease-hb" && Date.parse(item.expiresAt) > nowMs), "heartbeat");
@@ -2991,7 +3051,8 @@ test("an R&D worktree path in argv still spawns and completes", async () => {
     request: {
       cwd: rd,
       worktree: rd,
-      argv: ["--prompt-file", `${rd}\\PROMPT.md`, "--cwd", rd, "--no-plan"],
+      promptPath: `${rd}\\PROMPT.md`,
+      argv: grokImplementerArgv(`${rd}\\PROMPT.md`, rd),
     },
   });
   assert.equal(result.spawned, true, result.reason);
@@ -3308,6 +3369,7 @@ test("a parentless other-nonce row after the floor fails executorTreeIsGone", as
     neverWait: true,
     scanOrphans: () => [{
       pid: 460,
+      parentPid: RECORDED.pid,
       parentPresent: false,
       nonceReadable: true,
       runNonce: "other",
