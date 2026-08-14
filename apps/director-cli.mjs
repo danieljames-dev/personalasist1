@@ -87,6 +87,10 @@ export async function runDirectorCli(argv, io = console) {
     killTree: director.killProcessTreeStandIn,
     discoveryEnv: { ...process.env },
     discoveryFs: director.createNodeFileSystemProbe(),
+    logSinks: {
+      stdout: director.createFileLogSink(join(runRoot, "stdout.log")),
+      stderr: director.createFileLogSink(join(runRoot, "stderr.log")),
+    },
   };
 
   const result = await director.launchRun({

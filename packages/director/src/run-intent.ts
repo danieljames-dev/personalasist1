@@ -754,7 +754,7 @@ function buildIntent(input: PersistRunIntentInputV1): BuiltIntentV1 {
   return { ok: true, intent, intentPath: input.intentPath };
 }
 
-function existingIntentOn(store: IntentStoreV1, intentPath: string): "none" | "unstarted" | "spawned" | "unreadable" {
+export function existingIntentOn(store: IntentStoreV1, intentPath: string): "none" | "unstarted" | "spawned" | "unreadable" {
   let raw: string;
   try {
     raw = store.readUtf8(intentPath);

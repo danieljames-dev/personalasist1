@@ -738,7 +738,9 @@ test("a nonce-unreadable orphan after the floor makes the scan UNAVAILABLE", () 
     holderPid: 7504,
     observedPids: [7504],
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  // ParentProcessId names the holder, so membership is the holder chain
+  // (this run's tree), not an undecidable scan.
+  assert.equal(interpreted.outcome, "SCANNED");
 });
 
 test("unreadable rows with live parents or older creation still yield a performed scan", () => {

@@ -2150,9 +2150,10 @@ test("pre-spawn PRODUCTION_WRITER refusals release the lease so a later writer c
     assert.match(result.reason, /already exists/);
     assert.equal(
       leases.list().some((item) => item.leaseId === "lease-pw-replay"),
-      true,
-      "a recorded spawn is a live child until proven otherwise; do not drop the lease",
+      false,
+      "a refusal that spawned nothing must not mint a lease",
     );
+    await secondWriterAcquires(leases);
   }
 
   {

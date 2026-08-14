@@ -75,7 +75,6 @@ import {
   conflicts,
   heartbeat,
   LEASE_TTL_MS,
-  processIdentityMatches,
   reclaimStaleLease,
   releaseLease,
   type LeaseKindV1,
@@ -91,6 +90,8 @@ import {
   holderLiveness,
   isUsablePid,
   normaliseRunNonce,
+  isBrokerHostName,
+  processRowCouldBelongToThisRun,
   processRowMakesScanUndecidable,
   placeableInstantMs,
   type ExecutorProcessIdentityV1,
@@ -99,8 +100,8 @@ import {
   type ProcessObservationV1,
 } from "./process-identity.js";
 import {
-  answersAfterReboot,
   assertSpawnPermitBinding,
+  existingIntentOn,
   isSpawnPermitSpent,
   readRunIntent,
   recordSpawnAttempt,
@@ -208,6 +209,7 @@ export interface LeaseStoreV1 {
 
 export interface OrphanSightingV1 {
   readonly pid: number;
+  readonly name?: string;
   readonly creationDate?: string;
   readonly runNonce?: string;
   readonly parentPid?: number;
@@ -248,6 +250,7 @@ export interface RunManagerDepsV1 {
     createdNotBefore: string;
     holderPid?: number;
     holderExitedAt?: string;
+    observedPids?: readonly number[];
   }) => readonly OrphanSightingV1[];
   readonly logSinks?: { readonly stdout: LogSinkV1; readonly stderr: LogSinkV1 };
   /**
@@ -498,6 +501,7 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
   }
 }
 
+/** The only caller is {@link proveWriterExit}. Do not mint a proof from any other path. */
 function makeWriterExitProof(): WriterExitProofV1 {
   const proof = Object.freeze({ [WRITER_EXIT_PROOF]: true as const });
   MINTED_EXIT_PROOFS.add(proof);
@@ -879,17 +883,6 @@ function launchPathMatchesDiscoveredAdapter(
   return { ok: true };
 }
 
-function durableSpawnRequiresWithhold(fs: RunFileSystemV1, intentPath: string): boolean {
-  try {
-    if (!fs.isFile(intentPath)) return false;
-  } catch {
-    return true;
-  }
-  const read = readRunIntent(intentPath, intentStoreFromFs(fs));
-  if (!read.ok) return true;
-  return answersAfterReboot(read.intent).started === true;
-}
-
 function refusedBeforeSpawn(
   request: LaunchRunRequestV1,
   deps: LaunchRunDepsV1,
@@ -1015,6 +1008,7 @@ export async function executeRun(
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
   let exitProof: WriterExitProofV1 | null = null;
   let captureTimeIdentityNotFound = false;
+  const seenInTreePids = new Set<number>();
 
   const interruptedAfterSpawn = (timedOutFlag: boolean): SuccessConjunctionV1 =>
     evaluateSuccessConjunction({
@@ -1044,11 +1038,7 @@ export async function executeRun(
 
   const releaseHeld = (): void => {
     if (heldLease !== null && releasedLeaseId === null) {
-      if (adoptedExistingHolder && exitProof === null) {
-        exitProof = proveAdoptedHolderDead(heldLease, deps.probe);
-      }
-      const durableSpawn = durableSpawnRequiresWithhold(deps.fs, intentPath);
-      const withhold = (spawnOccurred || adoptedExistingHolder || durableSpawn) && exitProof === null;
+      const withhold = (spawnOccurred || adoptedExistingHolder) && exitProof === null;
       if (!withhold) {
         try {
           const before = leaseStore.list();
@@ -1176,6 +1166,73 @@ export async function executeRun(
         ok: false,
         spawned: false,
         reason: launchPath.reason,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    // Refuse-before-acquire: a run that will not spawn must not enter the store.
+    const completion = existingCompletionOn(deps.fs, resultPath, request.runId);
+    if (completion === "spawned") {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "a recorded completion already exists; refusing to overwrite it",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (completion === "unreadable") {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "an existing result at this path is unreadable; refusing to overwrite it",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    const intentState = existingIntentOn(intentStoreFromFs(deps.fs), intentPath);
+    const sameRunHeld = leaseStore.list().find((item) =>
+      item.runId === request.runId
+      && conflicts(item, { kind: request.lease.kind, resource: request.lease.resource }),
+    );
+    const wouldAdoptExistingHolder = sameRunHeld !== undefined
+      && (sameRunHeld.pid !== null || sameRunHeld.processIdentity !== undefined);
+    if (intentState !== "none" && !wouldAdoptExistingHolder) {
+      const why = intentState === "spawned"
+        ? "a recorded spawn already exists; refusing to overwrite it"
+        : intentState === "unreadable"
+          ? "an existing intent at this path is unreadable; refusing to overwrite it"
+          : "an existing intent at this path is unresolvable; refusing to overwrite it";
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: why,
         conjunction: emptyConjunction,
         exitCode: null,
         processIdentity: null,
@@ -1334,37 +1391,38 @@ export async function executeRun(
       });
     }
 
-    const completion = existingCompletionOn(deps.fs, resultPath, request.runId);
-    if (completion === "spawned") {
-      return finish({
-        ok: false,
-        spawned: false,
-        reason: "a recorded completion already exists; refusing to overwrite it",
-        conjunction: emptyConjunction,
-        exitCode: null,
-        processIdentity: null,
-        intent: null,
-        handoff: null,
-        gitAfter: null,
+    if (intentState !== "none") {
+      const prior = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
+      const intentIdentity = prior.ok ? prior.intent.processIdentity : null;
+      exitProof = proveAdoptedWriterExit({
         lease: heldLease,
-        productionWriterLeaseReleasedByThisRun: false,
-        cancel: emptyCancel,
-        log: null,
+        probe: deps.probe,
+        scanOrphans: deps.scanOrphans,
+        runNonce,
+        intentIdentity,
+        observedPids: seenInTreePids,
       });
-    }
-    if (completion === "unreadable") {
+      releaseHeld();
+      const adoptedWriterFact = writerReleaseEvidence(exitProof)
+        && releasedLeaseId === heldLease.leaseId
+        && heldLease.kind === "PRODUCTION_WRITER";
+      const why = intentState === "spawned"
+        ? "a recorded spawn already exists; refusing to overwrite it"
+        : intentState === "unreadable"
+          ? "an existing intent at this path is unreadable; refusing to overwrite it"
+          : "an existing intent at this path is unresolvable; refusing to overwrite it";
       return finish({
         ok: false,
         spawned: false,
-        reason: "an existing result at this path is unreadable; refusing to overwrite it",
+        reason: why,
         conjunction: emptyConjunction,
         exitCode: null,
-        processIdentity: null,
-        intent: null,
+        processIdentity: intentIdentity,
+        intent: prior.ok ? prior.intent : null,
         handoff: null,
         gitAfter: null,
         lease: heldLease,
-        productionWriterLeaseReleasedByThisRun: false,
+        productionWriterLeaseReleasedByThisRun: adoptedWriterFact,
         cancel: emptyCancel,
         log: null,
       });
@@ -1567,6 +1625,7 @@ export async function executeRun(
           parentExited: confirmedStopped,
           holderPid: childPid,
           createdNotBefore: spawnedAtFloor ?? "",
+          observedPids: seenInTreePids,
           ...(holderExitedAt !== null ? { holderExitedAt } : {}),
         });
       } catch {
@@ -1578,6 +1637,7 @@ export async function executeRun(
         runNonce,
         holderPid: childPid,
         createdNotBefore: spawnedAtFloor ?? "",
+        observedPids: seenInTreePids,
         ...(holderExitedAt !== null ? { holderExitedAt } : {}),
       });
       const reason = confirmedStopped
@@ -1695,6 +1755,7 @@ export async function executeRun(
           cancelStages,
           spawnedAtFloor ?? "",
           holderExitedAt,
+          seenInTreePids,
         );
         stillRunning = cancelled.stillRunning;
         exitCode = cancelled.exitCode;
@@ -1714,6 +1775,7 @@ export async function executeRun(
         cancelStages,
         spawnedAtFloor ?? "",
         holderExitedAt,
+        seenInTreePids,
       );
       stillRunning = cancelled.stillRunning;
       if (cancelled.exitCode !== null) exitCode = cancelled.exitCode;
@@ -1736,6 +1798,7 @@ export async function executeRun(
         parentExited: child.exited,
         holderPid: processIdentity?.pid ?? childPid,
         createdNotBefore: spawnedAtFloor ?? "",
+        observedPids: seenInTreePids,
         ...(holderExitedAt !== null ? { holderExitedAt } : {}),
       });
     } catch {
@@ -1790,6 +1853,7 @@ export async function executeRun(
       runNonce,
       holderPid: processIdentity?.pid ?? childPid,
       createdNotBefore: spawnedAtFloor ?? "",
+      observedPids: seenInTreePids,
       ...(holderExitedAt !== null ? { holderExitedAt } : {}),
     });
 
@@ -1856,11 +1920,14 @@ export async function executeRun(
       liveSightings: orphanScan.liveSightings,
       ownedHandleExit,
     });
+    const proofBeforeRelease = exitProof;
     releaseHeld();
     if (releasedLeaseId !== heldLease.leaseId) {
       exitProof = null;
     }
-    const writerFact = writerReleaseEvidence(exitProof) && heldLease.kind === "PRODUCTION_WRITER";
+    const writerFact = writerReleaseEvidence(proofBeforeRelease)
+      && releasedLeaseId === heldLease.leaseId
+      && heldLease.kind === "PRODUCTION_WRITER";
 
     const reason = conjunction.ok
       ? "every success conjunct holds"
@@ -1968,6 +2035,9 @@ function describeExecutorTree(input: {
   readonly leftoverRemaining: readonly OrphanSightingV1[];
   readonly ownedHandleExit: OwnedHandleExitV1;
 }): { ok: boolean; reason: string } {
+  if (input.ownedHandleExit.spawnOccurred === true && input.ownedHandleExit.handleExited !== true) {
+    return { ok: false, reason: "the owned spawn handle has not exited" };
+  }
   if (input.recorded === null) {
     // Same conjunct proveWriterExit requires when identity is absent.
     const owned = input.ownedHandleExit;
@@ -2090,19 +2160,21 @@ function collectWriterOrphans(input: {
   readonly holderPid?: number;
   readonly createdNotBefore: string;
   readonly holderExitedAt?: string;
+  readonly observedPids?: Set<number>;
 }): WriterOrphanScanV1 {
   try {
     const createdNotBefore = input.createdNotBefore;
     const holderPid = input.holderPid ?? input.recorded?.pid;
     const holderExitedAt = input.holderExitedAt;
+    const observedPids = input.observedPids ?? new Set<number>();
+    if (isUsablePid(holderPid)) observedPids.add(holderPid);
     const sightings = [...resolveOrphanScanner(input.scanOrphans)({
       runNonce: input.runNonce,
       createdNotBefore,
       ...(holderPid !== undefined ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+      observedPids: [...observedPids],
     })];
-    const observedPids = new Set<number>();
-    if (isUsablePid(holderPid)) observedPids.add(holderPid);
     const plausibility = {
       runNonce: input.runNonce,
       createdNotBefore,
@@ -2116,11 +2188,15 @@ function collectWriterOrphans(input: {
         return { performed: false, sightings: [], liveSightings: [] };
       }
     }
-    const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(
-      sighting,
-      input.runNonce,
-      { holderPid: holderPid ?? null, rows: sightings },
-    ));
+    rememberInTreePids(observedPids, sightings, input.runNonce, holderPid);
+    const liveSightings = sightings.filter((sighting) =>
+      processRowCouldBelongToThisRun(sighting, plausibility)
+      && writerSightingNotProvenAbsent(
+        sighting,
+        input.runNonce,
+        { holderPid: holderPid ?? null, rows: sightings },
+      ),
+    );
     return { performed: true, sightings, liveSightings };
   } catch {
     // A throwing CIM/WMI scan is not a completed scan. Escaping executeRun
@@ -2142,6 +2218,7 @@ export function writerSightingNotProvenAbsent(
     rows: [],
   },
 ): boolean {
+  if (isBrokerHostName(sighting.name)) return false;
   // Ancestry is a fact this Director walked. A nonce the child wrote cannot
   // discharge a descendant of the recorded holder.
   if (tree.holderPid !== null && descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid)) {
@@ -2169,14 +2246,18 @@ function killNonceBearingLeftovers(input: {
   readonly holderPid?: number;
   readonly createdNotBefore: string;
   readonly holderExitedAt?: string;
+  readonly observedPids?: Set<number>;
 }): LeftoverSweepV1 {
   const createdNotBefore = input.createdNotBefore;
   const holderPid = input.holderPid ?? input.recorded?.pid ?? null;
+  const observedPids = input.observedPids ?? new Set<number>();
+  if (isUsablePid(holderPid)) observedPids.add(holderPid);
   const query = {
     runNonce: input.runNonce,
     createdNotBefore,
     ...(holderPid !== null ? { holderPid } : {}),
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+    observedPids: [...observedPids],
   };
   let leftovers: readonly OrphanSightingV1[];
   try {
@@ -2184,6 +2265,7 @@ function killNonceBearingLeftovers(input: {
   } catch {
     return { confirmed: false, remaining: [], killed: false };
   }
+  rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined);
   const tree = { holderPid, rows: leftovers };
   let killed = false;
   for (const leftover of leftovers) {
@@ -2199,7 +2281,10 @@ function killNonceBearingLeftovers(input: {
   }
   let remaining: readonly OrphanSightingV1[];
   try {
-    const after = resolveOrphanScanner(input.scanOrphans)(query);
+    const after = resolveOrphanScanner(input.scanOrphans)({
+      ...query,
+      observedPids: [...observedPids],
+    });
     remaining = after.filter((sighting) => writerSightingNotProvenAbsent(
       sighting,
       input.runNonce,
@@ -2263,6 +2348,7 @@ async function cancelLadder(
   stages: CancelStageV1[],
   createdNotBefore: string,
   holderExitedAt?: string | null,
+  observedPids?: Set<number>,
 ): Promise<{ stillRunning: boolean; exitCode: number | null }> {
   // SOFT: terminate the tracked root only. child.kill() is TerminateProcess on this PID.
   try {
@@ -2279,7 +2365,11 @@ async function cancelLadder(
 
   // HARD: record the attempt before the call that may throw.
   if (!stages.includes("HARD")) stages.push("HARD");
-  deps.killTree(child.pid);
+  try {
+    deps.killTree(child.pid);
+  } catch {
+    // A failed kill is not a confirmed stop.
+  }
   await deps.wait(CANCEL_HARD_MS);
   const stillAfterHard = !child.exited;
 
@@ -2287,18 +2377,24 @@ async function cancelLadder(
   const leftoverCeiling = child.exited
     ? (holderExitedAt ?? deps.clock.now())
     : holderExitedAt ?? undefined;
-  const leftoverSweep = killNonceBearingLeftovers({
-    scanOrphans: deps.scanOrphans,
-    killTree: deps.killTree,
-    childPid: child.pid,
-    recorded,
-    runNonce,
-    parentExited: child.exited,
-    holderPid: recorded?.pid ?? child.pid,
-    createdNotBefore,
-    ...(leftoverCeiling ? { holderExitedAt: leftoverCeiling } : {}),
-  });
-  if (leftoverSweep.killed && !stages.includes("ORPHAN")) stages.push("ORPHAN");
+  let leftoverSweep: LeftoverSweepV1 = { confirmed: false, remaining: [], killed: false };
+  try {
+    leftoverSweep = killNonceBearingLeftovers({
+      scanOrphans: deps.scanOrphans,
+      killTree: deps.killTree,
+      childPid: child.pid,
+      recorded,
+      runNonce,
+      parentExited: child.exited,
+      holderPid: recorded?.pid ?? child.pid,
+      createdNotBefore,
+      ...(observedPids !== undefined ? { observedPids } : {}),
+      ...(leftoverCeiling ? { holderExitedAt: leftoverCeiling } : {}),
+    });
+    if (leftoverSweep.killed && !stages.includes("ORPHAN")) stages.push("ORPHAN");
+  } catch {
+    leftoverSweep = { confirmed: false, remaining: [], killed: false };
+  }
 
   if (child.exited) {
     const ended = await child.exit;
@@ -2428,31 +2524,85 @@ function leaseIdentityEquals(
   return a.runId === b.runId && conflicts(a, b);
 }
 
-function proveAdoptedHolderDead(
+function recordedIdentityFromHeldLease(
   lease: LeaseV1,
-  probe: HostProcessProbe,
-): WriterExitProofV1 | null {
-  if (!isUsablePid(lease.pid)) return null;
-  let observation: ProcessObservationV1;
-  try {
-    observation = probe.observe(lease.pid);
-  } catch {
-    observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
+  intentIdentity: ExecutorProcessIdentityV1 | null,
+): ExecutorProcessIdentityV1 | null {
+  if (intentIdentity !== null) return intentIdentity;
+  const id = lease.processIdentity;
+  if (id === undefined || !isUsablePid(id.pid)) return null;
+  const token = normaliseRunNonce(id.runToken ?? "");
+  if (token === null) return null;
+  const creationDate = id.startedAt;
+  if (creationDate === undefined || creationDate === "") return null;
+  return {
+    pid: id.pid,
+    creationDate,
+    executablePath: "C:\\adopted-holder",
+    runNonce: token,
+  };
+}
+
+function rememberInTreePids(
+  seen: Set<number>,
+  sightings: readonly OrphanSightingV1[],
+  runNonce: string,
+  holderPid: number | undefined,
+): void {
+  if (isUsablePid(holderPid)) seen.add(holderPid);
+  for (const sighting of sightings) {
+    const nonce = normaliseRunNonce(sighting.runNonce);
+    if (nonce !== null && nonce === runNonce) seen.add(sighting.pid);
+    if (isUsablePid(holderPid) && descendantPidsOf(holderPid, sightings).has(sighting.pid)) {
+      seen.add(sighting.pid);
+    }
+    if (sighting.parentPid !== undefined && seen.has(sighting.parentPid)) {
+      seen.add(sighting.pid);
+    }
   }
-  if (observation.outcome === "UNAVAILABLE") return null;
-  if (observation.outcome === "NOT_FOUND") return makeWriterExitProof();
-  if (lease.processIdentity !== undefined) {
-    const observedIdentity: ProcessIdentityV1 = {
-      pid: observation.pid,
-      ...(observation.creationDate !== undefined ? { startedAt: observation.creationDate } : {}),
-      ...(normaliseRunNonce(observation.runNonce) !== null
-        ? { runToken: normaliseRunNonce(observation.runNonce)! }
-        : {}),
-    };
-    const match = processIdentityMatches(lease.processIdentity, observedIdentity);
-    if (match === "MATCH") return null;
+}
+
+function proveAdoptedWriterExit(input: {
+  readonly lease: LeaseV1;
+  readonly probe: HostProcessProbe;
+  readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
+  readonly runNonce: string;
+  readonly intentIdentity: ExecutorProcessIdentityV1 | null;
+  readonly observedPids: Set<number>;
+}): WriterExitProofV1 | null {
+  const identity = recordedIdentityFromHeldLease(input.lease, input.intentIdentity);
+  const holderPid = input.lease.pid ?? identity?.pid;
+  const floor = identity?.creationDate
+    ?? input.lease.processIdentity?.startedAt
+    ?? input.lease.acquiredAt;
+  const probedPid = identity?.pid ?? (isUsablePid(holderPid) ? holderPid : null);
+  let observation: ProcessObservationV1 | null = null;
+  if (probedPid !== null) {
+    try {
+      observation = input.probe.observe(probedPid);
+    } catch {
+      observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
+    }
   }
-  return null;
+  const orphanScan = collectWriterOrphans({
+    scanOrphans: input.scanOrphans,
+    recorded: identity,
+    runNonce: input.runNonce,
+    createdNotBefore: floor,
+    observedPids: input.observedPids,
+    ...(isUsablePid(holderPid) ? { holderPid } : {}),
+  });
+  return proveWriterExit({
+    processStillRunning: false,
+    recordedLeaseKind: input.lease.kind,
+    recordedLeaseId: input.lease.leaseId,
+    recordedIdentity: identity,
+    observation,
+    probedPid,
+    orphanScanPerformed: orphanScan.performed,
+    orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
+    liveSightings: orphanScan.performed ? orphanScan.liveSightings : null,
+  });
 }
 
 function errorCode(error: unknown): string | null {

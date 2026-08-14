@@ -107,6 +107,8 @@ export interface LivenessGrantV1 {
  */
 export interface NonceBearingProcessV1 {
   readonly pid: number;
+  /** Win32_Process.Name of this row, when the scan emitted it. */
+  readonly name?: string;
   readonly creationDate?: string;
   readonly runNonce?: string;
   readonly parentPid?: number;
@@ -642,8 +644,10 @@ export function interpretWindowsOrphanScanOutput(input: {
     const nonceReadable = typeof row.nonceReadable === "boolean" ? row.nonceReadable : undefined;
     const parentPresent = typeof row.parentPresent === "boolean" ? row.parentPresent : undefined;
     const parentName = asUsableToken(row.parentName) ?? undefined;
+    const name = asUsableToken(row.name) ?? undefined;
     sightings.push({
       pid: row.pid,
+      ...(name !== undefined ? { name } : {}),
       ...(creationDate !== null ? { creationDate } : {}),
       ...(runNonce !== null ? { runNonce } : {}),
       ...(parentPid !== undefined ? { parentPid } : {}),
@@ -693,6 +697,8 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly createdNotBefore: string;
   readonly holderPid?: number;
   readonly holderExitedAt?: string;
+  /** Pids earlier scans of this run already judged in-tree. */
+  readonly observedPids?: readonly number[];
 }) => readonly NonceBearingProcessV1[] {
   const spawn = host?.spawnSync ?? spawnSync;
   return (query) => {
@@ -730,13 +736,18 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     }
 
     const holderExitedAt = asUsableToken(query.holderExitedAt) ?? undefined;
+    const observedPids = [
+      ...(holderPid > 0 ? [holderPid] : []),
+      ...(query.observedPids ?? []),
+    ];
     const interpreted = interpretWindowsOrphanScanOutput({
       status: result.status,
       stdout: stripBom(String(result.stdout ?? "")).trim(),
       stderr: String(result.stderr ?? "").trim(),
       createdNotBefore: query.createdNotBefore,
       runNonce,
-      ...(holderPid > 0 ? { holderPid, observedPids: [holderPid] } : {}),
+      ...(holderPid > 0 ? { holderPid } : {}),
+      ...(observedPids.length > 0 ? { observedPids } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     });
     if (interpreted.outcome === "UNAVAILABLE") {
@@ -880,9 +891,10 @@ export const BROKER_HOST_PROCESS_NAMES = [
 
 export type ProcessRowPlausibilityV1 = {
   readonly pid?: number;
+  readonly name?: string | null;
   readonly parentPid?: number;
   readonly parentPresent?: boolean;
-  readonly parentName?: string;
+  readonly parentName?: string | null;
   readonly runNonce?: string | null;
   readonly creationDate?: string;
 };
@@ -902,8 +914,8 @@ export type ProcessRowPlausibilityContextV1 = {
   readonly rows: readonly { readonly pid: number; readonly parentPid?: number }[];
 };
 
-function isBrokerHostName(name: string | undefined): boolean {
-  if (name === undefined || name === "") return false;
+export function isBrokerHostName(name: string | undefined | null): boolean {
+  if (name === undefined || name === null || name === "") return false;
   const lower = name.toLowerCase();
   for (const host of BROKER_HOST_PROCESS_NAMES) {
     if (host.toLowerCase() === lower) return true;
@@ -938,6 +950,8 @@ export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
+  // A WMI/DCOM provider host is never a Claude or Grok executor.
+  if (isBrokerHostName(sighting.name)) return false;
   if (nonceMatchesRun(sighting, ctx.runNonce)) return true;
   if (rowIsInHolderChain(sighting, ctx)) return true;
   const noNonce = asUsableToken(sighting.runNonce) === null;
@@ -951,22 +965,17 @@ export function processRowCouldBelongToThisRun(
 
 /**
  * A plausible row we cannot classify as ours (no nonce match, not in the
- * holder chain) makes the scan UNAVAILABLE. Called from interpret and from
- * collectWriterOrphans — one definition.
+ * holder chain) makes the scan UNAVAILABLE. Derived from
+ * {@link processRowCouldBelongToThisRun} — one definition.
  */
 export function processRowMakesScanUndecidable(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
+  if (!processRowCouldBelongToThisRun(sighting, ctx)) return false;
   if (nonceMatchesRun(sighting, ctx.runNonce)) return false;
-  const noNonce = asUsableToken(sighting.runNonce) === null;
-  if (!noNonce) return false;
-  if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
-  const hasHolder = ctx.holderPid !== undefined && ctx.holderPid > 0;
-  if (hasHolder && brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
-  return sighting.parentPresent === false
-    && sighting.parentPid !== undefined
-    && ctx.observedPids.has(sighting.parentPid);
+  if (rowIsInHolderChain(sighting, ctx)) return false;
+  return true;
 }
 
 /**
@@ -1306,12 +1315,16 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedF
     "      if ([int]$q.ProcessId -eq $ppid) { $parentName = [string]$q.Name; break }",
     "    }",
     "  };",
+    "  $name = [string]$p.Name;",
     `  $brokerNames = @(${BROKER_HOST_PROCESS_NAMES.map((name) => `'${name.replace(/'/g, "''")}'`).join(", ")});`,
     "  $isBroker = $false;",
     "  if ($parentName) { foreach ($b in $brokerNames) { if ($parentName -ieq $b) { $isBroker = $true } } };",
+    "  $isSelfBroker = $false;",
+    "  if ($name) { foreach ($b in $brokerNames) { if ($name -ieq $b) { $isSelfBroker = $true } } };",
+    "  if ($isSelfBroker) { continue };",
     "  if ($n -eq $target -or $isDesc -or (-not $n -and $atOrAfterFloor -and ((-not $parentPresent) -or $isBroker))) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
-    "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent; parentName = $parentName });",
+    "    [void]$hits.Add([ordered]@{ pid = $id; name = $name; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent; parentName = $parentName });",
     "  }",
     "}",
     "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable } | ConvertTo-Json -Compress -Depth 5;",

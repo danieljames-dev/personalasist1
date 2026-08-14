@@ -906,6 +906,17 @@ export function createNodeGitRunner(input: {
   return {
     inspectedWorktree: cwd,
     run(argv: readonly string[]): GitCommandResultV1 {
+      const classified = isForbiddenGitOperation(argv);
+      if (classified.forbidden) {
+        return {
+          argv: argv.slice(),
+          status: null,
+          stdout: "",
+          stderr: "",
+          error: classified.reason,
+          cwd,
+        };
+      }
       let result: ReturnType<typeof spawnSync>;
       try {
         result = spawnSync(exe, argv.slice(), {

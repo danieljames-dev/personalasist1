@@ -633,6 +633,7 @@ test("B1 adopted NOT_FOUND holder is released on the same re-entry path", async 
     leases,
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
+    scanOrphans: () => [],
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
   });
   assert.equal(result.spawned, false);

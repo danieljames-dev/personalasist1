@@ -37,6 +37,9 @@
  * This module does not kill the executor. It reports that the run must be halted; the run
  * manager is what sends the signal.
  */
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { IsoTimestamp } from "./contracts.js";
 
 export const LIVE_TAIL_BYTES = 256 * 1024;
@@ -149,6 +152,20 @@ export function createMemoryLogSink(): MemoryLogSinkV1 {
   };
 }
 
+/** File-backed sink for `stdout.log` / `stderr.log` under a run root. */
+export function createFileLogSink(filePath: string): LogSinkV1 {
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, Buffer.alloc(0));
+  return {
+    append(bytes) {
+      appendFileSync(filePath, Buffer.from(bytes));
+    },
+    replace(bytes) {
+      writeFileSync(filePath, Buffer.from(bytes));
+    },
+  };
+}
+
 export function createFixedClock(now: IsoTimestamp): ClockV1 {
   return { now: () => now };
 }
@@ -180,7 +197,7 @@ export function firstUnterminatedPemBegin(pending: string): number {
 
 export function redactLogText(text: string): string {
   const closedBlock = new RegExp(
-    `${PRIVATE_KEY_BEGIN_LINE.source}\\r?\\n[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
+    `${PRIVATE_KEY_BEGIN_LINE.source}[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
     "g",
   );
   let out = text.replace(
@@ -188,7 +205,7 @@ export function redactLogText(text: string): string {
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
   out = out.replace(
-    /((?:Proxy-)?Authorization:\s+)(\S+)(?:\s+(\S+))?/gi,
+    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)([^\s\r\n]+)(?:[^\S\r\n]+([^\s\r\n]+))?/gi,
     (_m, head: string, scheme: string, cred: string | undefined) =>
       cred === undefined ? head + REDACTED : `${head}${scheme} ${REDACTED}`,
   );
@@ -247,6 +264,10 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
 
   function emitPending(stream: LogStreamV1, force: boolean): void {
     const state = streams[stream];
+    if (force) {
+      state.pending += state.decoder.end();
+      state.decoder = new StringDecoder("utf8");
+    }
     if (state.pending.length === 0) return;
     if (force) {
       const emit = redactOpenPrivateKey(state.pending);
@@ -276,7 +297,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     const raw = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
     lastWriteAt = deps.clock.now();
     runBytesIn += raw.length;
-    streams[name].pending += raw.toString("utf8");
+    streams[name].pending += streams[name].decoder.write(raw);
     emitPending(name, false);
     noteHaltIfNeeded();
     const state = streams[name];
@@ -344,6 +365,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
 
 interface StreamState {
   pending: string;
+  decoder: StringDecoder;
   livePayload: Buffer;
   filePayload: Buffer;
   liveTruncated: boolean;
@@ -356,6 +378,7 @@ interface StreamState {
 function emptyStream(): StreamState {
   return {
     pending: "",
+    decoder: new StringDecoder("utf8"),
     livePayload: Buffer.alloc(0),
     filePayload: Buffer.alloc(0),
     liveTruncated: false,
@@ -389,9 +412,25 @@ function splitHoldback(pending: string): { emit: string; hold: string } {
   if (begin >= 0) {
     const held = pending.slice(begin);
     if (held.length > MAX_PEM_HOLD) {
-      return { emit: pending, hold: "" };
+      const tailStart = Math.max(begin, pending.length - SECRET_TAIL_BYTES);
+      return {
+        emit: redactOpenPrivateKey(pending.slice(0, tailStart)),
+        hold: pending.slice(tailStart),
+      };
     }
     return { emit: pending.slice(0, begin), hold: held };
+  }
+
+  // Overflow tail: BEGIN was already redacted; emit END without the body.
+  if (!PRIVATE_KEY_BEGIN_LINE.test(pending)) {
+    const endFinder = /-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/;
+    const endMatch = endFinder.exec(pending);
+    if (endMatch !== null && endMatch.index !== undefined) {
+      return {
+        emit: pending.slice(endMatch.index),
+        hold: "",
+      };
+    }
   }
 
   const lastNl = pending.lastIndexOf("\n");

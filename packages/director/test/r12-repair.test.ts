@@ -571,7 +571,7 @@ test("B2 a broker-parented no-nonce row after the floor makes the scan UNAVAILAB
   assert.match(interpreted.reason, /undecidable/);
 });
 
-test("D1 a parentless post-floor row whose dead parent is the holder is UNAVAILABLE", () => {
+test("D1 a parentless post-floor row whose dead parent is the holder is in the holder chain", () => {
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({
@@ -591,7 +591,9 @@ test("D1 a parentless post-floor row whose dead parent is the holder is UNAVAILA
     runNonce: NONCE,
     holderPid: 4812,
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  // ParentProcessId still names the holder, so the row is classified as ours
+  // (a live sighting), not as an undecidable scan.
+  assert.equal(interpreted.outcome, "SCANNED");
 });
 
 test("D1 a parentless post-floor row whose dead parent was never observed is host noise", () => {
