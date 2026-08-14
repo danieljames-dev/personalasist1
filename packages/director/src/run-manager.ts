@@ -72,6 +72,7 @@ import {
 } from "./leases.js";
 import {
   captureProcessIdentity,
+  createWindowsOrphanScanner,
   detectOrphan,
   holderLiveness,
   normaliseRunNonce,
@@ -81,9 +82,10 @@ import {
   type ProcessObservationV1,
 } from "./process-identity.js";
 import {
+  assertSpawnPermitBinding,
+  isSpawnPermitSpent,
   recordSpawnAttempt,
   recordSpawnObservation,
-  requireSpawnPermit,
   spendSpawnPermit,
   withPersistedIntent,
   type IntentStoreV1,
@@ -202,6 +204,11 @@ export interface RunManagerDepsV1 {
   readonly leases: LeaseStoreV1;
   readonly wait: (ms: number) => Promise<void>;
   readonly killTree: (pid: number) => void;
+  /**
+   * Optional test hook. When omitted, production uses
+   * {@link createWindowsOrphanScanner}. A missing implementation used to
+   * withhold every production-writer lease forever.
+   */
   readonly scanOrphans?: (query: { runNonce: string; createdNotBefore: string }) => readonly OrphanSightingV1[];
   readonly logSinks?: { readonly stdout: LogSinkV1; readonly stderr: LogSinkV1 };
   /**
@@ -296,6 +303,12 @@ export interface WriterExitProofV1 {
 }
 
 export interface WriterExitProofInputV1 {
+  /**
+   * This module's verdict after the SOFT/HARD ladder (and mustHalt). The first
+   * denying conjunct: a handle that has not exited is not a writer exit, even
+   * when the probe reports `NOT_FOUND`.
+   */
+  readonly processStillRunning: boolean;
   readonly recordedLeaseKind: LeaseKindV1 | null;
   readonly recordedLeaseId: string | null;
   readonly releasedLeaseId: string | null;
@@ -325,6 +338,8 @@ export function isWriterExitProof(value: unknown): value is WriterExitProofV1 {
  * The only constructor. Returns a proof only when every conjunct is true at
  * once; otherwise null. A throw in any step is null, not a proof.
  *
+ * `processStillRunning !== false` denies first — a handle that has not
+ * exited is not a writer exit, even when the probe reports `NOT_FOUND`.
  * Liveness is `holderLiveness(recorded, observation)` and must be exactly
  * `DEAD_CONFIRMED` — a closed allowlist. `UNKNOWN`, `ALIVE`, `null`, and any
  * later member deny. The observation must be about the recorded holder
@@ -333,6 +348,8 @@ export function isWriterExitProof(value: unknown): value is WriterExitProofV1 {
  */
 export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV1 | null {
   try {
+    // Fail closed: only an explicit false proceeds. A missing field must not mint a proof.
+    if (input.processStillRunning !== false) return null;
     if (input.recordedLeaseKind !== "PRODUCTION_WRITER") return null;
     if (input.recordedLeaseId === null || input.releasedLeaseId === null) return null;
     if (input.releasedLeaseId !== input.recordedLeaseId) return null;
@@ -823,7 +840,11 @@ export async function executeRun(
       const launched = withPersistedIntent(
         persistInput,
         (minted) => {
-          permit = requireSpawnPermit(minted);
+          permit = spendSpawnPermit(minted, {
+            executable: request.executablePath,
+            argv: request.argv,
+            cwd: request.cwd,
+          });
           return deps.spawn(
             request.executablePath,
             request.argv,
@@ -1089,6 +1110,7 @@ export async function executeRun(
     });
 
     exitProof = proveWriterExit({
+      processStillRunning: stillRunning,
       recordedLeaseKind: heldLease.kind,
       recordedLeaseId: heldLease.leaseId,
       releasedLeaseId: heldLease.leaseId,
@@ -1140,17 +1162,23 @@ function observeRecordedHolder(
   }
 }
 
+function resolveOrphanScanner(
+  scanOrphans: RunManagerDepsV1["scanOrphans"],
+): NonNullable<RunManagerDepsV1["scanOrphans"]> {
+  return scanOrphans ?? createWindowsOrphanScanner();
+}
+
 function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
 }): WriterOrphanScanV1 {
-  if (input.scanOrphans === undefined) {
-    return { performed: false, sightings: [], liveSightings: [] };
-  }
   try {
     const createdNotBefore = input.recorded?.creationDate ?? "";
-    const sightings = [...input.scanOrphans({ runNonce: input.runNonce, createdNotBefore })];
+    const sightings = [...resolveOrphanScanner(input.scanOrphans)({
+      runNonce: input.runNonce,
+      createdNotBefore,
+    })];
     const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(sighting, input.runNonce));
     return { performed: true, sightings, liveSightings };
   } catch {
@@ -1179,9 +1207,15 @@ function killNonceBearingLeftovers(input: {
   readonly parentExited: boolean;
 }): boolean {
   const createdNotBefore = input.recorded?.creationDate ?? "";
-  const leftovers = input.scanOrphans !== undefined
-    ? input.scanOrphans({ runNonce: input.runNonce, createdNotBefore })
-    : [];
+  let leftovers: readonly OrphanSightingV1[] = [];
+  try {
+    leftovers = resolveOrphanScanner(input.scanOrphans)({
+      runNonce: input.runNonce,
+      createdNotBefore,
+    });
+  } catch {
+    leftovers = [];
+  }
   let killedOrphan = false;
   for (const leftover of leftovers) {
     if (leftover.pid === input.childPid) continue;
@@ -1427,12 +1461,22 @@ function writeAtomic(target: string, contents: string): void {
   }
 }
 
+const NODE_SPAWNER_USED = new WeakSet<object>();
+
 export function createNodeSpawner(): SpawnFnV1 {
   return (executable, argv, options, permit) => {
     if (options.shell !== false) {
       throw new Error("shell:true is forbidden");
     }
-    spendSpawnPermit(permit, { executable, argv, cwd: options.cwd });
+    const launch = { executable, argv, cwd: options.cwd };
+    const bound = assertSpawnPermitBinding(permit, launch);
+    if (NODE_SPAWNER_USED.has(bound)) {
+      throw new Error("spawn is refused: permit has already been spent");
+    }
+    if (!isSpawnPermitSpent(bound)) {
+      spendSpawnPermit(bound, launch);
+    }
+    NODE_SPAWNER_USED.add(bound);
     const child = spawn(executable, argv.slice(), {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },

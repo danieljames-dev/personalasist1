@@ -275,6 +275,28 @@ export function requireSpawnPermit(value: unknown): SpawnPermitV1 {
   return value;
 }
 
+/** True only for a minted permit that {@link spendSpawnPermit} has already consumed. */
+export function isSpawnPermitSpent(value: unknown): boolean {
+  return isSpawnPermit(value) && CONSUMED_PERMITS.has(value);
+}
+
+/**
+ * Membership plus the authorised `{executable, argv, cwd}` binding.
+ *
+ * Does not spend. The node spawner uses this after the run manager has already
+ * consumed the permit so the same rule can deny twice.
+ */
+export function assertSpawnPermitBinding(
+  value: unknown,
+  launch: { readonly executable: string; readonly argv: readonly string[]; readonly cwd: string },
+): SpawnPermitV1 {
+  const permit = requireSpawnPermit(value);
+  if (!launchMatchesAuthorised(permit.authorised, launch)) {
+    throw new Error("spawn is refused: launch does not match the persisted intent");
+  }
+  return permit;
+}
+
 /**
  * Bind a launch to the permit and spend it.
  *
@@ -746,7 +768,13 @@ function existingIntentOn(store: IntentStoreV1, intentPath: string): "none" | "u
 }
 
 function permitMatchesIntent(permit: SpawnPermitV1, current: RunIntentV1): boolean {
-  return permit.intent.runId === current.runId && permit.intent.runNonce === current.runNonce;
+  return permit.intent.runId === current.runId
+    && permit.intent.runNonce === current.runNonce
+    && launchMatchesAuthorised(permit.authorised, {
+      executable: current.executablePath,
+      argv: current.argv,
+      cwd: current.cwd,
+    });
 }
 
 function makePermit(intentPath: string, intent: RunIntentV1): SpawnPermitV1 {

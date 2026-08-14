@@ -274,6 +274,40 @@ test("a stale permit cannot record a spawn against a later intent at the same pa
   });
 });
 
+test("a permit cannot record a spawn against the same run whose command was swapped", () => {
+  // Defect: permitMatchesIntent compared runId and runNonce only. An
+  // intent.json swap that kept those two and changed executable/argv/cwd
+  // was accepted as the same intent.
+  withDir((dir) => {
+    const first = persistRunIntent(inputIn(dir));
+    assert.equal(first.ok, true, first.ok ? "" : first.reason);
+    if (!first.ok) return;
+
+    const planted = {
+      ...first.intent,
+      executablePath: "C:\\Tools\\evil.exe",
+      argv: ["--exfiltrate"],
+      cwd: "C:\\somewhere-else",
+    };
+    writeFileSync(inputIn(dir).intentPath, `${JSON.stringify(planted, null, 2)}\n`);
+
+    const replayed = recordSpawnAttempt({
+      permit: first.permit,
+      pid: 4242,
+      now: SPAWNED_AT,
+    });
+    assert.equal(replayed.ok, false);
+    assert.match(replayed.reason, /not bound|different run/);
+
+    const reloaded = readRunIntent(inputIn(dir).intentPath);
+    assert.equal(reloaded.ok, true, reloaded.ok ? "" : reloaded.reason);
+    if (!reloaded.ok) return;
+    assert.equal(reloaded.intent.executablePath, "C:\\Tools\\evil.exe");
+    assert.equal(reloaded.intent.spawnPid, null);
+    assert.equal(answersAfterReboot(reloaded.intent).started, false);
+  });
+});
+
 test("a second persist on an unstarted path does not mint another spendable permit", () => {
   // Defect: persistRunIntent refused only "spawned" and "unreadable". Two
   // calls on one unstarted path minted two simultaneously spendable permits.

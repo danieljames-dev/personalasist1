@@ -23,7 +23,9 @@
  * Looking at a process is a host operation. Every branch of comparison, liveness and orphan
  * detection takes a probe result it is handed, so the near-misses — same PID, later creation
  * date; same PID, different executable; a nonce that is not ours — are testable without spawning
- * anything. A real Windows probe exists so one test can confirm the probe works at all.
+ * anything. A real Windows probe exists so one test can confirm the probe works at all. A real
+ * Windows orphan scanner enumerates CIM `Win32_Process` rows and reads `AION_RUN_NONCE` from
+ * CommandLine or the PEB environment block. A failed scan is `UNAVAILABLE`, never "no orphans".
  */
 import { spawnSync } from "node:child_process";
 import type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
@@ -98,6 +100,20 @@ export interface LivenessGrantV1 {
   readonly reclaim: boolean;
   readonly writerFinished: boolean;
 }
+
+/**
+ * A live process that carries this run's nonce. Produced by {@link createWindowsOrphanScanner}
+ * or by a test double. Missing fields stay missing.
+ */
+export interface NonceBearingProcessV1 {
+  readonly pid: number;
+  readonly creationDate?: string;
+  readonly runNonce?: string;
+}
+
+export type OrphanScanInterpretationV1 =
+  | { readonly outcome: "SCANNED"; readonly sightings: readonly NonceBearingProcessV1[]; readonly reason: string }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string };
 
 export type OrphanKindV1 = "NONCE_MISMATCH" | "EXECUTABLE_MISMATCH" | "DEAD_PARENT_LIVE_CHILD";
 
@@ -488,6 +504,128 @@ export function interpretWindowsProbeOutput(input: {
   };
 }
 
+/**
+ * Map a PowerShell orphan-scan spawn result to a list of nonce-bearing processes.
+ *
+ * Empty, unparseable, or non-zero-exit output is `UNAVAILABLE`. `SCANNED`
+ * requires exit 0 and `{ ok: true }`. A failed scan is never an empty match
+ * list: that is how a writer lease would be released while children remain.
+ */
+export function interpretWindowsOrphanScanOutput(input: {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}): OrphanScanInterpretationV1 {
+  const combined = `${input.stdout}\n${input.stderr}`;
+  if (/access is denied/i.test(combined)) {
+    return { outcome: "UNAVAILABLE", reason: "access-denied" };
+  }
+
+  if (input.status !== 0) {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: input.status === null ? "scan exited without a status" : `scan exited ${input.status}`,
+    };
+  }
+
+  if (input.stdout === "") {
+    return { outcome: "UNAVAILABLE", reason: "scan produced no output" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input.stdout);
+  } catch {
+    return { outcome: "UNAVAILABLE", reason: "scan output was not parseable" };
+  }
+  if (!isPlainObject(parsed)) {
+    return { outcome: "UNAVAILABLE", reason: "scan output was not an object" };
+  }
+
+  if (parsed.ok !== true) {
+    const why = typeof parsed.reason === "string" ? parsed.reason : "scan returned a failure envelope";
+    return { outcome: "UNAVAILABLE", reason: why };
+  }
+
+  const rows = asObjectArray(parsed.processes);
+  if (rows === null) {
+    return { outcome: "UNAVAILABLE", reason: "scan did not return a process list" };
+  }
+
+  const sightings: NonceBearingProcessV1[] = [];
+  for (const row of rows) {
+    if (!isUsablePid(row.pid)) continue;
+    const runNonce = asUsableToken(row.runNonce);
+    const creationDate = normalisedCreationDate(row.creationDate);
+    sightings.push({
+      pid: row.pid,
+      ...(creationDate !== null ? { creationDate } : {}),
+      ...(runNonce !== null ? { runNonce } : {}),
+    });
+  }
+
+  return { outcome: "SCANNED", sightings, reason: "cim" };
+}
+
+/**
+ * Enumerate processes that carry this run's `AION_RUN_NONCE`.
+ *
+ * Uses the same CIM `Win32_Process` path as {@link createWindowsProcessProbe}.
+ * The adapter puts the nonce in the child environment, not argv, so CommandLine
+ * alone cannot see a correctly-spawned writer. After the CIM listing, each
+ * row's PEB environment is read. A CIM, parser, or host failure throws —
+ * `collectWriterOrphans` treats a throw as `{performed: false}`, never as
+ * "no orphans found".
+ */
+export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
+  readonly runNonce: string;
+  readonly createdNotBefore: string;
+}) => readonly NonceBearingProcessV1[] {
+  const spawn = host?.spawnSync ?? spawnSync;
+  return (query) => {
+    const runNonce = asUsableToken(query.runNonce);
+    if (runNonce === null) {
+      throw new Error("orphan scan unavailable: run nonce is empty or contains control bytes");
+    }
+
+    const script = windowsOrphanScanScript(psSingleQuoted(runNonce));
+    let result: WindowsProbeSpawnResultV1;
+    try {
+      result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+        shell: false,
+      });
+    } catch (error) {
+      throw new Error(`orphan scan unavailable: probe failed to start: ${errorMessage(error)}`);
+    }
+
+    if (result.error) {
+      const message = errorMessage(result.error);
+      throw new Error(
+        /timed? ?out/i.test(message)
+          ? "orphan scan unavailable: probe timed out"
+          : `orphan scan unavailable: probe failed: ${message}`,
+      );
+    }
+
+    const interpreted = interpretWindowsOrphanScanOutput({
+      status: result.status,
+      stdout: stripBom(String(result.stdout ?? "")).trim(),
+      stderr: String(result.stderr ?? "").trim(),
+    });
+    if (interpreted.outcome === "UNAVAILABLE") {
+      throw new Error(`orphan scan unavailable: ${interpreted.reason}`);
+    }
+
+    return interpreted.sightings.filter((sighting) => {
+      if (asUsableToken(sighting.runNonce) !== runNonce) return false;
+      return sightingCreatedNotBefore(sighting, query.createdNotBefore);
+    });
+  };
+}
+
 function asFoundObservation(
   observed: ExecutorProcessIdentityV1 | ProcessObservationV1,
 ): {
@@ -668,4 +806,96 @@ function nonceFromThisProcess(
   const match = /AION_RUN_NONCE=([^\s]+)/.exec(line);
   const token = asUsableToken(match?.[1]);
   return token === null ? {} : { runNonce: token };
+}
+
+function asObjectArray(value: unknown): readonly Record<string, unknown>[] | null {
+  if (value === undefined || value === null) return [];
+  if (Array.isArray(value)) {
+    const rows: Record<string, unknown>[] = [];
+    for (const item of value) {
+      if (!isPlainObject(item)) return null;
+      rows.push(item);
+    }
+    return rows;
+  }
+  if (isPlainObject(value)) return [value];
+  return null;
+}
+
+function psSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sightingCreatedNotBefore(
+  sighting: NonceBearingProcessV1,
+  createdNotBefore: string,
+): boolean {
+  const floorToken = asUsableToken(createdNotBefore);
+  if (floorToken === null) return true;
+  const floor = normalisedCreationDate(floorToken);
+  if (floor === null) return true;
+  if (sighting.creationDate === undefined) return true;
+  const at = normalisedCreationDate(sighting.creationDate);
+  if (at === null) return true;
+  return Date.parse(at) >= Date.parse(floor);
+}
+
+function windowsOrphanScanScript(quotedNonce: string): string {
+  return [
+    "$ProgressPreference = 'SilentlyContinue';",
+    "try {",
+    "Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "using System.Text;",
+    "public static class AionPebEnv {",
+    "  [DllImport(\"kernel32.dll\", SetLastError=true)] static extern IntPtr OpenProcess(uint a, bool b, int c);",
+    "  [DllImport(\"kernel32.dll\", SetLastError=true)] static extern bool CloseHandle(IntPtr h);",
+    "  [DllImport(\"kernel32.dll\", SetLastError=true)] static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, [Out] byte[] buf, int n, out IntPtr read);",
+    "  [DllImport(\"ntdll.dll\")] static extern int NtQueryInformationProcess(IntPtr h, int c, ref PBI p, int n, out int r);",
+    "  [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr A; public IntPtr Peb; public IntPtr C; public IntPtr D; public IntPtr E; public IntPtr F; }",
+    "  public static string GetNonce(int pid) {",
+    "    IntPtr h = OpenProcess(0x0410, false, pid);",
+    "    if (h == IntPtr.Zero) return null;",
+    "    try {",
+    "      PBI pbi = new PBI(); int rl;",
+    "      int st = NtQueryInformationProcess(h, 0, ref pbi, Marshal.SizeOf(pbi), out rl);",
+    "      if (st != 0 || pbi.Peb == IntPtr.Zero) return null;",
+    "      byte[] ptr = new byte[8]; IntPtr read;",
+    "      if (!ReadProcessMemory(h, pbi.Peb + 0x20, ptr, 8, out read)) return null;",
+    "      long pp = BitConverter.ToInt64(ptr, 0);",
+    "      if (pp == 0) return null;",
+    "      if (!ReadProcessMemory(h, new IntPtr(pp + 0x80), ptr, 8, out read)) return null;",
+    "      long env = BitConverter.ToInt64(ptr, 0);",
+    "      if (env == 0) return null;",
+    "      byte[] buf = new byte[65536];",
+    "      if (!ReadProcessMemory(h, new IntPtr(env), buf, buf.Length, out read)) return null;",
+    "      string s = Encoding.Unicode.GetString(buf, 0, (int)read);",
+    "      foreach (string e in s.Split(new char[]{(char)0})) {",
+    "        if (e.StartsWith(\"AION_RUN_NONCE=\")) return e.Substring(15);",
+    "      }",
+    "      return null;",
+    "    } finally { CloseHandle(h); }",
+    "  }",
+    "}",
+    "'@ -ErrorAction Stop;",
+    `$target = ${quotedNonce};`,
+    "$rows = Get-CimInstance Win32_Process -ErrorAction Stop;",
+    "$hits = New-Object System.Collections.Generic.List[object];",
+    "foreach ($p in $rows) {",
+    "  $n = $null;",
+    "  if ($p.CommandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
+    "  if (-not $n) { $n = [AionPebEnv]::GetNonce([int]$p.ProcessId) };",
+    "  if ($n -eq $target) {",
+    "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
+    "    [void]$hits.Add([ordered]@{ pid = [int]$p.ProcessId; creationDate = $cd; runNonce = $n });",
+    "  }",
+    "}",
+    "[ordered]@{ ok = $true; processes = $hits } | ConvertTo-Json -Compress -Depth 5;",
+    "exit 0",
+    "} catch {",
+    "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",
+    "exit 1",
+    "}",
+  ].join("\n");
 }

@@ -303,6 +303,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
         },
         wait: async () => undefined,
         killTree: () => undefined,
+        scanOrphans: () => [],
         discoveryEnv: { AION_GROK_PATH: exe },
         discoveryFs: {
           isFile: (path) => path === exe,

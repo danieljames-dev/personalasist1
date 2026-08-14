@@ -29,9 +29,12 @@ import {
 } from "../src/process-identity.js";
 import {
   answersAfterReboot,
+  isSpawnPermitSpent,
   persistRunIntent,
   requireSpawnPermit,
   runIntentFrom,
+  spendSpawnPermit,
+  type SpawnPermitV1,
 } from "../src/run-intent.js";
 import {
   CANCEL_HARD_MS,
@@ -85,6 +88,7 @@ const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exite
 
 function writerProofInput(over: Partial<WriterExitProofInputV1> = {}): WriterExitProofInputV1 {
   return {
+    processStillRunning: false,
     recordedLeaseKind: "PRODUCTION_WRITER",
     recordedLeaseId: "lease-pw-1",
     releasedLeaseId: "lease-pw-1",
@@ -387,7 +391,7 @@ async function runWith(
     wait: over.wait ?? (over.neverWait ? (() => new Promise(() => {})) : async () => undefined),
     killTree: over.killTree ?? (() => undefined),
     ...(over.askWriterLiveness !== undefined ? { askWriterLiveness: over.askWriterLiveness } : {}),
-    ...(over.scanOrphans !== undefined ? { scanOrphans: over.scanOrphans } : {}),
+    scanOrphans: over.scanOrphans ?? (() => []),
   };
   return executeRun(request(over.request), deps);
 }
@@ -1154,6 +1158,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
     leases,
     wait: () => new Promise(() => {}),
     killTree: () => undefined,
+    scanOrphans: () => [],
   });
 
   await until(() => firstSpawn.calls === 1 && filesAtCrash.size > 0, "first persist and spawn");
@@ -1184,6 +1189,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
     leases: memoryLeases(leases.list()),
     wait: async () => undefined,
     killTree: () => undefined,
+    scanOrphans: () => [],
   });
 
   assert.equal(secondSpawn.calls, 0, second.reason);
@@ -1248,6 +1254,7 @@ test("a real node process is spawned with shell false and its exit is collected"
         leases: memoryLeases(),
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
+        scanOrphans: () => [],
       },
     );
     assert.equal(seenShell, false);
@@ -1511,4 +1518,194 @@ test("a dropped lease save is not a released lease and does not mint an exit pro
     stored.some((item) => item.leaseId === "lease-pw-1"),
     "a save that dropped the release must leave the lease in the store",
   );
+});
+
+test("proveWriterExit denies when the handle is still running, even if the probe says NOT_FOUND", () => {
+  // Defect: WriterExitProofInputV1 had no processStillRunning field. The probe
+  // won, so a hanging handle plus NOT_FOUND minted a proof and freed the lease.
+  assert.equal(
+    proveWriterExit(writerProofInput({ processStillRunning: true })),
+    null,
+  );
+  assert.ok(proveWriterExit(writerProofInput({ processStillRunning: false })));
+});
+
+test("a hanging handle plus a NOT_FOUND probe does not release the production-writer lease", async () => {
+  // Defect: stillRunning was this module's verdict after the SOFT/HARD ladder,
+  // but proveWriterExit never saw it. Every existing writer-release test used a
+  // handle that had already exited, so the probe alone decided death.
+  const hung = hangingProcess();
+  const leases = memoryLeases();
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const result = await runWith({
+    fs,
+    spawn: trackingSpawn(() => hung),
+    leases,
+    request: {
+      lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" },
+      timeoutMs: 1,
+    },
+    wait: async () => undefined,
+    killTree: () => undefined,
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "gone after ladder" },
+    ]),
+    scanOrphans: () => [],
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.exitCode, null);
+  assert.equal(finding(result, "processExitedWithKnownSuccessCode").ok, false);
+  assert.match(finding(result, "processExitedWithKnownSuccessCode").reason, /still running/);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-1"),
+    "the module's still-running verdict must deny the writer-exit proof",
+  );
+  const raw = fs.files.get(join(RUN_ROOT, "result.json"));
+  assert.ok(raw, "result.json must exist");
+  const persisted = JSON.parse(raw) as {
+    productionWriterLeaseReleasedByThisRun: boolean;
+    exitCode: number | null;
+    conjunction: { findings: { name: string; ok: boolean; reason: string }[] };
+  };
+  assert.equal(persisted.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(persisted.exitCode, null);
+  const exitFinding = persisted.conjunction.findings.find((item) => item.name === "processExitedWithKnownSuccessCode");
+  assert.equal(exitFinding?.ok, false);
+  assert.match(exitFinding?.reason ?? "", /still running/);
+});
+
+test("executeRun spends the permit before the injected spawner runs", async () => {
+  // Defect: requireSpawnPermit at the gate checked membership only. A SpawnFn
+  // that accepted the permit and ignored it completed a launch, and the permit
+  // was still spendable afterwards.
+  let seen: SpawnPermitV1 | null = null;
+  const spawn: SpawnFnV1 = (_exe, _argv, _options, permit) => {
+    requireSpawnPermit(permit);
+    seen = permit;
+    return exitingProcess();
+  };
+  const result = await runWith({ spawn, neverWait: true });
+  assert.equal(result.spawned, true, result.reason);
+  assert.ok(seen, "the injected spawner must receive the permit");
+  assert.equal(isSpawnPermitSpent(seen), true);
+  assert.throws(
+    () => spendSpawnPermit(seen, {
+      executable: EXE,
+      argv: request().argv,
+      cwd: CWD,
+    }),
+    /already been spent/,
+  );
+});
+
+test("a swapped intent.json between spawn and its record does not adopt the swapped command", async () => {
+  // Defect: permitMatchesIntent compared runId and runNonce only. Swapping
+  // executable/argv/cwd after spawn returned was accepted, so the durable
+  // record described a launch that never ran.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const spawn: SpawnFnV1 = (_exe, _argv, _options, permit) => {
+    requireSpawnPermit(permit);
+    const path = join(RUN_ROOT, "intent.json");
+    const current = JSON.parse(fs.readUtf8(path)) as Record<string, unknown>;
+    fs.writeDurable(path, `${JSON.stringify({
+      ...current,
+      executablePath: "C:\\Tools\\evil.exe",
+      argv: ["--exfiltrate"],
+      worktree: "C:\\somewhere-else",
+      cwd: "C:\\somewhere-else",
+    }, null, 2)}\n`);
+    return exitingProcess();
+  };
+  const result = await runWith({ fs, spawn, neverWait: true });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.ok, false, "a swapped command must not be recorded as a successful run");
+  assert.equal(result.intent?.executablePath, EXE);
+  assert.deepEqual(result.intent ? [...result.intent.argv] : [], [...request().argv]);
+  assert.equal(result.intent?.cwd, CWD);
+  const raw = fs.files.get(join(RUN_ROOT, "intent.json"));
+  assert.ok(raw, "intent.json must still exist");
+  const parsed = runIntentFrom(JSON.parse(raw) as unknown);
+  assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.reason);
+  if (!parsed.ok) return;
+  assert.equal(parsed.intent.spawnPid, null, "the swapped file must not receive a spawn record");
+  assert.equal(parsed.intent.executablePath, "C:\\Tools\\evil.exe");
+  assert.equal(answersAfterReboot(parsed.intent).started, false);
+});
+
+test("a real child exit, a real orphan scan, and an explicit release free the writer lease for the next run", async () => {
+  // Defect: scanOrphans was optional and only tests supplied it. Production
+  // therefore never performed a scan, never minted a proof, and every
+  // production-writer run permanently blocked the next one.
+  const dir = mkdtempSync(join(tmpdir(), "aion-writer-liveness-"));
+  const nonce = `nonce-live-scan-${process.pid}-${Date.now()}`;
+  try {
+    const leases = memoryLeases();
+    const first = await executeRun(
+      request({
+        cwd: dir,
+        worktree: dir,
+        runRoot: join(dir, "run-a"),
+        executablePath: process.execPath,
+        argv: ["-e", "setTimeout(() => process.exit(0), 2000)"],
+        runNonce: nonce,
+        timeoutMs: 15_000,
+        lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-1" },
+      }),
+      {
+        clock: createFixedClock(NOW),
+        fs: createNodeRunFileSystem(),
+        spawn: createNodeSpawner(),
+        git: matchingGit(),
+        probe: createWindowsProcessProbe(),
+        capacity: memoryCapacity(),
+        leases,
+        wait: createNodeWait(),
+        killTree: killProcessTreeStandIn,
+      },
+    );
+    assert.equal(first.spawned, true, first.reason);
+    assert.equal(first.exitCode, 0, first.reason);
+    assert.ok(first.processIdentity, "identity must be captured while the child is alive");
+    assert.equal(first.productionWriterLeaseReleasedByThisRun, true, first.reason);
+    assert.equal(
+      leases.list().some((item) => item.leaseId === "lease-pw-live-1"),
+      false,
+      "a completed scan that found nothing must release the production-writer lease",
+    );
+
+    const second = await executeRun(
+      request({
+        runId: "run-2",
+        cwd: dir,
+        worktree: dir,
+        runRoot: join(dir, "run-b"),
+        executablePath: process.execPath,
+        argv: ["-e", "process.exit(0)"],
+        runNonce: `${nonce}-b`,
+        timeoutMs: 15_000,
+        lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-2" },
+      }),
+      {
+        clock: createFixedClock(NOW),
+        fs: createNodeRunFileSystem(),
+        spawn: createNodeSpawner(),
+        git: matchingGit(),
+        probe: createWindowsProcessProbe(),
+        capacity: memoryCapacity(),
+        leases,
+        wait: createNodeWait(),
+        killTree: killProcessTreeStandIn,
+      },
+    );
+    assert.equal(second.spawned, true, second.reason);
+    assert.doesNotMatch(second.reason, /another run holds this/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

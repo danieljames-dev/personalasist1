@@ -6,15 +6,18 @@
  * below is the defect it would miss.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import type { ProcessLivenessV1 } from "../src/leases.js";
 import {
   captureProcessIdentity,
   compareProcessIdentity,
+  createWindowsOrphanScanner,
   createWindowsProcessProbe,
   detectOrphan,
   holderLiveness,
   identityFromObservation,
+  interpretWindowsOrphanScanOutput,
   interpretWindowsProbeOutput,
   livenessGrants,
   normaliseRunNonce,
@@ -418,4 +421,100 @@ test("probe failure envelopes are UNAVAILABLE even when they look like not-found
     stderr: "",
   });
   assert.equal(gone.outcome, "NOT_FOUND");
+});
+
+test("orphan-scan failure envelopes are UNAVAILABLE, never an empty match list", () => {
+  assert.equal(
+    interpretWindowsOrphanScanOutput({ status: 0, stdout: "", stderr: "" }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsOrphanScanOutput({ status: 1, stdout: "", stderr: "" }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsOrphanScanOutput({
+      status: 0,
+      stdout: "{\"ok\":false,\"reason\":\"cim-error\"}",
+      stderr: "",
+    }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsOrphanScanOutput({ status: 0, stdout: "{\"ok\":false}", stderr: "" }).outcome,
+    "UNAVAILABLE",
+  );
+  const empty = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: "{\"ok\":true,\"processes\":[]}",
+    stderr: "",
+  });
+  assert.equal(empty.outcome, "SCANNED");
+  if (empty.outcome === "SCANNED") assert.deepEqual(empty.sightings, []);
+
+  const one = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: "{\"ok\":true,\"processes\":{\"pid\":4812,\"runNonce\":\"nonce-a\",\"creationDate\":\"2026-08-13T12:00:01.000Z\"}}",
+    stderr: "",
+  });
+  assert.equal(one.outcome, "SCANNED");
+  if (one.outcome === "SCANNED") {
+    assert.equal(one.sightings.length, 1);
+    assert.equal(one.sightings[0]?.pid, 4812);
+    assert.equal(one.sightings[0]?.runNonce, "nonce-a");
+  }
+});
+
+test("a shadowed orphan scan that fails does not report an empty match list", () => {
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: () => ({ status: 1, stdout: "", stderr: "" }),
+  });
+  assert.throws(
+    () => scanner({ runNonce: NONCE_A, createdNotBefore: "" }),
+    /unavailable/,
+  );
+});
+
+test("the orphan scanner keeps only this nonce and drops processes created too early", () => {
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: () => ({
+      status: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        processes: [
+          { pid: 10, creationDate: "2026-08-13T10:00:00.000Z", runNonce: NONCE_A },
+          { pid: 11, creationDate: "2026-08-13T12:00:00.000Z", runNonce: NONCE_A },
+          { pid: 12, creationDate: "2026-08-13T12:00:00.000Z", runNonce: NONCE_B },
+        ],
+      }),
+      stderr: "",
+    }),
+  });
+  const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-13T11:00:00.000Z" });
+  assert.deepEqual(hits.map((item) => item.pid), [11]);
+});
+
+test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its environment", async () => {
+  const nonce = `nonce-scan-live-${process.pid}-${Date.now()}`;
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+    env: { ...process.env, AION_RUN_NONCE: nonce },
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  try {
+    assert.ok(child.pid && child.pid > 0, "the child must have a pid");
+    const sightings = createWindowsOrphanScanner()({
+      runNonce: nonce,
+      createdNotBefore: "",
+    });
+    assert.ok(
+      sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
+      `expected pid ${child.pid} in ${JSON.stringify(sightings)}`,
+    );
+  } finally {
+    child.kill();
+    await new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+    });
+  }
 });
