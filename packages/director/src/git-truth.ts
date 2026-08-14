@@ -36,6 +36,7 @@
  * repository, which is why nothing here hardcodes a filename and the default policy reports without
  * blocking.
  */
+import { spawnSync } from "node:child_process";
 import type { IsoTimestamp } from "./contracts.js";
 
 export const GIT_TRUTH_SCHEMA_V1 = "aion.director.git-truth.v1" as const;
@@ -553,4 +554,331 @@ export function describeVerdict(verdict: GitVerdictV1): string {
   if (verdict.ok) return `acceptable, with ${verdict.findings.length} thing(s) worth a look`;
   const blocking = verdict.findings.filter((f) => f.blocking);
   return blocking.map((f) => f.detail).join("; ");
+}
+
+/**
+ * What Git actually says, collected by the Director itself.
+ *
+ * {@link verifyGitTruth} judges a snapshot it is handed. That snapshot has to come from
+ * somewhere, and it must not come from the executor: `headAfter` on a handoff is testimony.
+ * This collector is the corroboration — the Director runs Git and records the answers.
+ *
+ * ## Argv arrays, never a shell string
+ *
+ * PowerShell treats `@{upstream}` as a hashtable literal. That has already bitten this project
+ * four times. Git is invoked as `spawnSync(exe, argv, { shell: false })` with an argv array.
+ * Never `git rev-parse --abbrev-ref @{upstream}` as a string, never `git ${args.join(" ")}`,
+ * never `shell: true`. The token `@{upstream}` is one argv element. Do not "simplify" this
+ * into a command line later.
+ *
+ * ## Absence, detachment, and failure are different states
+ *
+ * A missing upstream is not an error and not "ahead 0 / behind 0". A detached HEAD is not a
+ * branch named `HEAD` and not a missing repository. A `git status` that failed is not a clean
+ * tree: empty porcelain and a failed status command must never look the same, because one
+ * means clean.
+ *
+ * The runner is injected so those cases are testable without a repository. One test against
+ * this real worktree confirms the runner actually talks to Git.
+ */
+export const GIT_OBSERVATION_SCHEMA_V1 = "aion.director.git-observation.v1" as const;
+
+const GIT_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/i;
+const AHEAD_BEHIND = /^(\d+)\s+(\d+)$/;
+const NO_UPSTREAM = /no upstream configured/i;
+
+export interface GitCommandResultV1 {
+  readonly argv: readonly string[];
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  /** Spawn failure (ENOENT, timeout). Null when Git itself ran and produced a status. */
+  readonly error: string | null;
+}
+
+/**
+ * Runs one Git command as an argv array with no shell.
+ *
+ * Implementations must pass `argv` through to the process unchanged. Joining it into a string
+ * reintroduces the `@{upstream}` hashtable hazard.
+ */
+export interface GitRunner {
+  run(argv: readonly string[]): GitCommandResultV1;
+}
+
+export type GitHeadObservationV1 =
+  | { readonly outcome: "FOUND"; readonly sha: string }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
+
+export type GitBranchObservationV1 =
+  | { readonly outcome: "ATTACHED"; readonly name: string }
+  | { readonly outcome: "DETACHED" }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
+
+export type GitUpstreamObservationV1 =
+  | { readonly outcome: "TRACKING"; readonly name: string; readonly ahead: number; readonly behind: number }
+  | { readonly outcome: "NO_UPSTREAM" }
+  | { readonly outcome: "NOT_APPLICABLE"; readonly reason: "DETACHED_HEAD" }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
+
+export type GitStatusObservationV1 =
+  | { readonly outcome: "CLEAN"; readonly porcelain: "" }
+  | { readonly outcome: "DIRTY"; readonly porcelain: string; readonly dirtyPaths: readonly string[] }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
+
+export interface GitObservationV1 {
+  readonly schema: typeof GIT_OBSERVATION_SCHEMA_V1;
+  readonly worktreePath: string;
+  readonly collectedAt: IsoTimestamp;
+  readonly head: GitHeadObservationV1;
+  readonly branch: GitBranchObservationV1;
+  readonly upstream: GitUpstreamObservationV1;
+  readonly status: GitStatusObservationV1;
+}
+
+export type GitCollectResultV1 =
+  | { readonly ok: true; readonly observation: GitObservationV1; readonly reason: string }
+  | { readonly ok: false; readonly observation: GitObservationV1; readonly reason: string };
+
+export interface CollectGitTruthInputV1 {
+  readonly runner: GitRunner;
+  readonly worktreePath: string;
+  readonly now: IsoTimestamp;
+}
+
+/**
+ * Collect an independent reading of a worktree.
+ *
+ * Every Git invocation is an argv array. The only expected non-zero exits are `symbolic-ref`
+ * on a detached HEAD (quiet `-q`) and `rev-parse @{upstream}` when nothing is configured.
+ * Any other failure is recorded as `UNAVAILABLE` on that field, never rewritten into a
+ * plausible empty success.
+ */
+export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResultV1 {
+  const worktreePath = input.worktreePath;
+  const collectedAt = input.now;
+  const runner = input.runner;
+
+  const headCmd = invokeGit(runner, ["rev-parse", "HEAD"]);
+  const head = observeHead(headCmd);
+
+  const branchCmd = invokeGit(runner, ["symbolic-ref", "-q", "--short", "HEAD"]);
+  const branch = observeBranch(branchCmd);
+
+  const statusCmd = invokeGit(runner, ["status", "--porcelain"]);
+  const status = observeStatus(statusCmd);
+
+  const upstream = observeUpstream(runner, branch);
+
+  const observation: GitObservationV1 = {
+    schema: GIT_OBSERVATION_SCHEMA_V1,
+    worktreePath,
+    collectedAt,
+    head,
+    branch,
+    upstream,
+    status,
+  };
+
+  if (head.outcome === "UNAVAILABLE") {
+    return { ok: false, observation, reason: `HEAD is unavailable: ${head.reason}` };
+  }
+  if (branch.outcome === "UNAVAILABLE") {
+    return { ok: false, observation, reason: `branch is unavailable: ${branch.reason}` };
+  }
+  if (status.outcome === "UNAVAILABLE") {
+    return { ok: false, observation, reason: `status is unavailable: ${status.reason}` };
+  }
+  if (upstream.outcome === "UNAVAILABLE") {
+    return { ok: false, observation, reason: `upstream is unavailable: ${upstream.reason}` };
+  }
+
+  return { ok: true, observation, reason: "independent Git observation collected" };
+}
+
+/**
+ * Spawn Git with an argv array and no shell.
+ *
+ * `@{upstream}` is a single argv element. PowerShell must never see it as source text.
+ */
+export function createNodeGitRunner(input: {
+  readonly worktreePath: string;
+  readonly gitExecutable?: string;
+}): GitRunner {
+  const exe = input.gitExecutable ?? "git";
+  const cwd = input.worktreePath;
+  return {
+    run(argv: readonly string[]): GitCommandResultV1 {
+      let result: ReturnType<typeof spawnSync>;
+      try {
+        result = spawnSync(exe, argv.slice(), {
+          cwd,
+          encoding: "utf8",
+          timeout: 15_000,
+          windowsHide: true,
+          shell: false,
+        });
+      } catch (error) {
+        return {
+          argv: argv.slice(),
+          status: null,
+          stdout: "",
+          stderr: "",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      return {
+        argv: argv.slice(),
+        status: result.status,
+        stdout: String(result.stdout ?? ""),
+        stderr: String(result.stderr ?? ""),
+        error: result.error ? result.error.message : null,
+      };
+    },
+  };
+}
+
+function invokeGit(runner: GitRunner, argv: readonly string[]): GitCommandResultV1 {
+  try {
+    const result = runner.run(argv);
+    return {
+      argv: [...result.argv],
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      error: result.error,
+    };
+  } catch (error) {
+    return {
+      argv: [...argv],
+      status: null,
+      stdout: "",
+      stderr: "",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function commandFailed(result: GitCommandResultV1): boolean {
+  return result.error !== null || result.status === null || result.status !== 0;
+}
+
+function describeCommandFailure(result: GitCommandResultV1): string {
+  if (result.error !== null) return `git ${result.argv.join(" ")} failed to start: ${result.error}`;
+  const err = result.stderr.trim();
+  return `git ${result.argv.join(" ")} exited ${result.status}${err ? `: ${err}` : ""}`;
+}
+
+function observeHead(result: GitCommandResultV1): GitHeadObservationV1 {
+  if (commandFailed(result)) {
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(result), command: result };
+  }
+  const sha = result.stdout.trim();
+  if (!GIT_SHA.test(sha)) {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: `git rev-parse HEAD returned ${sha === "" ? "an empty string" : JSON.stringify(sha)}, which is not a SHA`,
+      command: result,
+    };
+  }
+  return { outcome: "FOUND", sha };
+}
+
+function observeBranch(result: GitCommandResultV1): GitBranchObservationV1 {
+  if (result.error !== null || result.status === null) {
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(result), command: result };
+  }
+  if (result.status === 0) {
+    const name = result.stdout.trim();
+    if (name === "") {
+      return {
+        outcome: "UNAVAILABLE",
+        reason: "git symbolic-ref succeeded with an empty branch name",
+        command: result,
+      };
+    }
+    return { outcome: "ATTACHED", name };
+  }
+  // `symbolic-ref -q` exits 1 with no output when HEAD is detached. Any other non-zero is a
+  // real failure — including "not a git repository" (128) — and must not look detached.
+  if (result.status === 1 && result.stdout.trim() === "") {
+    return { outcome: "DETACHED" };
+  }
+  return { outcome: "UNAVAILABLE", reason: describeCommandFailure(result), command: result };
+}
+
+function observeStatus(result: GitCommandResultV1): GitStatusObservationV1 {
+  if (commandFailed(result)) {
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(result), command: result };
+  }
+  const porcelain = result.stdout.replace(/(?:\r?\n)+$/, "");
+  const lines = porcelain.length === 0 ? [] : porcelain.split(/\r?\n/).filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return { outcome: "CLEAN", porcelain: "" };
+  }
+  return {
+    outcome: "DIRTY",
+    porcelain,
+    dirtyPaths: lines.map(porcelainPath),
+  };
+}
+
+function porcelainPath(line: string): string {
+  if (line.length >= 3 && line.charAt(2) === " ") return line.slice(3);
+  return line;
+}
+
+function observeUpstream(runner: GitRunner, branch: GitBranchObservationV1): GitUpstreamObservationV1 {
+  if (branch.outcome === "DETACHED") {
+    return { outcome: "NOT_APPLICABLE", reason: "DETACHED_HEAD" };
+  }
+  if (branch.outcome === "UNAVAILABLE") {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: "upstream was not asked because the branch observation failed",
+      command: {
+        argv: ["rev-parse", "--abbrev-ref", "@{upstream}"],
+        status: null,
+        stdout: "",
+        stderr: "",
+        error: "not invoked",
+      },
+    };
+  }
+
+  // `@{upstream}` is one argv element. Never interpolate it into a shell string.
+  const nameCmd = invokeGit(runner, ["rev-parse", "--abbrev-ref", "@{upstream}"]);
+  if (commandFailed(nameCmd)) {
+    if (NO_UPSTREAM.test(nameCmd.stderr) || NO_UPSTREAM.test(nameCmd.stdout)) {
+      return { outcome: "NO_UPSTREAM" };
+    }
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(nameCmd), command: nameCmd };
+  }
+  const name = nameCmd.stdout.trim();
+  if (name === "") {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: "git rev-parse --abbrev-ref @{upstream} succeeded with an empty name",
+      command: nameCmd,
+    };
+  }
+
+  const countCmd = invokeGit(runner, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
+  if (commandFailed(countCmd)) {
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(countCmd), command: countCmd };
+  }
+  const match = AHEAD_BEHIND.exec(countCmd.stdout.trim());
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: `git rev-list --left-right --count HEAD...@{upstream} returned ${JSON.stringify(countCmd.stdout.trim())}`,
+      command: countCmd,
+    };
+  }
+  return {
+    outcome: "TRACKING",
+    name,
+    ahead: Number(match[1]),
+    behind: Number(match[2]),
+  };
 }
