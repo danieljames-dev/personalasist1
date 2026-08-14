@@ -74,7 +74,11 @@ test("conflict detection sees through the alias, and still separates real direct
 test("a branch name is folded but not treated as a path", () => {
   // Git on Windows stores refs as files, so two casings are one branch and must be one lease.
   assert.equal(canonicalResource("BRANCH", "Executor/Claude-Director-V01"), "executor/claude-director-v01");
-  assert.equal(canonicalResource("BRANCH", "executor/x/../y"), "executor/x/../y", "no path resolution on a ref name");
+  // A ref is still never path-canonicalised — "executor/x/../y" must not collapse to "executor/y"
+  // and merge two branches into one lease. Git forbids ".." in a ref name outright, so the stronger
+  // and more honest answer is to refuse it rather than to carry an impossible branch as an identity.
+  assert.equal(canonicalResource("BRANCH", "executor/x/../y"), "", "Git forbids '..' in a ref name");
+  assert.notEqual(canonicalResource("BRANCH", "executor/x/../y"), "executor/y", "and never resolves it");
 });
 
 // ---------------------------------------------------------------------------

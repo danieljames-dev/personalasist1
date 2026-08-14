@@ -74,17 +74,35 @@ test("pause remembers where it came from, and resume returns there", () => {
   assert.equal(resumed.to, "VERIFYING", "a pause that forgot its origin would be a restart");
 });
 
-test("resuming without a remembered origin verifies rather than guesses", () => {
+test("resuming without a remembered origin refuses rather than guesses", () => {
+  // This asserted `VERIFYING` and thereby asserted the defect: pause always records the state it
+  // suspended, so a paused mission with no origin has lost one, and VERIFYING is two events from
+  // writing production again. Having no target and having an unusable one are the same situation.
   const resumed = advance("PAUSED", "MISSION_RESUMED", null);
-  assert.equal(resumed.to, "VERIFYING");
-  assert.match(resumed.reason, /verify first/);
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.to, null);
+  assert.match(resumed.reason, /no recorded origin/);
+  assert.deepEqual(resumed.missing, ["the state the pause suspended"]);
 });
 
 test("an interrupted run is a question, not a verdict", () => {
   const interrupted = advance("EXECUTOR_RUNNING", "MISSION_INTERRUPTED");
   assert.equal(interrupted.to, "INTERRUPTED");
-  // The work may well have finished before the process died, so the next move is to look.
-  assert.equal(advance("INTERRUPTED", "GIT_VERIFIED").to, "VERIFYING");
+  // The work may well have finished before the process died, so the next move is to look — but only
+  // when the record still says what was in flight. See the no-origin case below.
+  assert.equal(advance("INTERRUPTED", "GIT_VERIFIED", null, { interruptedFrom: "EXECUTOR_RUNNING" }).to, "VERIFYING");
+  assert.equal(advance("INTERRUPTED", "GIT_MISMATCH").to, "BLOCKED");
+});
+
+test("an interruption with no recorded origin is never verified back into flight", () => {
+  // The regression this file previously asserted as correct. `advance("INTERRUPTED","GIT_VERIFIED")`
+  // with the optional origin omitted returned VERIFYING, from which the deploy chain below all
+  // succeeds on the context that was true when the first deploy began — production written twice.
+  const blind = advance("INTERRUPTED", "GIT_VERIFIED");
+  assert.equal(blind.ok, false, "a matching repository is not evidence of what was interrupted");
+  assert.equal(blind.to, null);
+  assert.deepEqual(blind.missing, ["the condition the interruption interrupted"]);
+  // GIT_MISMATCH -> BLOCKED stays available, so a mission with a lost origin still reaches a person.
   assert.equal(advance("INTERRUPTED", "GIT_MISMATCH").to, "BLOCKED");
 });
 

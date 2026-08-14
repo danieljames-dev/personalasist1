@@ -35,12 +35,21 @@
  * uncontested, and the corrupted run this module exists to prevent happens with the rule working
  * exactly as written. Resource identity is therefore canonical, using the same path canonicaliser the
  * store uses for lock file names, so a lease and its lock can never disagree about what was claimed.
+ *
+ * ## A resource nobody can pin down is refused, not granted
+ *
+ * `../wt-a` names a different directory to every process with a different working directory, and an
+ * empty resource names none. Either one would take a lease that excludes nobody — the second
+ * executor arrives, its claim canonicalises to some other string, and both hold what looks like an
+ * uncontested lease on one worktree. Such a claim is therefore refused at the point it is made.
  */
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
-// One canonicaliser for the whole package. A private copy here would drift from the store's idea of
-// which directory a path names, and the alias collision would come back as a lease held under one
-// spelling and a lock file created under another.
-import { canonicalizeHostPath } from "./store-contract.js";
+// One canonicaliser for the whole package, taken from the pure path module rather than from the
+// store: these rules must stay decidable — and testable — with no persistence layer in the process,
+// and `store-contract.ts` is where filesystem code lands. A private copy here would drift from the
+// store's idea of which directory a path names, and that alias collision comes back as a lease held
+// under one spelling and a lock file created under another.
+import { canonicalResource, resourceIsIdentifiable, type LeaseKindV1 } from "./resource-identity.js";
 
 export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
 
@@ -50,12 +59,6 @@ export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
  * `PRODUCTION_WRITER` is the strictest: the running production process is the only writer of the
  * Owner's business state, and a second one would race it over a single JSON document.
  */
-export type LeaseKindV1 =
-  | "WORKTREE"
-  | "BRANCH"
-  | "INTEGRATION"
-  | "PREVIEW"
-  | "PRODUCTION_WRITER";
 
 /**
  * What the caller learned by looking at the host.
@@ -92,7 +95,8 @@ export interface LeaseV1 {
    *
    * Optional because leases written before canonicalisation existed have no key on disk; every
    * comparison recomputes from `resource` rather than trusting this, so an old record still matches.
-   * Stored because the lock file the store creates must be named for exactly this string.
+   * Stored because the store's lock file is named from a digest of exactly this string, and a lease
+   * that cannot show which key its lock was derived from cannot be matched to that lock by hand.
    */
   resourceKey?: string;
   missionId: OpaqueId;
@@ -119,32 +123,15 @@ export interface LeaseAttemptV1 {
   requiresStalenessCheck: boolean;
 }
 
-/**
- * Kinds whose resource names a directory on the host.
- *
- * Kind-driven rather than guessed, so a relative worktree path still gets path treatment; anything
- * that merely looks absolute gets it too, because a `PRODUCTION_WRITER` resource is sometimes a
- * directory and the collision is identical.
- */
-const PATH_LIKE_KINDS: ReadonlySet<LeaseKindV1> = new Set<LeaseKindV1>(["WORKTREE"]);
-
-function looksLikeHostPath(resource: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(resource) || /^[\\/]/.test(resource);
-}
-
-/**
- * The string two claims are compared on.
- *
- * Paths go through the host canonicaliser — separators normalised, `.`/`..` and repeated separators
- * collapsed, trailing separator dropped, drive letter and body case-folded. Everything else is
- * trimmed and case-folded, which is not cosmetic: Git on Windows stores refs as files, so
- * `Executor/X` and `executor/x` are one branch and must be one lease.
- */
-export function canonicalResource(kind: LeaseKindV1, resource: string): string {
-  const trimmed = resource.trim();
-  if (PATH_LIKE_KINDS.has(kind) || looksLikeHostPath(trimmed)) return canonicalizeHostPath(trimmed);
-  return trimmed.toLowerCase();
-}
+// Identity lives in its own pure module so the lease rules and the lock-file rules cannot disagree
+// about one claim — they did: a WORKTREE key of `wt-a` was refused a lease and granted a lock file.
+export {
+  canonicalResource,
+  resourceIsIdentifiable,
+  IDENTITY_MODEL,
+  type LeaseKindV1,
+  type ResourceIdentityModelV1,
+} from "./resource-identity.js";
 
 function sameResource(a: LeaseV1, kind: LeaseKindV1, resource: string): boolean {
   return a.kind === kind && canonicalResource(a.kind, a.resource) === canonicalResource(kind, resource);
@@ -204,6 +191,19 @@ export function acquireLease(input: {
   now: IsoTimestamp;
   ttlMs?: number;
 }): LeaseAttemptV1 {
+  // Refused before anything is compared: a claim on `../wt-a` or on `""` would be recorded, would
+  // look uncontested to every other spelling of the same directory, and would hand the caller an
+  // exclusion it does not have. There is no safe key to grant here, so nothing is granted.
+  if (!resourceIsIdentifiable(input.kind, input.resource)) {
+    return {
+      ok: false,
+      lease: null,
+      heldBy: null,
+      reason: "the resource does not name one identifiable place; resolve it against a base before claiming it",
+      requiresStalenessCheck: false,
+    };
+  }
+
   const held = input.existing.find((lease) => sameResource(lease, input.kind, input.resource));
   if (held) {
     const expired = Date.parse(held.expiresAt) < Date.parse(input.now);
@@ -377,5 +377,9 @@ export function leasesForRun(existing: readonly LeaseV1[], runId: OpaqueId): Lea
 export function conflicts(a: { kind: LeaseKindV1; resource: string }, b: { kind: LeaseKindV1; resource: string }): boolean {
   if (a.kind === "INTEGRATION" && b.kind === "INTEGRATION") return true;
   if (a.kind === "PRODUCTION_WRITER" && b.kind === "PRODUCTION_WRITER") return true;
-  return a.kind === b.kind && canonicalResource(a.kind, a.resource) === canonicalResource(b.kind, b.resource);
+  if (a.kind !== b.kind) return false;
+  // `../wt-a` cannot be shown to be a different directory from `C:/repos/wt-a`, so "no conflict" is
+  // a claim the text does not support. The safe error is to schedule them one after the other.
+  if (!resourceIsIdentifiable(a.kind, a.resource) || !resourceIsIdentifiable(b.kind, b.resource)) return true;
+  return canonicalResource(a.kind, a.resource) === canonicalResource(b.kind, b.resource);
 }

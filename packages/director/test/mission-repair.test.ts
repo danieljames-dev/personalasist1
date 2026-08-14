@@ -23,6 +23,9 @@ const NOW = "2026-08-13T12:00:00.000Z";
 /** Everything established. Individual tests take this away one fact at a time. */
 const PROVEN: Partial<MissionContextV1> = {
   unresolvedRequiredGates: 0,
+  // Stated rather than defaulted: omitting this field now refuses, because a caller that has lost
+  // the record must not be read as a caller asserting no deployment ever happened.
+  deploymentTruth: "NOT_STARTED",
   unsatisfiedMandatoryWorkItems: 0,
   independentWorkRemains: false,
   postIntegrationVerificationPassed: true,
@@ -72,9 +75,16 @@ test("READY_FOR_INTEGRATION + MISSION_COMPLETED does not bypass prerequisites", 
 
 test("a refusal to complete names what is outstanding, in words a person can act on", () => {
   const attempt = advance("VERIFYING", "MISSION_COMPLETED", null, {
-    context: { unresolvedRequiredGates: 1, unsatisfiedMandatoryWorkItems: 3 },
+    context: { unresolvedRequiredGates: 1, unsatisfiedMandatoryWorkItems: 3, deploymentTruth: "NOT_STARTED" },
   });
   assert.equal(attempt.missing.length, 2);
+  // And with production unstated the list grows rather than the refusal changing shape, so the
+  // Owner-facing prose still holds when the mission genuinely does not know what it deployed.
+  const uncertain = advance("VERIFYING", "MISSION_COMPLETED", null, {
+    context: { unresolvedRequiredGates: 1, unsatisfiedMandatoryWorkItems: 3 },
+  });
+  assert.equal(uncertain.missing.length, 3);
+  assert.ok(!/[A-Z_]{8,}/.test(uncertain.missing.join(" ")), "no enums reach the Owner here either");
   assert.ok(!/[A-Z_]{8,}/.test(attempt.missing.join(" ")), `no enums reach the Owner: ${attempt.missing.join(" ")}`);
 });
 
@@ -136,27 +146,27 @@ test("answering one gate while another is open does not release the mission", ()
 
 test("gate resolution derives its target from the records and validates the resume state", () => {
   const resolved = advance("OWNER_GATE_REQUIRED", "OWNER_GATE_RESOLVED", "READY_FOR_DEPLOYMENT", {
-    context: { unresolvedRequiredGates: 0 },
+    context: { unresolvedRequiredGates: 0, deploymentTruth: "NOT_STARTED" },
   });
   assert.equal(resolved.to, "READY_FOR_DEPLOYMENT", "the gate says where its mission continues");
   assert.equal(resolved.resumeState, null, "and the remembered target is consumed");
 
   // A gate file naming an outcome must not select it.
   const forged = advance("OWNER_GATE_REQUIRED", "OWNER_GATE_RESOLVED", "COMPLETED", {
-    context: { unresolvedRequiredGates: 0 },
+    context: { unresolvedRequiredGates: 0, deploymentTruth: "NOT_STARTED" },
   });
   assert.equal(forged.ok, false);
   assert.equal(forged.to, null);
 
   // A target that would skip the deployment prerequisites is not honoured either.
   assert.equal(
-    advance("OWNER_GATE_REQUIRED", "OWNER_GATE_RESOLVED", "DEPLOYING", { context: { unresolvedRequiredGates: 0 } }).ok,
+    advance("OWNER_GATE_REQUIRED", "OWNER_GATE_RESOLVED", "DEPLOYING", { context: { unresolvedRequiredGates: 0, deploymentTruth: "NOT_STARTED" } }).ok,
     false,
   );
 
   // An unstated target is not guessed at.
   assert.equal(
-    advance("OWNER_GATE_REQUIRED", "OWNER_GATE_RESOLVED", null, { context: { unresolvedRequiredGates: 0 } }).to,
+    advance("OWNER_GATE_REQUIRED", "OWNER_GATE_RESOLVED", null, { context: { unresolvedRequiredGates: 0, deploymentTruth: "NOT_STARTED" } }).to,
     "VERIFYING",
   );
 });
@@ -236,7 +246,7 @@ test("an answer given while nothing was running is still honoured", () => {
   // The gate record, not the interruption, is what says the question was answered.
   const back = advance("INTERRUPTED", "GIT_VERIFIED", null, {
     interruptedFrom: "WAITING_FOR_OWNER",
-    context: { unresolvedRequiredGates: 0 },
+    context: { unresolvedRequiredGates: 0, deploymentTruth: "NOT_STARTED" },
   });
   assert.equal(back.to, "VERIFYING");
 });
@@ -324,6 +334,9 @@ test("pausing a blocked mission does not clear the block either", () => {
 
 const DEPLOYABLE: Partial<MissionContextV1> = {
   unresolvedRequiredGates: 0,
+  // Stated rather than defaulted: omitting this field now refuses, because a caller that has lost
+  // the record must not be read as a caller asserting no deployment ever happened.
+  deploymentTruth: "NOT_STARTED",
   postIntegrationVerificationPassed: true,
   deploymentDependenciesSatisfied: true,
   deploymentAuthorityPresent: true,
@@ -363,9 +376,21 @@ test("each deployment prerequisite is required on its own", () => {
 });
 
 test("an unstated board never deploys", () => {
-  const attempt = advance("READY_FOR_DEPLOYMENT", "DEPLOY_STARTED");
-  assert.equal(attempt.ok, false);
-  assert.equal(attempt.missing.length, 5, "nothing supplied is nothing established");
+  // Two layers now, checked in this order. An unstated board does not say what production contains,
+  // and that alone refuses — omitting the field used to be read as "no deployment has ever happened",
+  // which was the one deployment fact that failed open.
+  const nothing = advance("READY_FOR_DEPLOYMENT", "DEPLOY_STARTED");
+  assert.equal(nothing.ok, false);
+  assert.equal(NOTHING_PROVEN.deploymentTruth, "UNRECORDED", "absence is its own value, not a borrowed one");
+  assert.match(nothing.reason, /nothing on record says what this mission has done to production/);
+
+  // With production stated but nothing else, every remaining prerequisite is still named on its own,
+  // so a caller learns the whole list rather than being sent back one item at a time.
+  const stated = advance("READY_FOR_DEPLOYMENT", "DEPLOY_STARTED", null, {
+    context: { deploymentTruth: "NOT_STARTED" },
+  });
+  assert.equal(stated.ok, false);
+  assert.equal(stated.missing.length, 5, "nothing supplied is nothing established");
   assert.equal(NOTHING_PROVEN.deploymentAuthorityPresent, false);
 });
 

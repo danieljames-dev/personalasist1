@@ -31,9 +31,35 @@
  * `artifacts` is a list of filenames chosen by the executor and later opened, copied or served by
  * something else. A caller that knows the run's artifact directory passes it as `artifactRoot`, and
  * every path is resolved against it with both separators and `..` segments accounted for, so a
- * report cannot nominate a file outside the run it belongs to.
+ * report cannot *name* a file outside the run it belongs to.
+ *
+ * ## What containment here does not cover, and who must close it
+ *
+ * The check is pure string work — no filesystem is consulted — so it proves textual containment, not
+ * filesystem containment. A junction or symlink planted inside the run directory defeats it: with
+ * `runs\r1` as the root, an executor that creates `runs\r1\logs -> ..\..\secrets` (which needs no
+ * elevation, and which is inside the authority an executor already has over its own run directory)
+ * gets `logs\id_rsa` accepted, and whatever opens it reads a file outside the run. This module cannot
+ * close that without importing `node:fs`, which would put filesystem code in the parse layer.
+ *
+ * The obligation therefore sits with the consumer, exactly as it does in `host-path.ts`: callers that
+ * can resolve, must resolve before trusting the answer. Re-check after resolution —
+ * `artifactPathWithinRoot(realpathSync.native(root), realpathSync.native(join(root, artifact)))` —
+ * before opening, copying or serving anything this parser returned. Accepting a path here means the
+ * text names somewhere inside the run; it does not mean the bytes are there.
+ *
+ * Both ways of having no usable root fail closed. A root that was supplied but is empty or
+ * whitespace-only is a validation error rather than a quiet fallback to "no root", because the
+ * caller that built it by joining a run directory that turned out missing believes containment is
+ * being enforced. And with no root at all, an absolute artifact path is refused: declining to say
+ * where artifacts live is not a statement that every location on the machine is a run artifact.
  */
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
+// One device predicate for the package, not a second copy. The copy that used to live here took the
+// stem at the first "." only, so `NUL` was refused and `NUL:` was accepted — and `NUL:` opens the null
+// device in any real directory. Two predicates for one Windows rule will always drift apart; this is
+// the pure leaf both path layers already depend on, so there is no new coupling and no cycle.
+import { namesReservedDeviceSegment, isResolvedHostPath } from "./host-path.js";
 
 export const HANDOFF_SCHEMA_V1 = "aion.director.handoff.v1" as const;
 
@@ -122,13 +148,21 @@ export interface HandoffParseV1 {
 export interface HandoffParseOptionsV1 {
   expectedMissionId?: string;
   expectedRunId?: string;
-  /** Absolute directory every artifact path must resolve inside. */
+  /**
+   * Absolute directory every artifact path must resolve inside.
+   *
+   * Omit it to say nothing; supplying an empty, whitespace-only or relative value is a validation
+   * error, since a root that was offered and cannot be enforced must not read as no root at all.
+   */
   artifactRoot?: string;
   /** Override for HANDOFF_MAX_BYTES. Applies to text input; an already-parsed object has no text size. */
   maxBytes?: number;
 }
 
 const SHA = /^[0-9a-f]{40}$/i;
+
+/** Written as escapes, never as the characters themselves — typing them is how they reach source. */
+const CONTROL_BYTES_IN_PATH = /[\u0000-\u001f\u007f]/;
 
 interface NormalizedPathV1 {
   /** Lowercased drive letter when the path named one, else null. */
@@ -138,6 +172,13 @@ interface NormalizedPathV1 {
   segments: string[];
   /** True when a ".." climbed above the path's own starting point. */
   escaped: boolean;
+  /**
+   * True for a UNC path (`\\server\share\x`), which names a host this process does not control.
+   *
+   * Carried separately because flattening it into `absolute` made a remote location compare equal to
+   * a local one: see the drive/UNC comparison in `artifactPathWithinRoot`.
+   */
+  unc: boolean;
 }
 
 /**
@@ -151,12 +192,22 @@ function normalizePath(input: string): NormalizedPathV1 {
   let rest = input.replace(/\\/g, "/");
   let drive: string | null = null;
   let absolute = false;
+  let unc = false;
 
   const driveMatch = /^([A-Za-z]):(\/?)/.exec(rest);
   if (driveMatch) {
     drive = driveMatch[1]!.toLowerCase();
     absolute = driveMatch[2] === "/";
     rest = rest.slice(driveMatch[0].length);
+  } else if (rest.startsWith("//")) {
+    // A UNC path names a share on another host. Reduced to the same shape as a slash-rooted local
+    // path it compared equal to one, and the leading `//` collapsed silently because the segment
+    // loop skips empty parts: root `/AION/runs/r1` accepted `\\AION\runs\r1\payload.exe`, a remote
+    // SMB location reported as inside a local run directory, and the mirror case accepted a local
+    // `\aion-nas\runs\r1\x` under a `\\aion-nas\runs\r1` root.
+    absolute = true;
+    unc = true;
+    rest = rest.slice(2);
   } else if (rest.startsWith("/")) {
     absolute = true;
     rest = rest.slice(1);
@@ -176,7 +227,26 @@ function normalizePath(input: string): NormalizedPathV1 {
     segments.push(part);
   }
 
-  return { drive, absolute, segments, escaped };
+  return { drive, absolute, segments, escaped, unc };
+}
+
+/**
+ * A root anchors containment only when it names one directory on its own.
+ *
+ * A relative root ("runs/r1"), a root that climbed above itself, or a root that resolves to no
+ * segments at all means a different directory depending on whose working directory is current, so
+ * artifacts would be compared against a location this process cannot name.
+ */
+function rootAnchorsContainment(root: NormalizedPathV1): boolean {
+  // Positively anchored: a drive letter, or a UNC share. `absolute` alone was not enough, because a
+  // driveless root like `\AION\runs\r1` sets it while being anchored to the *current drive* — process
+  // state, so the Director validated `logs\x` against `C:\AION\runs\r1` while a consumer whose current
+  // drive was D: opened `D:\AION\runs\r1\logs\x`, a tree outside the run. It also broke the honest
+  // case: the run's own absolute artifact paths were rejected under a root naming that run. The
+  // sibling module refuses the same spelling for the same reason; two files in one package must not
+  // rule oppositely on `\x`.
+  if (!(root.drive !== null || root.unc)) return false;
+  return root.absolute && !root.escaped && root.segments.length > 0;
 }
 
 /**
@@ -187,14 +257,33 @@ function normalizePath(input: string): NormalizedPathV1 {
  * handoffs without preventing any traversal.
  */
 export function artifactPathWithinRoot(root: string, candidate: string): boolean {
+  // Exported, so it is reachable with whatever a caller happens to hold — including the `null` that
+  // JSON.parse yields for an absent field. Throwing here would turn a containment *refusal* into an
+  // exception that skips the caller's `if (!allowed)` branch entirely, which fails open at the one
+  // call site that matters.
+  if (typeof root !== "string" || typeof candidate !== "string") return false;
   if (root.trim() === "" || candidate.trim() === "") return false;
   // A NUL truncates the name the operating system actually opens, so the path that was validated
   // and the path that is opened are different paths.
-  if (root.includes("\0") || candidate.includes("\0")) return false;
+  // Every control byte, not only NUL: NUL truncates the name Win32 opens, and the rest make a path
+  // that renders one way in a log and another way on disk. Either way the string that was checked is
+  // not the string that gets opened, which is the only thing containment can be about.
+  if (CONTROL_BYTES_IN_PATH.test(root) || CONTROL_BYTES_IN_PATH.test(candidate)) return false;
+
+  // The parser refuses these before it ever asks about containment, but this function is exported
+  // and called directly — including by the consumer the module docblock tells to re-check after
+  // resolving symlinks. A guard that only exists on one of two paths into the same decision is the
+  // shape that produced most of this package's defects, so both paths ask the same questions.
+  if (namesAlternateDataStream(candidate) || namesReservedDevice(candidate)) return false;
+
+  // The root faces the same acceptance test the parser applies. Without it this function answered
+  // about roots `decideArtifactRoot` refuses outright — and the comment directly above already argued
+  // that a guard existing on only one of two paths into a decision is this package's signature
+  // defect. It was true of the candidate side and left untrue of the root side in the same function.
+  if (!isResolvedHostPath(root) || namesReservedDevice(root) || namesAlternateDataStream(root)) return false;
 
   const rootPath = normalizePath(root);
-  // A relative root cannot decide containment: it means something different from every directory.
-  if (!rootPath.absolute || rootPath.escaped || rootPath.segments.length === 0) return false;
+  if (!rootAnchorsContainment(rootPath)) return false;
 
   const candidatePath = normalizePath(candidate);
   if (candidatePath.escaped) return false;
@@ -202,6 +291,8 @@ export function artifactPathWithinRoot(root: string, candidate: string): boolean
   let resolved: string[];
   if (candidatePath.absolute) {
     if (candidatePath.drive !== rootPath.drive) return false;
+    // A share on another host is not the local directory that spells the same segments.
+    if (candidatePath.unc !== rootPath.unc) return false;
     resolved = candidatePath.segments;
   } else {
     // "C:logs" is drive-relative: it resolves against a per-drive working directory nobody here
@@ -218,9 +309,112 @@ export function artifactPathWithinRoot(root: string, candidate: string): boolean
   return true;
 }
 
+/**
+ * Whether any segment names a Win32 reserved device rather than a file.
+ *
+ * `logs/CON`, `CON.txt`, `NUL`, `NUL:` and `NUL::$DATA` name devices, not files, whatever directory
+ * precedes them. The predicate itself lives in `host-path.ts` so this module and the lease/lock layer
+ * cannot drift apart about what Windows does — the local copy this replaces cut the stem at `.` only,
+ * which refused `NUL` and accepted `NUL:`.
+ */
+function namesReservedDevice(candidate: string): boolean {
+  return candidate.split(/[\\/]+/).some(namesReservedDeviceSegment);
+}
+
+/** Whether any segment past an optional leading drive letter carries a `:`, i.e. a stream suffix. */
+function namesAlternateDataStream(candidate: string): boolean {
+  const segments = candidate.split(/[\\/]+/);
+  return segments.some((segment, index) => {
+    // The drive colon is legitimate and may be followed by a drive-relative remainder ("C:logs").
+    // Only colons past that prefix name a stream; the drive-relative shape is refused elsewhere, by
+    // the rule that actually understands it, and must not be reported as an ADS instead.
+    if (index === 0) return segment.replace(/^[A-Za-z]:/, "").includes(":");
+    return segment.includes(":");
+  });
+}
+
 /** A ".." segment is never a legitimate way to name a run artifact, root known or not. */
 function hasTraversalSegment(candidate: string): boolean {
   return candidate.split(/[\\/]+/).includes("..");
+}
+
+/**
+ * True when a path names a filesystem location by itself instead of a place inside some root.
+ *
+ * With no root established there is nothing such a path can be checked against, so it is refused
+ * rather than kept: "C:\\Windows\\System32\\config\\SAM", "/etc/shadow" and "\\\\server\\share\\x"
+ * all pass a traversal scan unchanged, and a traversal scan was the only check they used to face.
+ * Drive-relative names ("C:logs\\x") count as absolute here because they resolve against a per-drive
+ * working directory this process does not control, which is not a run-relative location either.
+ */
+function namesAbsoluteLocation(candidate: string): boolean {
+  const path = normalizePath(candidate);
+  return path.absolute || path.drive !== null;
+}
+
+/** What `options.artifactRoot` established, decided once rather than re-derived per artifact. */
+interface ArtifactRootDecisionV1 {
+  /** The trimmed root to enforce, or null when none was established. */
+  root: string | null;
+  /** Set when a root was supplied but cannot be used; a supplied-and-unusable root is an error. */
+  problem: string | null;
+}
+
+/**
+ * Separate "no root was supplied" from "a root was supplied and is unusable".
+ *
+ * Collapsing the second into the first is how containment silently became traversal-only checking:
+ * an `artifactRoot` of "" or "   " — the shape produced by joining an undefined run directory, or by
+ * reading a blank config value — left the caller believing paths were confined to a run while every
+ * non-traversing path was accepted. Unusable roots therefore fail the parse, and the artifact loop
+ * falls back to the strictest rules rather than the weakest.
+ */
+function decideArtifactRoot(supplied: unknown): ArtifactRootDecisionV1 {
+  // `undefined` is the only way to say "I have nothing to add". `null` used to mean the same thing and
+  // must not: it is what `JSON.parse` yields for an absent value and what a config read returns when a
+  // key is missing, so it is the shape a caller arrives with while believing containment is enforced —
+  // the same failure as `""`, one type further along. Every other non-string already errored.
+  if (supplied === undefined) return { root: null, problem: null };
+  if (supplied === null) {
+    return {
+      root: null,
+      problem: "artifactRoot was supplied as null; that is a missing value, not a decision to skip containment",
+    };
+  }
+  if (typeof supplied !== "string") {
+    return { root: null, problem: `artifactRoot must be a string, not ${typeof supplied}` };
+  }
+  const trimmed = supplied.trim();
+  if (trimmed === "") {
+    return {
+      root: null,
+      problem: "artifactRoot was supplied but is empty; an empty root confines nothing and is not the same as supplying no root",
+    };
+  }
+  // A NUL truncates the name the operating system actually opens, so containment would be decided
+  // against a longer root than the one anything later opens.
+  if (trimmed.includes("\0")) {
+    return { root: null, problem: "artifactRoot contains a NUL byte" };
+  }
+  // Acceptance is *delegated* to the host-path module rather than re-derived here. The previous
+  // version re-derived it and the two drifted immediately: this file's own comment claimed "two files
+  // in one package must not rule oppositely on `\x`", and while the driveless spelling was fixed, a
+  // share-less UNC (`\\aion-nas`), the device namespace (`\\?\NUL`, `\\?\GLOBALROOT\...`) and a root
+  // ending in a reserved device (`C:\AION\runs\NUL`) all still passed here while `host-path.ts`
+  // called every one of them INVALID. `\\aion-nas` then reported `\\aion-nas\c$\Windows\...\SAM` as
+  // contained, and a `...\NUL` root makes every artifact write vanish while reporting success.
+  //
+  // A second predicate for one question is the same defect as a second device-name predicate was.
+  // `rootAnchorsContainment` below still runs, because containment is computed in this module's own
+  // normalised form and the root must satisfy that shape too — but it can no longer be the *only*
+  // thing standing between a caller and an unusable root.
+  if (!isResolvedHostPath(trimmed) || namesReservedDevice(trimmed)) {
+    return { root: null, problem: `artifactRoot ${trimmed} does not name one directory on this host` };
+  }
+  if (!rootAnchorsContainment(normalizePath(trimmed))) {
+    return { root: null, problem: `artifactRoot ${trimmed} is not an absolute directory path` };
+  }
+  return { root: trimmed, problem: null };
 }
 
 /**
@@ -416,9 +610,12 @@ export function parseHandoff(raw: string | unknown, options: HandoffParseOptions
     }
   }
 
-  const artifactRoot = typeof options.artifactRoot === "string" && options.artifactRoot.trim() !== ""
-    ? options.artifactRoot
-    : null;
+  // Decided before the list is walked so an unusable root is reported once, as itself, rather than
+  // as N copies of "resolves outside the permitted artifact root" that blame the executor's paths
+  // for the caller's option.
+  const rootDecision = decideArtifactRoot(options.artifactRoot);
+  if (rootDecision.problem !== null) problems.push(rootDecision.problem);
+  const artifactRoot = rootDecision.root;
   const artifacts: string[] = [];
   const rawArtifacts = value.artifacts;
   if (rawArtifacts !== undefined && rawArtifacts !== null) {
@@ -437,15 +634,47 @@ export function parseHandoff(raw: string | unknown, options: HandoffParseOptions
           problems.push(`artifacts[${index}] is longer than ${HANDOFF_MAX_ARTIFACT_PATH_LENGTH} characters`);
           return;
         }
-        if (candidate.includes("\0")) {
-          problems.push(`artifacts[${index}] contains a NUL byte`);
+        // Every control byte, not only NUL. NUL is the one that truncates the name Win32 opens, but
+        // a CR or an ESC in a path reaches a log line, a terminal and a JSON record, and a name that
+        // renders differently everywhere it is displayed is not a name anyone can verify.
+        if (CONTROL_BYTES_IN_PATH.test(candidate)) {
+          problems.push(`artifacts[${index}] contains a control byte`);
+          return;
+        }
+        // Checked before containment, because containment cannot see it: "logs/CON" is textually
+        // inside the run root and passes every test above, but Win32 resolves a reserved device name
+        // in any directory to the device itself, so what is opened is the console, the null sink or a
+        // serial port rather than a file in the run. That is the header's promise — a report cannot
+        // nominate something outside the run it belongs to — failing on a path with no ".." in it.
+        // An NTFS alternate data stream rides on a name that otherwise looks ordinary:
+        // `x.txt::$DATA` is the file's own default stream and `x.txt:hidden` is a second payload the
+        // same directory listing never shows. Neither is the artifact the report claims to be naming,
+        // and a collector that copies one produces something other than what was reviewed. The drive
+        // colon is the only legitimate colon in a path, and it is the first segment or nothing.
+        if (namesAlternateDataStream(candidate)) {
+          problems.push(`artifacts[${index}] names an alternate data stream rather than a file`);
+          return;
+        }
+        if (namesReservedDevice(candidate)) {
+          problems.push(`artifacts[${index}] names a reserved Windows device rather than a file`);
           return;
         }
         if (artifactRoot === null) {
-          // Containment cannot be decided without a root, but traversal can still be refused, so a
-          // caller that forgot to pass one is not thereby opting into "../../.ssh/id_rsa".
-          if (hasTraversalSegment(candidate)) problems.push(`artifacts[${index}] contains a .. segment`);
-          else artifacts.push(candidate);
+          // No root means nothing to resolve against, so only a path that is already relative and
+          // traversal-free survives. An absolute path is refused rather than waved through: a caller
+          // that forgot to pass a root is not thereby opting into "/etc/shadow" or "../../.ssh/id_rsa",
+          // and the path will be joined to a run directory by whatever opens it later.
+          if (namesAbsoluteLocation(candidate)) {
+            problems.push(`artifacts[${index}] is an absolute path and no artifact root was established`);
+          } else if (hasTraversalSegment(candidate)) {
+            problems.push(`artifacts[${index}] contains a .. segment`);
+          } else if (normalizePath(candidate).segments.length === 0) {
+            // "." and "./" resolve to the artifact directory itself, which is a directory rather
+            // than a file in it, and would be copied or served whole by anything that trusted it.
+            problems.push(`artifacts[${index}] names a directory rather than a file`);
+          } else {
+            artifacts.push(candidate);
+          }
           return;
         }
         if (!artifactPathWithinRoot(artifactRoot, candidate)) {

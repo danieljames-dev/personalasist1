@@ -24,9 +24,13 @@
  * would take mission continuity with it. The repository holds code and default policy; the host holds
  * what is actually happening.
  */
+import { createHash } from "node:crypto";
 import { DEFAULT_DIRECTOR_ROOT, DIRECTOR_ROOT_ENV, type IsoTimestamp, type OpaqueId } from "./contracts.js";
-// Type-only, so this stays a contract file and no import cycle survives compilation: leases.ts
-// imports the canonicaliser below at runtime, and the arrow back is erased.
+// Path identity comes from the shared pure module, never the other way round: this file is where
+// filesystem code will land, and the lease rules must stay testable without any of it.
+import { resourceIsIdentifiable } from "./resource-identity.js";
+// Type-only, and it must stay that way: `leases.ts` is a pure policy module and a runtime edge from
+// here to there — or back — would put the store on both ends of a cycle the moment either grows.
 import type { LeaseKindV1, ProcessIdentityV1, ProcessLivenessV1 } from "./leases.js";
 
 export const DIRECTOR_STORE_SCHEMA_V1 = "aion.director.store.v1" as const;
@@ -56,7 +60,7 @@ export const DIRECTOR_STORE_LAYOUT_V1 = {
   currentStateFile: "CURRENT.json",
   /** Append-only NDJSON. One event per line, never rewritten. */
   eventJournalFile: "EVENTS.ndjson",
-  /** Host-wide exclusion, one file per canonical resource key. */
+  /** Host-wide exclusion, one file per canonical resource key, named by `hostLockFileName`. */
   locksDir: "locks",
   /** Where unreadable state is moved to, never deleted. */
   quarantineDir: "quarantine",
@@ -67,60 +71,24 @@ export const DIRECTOR_STORE_LAYOUT_V1 = {
 // ---------------------------------------------------------------------------
 
 /**
- * One spelling per directory.
+ * Path identity lives in `host-path.ts` and is re-exported here.
  *
- * `C:/wt-a`, `C:\wt-a`, `C:\WT-A\` and `C:/wt-a/sub/..` are one place on a Windows host, and treating
- * them as four is how two runs end up inside one worktree while both leases look uncontested. Pure
- * string work — no filesystem is consulted, so this never resolves a symlink or a mapped drive, and
- * callers that care about those must resolve before calling.
+ * Re-exported rather than moved out from under callers, because these names are part of this
+ * module's published surface and an import that has to be rewritten in five files is an import
+ * somebody copies wrongly. The implementation moved so the lease rules could stop importing the
+ * store; where it is imported from did not have to change with it.
  */
-export function canonicalizeHostPath(value: string): string {
-  const raw = value.trim().replace(/\\/g, "/");
-  if (raw === "") return "";
-
-  const isUnc = raw.startsWith("//");
-  const parts = (isUnc ? raw.slice(2) : raw).split("/");
-  const head = parts[0] ?? "";
-  const drive = /^([a-zA-Z]):$/.exec(head);
-  const rooted = !isUnc && head === "";
-
-  // A UNC share (`//server/share`) is the root, so `..` must not be allowed to eat the server name.
-  const uncRoot = isUnc ? `//${parts[0] ?? ""}/${parts[1] ?? ""}` : "";
-  const prefix = isUnc ? uncRoot : drive ? `${drive[1]}:/` : rooted ? "/" : "";
-  const start = isUnc ? 2 : drive || rooted ? 1 : 0;
-
-  const out: string[] = [];
-  for (let i = start; i < parts.length; i += 1) {
-    const part = parts[i] ?? "";
-    if (part === "" || part === ".") continue; // collapses `//`, `/./` and a trailing separator
-    if (part === "..") {
-      if (out.length > 0) out.pop();
-      else if (prefix === "") out.push(".."); // a relative path may genuinely start above itself
-      continue;
-    }
-    out.push(part);
-  }
-
-  const joined = out.join("/");
-  const body = prefix === "" || prefix.endsWith("/") || joined === "" ? prefix + joined : `${prefix}/${joined}`;
-  // Case-folded whole, drive letter included: NTFS is case-insensitive, so `C:\WT-A` and `c:/wt-a`
-  // must not become two leases and two lock files.
-  return body.toLowerCase();
-}
-
-/**
- * Whether a path sits under an ancestor, for asserting the store root is outside every worktree.
- *
- * The separator is appended before the prefix test because `C:/AION` is not an ancestor of
- * `C:/AION-HQ-claude-director-v01`, and a naive `startsWith` says it is.
- */
-export function pathIsInside(candidate: string, ancestor: string): boolean {
-  const child = canonicalizeHostPath(candidate);
-  const parent = canonicalizeHostPath(ancestor);
-  if (child === "" || parent === "") return false;
-  if (child === parent) return true;
-  return child.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
-}
+export {
+  canonicalizeHostPath,
+  inspectHostPath,
+  isResolvedHostPath,
+  pathIsInside,
+  namesReservedDevice,
+  namesReservedDeviceSegment,
+  IDENTITY_CLASSES,
+  type HostPathClassV1,
+  type HostPathV1,
+} from "./host-path.js";
 
 // ---------------------------------------------------------------------------
 // Identifier validation
@@ -330,9 +298,93 @@ export interface EventJournalV1<E> {
 // Host-wide exclusion
 // ---------------------------------------------------------------------------
 
+/** Extension of every file under `locksDir`, so a stray file there is obvious rather than ambiguous. */
+export const HOST_LOCK_FILE_SUFFIX = ".lock";
+
+/**
+ * Digest length in hex characters, i.e. 128 bits of SHA-256.
+ *
+ * Long enough that two different resources sharing a lock file is not a thing that happens on a host
+ * — a collision would silently merge two exclusion domains — and short enough that root + `locks` +
+ * name stays clear of the 260-character Windows path limit.
+ */
+export const HOST_LOCK_DIGEST_HEX_LENGTH = 32;
+
+/** Why a lock file name could not be derived. A refusal here means no lock, never a guessed name. */
+export type HostLockNameRuleV1 = "UNIDENTIFIED_RESOURCE" | "UNSAFE_DERIVED_NAME";
+
+export interface HostLockNameV1 {
+  ok: boolean;
+  /** One safe segment to create under `locksDir`, or `null` when refused. */
+  fileName: string | null;
+  rule: HostLockNameRuleV1 | null;
+  reason: string;
+}
+
+/**
+ * Turn a canonical resource key into a lock file name, by digest and never by the key itself.
+ *
+ * A resource key is host text — `C:\wt-a`, a branch name, whatever an Owner typed — and host text is
+ * not a file name. Using it directly needs separators stripped, `..` handled, `NUL` and `COM1`
+ * refused, case folded and length capped, and every one of those transformations maps two different
+ * resources onto one name: `C:/wt-a` and `C:_wt-a` become the same lock, so two runs in two
+ * directories each create the file the other one is excluded by. The digest has none of those
+ * problems, is fixed length, and is the same on every platform.
+ *
+ * The readable half deliberately stays out of the name and lives in the file's holder record
+ * instead, which is where somebody investigating a stale lock is already looking; a truncated path
+ * baked into a file name is a thing later code will try to parse back.
+ *
+ * `resourceKey` must already be canonical — `canonicalResource` in `leases.ts` decides that, because
+ * which spellings are equal is lease policy (a branch is case-folded, a path is resolved) and the
+ * store must not hold a second opinion about it.
+ */
+export function hostLockFileName(input: { kind: LeaseKindV1; resourceKey: string }): HostLockNameV1 {
+  const key = input.resourceKey.trim();
+  if (key === "") {
+    return { ok: false, fileName: null, rule: "UNIDENTIFIED_RESOURCE", reason: "an empty resource key names nothing to exclude" };
+  }
+  // Defence in depth, whatever kind it came from. Tested positively: a key that is path-shaped must
+  // be an identifiable host path. The old test asked only whether the shape was `ESCAPING`, which let
+  // through every rooted-looking value the UNC anchor defect produced — `//../../x` was accepted and
+  // given a lock file, so two claims climbing out of different bases shared one exclusion domain.
+  // A non-path key (a Git ref, a role token) has no separators and is left to its own rules.
+  // Kind-aware, and the same answer the lease layer gives. Testing only for a leftover `..` let a
+  // relative WORKTREE key like `wt-a` — refused a lease — still name a lock file, so the two layers
+  // disagreed about one claim and the weaker one was reachable.
+  if (!resourceIsIdentifiable(input.kind, key)) {
+    return {
+      ok: false,
+      fileName: null,
+      rule: "UNIDENTIFIED_RESOURCE",
+      reason: "the resource key still contains unresolved parent traversal and does not name one place",
+    };
+  }
+
+  // `\n` separates the fields because a lease kind is a closed union with no newline in it, so no
+  // pair of (kind, key) can be re-split into another pair and share a digest.
+  const digest = createHash("sha256").update(`${input.kind}\n${key}`, "utf8").digest("hex").slice(0, HOST_LOCK_DIGEST_HEX_LENGTH);
+  const fileName = `${input.kind.toLowerCase().replace(/_/g, "-")}-${digest}${HOST_LOCK_FILE_SUFFIX}`;
+
+  // The derivation cannot produce an unsafe segment, so this is an assertion rather than a filter:
+  // if it ever fires, the naming scheme changed and the lock directory is no longer trustworthy.
+  const validation = validatePathSegment(fileName);
+  if (!validation.ok) {
+    return { ok: false, fileName: null, rule: "UNSAFE_DERIVED_NAME", reason: `derived lock name is unsafe: ${validation.reason}` };
+  }
+  return { ok: true, fileName, rule: null, reason: "derived from a digest of kind and canonical resource key" };
+}
+
 export interface HostLockHolderV1 {
   missionId: OpaqueId;
   runId: OpaqueId;
+  /**
+   * What was claimed, as the caller spelled it, and the canonical key the file name was derived
+   * from. Both live in the content because the name is a digest: without them a stale lock is an
+   * unreadable hash, and the first person to meet one would delete it to find out what it was.
+   */
+  resource: string;
+  resourceKey: string;
   /** Weak on its own — the OS reuses PIDs — so identity carries the stronger fields when known. */
   identity: ProcessIdentityV1;
   acquiredAt: IsoTimestamp;
@@ -346,22 +398,29 @@ export type HostLockResultV1 =
   | { outcome: "RECLAIMED"; holder: HostLockHolderV1; reclaimedFrom: HostLockHolderV1 }
   | { outcome: "HELD"; heldBy: HostLockHolderV1; expired: boolean }
   /** Expired but the holder could not be proven dead. The correct answer to "is it gone?" is often "I cannot tell". */
-  | { outcome: "REFUSED_UNPROVEN"; heldBy: HostLockHolderV1; liveness: ProcessLivenessV1 };
+  | { outcome: "REFUSED_UNPROVEN"; heldBy: HostLockHolderV1; liveness: ProcessLivenessV1 }
+  /** No name could be derived, so nothing was created. A lock nobody can name excludes nobody. */
+  | { outcome: "REJECTED"; name: HostLockNameV1 };
 
 /**
  * The only thing in this package that can actually stop two processes.
  *
- * Backed by an exclusive-create of a file named for the canonical resource key under
- * `DIRECTOR_STORE_LAYOUT_V1.locksDir` — exclusive create is the primitive the OS arbitrates, so the
- * loser learns it lost rather than both winning. The file's content is the holder record, which is
- * what makes a stale lock investigable instead of merely old.
+ * Backed by an exclusive-create of a file under `DIRECTOR_STORE_LAYOUT_V1.locksDir` — exclusive
+ * create is the primitive the OS arbitrates, so the loser learns it lost rather than both winning.
+ * The file's content is the holder record, which is what makes a stale lock investigable instead of
+ * merely old.
  *
  * Reclaim delegates to the lease rules rather than restating them: expiry alone grants nothing, a
  * confirmed-dead holder plus an expired lock grants a reclaim, `UNKNOWN` grants nothing, and a
  * recorded strong identity must match the observed one.
  */
 export interface HostLockManagerV1 {
-  /** `resource` is canonicalised with `canonicalizeHostPath` before it becomes a lock file name. */
+  /**
+   * `resource` is canonicalised by the caller's lease rules (`canonicalResource`) and the file name
+   * comes from `hostLockFileName`, which is a digest. Host path text never becomes a file name here:
+   * an implementation that sanitises the path into a name maps two directories onto one lock.
+   * A resource whose name cannot be derived is `REJECTED`, never locked under a fallback name.
+   */
   acquire(input: {
     kind: LeaseKindV1;
     resource: string;
