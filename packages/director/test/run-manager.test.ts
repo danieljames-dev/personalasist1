@@ -24,6 +24,7 @@ import {
 } from "../src/leases.js";
 import {
   createWindowsProcessProbe,
+  holderLiveness,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type ProcessObservationV1,
@@ -2181,6 +2182,82 @@ test("fast-exit before identity capture still releases the production-writer lea
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-fast"), false);
 });
 
+test("a child gone on the host before Node delivers exit still releases the production-writer lease", async () => {
+  let exited = false;
+  let resolveExit: ((value: { code: number | null; signal: string | null }) => void) | null = null;
+  const handle: SpawnHandleV1 = {
+    pid: RECORDED.pid,
+    stdout: Readable.from([""]),
+    stderr: Readable.from([""]),
+    kill() {
+      if (!exited) {
+        exited = true;
+        resolveExit?.({ code: null, signal: "SIGTERM" });
+      }
+    },
+    exit: new Promise((resolve) => {
+      resolveExit = resolve;
+    }),
+    get exited() {
+      return exited;
+    },
+  };
+  const leases = memoryLeases();
+  const result = await runWith({
+    leases,
+    spawn: trackingSpawn(() => handle),
+    probe: {
+      observe() {
+        queueMicrotask(() => {
+          if (exited) return;
+          exited = true;
+          resolveExit?.({ code: 0, signal: null });
+        });
+        assert.equal(handle.exited, false, "capture must see the handle before the exit event");
+        return { outcome: "NOT_FOUND", reason: "host slot empty" };
+      },
+    },
+    scanOrphans: () => [],
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-loop" } },
+  });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
+  assert.equal(leases.list().length, 0, "the production-writer singleton must be free after a clean fast exit");
+});
+
+test("a real instant-exit production writer releases its own lease", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aion-fast-writer-"));
+  try {
+    const leases = memoryLeases();
+    const result = await runWith({
+      fs: memoryFs({
+        dirs: [dir, join(dir, "run")],
+        files: { [join(dir, "run", "handoff.json")]: JSON.stringify(goodHandoff()) },
+      }),
+      spawn: createNodeSpawner(),
+      probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
+      scanOrphans: () => [],
+      wait: createNodeWait(),
+      leases,
+      request: {
+        cwd: dir,
+        worktree: dir,
+        runRoot: join(dir, "run"),
+        executablePath: process.execPath,
+        argv: ["-e", "process.exit(0)"],
+        timeoutMs: 15_000,
+        lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-instant" },
+      },
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
+    assert.equal(leases.list().length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("owned-handle exit with a throwing scanner withholds the lease", async () => {
   const leases = memoryLeases();
   const result = await runWith({
@@ -2194,7 +2271,9 @@ test("owned-handle exit with a throwing scanner withholds the lease", async () =
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-scanfail" } },
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
-  assert.ok(leases.list().some((item) => item.leaseId === "lease-pw-scanfail"));
+  const held = leases.list().find((item) => item.leaseId === "lease-pw-scanfail");
+  assert.ok(held);
+  assert.equal(held.processIdentity?.runToken, NONCE, "a NOT_FOUND capture must still record the run token");
 });
 
 test("UNAVAILABLE probe while the handle has not exited withholds the lease", async () => {
@@ -2296,6 +2375,47 @@ test("writerSightingNotProvenAbsent treats ancestry as this run's tree", () => {
     }),
     false,
   );
+});
+
+test("a zone-less occupant of a zoned record does not mint an exit proof", () => {
+  const recorded: ExecutorProcessIdentityV1 = {
+    ...RECORDED,
+    creationDate: "2026-08-13T12:00:01.000+02:00",
+  };
+  const observed: ProcessObservationV1 = {
+    outcome: "FOUND",
+    reason: "injected",
+    pid: recorded.pid,
+    creationDate: "2026-08-13T12:00:01.0000000",
+    executablePath: recorded.executablePath,
+  };
+  assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
+  assert.equal(writerReleaseEvidence(proveWriterExit(writerProofInput({
+    recordedIdentity: recorded,
+    observation: observed,
+    probedPid: recorded.pid,
+  }))), false);
+});
+
+test("proveWriterExit owned-handle branch requires the capture-time NOT_FOUND fact", () => {
+  const owned = {
+    spawnOccurred: true,
+    handleExited: true,
+    exitSettledWithCode: true,
+    identityAbsentBecauseAlreadyExited: false,
+  };
+  assert.equal(proveWriterExit(writerProofInput({
+    recordedIdentity: null,
+    observation: null,
+    probedPid: null,
+    ownedHandleExit: owned,
+  })), null);
+  assert.ok(proveWriterExit(writerProofInput({
+    recordedIdentity: null,
+    observation: null,
+    probedPid: null,
+    ownedHandleExit: { ...owned, identityAbsentBecauseAlreadyExited: true },
+  })));
 });
 
 test("an earlier observed creation instant is UNKNOWN and does not mint an exit proof", () => {

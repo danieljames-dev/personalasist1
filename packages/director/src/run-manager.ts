@@ -330,15 +330,21 @@ export interface WriterExitProofV1 {
 /**
  * Exit fact taken from the spawn handle this run owns, used only when identity
  * capture lost the race against a child that had already exited.
+ *
+ * `handleExited` and `exitSettledWithCode` are facts about this handle after
+ * it has settled — never a `child.exited` read taken while a synchronous
+ * probe still owns the event loop. `identityAbsentBecauseAlreadyExited` is
+ * the capture-time observation: `NOT_FOUND` for the recorded pid, not
+ * `UNAVAILABLE` and not `FOUND`.
  */
 export interface OwnedHandleExitV1 {
   readonly spawnOccurred: boolean;
   readonly handleExited: boolean;
   readonly exitSettledWithCode: boolean;
   /**
-   * Identity is absent because capture saw `NOT_FOUND` after this handle had
-   * already exited. Distinct from probe `UNAVAILABLE` while the child is still
-   * alive, which must keep denying.
+   * Capture-time observation of the recorded pid was `NOT_FOUND`. Combined
+   * with `handleExited` at proof time this is "the child was already gone",
+   * not "the probe could not answer".
    */
   readonly identityAbsentBecauseAlreadyExited: boolean;
 }
@@ -408,10 +414,11 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
 
     if (input.recordedIdentity === null) {
       // Two reasons identity can be absent. Only the first may mint:
-      // 1. The child had already exited before capture. The handle this run
-      //    owns is stronger than a CIM sighting of a process that is gone.
-      // 2. Any other reason (probe UNAVAILABLE while the child is still
-      //    alive) must keep denying.
+      // 1. Capture saw NOT_FOUND for the recorded pid, and the handle this
+      //    run owns has since settled as exited. The owned handle is
+      //    stronger than a CIM sighting of a process that is gone.
+      // 2. Any other reason (probe UNAVAILABLE, or NOT_FOUND while the
+      //    handle has not settled) must keep denying.
       const owned = input.ownedHandleExit;
       if (owned === null || owned === undefined) return null;
       if (owned.spawnOccurred !== true) return null;
@@ -796,7 +803,7 @@ export async function executeRun(
   let spawnOccurred = false;
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
   let exitProof: WriterExitProofV1 | null = null;
-  let identityAbsentBecauseAlreadyExited = false;
+  let captureTimeIdentityNotFound = false;
 
   const releaseHeld = (): void => {
     if (heldLease !== null && releasedLeaseId === null) {
@@ -1210,14 +1217,13 @@ export async function executeRun(
     heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null);
 
     const captured = captureProcessIdentity(deps.probe, { pid: childPid, runNonce });
-    if (
+    // Capture asked about `childPid`. NOT_FOUND is therefore about that pid.
+    // Do not read `child.exited` here: a synchronous probe owns the event
+    // loop, so the handle cannot have settled even when the OS process is gone.
+    captureTimeIdentityNotFound =
       !captured.ok
       && captured.observation !== null
-      && captured.observation.outcome === "NOT_FOUND"
-      && child.exited
-    ) {
-      identityAbsentBecauseAlreadyExited = true;
-    }
+      && captured.observation.outcome === "NOT_FOUND";
     const processIdentity = captured.ok ? captured.identity : null;
     if (processIdentity !== null) {
       const observed = recordSpawnObservation({
@@ -1228,6 +1234,26 @@ export async function executeRun(
       });
       if (observed.ok && observed.permit !== null) permit = observed.permit;
       heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, processIdentity);
+    } else if (
+      captured.observation !== null
+      && (
+        captured.observation.outcome === "NOT_FOUND"
+        || (captured.observation.outcome === "FOUND" && captured.observation.pid === childPid)
+      )
+    ) {
+      heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, {
+        pid: childPid,
+        ...(captured.observation.outcome === "FOUND" && captured.observation.creationDate !== undefined
+          ? { creationDate: captured.observation.creationDate }
+          : {}),
+        runNonce,
+      });
+    }
+
+    if (!child.exited) {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
     }
 
     const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
@@ -1371,7 +1397,7 @@ export async function executeRun(
       spawnOccurred,
       handleExited: child.exited,
       exitSettledWithCode: child.exited && exitCode !== null,
-      identityAbsentBecauseAlreadyExited,
+      identityAbsentBecauseAlreadyExited: captureTimeIdentityNotFound && child.exited,
     };
 
     exitProof = proveWriterExit({
@@ -1433,11 +1459,17 @@ export async function executeRun(
   }
 }
 
+type PersistableHolderIdentityV1 = {
+  readonly pid: number;
+  readonly creationDate?: string;
+  readonly runNonce?: string;
+};
+
 function persistLeaseHolder(
   store: LeaseStoreV1,
   lease: LeaseV1,
   pid: number | null,
-  identity: ExecutorProcessIdentityV1 | null,
+  identity: PersistableHolderIdentityV1 | null,
   base: LeaseV1 = lease,
 ): LeaseV1 {
   const updated: LeaseV1 = {
@@ -1447,8 +1479,12 @@ function persistLeaseHolder(
       ? {
           processIdentity: {
             pid: identity.pid,
-            startedAt: identity.creationDate,
-            runToken: identity.runNonce,
+            ...(identity.creationDate !== undefined && identity.creationDate !== ""
+              ? { startedAt: identity.creationDate }
+              : {}),
+            ...(identity.runNonce !== undefined && identity.runNonce !== ""
+              ? { runToken: identity.runNonce }
+              : {}),
           },
         }
       : base.processIdentity !== undefined

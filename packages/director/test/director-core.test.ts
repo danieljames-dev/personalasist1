@@ -414,7 +414,9 @@ test("reclaiming requires evidence the holder is actually gone", () => {
 
   const gone = reclaimStaleLease({
     existing: [stale], kind: "WORKTREE", resource: "C:/wt-a",
-    holderProcessAlive: false, now: NOW,
+    holderProcessAlive: false,
+    holderObservation: { outcome: "NOT_FOUND", pid: 100 },
+    now: NOW,
   });
   assert.equal(gone.ok, true);
   assert.deepEqual(gone.remaining, []);

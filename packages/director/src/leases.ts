@@ -271,7 +271,17 @@ export type ReclaimRefusalV1 =
   | "HOLDER_ALIVE"
   | "LIVENESS_UNKNOWN"
   | "IDENTITY_MISMATCH"
-  | "IDENTITY_UNVERIFIABLE";
+  | "IDENTITY_UNVERIFIABLE"
+  | "HOLDER_UNOBSERVED";
+
+/**
+ * What a probe reported about a specific pid. A liveness enum is not this.
+ * `NOT_FOUND` of the recorded holder pid is sufficient evidence the holder is gone.
+ */
+export interface HolderObservationV1 {
+  readonly outcome: "NOT_FOUND" | "FOUND" | "UNAVAILABLE";
+  readonly pid?: number;
+}
 
 export interface ReclaimResultV1 {
   ok: boolean;
@@ -284,10 +294,11 @@ export interface ReclaimResultV1 {
  * Reclaim an expired lease, but only on evidence.
  *
  * Every path out of here is a refusal except one: the lease has expired, the caller looked at the
- * host and came back with `DEAD_CONFIRMED`, and — when the lease recorded a start time or a run
- * token — the observation is about that same process rather than about whatever now owns the PID.
- * `ALIVE` refuses however long the heartbeat has been silent, because a busy machine is not a dead
- * one, and `UNKNOWN` refuses because a failed probe is not a death certificate.
+ * host and came back with `DEAD_CONFIRMED`, and that finding is bound to an observation of the
+ * recorded holder pid (or, when the lease recorded a start time or a run token, to a matching
+ * identity). A liveness enum with nothing observed is not a probe. `ALIVE` refuses however long
+ * the heartbeat has been silent, because a busy machine is not a dead run, and `UNKNOWN` refuses
+ * because a failed probe is not a death certificate. `NOT_FOUND` of the recorded pid is sufficient.
  */
 export function reclaimStaleLease(input: {
   existing: readonly LeaseV1[];
@@ -303,6 +314,12 @@ export function reclaimStaleLease(input: {
   holderProcessAlive?: boolean;
   /** What the probe actually saw, checked against the identity the lease recorded. */
   observedIdentity?: ProcessIdentityV1;
+  /**
+   * Host observation of a specific pid. Required (or `observedIdentity` about the
+   * same pid) when the held lease records a pid and the caller asserts `DEAD_CONFIRMED`.
+   * `NOT_FOUND` of that pid is sufficient evidence the holder is gone.
+   */
+  holderObservation?: HolderObservationV1;
   now: IsoTimestamp;
 }): ReclaimResultV1 {
   const held = input.existing.find((lease) => sameResource(lease, input.kind, input.resource));
@@ -333,7 +350,33 @@ export function reclaimStaleLease(input: {
     };
   }
 
-  // DEAD_CONFIRMED from here. The remaining question is whether the death was the holder's.
+  // DEAD_CONFIRMED from here. A recorded pid requires a look at that pid.
+  const recordedPid = held.pid;
+  if (isRecordedHolderPid(recordedPid)) {
+    const observation = input.holderObservation;
+    const observedId = input.observedIdentity;
+    const observationAboutPid =
+      (observation !== undefined && observation.pid === recordedPid)
+      || (observedId !== undefined && observedId.pid === recordedPid);
+    if (!observationAboutPid) {
+      return {
+        ok: false,
+        remaining: unchanged,
+        reason: "the recorded holder pid was not observed; a liveness label is not a probe",
+        refusal: "HOLDER_UNOBSERVED",
+      };
+    }
+    if (observation !== undefined && observation.outcome === "NOT_FOUND" && observation.pid === recordedPid) {
+      return {
+        ok: true,
+        remaining: input.existing.filter((lease) => lease.leaseId !== held.leaseId),
+        reason: "holder confirmed gone; lease reclaimed",
+        refusal: null,
+      };
+    }
+  }
+
+  // The remaining question is whether the death was the holder's.
   if (hasStrongIdentity(held.processIdentity)) {
     const verdict = processIdentityMatches(held.processIdentity, input.observedIdentity);
     if (verdict === "MISMATCH") {
@@ -360,6 +403,10 @@ export function reclaimStaleLease(input: {
     reason: "holder confirmed gone; lease reclaimed",
     refusal: null,
   };
+}
+
+function isRecordedHolderPid(pid: number | null): pid is number {
+  return typeof pid === "number" && Number.isInteger(pid) && pid > 0;
 }
 
 /** Leases a run holds, for release when it ends. */

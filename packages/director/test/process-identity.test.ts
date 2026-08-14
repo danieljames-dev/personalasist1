@@ -249,18 +249,32 @@ test("DMTF and ISO spellings of the same creation instant are the same process, 
 });
 
 test("two encodings of one live process are not a death certificate", () => {
-  // Defect: Date.parse treated PowerShell ToString('o') on Kind=Unspecified
-  // ("2026-08-13T12:00:01.0000000", no offset) as local time and the Z form as
-  // UTC. Same live process, same nonce → DEAD_CONFIRMED, while detectOrphan
-  // on the identical sighting said orphan: false.
+  // A zone-less string is not a comparable instant. Treating it as UTC made
+  // the Z form MATCH/ALIVE, and the same guess later minted DEAD_CONFIRMED
+  // when the offset-bearing encoding was the recorded side.
   const unspecified = "2026-08-13T12:00:01.0000000";
   const zulu = "2026-08-13T12:00:01.000Z";
   const recorded: ExecutorProcessIdentityV1 = { ...RECORDED, creationDate: unspecified };
   const observed = found({ creationDate: zulu, runNonce: RECORDED.runNonce });
   assert.notEqual(holderLiveness(recorded, observed), "DEAD_CONFIRMED");
   assert.equal(detectOrphan({ recorded, observed }).orphan, false);
-  assert.equal(compareProcessIdentity(recorded, observed), "MATCH");
-  assert.equal(holderLiveness(recorded, observed), "ALIVE");
+  assert.equal(compareProcessIdentity(recorded, observed), "UNVERIFIABLE");
+  assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
+});
+
+test("a zone-less re-encoding of a zoned instant is UNKNOWN, not a death certificate", () => {
+  const recorded: ExecutorProcessIdentityV1 = {
+    ...RECORDED,
+    creationDate: "2026-08-13T12:00:01.000+02:00",
+  };
+  const observed = found({
+    creationDate: "2026-08-13T12:00:01.0000000",
+    executablePath: recorded.executablePath,
+    omitNonce: true,
+  });
+  assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
+  assert.notEqual(holderLiveness(recorded, observed), "DEAD_CONFIRMED");
+  assert.equal(livenessGrants(holderLiveness(recorded, observed)).reclaim, false);
 });
 
 test("a date difference that still carries the recorded nonce is UNKNOWN, not death", () => {

@@ -714,14 +714,28 @@ type CreationDateComparisonV1 = "SAME" | "DIFFERENT" | "UNCOMPARABLE";
 const DMTF_DATETIME = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/;
 
 /**
- * ISO-8601 instants this module will accept. Offset is optional: CIM/`ToString('o')` on a
- * `Kind=Unspecified` DateTime emits seven fractional digits and no offset; that is UTC,
- * not a local wall time for Date.parse to reinterpret.
+ * ISO-8601 instants this module will accept. The zone group is optional in the
+ * pattern so a zone-less string can still be recognised as a timestamp — but a
+ * zone-less string is not a comparable instant. `compareCreationDates` refuses
+ * to place one on a timeline. Do not treat a missing zone as UTC or as local.
  */
 const ISO_INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):?(\d{2}))?$/;
 
+function timestampHasExplicitZone(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed === "") return false;
+  if (DMTF_DATETIME.test(trimmed)) return true;
+  const match = ISO_INSTANT.exec(trimmed);
+  if (match === null) return false;
+  if (/Z$/i.test(trimmed)) return true;
+  return match[8] !== undefined;
+}
+
 function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {
+  if (!timestampHasExplicitZone(recorded) || !timestampHasExplicitZone(observed)) {
+    return "UNCOMPARABLE";
+  }
   const a = parseProcessTimestamp(recorded);
   const b = parseProcessTimestamp(observed);
   if (a !== null && b !== null) return a === b ? "SAME" : "DIFFERENT";

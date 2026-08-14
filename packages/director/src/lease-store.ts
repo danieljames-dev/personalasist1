@@ -118,6 +118,7 @@ export function reclaimNodeLeaseStore(input: {
   readonly holderLiveness: Parameters<typeof reclaimStaleLease>[0]["holderLiveness"];
   readonly now: string;
   readonly observedIdentity?: Parameters<typeof reclaimStaleLease>[0]["observedIdentity"];
+  readonly holderObservation?: Parameters<typeof reclaimStaleLease>[0]["holderObservation"];
 }): ReturnType<typeof reclaimStaleLease> {
   const result = reclaimStaleLease({
     existing: input.store.list(),
@@ -126,6 +127,7 @@ export function reclaimNodeLeaseStore(input: {
     ...(input.holderLiveness !== undefined ? { holderLiveness: input.holderLiveness } : {}),
     now: input.now,
     ...(input.observedIdentity !== undefined ? { observedIdentity: input.observedIdentity } : {}),
+    ...(input.holderObservation !== undefined ? { holderObservation: input.holderObservation } : {}),
   });
   if (result.ok) input.store.save(result.remaining);
   return result;

@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   acquireLease, reclaimStaleLease, conflicts, canonicalResource, processIdentityMatches,
-  type LeaseV1, type ProcessIdentityV1,
+  type HolderObservationV1, type LeaseV1, type ProcessIdentityV1,
 } from "../src/leases.js";
 import {
   canonicalizeHostPath, pathIsInside, resolveDirectorRoot, isSafePathSegment, validatePathSegment,
@@ -23,6 +23,7 @@ import { DEFAULT_DIRECTOR_ROOT, DIRECTOR_ROOT_ENV } from "../src/contracts.js";
 const NOW = "2026-08-13T12:00:00.000Z";
 /** Long enough before NOW that the default TTL has run out. */
 const LONG_AGO = "2026-08-13T10:00:00.000Z";
+const PID_GONE: HolderObservationV1 = { outcome: "NOT_FOUND", pid: 100 };
 
 // ---------------------------------------------------------------------------
 // One spelling per resource
@@ -58,7 +59,7 @@ test("a lease taken under one spelling is found under any of them", () => {
 
   const reclaimed = reclaimStaleLease({
     existing: [held], kind: "WORKTREE", resource: "C:\\WT-A\\",
-    holderLiveness: "DEAD_CONFIRMED", now: NOW,
+    holderLiveness: "DEAD_CONFIRMED", holderObservation: PID_GONE, now: NOW,
   });
   assert.equal(reclaimed.ok, true, "an alias must not hide a lease from its own reclaim");
   assert.deepEqual(reclaimed.remaining, []);
@@ -121,10 +122,45 @@ test("ALIVE reclaims nothing however long the heartbeat has been silent", () => 
 test("DEAD_CONFIRMED plus an expired lease is the one case that reclaims", () => {
   const reclaimed = reclaimStaleLease({
     existing: [staleLease()], kind: "WORKTREE", resource: "C:/wt-a",
-    holderLiveness: "DEAD_CONFIRMED", now: NOW,
+    holderLiveness: "DEAD_CONFIRMED", holderObservation: PID_GONE, now: NOW,
   });
   assert.equal(reclaimed.ok, true);
   assert.equal(reclaimed.refusal, null);
+  assert.deepEqual(reclaimed.remaining, []);
+});
+
+test("DEAD_CONFIRMED without an observation of the recorded pid does not reclaim", () => {
+  const refused = reclaimStaleLease({
+    existing: [staleLease()], kind: "WORKTREE", resource: "C:/wt-a",
+    holderLiveness: "DEAD_CONFIRMED", now: NOW,
+  });
+  assert.equal(refused.ok, false, "a liveness enum with nothing observed is not a probe");
+  assert.equal(refused.refusal, "HOLDER_UNOBSERVED");
+  assert.equal(refused.remaining.length, 1);
+});
+
+test("NOT_FOUND of the recorded pid reclaims an expired lease", () => {
+  const held = staleLease({ identity: { pid: 100, runToken: "run-a" } });
+  const reclaimed = reclaimStaleLease({
+    existing: [held], kind: "WORKTREE", resource: "C:/wt-a",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "NOT_FOUND", pid: 100 },
+    now: NOW,
+  });
+  assert.equal(reclaimed.ok, true, "a gone slot is enough even when the lease recorded a run token");
+  assert.deepEqual(reclaimed.remaining, []);
+});
+
+test("an expired lease that recorded no pid can still be reclaimed with DEAD_CONFIRMED", () => {
+  const held = acquireLease({
+    existing: [], leaseId: "l1", kind: "WORKTREE", resource: "C:/wt-a",
+    missionId: "m1", runId: "r1", pid: null, now: LONG_AGO,
+  }).lease!;
+  const reclaimed = reclaimStaleLease({
+    existing: [held], kind: "WORKTREE", resource: "C:/wt-a",
+    holderLiveness: "DEAD_CONFIRMED", now: NOW,
+  });
+  assert.equal(reclaimed.ok, true, "a lease with no pid has no holder slot to observe");
   assert.deepEqual(reclaimed.remaining, []);
 });
 
@@ -152,7 +188,7 @@ test("the retired boolean keeps its old meaning so existing callers do not silen
 
   const gone = reclaimStaleLease({
     existing: [staleLease()], kind: "WORKTREE", resource: "C:/wt-a",
-    holderProcessAlive: false, now: NOW,
+    holderProcessAlive: false, holderObservation: PID_GONE, now: NOW,
   });
   assert.equal(gone.ok, true, "`false` was written to mean 'I confirmed it is gone'");
 });
