@@ -48,6 +48,9 @@ const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 const SPAWN_PERMIT = Symbol("aion.director.spawn-permit.v1");
 
+/** Values this module minted. A property read asks "does this look like a permit"; membership asks "did I mint this". */
+const MINTED_PERMITS = new WeakSet<object>();
+
 export interface RunIntentV1 {
   readonly schema: typeof RUN_INTENT_SCHEMA_V1;
   readonly runId: OpaqueId;
@@ -99,7 +102,8 @@ export interface IntentStoreV1 {
  * The only value that makes a spawn legal.
  *
  * Produced solely by {@link persistRunIntent} after write-and-read-back. There is no public
- * constructor. A forged object without the brand is rejected at the spawn gate.
+ * constructor: {@link isSpawnPermit} is set membership, not a property read, so an inherited
+ * brand or a Proxy cannot satisfy the gate.
  */
 export interface SpawnPermitV1 {
   readonly [SPAWN_PERMIT]: true;
@@ -229,7 +233,7 @@ export function withPersistedIntent<T>(
 
 /** True only for a permit this module minted after a durable write. */
 export function isSpawnPermit(value: unknown): value is SpawnPermitV1 {
-  return isPlainObject(value) && (value as { readonly [SPAWN_PERMIT]?: unknown })[SPAWN_PERMIT] === true;
+  return typeof value === "object" && value !== null && MINTED_PERMITS.has(value);
 }
 
 /**
@@ -266,6 +270,9 @@ export function recordSpawnAttempt(input: {
   const current = readRunIntent(input.permit.intentPath, store);
   if (!current.ok) {
     return refused(`cannot record spawn attempt against an unreadable intent: ${current.reason}`);
+  }
+  if (!permitMatchesIntent(input.permit, current.intent)) {
+    return refused("permit is not bound to the intent at this path; refusing to record a spawn for a different run");
   }
 
   const pid = isUsablePid(input.pid) ? input.pid : null;
@@ -338,6 +345,9 @@ export function recordSpawnObservation(input: {
   const current = readRunIntent(input.permit.intentPath, store);
   if (!current.ok) {
     return refused(`cannot record spawn against an unreadable intent: ${current.reason}`);
+  }
+  if (!permitMatchesIntent(input.permit, current.intent)) {
+    return refused("permit is not bound to the intent at this path; refusing to record a spawn for a different run");
   }
 
   if (current.intent.processIdentity !== null) {
@@ -679,12 +689,18 @@ function existingIntentOn(store: IntentStoreV1, intentPath: string): "none" | "u
   return "unstarted";
 }
 
+function permitMatchesIntent(permit: SpawnPermitV1, current: RunIntentV1): boolean {
+  return permit.intent.runId === current.runId && permit.intent.runNonce === current.runNonce;
+}
+
 function makePermit(intentPath: string, intent: RunIntentV1): SpawnPermitV1 {
-  return Object.freeze({
+  const permit = Object.freeze({
     [SPAWN_PERMIT]: true as const,
     intentPath,
-    intent,
+    intent: Object.freeze(intent),
   });
+  MINTED_PERMITS.add(permit);
+  return permit;
 }
 
 function refused(reason: string): { readonly ok: false; readonly permit: null; readonly intent: null; readonly reason: string } {

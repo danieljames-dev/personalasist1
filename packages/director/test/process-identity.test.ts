@@ -74,7 +74,10 @@ function asLeaseLiveness(value: ProcessLivenessV1): ProcessLivenessV1 {
 
 test("the same pid with a later creation date is a different process, not the holder", () => {
   // Defect: `pid === recorded.pid && process exists` treated as MATCH / ALIVE.
-  const reused = found({ creationDate: T1 });
+  // CIM typically has no nonce on the occupant. A later start with no nonce is reuse.
+  // The previous version defaulted the recorded nonce onto the occupant, so the
+  // nonce-over-date rule would have flipped this to UNKNOWN and pinned the opposite.
+  const reused = found({ creationDate: T1, omitNonce: true });
   assert.equal(compareProcessIdentity(RECORDED, reused), "MISMATCH");
   assert.notEqual(compareProcessIdentity(RECORDED, reused), "MATCH");
   assert.equal(holderLiveness(RECORDED, reused), "DEAD_CONFIRMED");
@@ -240,6 +243,48 @@ test("DMTF and ISO spellings of the same creation instant are the same process, 
   assert.equal(compareProcessIdentity(recorded, observed), "MATCH");
   assert.equal(holderLiveness(recorded, observed), "ALIVE");
   assert.equal(livenessGrants(holderLiveness(recorded, observed)).reclaim, false);
+});
+
+test("two encodings of one live process are not a death certificate", () => {
+  // Defect: Date.parse treated PowerShell ToString('o') on Kind=Unspecified
+  // ("2026-08-13T12:00:01.0000000", no offset) as local time and the Z form as
+  // UTC. Same live process, same nonce → DEAD_CONFIRMED, while detectOrphan
+  // on the identical sighting said orphan: false.
+  const unspecified = "2026-08-13T12:00:01.0000000";
+  const zulu = "2026-08-13T12:00:01.000Z";
+  const recorded: ExecutorProcessIdentityV1 = { ...RECORDED, creationDate: unspecified };
+  const observed = found({ creationDate: zulu, runNonce: RECORDED.runNonce });
+  assert.notEqual(holderLiveness(recorded, observed), "DEAD_CONFIRMED");
+  assert.equal(detectOrphan({ recorded, observed }).orphan, false);
+  assert.equal(compareProcessIdentity(recorded, observed), "MATCH");
+  assert.equal(holderLiveness(recorded, observed), "ALIVE");
+});
+
+test("a date difference that still carries the recorded nonce is UNKNOWN, not death", () => {
+  // Defect: holderLiveness minted DEAD_CONFIRMED from the date before reading
+  // the nonce, discarding the field this module calls "survives PID reuse outright".
+  const later = found({ creationDate: T1, runNonce: NONCE_A });
+  assert.equal(compareProcessIdentity(RECORDED, later), "MISMATCH");
+  assert.equal(holderLiveness(RECORDED, later), "UNKNOWN");
+  assert.equal(detectOrphan({ recorded: RECORDED, observed: later }).orphan, false);
+});
+
+test("build-7 is not a process creation instant", () => {
+  // Defect: Date.parse("build-7") is 2001-07-01. A corrupt record was repaired
+  // into a plausible instant and then minted DEAD_CONFIRMED against a real 2026 date.
+  const corrupt = found({ creationDate: "build-7" });
+  assert.equal(compareProcessIdentity(RECORDED, corrupt), "UNVERIFIABLE");
+  assert.equal(holderLiveness(RECORDED, corrupt), "UNKNOWN");
+  assert.notEqual(holderLiveness(RECORDED, corrupt), "DEAD_CONFIRMED");
+  const read = processIdentityFrom({
+    pid: 4812,
+    creationDate: "build-7",
+    executablePath: GROK,
+    runNonce: NONCE_A,
+  });
+  assert.equal(read.ok, false, "an unparseable timestamp must deny rather than normalise");
+  assert.equal(read.identity, null);
+  assert.equal(identityFromObservation(corrupt), null);
 });
 
 test("unparseable unequal creation dates are UNKNOWN, not confirmed death", () => {

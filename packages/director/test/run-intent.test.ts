@@ -172,6 +172,95 @@ test("requireSpawnPermit refuses a forged handle, so spawn cannot be invented", 
   assert.equal(isSpawnPermit(null), false);
 });
 
+test("an inherited-prototype permit is not a minted permit", () => {
+  // Defect: isSpawnPermit read the brand as a property. Object.create(realPermit)
+  // inherited it — Object.freeze does not stop prototype inheritance — and
+  // defineProperty(intentPath) redirected recordSpawnAttempt into another run.
+  withDir((dir) => {
+    const victim = persistRunIntent(inputIn(dir, {
+      intentPath: join(dir, "victim", "intent.json"),
+      runId: "run-victim",
+      runNonce: "nonce-victim",
+    }));
+    assert.equal(victim.ok, true, victim.ok ? "" : victim.reason);
+    if (!victim.ok) return;
+
+    const attacker = persistRunIntent(inputIn(dir, {
+      intentPath: join(dir, "attacker", "intent.json"),
+      runId: "run-attacker",
+      runNonce: "nonce-attacker",
+    }));
+    assert.equal(attacker.ok, true, attacker.ok ? "" : attacker.reason);
+    if (!attacker.ok) return;
+
+    const inherited = Object.create(attacker.permit) as SpawnPermitV1;
+    Object.defineProperty(inherited, "intentPath", {
+      value: victim.permit.intentPath,
+    });
+
+    assert.equal(isSpawnPermit(inherited), false);
+    assert.throws(() => requireSpawnPermit(inherited), /spawn is refused/);
+
+    const recorded = recordSpawnAttempt({
+      permit: inherited,
+      pid: 9090,
+      now: SPAWNED_AT,
+    });
+    assert.equal(recorded.ok, false, "an inherited permit must not write another run's intent");
+
+    const victimAfter = readRunIntent(victim.permit.intentPath);
+    assert.equal(victimAfter.ok, true, victimAfter.ok ? "" : victimAfter.reason);
+    if (!victimAfter.ok) return;
+    assert.equal(victimAfter.intent.spawnPid, null);
+    assert.equal(answersAfterReboot(victimAfter.intent).started, false);
+
+    assert.throws(
+      () => requireSpawnPermit(new Proxy({}, { get: () => true })),
+      /spawn is refused/,
+    );
+    assert.equal(isSpawnPermit(new Proxy({}, { get: () => true })), false);
+  });
+});
+
+test("a stale permit cannot record a spawn against a later intent at the same path", () => {
+  // Defect: recordSpawnAttempt read whatever was at permit.intentPath now and
+  // never compared permit.intent. Persist of run B over an unstarted run A is
+  // allowed; replaying permit A then wrote spawnPid onto run B.
+  withDir((dir) => {
+    const first = persistRunIntent(inputIn(dir, { runId: "run-a", runNonce: "nonceA" }));
+    assert.equal(first.ok, true, first.ok ? "" : first.reason);
+    if (!first.ok) return;
+
+    const second = persistRunIntent(inputIn(dir, { runId: "run-b", runNonce: "nonceB" }));
+    assert.equal(second.ok, true, second.ok ? "" : second.reason);
+    if (!second.ok) return;
+
+    const replayed = recordSpawnAttempt({
+      permit: first.permit,
+      pid: 4242,
+      now: SPAWNED_AT,
+    });
+    assert.equal(replayed.ok, false);
+    assert.match(replayed.reason, /not bound|different run/);
+
+    const observed = recordSpawnObservation({
+      permit: first.permit,
+      identity: { ...IDENTITY, runNonce: "nonceA" },
+      now: SPAWNED_AT,
+    });
+    assert.equal(observed.ok, false);
+
+    const reloaded = readRunIntent(inputIn(dir).intentPath);
+    assert.equal(reloaded.ok, true, reloaded.ok ? "" : reloaded.reason);
+    if (!reloaded.ok) return;
+    assert.equal(reloaded.intent.runId, "run-b");
+    assert.equal(reloaded.intent.runNonce, "nonceB");
+    assert.equal(reloaded.intent.spawnPid, null);
+    assert.equal(reloaded.intent.processIdentity, null);
+    assert.equal(answersAfterReboot(reloaded.intent).started, false);
+  });
+});
+
 test("a secret in argv refuses persist, so the secret never becomes the 2am record", () => {
   withDir((dir) => {
     const result = persistRunIntent(inputIn(dir, {

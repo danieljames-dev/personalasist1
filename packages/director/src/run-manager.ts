@@ -81,9 +81,10 @@ import {
   type ProcessObservationV1,
 } from "./process-identity.js";
 import {
-  persistRunIntent,
   recordSpawnAttempt,
   recordSpawnObservation,
+  requireSpawnPermit,
+  withPersistedIntent,
   type IntentStoreV1,
   type RunIntentV1,
   type SpawnPermitV1,
@@ -152,6 +153,7 @@ export type SpawnFnV1 = (
   executable: string,
   argv: readonly string[],
   options: SpawnOptionsV1,
+  permit: SpawnPermitV1,
 ) => SpawnHandleV1;
 
 export interface RunFileSystemV1 {
@@ -274,11 +276,14 @@ export interface WriterOrphanScanV1 {
 
 const WRITER_EXIT_PROOF = Symbol("aion.director.writer-exit-proof.v1");
 
+/** Values this module minted. A property read asks "does this look like a proof"; membership asks "did I mint this". */
+const MINTED_EXIT_PROOFS = new WeakSet<object>();
+
 /**
  * The only value that makes `productionWriterLeaseReleasedByThisRun` true.
  *
- * Produced solely by {@link proveWriterExit}. There is no public constructor.
- * A bag of optional booleans is not this value.
+ * Produced solely by {@link proveWriterExit}. There is no public constructor:
+ * {@link isWriterExitProof} is set membership, not a property read.
  */
 export interface WriterExitProofV1 {
   readonly [WRITER_EXIT_PROOF]: true;
@@ -307,8 +312,7 @@ export function writerReleaseEvidence(proof: unknown): boolean {
 }
 
 export function isWriterExitProof(value: unknown): value is WriterExitProofV1 {
-  return isPlainObject(value)
-    && (value as { readonly [WRITER_EXIT_PROOF]?: unknown })[WRITER_EXIT_PROOF] === true;
+  return typeof value === "object" && value !== null && MINTED_EXIT_PROOFS.has(value);
 }
 
 /**
@@ -356,7 +360,9 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
 }
 
 function makeWriterExitProof(): WriterExitProofV1 {
-  return Object.freeze({ [WRITER_EXIT_PROOF]: true as const });
+  const proof = Object.freeze({ [WRITER_EXIT_PROOF]: true as const });
+  MINTED_EXIT_PROOFS.add(proof);
+  return proof;
 }
 
 function observationIsAboutRecorded(
@@ -801,39 +807,49 @@ export async function executeRun(
       now: deps.clock.now(),
       ...(request.promptPath !== undefined ? { promptPath: request.promptPath } : {}),
     };
-    const persisted = persistRunIntent(persistInput, intentStore);
-    if (!persisted.ok || persisted.permit === null) {
-      return finish({
-        ok: false,
-        spawned: false,
-        reason: persisted.reason,
-        conjunction: emptyConjunction,
-        exitCode: null,
-        processIdentity: null,
-        intent: null,
-        handoff: null,
-        gitAfter: null,
-        lease: heldLease,
-        productionWriterLeaseReleasedByThisRun: writerReleaseEvidence(null),
-        cancel: emptyCancel,
-        log: null,
-      });
-    }
-
-    let permit: SpawnPermitV1 = persisted.permit;
-
-    // 4. Spawn only under the permit. shell is false. windowsHide is true. cwd is the validated one.
+    let permit: SpawnPermitV1 | null = null;
     let child: SpawnHandleV1;
     try {
-      child = deps.spawn(request.executablePath, request.argv, {
-        cwd: request.cwd,
-        env: {
-          ...(request.childEnv ?? {}),
-          AION_RUN_NONCE: runNonce,
+      const launched = withPersistedIntent(
+        persistInput,
+        (minted) => {
+          permit = requireSpawnPermit(minted);
+          return deps.spawn(
+            request.executablePath,
+            request.argv,
+            {
+              cwd: request.cwd,
+              env: {
+                ...(request.childEnv ?? {}),
+                AION_RUN_NONCE: runNonce,
+              },
+              shell: false,
+              windowsHide: true,
+            },
+            permit,
+          );
         },
-        shell: false,
-        windowsHide: true,
-      });
+        intentStore,
+      );
+      if (!launched.ok || launched.permit === null || launched.launched === null) {
+        return finish({
+          ok: false,
+          spawned: false,
+          reason: launched.reason,
+          conjunction: emptyConjunction,
+          exitCode: null,
+          processIdentity: null,
+          intent: null,
+          handoff: null,
+          gitAfter: null,
+          lease: heldLease,
+          productionWriterLeaseReleasedByThisRun: writerReleaseEvidence(null),
+          cancel: emptyCancel,
+          log: null,
+        });
+      }
+      permit = launched.permit;
+      child = launched.launched;
     } catch (error) {
       return finish({
         ok: false,
@@ -842,11 +858,28 @@ export async function executeRun(
         conjunction: emptyConjunction,
         exitCode: null,
         processIdentity: null,
-        intent: persisted.intent,
+        intent: permit !== null ? permit.intent : null,
         handoff: null,
         gitAfter: null,
         lease: heldLease,
         productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (permit === null) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "spawn is refused: no durable run intent permit",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: writerReleaseEvidence(null),
         cancel: emptyCancel,
         log: null,
       });
@@ -870,9 +903,16 @@ export async function executeRun(
       try {
         deps.killTree(child.pid);
       } catch {
-        // A failed kill must not leave the run looking successful.
+        // A failed kill is not a confirmed stop.
       }
-      stillRunning = !child.exited;
+      let observation: ProcessObservationV1;
+      try {
+        observation = deps.probe.observe(child.pid);
+      } catch (error) {
+        observation = { outcome: "UNAVAILABLE", reason: `probe threw: ${errorMessage(error)}` };
+      }
+      const confirmedStopped = observation.outcome === "NOT_FOUND";
+      stillRunning = !confirmedStopped;
       orphanScan = collectWriterOrphans({
         scanOrphans: deps.scanOrphans,
         recorded: null,
@@ -880,14 +920,17 @@ export async function executeRun(
         parentStillRunning: stillRunning,
         parentLiveness: stillRunning ? "ALIVE" : "DEAD_CONFIRMED",
       });
+      const reason = confirmedStopped
+        ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
+        : `spawn returned but the attempt could not be recorded; stillRunning: true; pid ${child.pid}: ${attempted.reason}`;
       return finish({
         ok: false,
         spawned: true,
-        reason: `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`,
+        reason,
         conjunction: emptyConjunction,
         exitCode: child.exited ? (await child.exit).code : null,
         processIdentity: null,
-        intent: persisted.intent,
+        intent: permit.intent,
         handoff: null,
         gitAfter: null,
         lease: heldLease,
@@ -1337,7 +1380,8 @@ function writeAtomic(target: string, contents: string): void {
 }
 
 export function createNodeSpawner(): SpawnFnV1 {
-  return (executable, argv, options) => {
+  return (executable, argv, options, permit) => {
+    requireSpawnPermit(permit);
     if (options.shell !== false) {
       throw new Error("shell:true is forbidden");
     }

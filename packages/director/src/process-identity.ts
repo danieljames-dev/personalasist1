@@ -204,8 +204,9 @@ export function compareProcessIdentity(
  * Liveness of the *recorded holder*, not of whoever currently occupies the PID slot.
  *
  * `UNAVAILABLE` is `UNKNOWN`. `NOT_FOUND` is `DEAD_CONFIRMED`. A found process that matches is
- * `ALIVE`. A found process whose creation date disagrees is the slot after reuse — the holder is
- * gone. Any other disagreement, or a found process that cannot be compared, is `UNKNOWN`.
+ * `ALIVE`. A found process whose creation date disagrees is the slot after reuse — unless the
+ * observed nonce still equals the recorded one, in which case the date cannot mint death.
+ * Any other disagreement, or a found process that cannot be compared, is `UNKNOWN`.
  */
 export function holderLiveness(
   recorded: ExecutorProcessIdentityV1,
@@ -218,12 +219,19 @@ export function holderLiveness(
   if (verdict === "MATCH") return "ALIVE";
   if (verdict === "UNVERIFIABLE") return "UNKNOWN";
 
-  // MISMATCH. Same slot, later start: the original process is gone. Reuse is only that case —
-  // both dates must parse and differ. Unparseable-and-unequal is UNKNOWN, not a death certificate.
-  // Any other mismatch is a live occupant we cannot treat as the holder.
+  // MISMATCH. Same slot, later start: the original process is gone — but only when the
+  // nonce does not contradict that certificate. The nonce is this module's own
+  // "survives PID reuse outright" evidence; a date-encoding difference that still
+  // carries our nonce is UNKNOWN, not death. Unparseable-and-unequal is UNKNOWN.
   if (observation.creationDate !== undefined) {
     const dates = compareCreationDates(recorded.creationDate, observation.creationDate);
-    if (dates === "DIFFERENT") return "DEAD_CONFIRMED";
+    if (dates === "DIFFERENT") {
+      const observedNonce = asUsableToken(observation.runNonce);
+      if (observedNonce !== null && observedNonce === recorded.runNonce) {
+        return "UNKNOWN";
+      }
+      return "DEAD_CONFIRMED";
+    }
   }
   return "UNKNOWN";
 }
@@ -503,6 +511,14 @@ type CreationDateComparisonV1 = "SAME" | "DIFFERENT" | "UNCOMPARABLE";
  */
 const DMTF_DATETIME = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/;
 
+/**
+ * ISO-8601 instants this module will accept. Offset is optional: CIM/`ToString('o')` on a
+ * `Kind=Unspecified` DateTime emits seven fractional digits and no offset; that is UTC,
+ * not a local wall time for Date.parse to reinterpret.
+ */
+const ISO_INSTANT =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):?(\d{2}))?$/;
+
 function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {
   const a = parseProcessTimestamp(recorded);
   const b = parseProcessTimestamp(observed);
@@ -516,8 +532,31 @@ function parseProcessTimestamp(value: string): number | null {
   if (trimmed === "") return null;
   const dmtf = parseDmtfDatetime(trimmed);
   if (dmtf !== null) return dmtf;
-  const parsed = Date.parse(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
+  return parseIso8601Instant(trimmed);
+}
+
+function parseIso8601Instant(value: string): number | null {
+  const match = ISO_INSTANT.exec(value);
+  if (match === null) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? "";
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const ms = fraction === "" ? 0 : Number(fraction.padEnd(3, "0").slice(0, 3));
+  if (!Number.isFinite(ms)) return null;
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  if (!Number.isFinite(asUtc)) return null;
+  if (match[8] === undefined) return asUtc;
+  const offsetHours = Number(match[9]);
+  const offsetMinutes = Number(match[10]);
+  if (offsetHours > 23 || offsetMinutes > 59) return null;
+  const offsetMs = (offsetHours * 60 + offsetMinutes) * 60 * 1000;
+  return match[8] === "+" ? asUtc - offsetMs : asUtc + offsetMs;
 }
 
 function parseDmtfDatetime(value: string): number | null {
@@ -544,7 +583,8 @@ function normalisedCreationDate(value: unknown): string | null {
   const token = asUsableToken(value);
   if (token === null) return null;
   const ms = parseProcessTimestamp(token);
-  return ms === null ? token : new Date(ms).toISOString();
+  if (ms === null) return null;
+  return new Date(ms).toISOString();
 }
 
 function sameExecutable(recorded: string, observed: string): boolean {

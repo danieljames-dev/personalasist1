@@ -2,11 +2,13 @@
  * The D2 stack is reachable, and there is one implementation of each guarantee.
  *
  * A correct module that nothing calls is the worst of both: the defects it was written to
- * fix stay live in the older copy. This file reads the source and builds the import graph
- * so a later split cannot ship as a green suite.
+ * fix stay live in the older copy. Declaration-matching regexes are not a physical fact:
+ * they stay green while the symbol is never invoked. Call-position checks strip the
+ * declaration first; the launch path is driven.
  */
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
@@ -15,7 +17,14 @@ import { createFixedClock } from "../src/bounded-log.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import type { LeaseV1 } from "../src/leases.js";
 import type { ExecutorProcessIdentityV1, ProcessObservationV1 } from "../src/process-identity.js";
-import { executeRun, type SpawnHandleV1 } from "../src/run-manager.js";
+import { requireSpawnPermit } from "../src/run-intent.js";
+import {
+  createNodeRunFileSystem,
+  executeRun,
+  launchRun,
+  type SpawnFnV1,
+  type SpawnHandleV1,
+} from "../src/run-manager.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "..", "src");
@@ -52,6 +61,26 @@ function countCalls(source: string, pattern: RegExp): number {
   return (source.match(copy) ?? []).length;
 }
 
+/** Strip `export async function name(` so a later `name(` is a call, not the declaration. */
+function withoutDeclaration(source: string, name: string): string {
+  return source.replace(
+    new RegExp(String.raw`(?:export\s+)?(?:async\s+)?function\s+${name}\s*\(`, "g"),
+    `function ${name}_decl(`,
+  );
+}
+
+function calledIn(source: string, name: string): boolean {
+  return new RegExp(String.raw`\b${name}\s*\(`).test(withoutDeclaration(source, name));
+}
+
+function modulesCalling(files: Map<string, string>, name: string): string[] {
+  const hits: string[] = [];
+  for (const [file, source] of files) {
+    if (calledIn(source, name)) hits.push(file);
+  }
+  return hits.sort();
+}
+
 test("every src module is imported by a non-test module, or is the package entry", () => {
   const files = sourceFiles();
   assert.ok(files.has("index.ts"), "src/index.ts is the package entry");
@@ -77,11 +106,15 @@ test("every src module is imported by a non-test module, or is the package entry
 test("there is exactly one argv builder: the adapter, reached through buildLaunchPlan", () => {
   const files = sourceFiles();
   const executors = files.get("executors.ts") ?? "";
-  const adapters = files.get("executor-adapters.ts") ?? "";
 
-  assert.match(adapters, /\bexport\s+function\s+buildExecutorLaunch\b/);
-  assert.match(executors, /\bexport\s+function\s+buildLaunchPlan\b/);
-  assert.match(executors, /\bbuildExecutorLaunch\s*\(/, "buildLaunchPlan must delegate to the adapter");
+  assert.ok(
+    calledIn(executors, "buildExecutorLaunch"),
+    "buildLaunchPlan must call the adapter, not merely import it",
+  );
+  assert.ok(
+    modulesCalling(files, "buildExecutorLaunch").includes("run-manager.ts"),
+    "the run path must call the adapter",
+  );
   assert.doesNotMatch(
     executors,
     /dontAsk/,
@@ -103,18 +136,16 @@ test("there is exactly one discovery ladder, and the launch path uses it", () =>
   );
 
   const launch = files.get("run-manager.ts") ?? "";
-  assert.match(launch, /discoverClaudeExecutor/);
-  assert.match(launch, /discoverGrokExecutor/);
+  assert.ok(calledIn(launch, "discoverClaudeExecutor"), "launchRun must call discoverClaudeExecutor");
+  assert.ok(calledIn(launch, "discoverGrokExecutor"), "launchRun must call discoverGrokExecutor");
 });
 
 test("there is exactly one handoff parser call on the run path", () => {
   const files = sourceFiles();
   const runManager = files.get("run-manager.ts") ?? "";
-  const handoff = files.get("handoff.ts") ?? "";
 
-  assert.match(handoff, /\bexport\s+function\s+parseHandoff\b/);
   assert.equal(
-    countCalls(runManager, /\bparseHandoff\s*\(/g),
+    countCalls(withoutDeclaration(runManager, "parseHandoff"), /\bparseHandoff\s*\(/g),
     1,
     "run-manager must parse the handoff once",
   );
@@ -133,47 +164,161 @@ test("there is exactly one handoff-vs-reality verdict, and it is the one that ru
 
   const runManager = files.get("run-manager.ts") ?? "";
   assert.equal(
-    countCalls(runManager, /\bfindHandoffContradictions\s*\(/g),
+    countCalls(withoutDeclaration(runManager, "findHandoffContradictions"), /\bfindHandoffContradictions\s*\(/g),
     1,
     "the running conjunction must call findHandoffContradictions",
   );
-  assert.match(runManager, /handoff\.status/, "the running verdict must read handoff status");
+  assert.ok(
+    /handoff\.status/.test(runManager),
+    "the running verdict must read handoff status",
+  );
 });
 
 test("there is exactly one Git verdict path, and it consumes the collector", () => {
   const files = sourceFiles();
   const gitTruth = files.get("git-truth.ts") ?? "";
-  assert.match(gitTruth, /\bexport\s+function\s+verifyGitTruth\b/);
-  assert.match(
-    gitTruth,
-    /GitSnapshotV1\s*\|\s*GitObservationV1|GitObservationV1\s*\|\s*GitSnapshotV1/,
+  assert.ok(
+    /GitSnapshotV1\s*\|\s*GitObservationV1|GitObservationV1\s*\|\s*GitSnapshotV1/.test(gitTruth),
     "verifyGitTruth must accept the collector observation",
   );
 
   const runManager = files.get("run-manager.ts") ?? "";
-  assert.match(runManager, /\bcollectGitTruth\s*\(/);
+  assert.ok(calledIn(runManager, "collectGitTruth"));
   assert.equal(
-    countCalls(runManager, /\bverifyGitTruth\s*\(/g),
+    countCalls(withoutDeclaration(runManager, "verifyGitTruth"), /\bverifyGitTruth\s*\(/g),
     1,
     "executeRun must judge the collected observation",
   );
 });
 
-test("the executor launch path is discovery → adapters → intent → spawn → log → Git → conjunction", () => {
-  const files = sourceFiles();
-  const runManager = files.get("run-manager.ts") ?? "";
-  assert.match(runManager, /\bexport\s+async\s+function\s+launchRun\b/);
-  assert.match(runManager, /\bexport\s+async\s+function\s+executeRun\b/);
-  assert.match(runManager, /\bdiscoverClaudeExecutor\b/);
-  assert.match(runManager, /\bdiscoverGrokExecutor\b/);
-  assert.match(runManager, /\bbuildExecutorLaunch\s*\(/);
-  assert.match(runManager, /\bpersistRunIntent\s*\(/);
-  assert.match(runManager, /deps\.spawn\s*\(/);
-  assert.match(runManager, /\bcreateBoundedLog\s*\(/);
-  assert.match(runManager, /\bcollectGitTruth\s*\(/);
-  assert.match(runManager, /\bverifyGitTruth\s*\(/);
-  assert.match(runManager, /\bevaluateSuccessConjunction\s*\(/);
-  assert.match(runManager, /\bproveWriterExit\s*\(/);
+test("launchRun is the discovery entry: it finds the binary, builds argv, and consumes a minted permit", async () => {
+  // Was: assert.match(runManager, /\bexport\s+async\s+function\s+launchRun\b/).
+  // That matched the declaration. launchRun had zero call sites.
+  const dir = mkdtempSync(join(tmpdir(), "aion-launch-run-"));
+  const promptPath = join(dir, "PROMPT.md");
+  const runRoot = join(dir, "run");
+  const exe = "C:\\Tools\\grok.exe";
+  writeFileSync(promptPath, "do the work\n");
+  try {
+    let spawnedExe: string | null = null;
+    let spawnedArgv: readonly string[] = [];
+    const spawn: SpawnFnV1 = (executable, argv, options, permit) => {
+      requireSpawnPermit(permit);
+      spawnedExe = executable;
+      spawnedArgv = argv;
+      assert.equal(options.shell, false);
+      assert.equal(options.windowsHide, true);
+      const child: SpawnHandleV1 = {
+        pid: 4812,
+        stdout: Readable.from([""]),
+        stderr: Readable.from([""]),
+        kill() { /* unused */ },
+        exit: Promise.resolve({ code: 0, signal: null }),
+        get exited() {
+          return true;
+        },
+      };
+      return child;
+    };
+
+    const hostFs = createNodeRunFileSystem();
+    hostFs.mkdirp(runRoot);
+    hostFs.writeDurable(join(runRoot, "handoff.json"), JSON.stringify({
+      schema: HANDOFF_SCHEMA_V1,
+      executor: "grok",
+      missionId: "mission-1",
+      runId: "run-1",
+      workItemId: "work-1",
+      branch: "executor/oracle",
+      headBefore: "a".repeat(40),
+      headAfter: "b".repeat(40),
+      status: "PASS",
+      tests: [{ suite: "director", total: 1, passed: 1, failed: 0, skipped: 0 }],
+      productionMutated: false,
+      spendUsd: 0,
+      requiresOwner: false,
+      nextRecommendedGate: null,
+      artifacts: [],
+      startedAt: "2026-08-13T12:00:00.000Z",
+      finishedAt: "2026-08-13T12:00:30.000Z",
+      capacityStatus: "AVAILABLE",
+      summary: "ok",
+    }));
+
+    const result = await launchRun(
+      {
+        runId: "run-1",
+        missionId: "mission-1",
+        workItemId: "work-1",
+        executor: "grok",
+        worktree: dir,
+        branch: "executor/oracle",
+        cwd: dir,
+        runNonce: "nonce-run-1",
+        runRoot,
+        promptPath,
+        timeoutMs: 30_000,
+        lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-launch-1" },
+        authorisedProductionMutated: false,
+      },
+      {
+        clock: createFixedClock("2026-08-13T12:00:00.000Z"),
+        fs: hostFs,
+        spawn,
+        git: {
+          run(argv) {
+            const key = argv.join(" ");
+            if (key === "rev-parse HEAD") {
+              return { argv: [...argv], status: 0, stdout: `${"b".repeat(40)}\n`, stderr: "", error: null };
+            }
+            if (key === "symbolic-ref -q --short HEAD") {
+              return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
+            }
+            if (key === "status --porcelain") {
+              return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+            }
+            if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
+              return { argv: [...argv], status: 128, stdout: "", stderr: "fatal: no upstream configured\n", error: null };
+            }
+            throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
+          },
+        },
+        probe: {
+          observe: () => ({
+            outcome: "FOUND",
+            reason: "injected",
+            pid: 4812,
+            creationDate: "2026-08-13T12:00:01.000Z",
+            executablePath: exe,
+            runNonce: "nonce-run-1",
+          }),
+        },
+        capacity: {
+          tryAcquire: () => ({ ok: true, reason: "capacity-acquired" }),
+          release() { /* unused */ },
+        },
+        leases: {
+          list: () => [],
+          save() { /* unused */ },
+        },
+        wait: async () => undefined,
+        killTree: () => undefined,
+        discoveryEnv: { AION_GROK_PATH: exe },
+        discoveryFs: {
+          isFile: (path) => path === exe,
+          readDir: () => [],
+        },
+      },
+    );
+
+    assert.equal(result.spawned, true, result.reason);
+    assert.equal(spawnedExe, exe, "launchRun must use the discovered executable, not a caller-supplied one");
+    assert.ok(spawnedArgv.includes("--prompt-file"), "launchRun must use the adapter argv");
+    assert.ok(spawnedArgv.includes("--no-plan"), "launchRun must use the measured Grok flags");
+    assert.ok(spawnedArgv.includes(promptPath));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThisRun false", async () => {
@@ -274,7 +419,10 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
           dirs.add(path);
         },
       },
-      spawn: () => child,
+      spawn: (_exe, _argv, _options, permit) => {
+        requireSpawnPermit(permit);
+        return child;
+      },
       git: {
         run(argv) {
           const key = argv.join(" ");

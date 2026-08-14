@@ -27,7 +27,7 @@ import {
   type HostProcessProbe,
   type ProcessObservationV1,
 } from "../src/process-identity.js";
-import { answersAfterReboot, runIntentFrom } from "../src/run-intent.js";
+import { answersAfterReboot, requireSpawnPermit, runIntentFrom } from "../src/run-intent.js";
 import {
   CANCEL_HARD_MS,
   CANCEL_SOFT_MS,
@@ -328,7 +328,8 @@ function hangingProcess(opts: { pid?: number; dieOnSoft?: boolean } = {}): Spawn
 
 function trackingSpawn(factory: () => SpawnHandleV1): SpawnFnV1 & { calls: number; lastShell: boolean | null } {
   const tracked = { calls: 0, lastShell: null as boolean | null };
-  const spawn: SpawnFnV1 = (_exe, _argv, options) => {
+  const spawn: SpawnFnV1 = (_exe, _argv, options, permit) => {
+    requireSpawnPermit(permit);
     tracked.calls += 1;
     tracked.lastShell = options.shell;
     assert.equal(options.shell, false);
@@ -664,6 +665,10 @@ test("a production-writer lease release is evidence only after a constructed exi
   assert.equal(writerReleaseEvidence(proof), true);
   assert.equal(writerReleaseEvidence(null), false);
   assert.equal(writerReleaseEvidence(writerProofInput()), false, "a field bag is not a proof");
+  const inheritedProof = Object.create(proof) as typeof proof;
+  assert.equal(isWriterExitProof(inheritedProof), false, "an inherited brand is not a minted proof");
+  assert.equal(writerReleaseEvidence(inheritedProof), false);
+  assert.equal(isWriterExitProof(new Proxy({}, { get: () => true })), false);
   assert.equal(
     writerReleaseEvidence(proveWriterExit(writerProofInput({ orphanScanPerformed: false }))),
     false,
@@ -674,6 +679,28 @@ test("a production-writer lease release is evidence only after a constructed exi
     }))),
     false,
     "ALIVE is not DEAD_CONFIRMED",
+  );
+  assert.equal(
+    proveWriterExit(writerProofInput({
+      recordedIdentity: { ...RECORDED, creationDate: "2026-08-13T12:00:01.0000000" },
+      observation: {
+        outcome: "FOUND",
+        reason: "injected",
+        pid: RECORDED.pid,
+        creationDate: "2026-08-13T12:00:01.000Z",
+        executablePath: RECORDED.executablePath,
+        runNonce: RECORDED.runNonce,
+      },
+    })),
+    null,
+    "two encodings of one live process must not mint DEAD_CONFIRMED",
+  );
+  assert.equal(
+    proveWriterExit(writerProofInput({
+      observation: foundObservation({ ...RECORDED, creationDate: T1 }),
+    })),
+    null,
+    "a date difference that still carries this run's nonce is not an exit proof",
   );
 });
 
@@ -991,6 +1018,11 @@ test("a padded request nonce still identifies a live grandchild as an orphan", a
 test("a failed spawn-attempt record after a live spawn kills the child and fails the run", async () => {
   // Defect: the second intent.json write failed ENOSPC after spawn; the child stayed up
   // and answersAfterReboot().started was false, so recovery relaunched a second writer.
+  //
+  // Changed: this test used to assert started === false as the success condition.
+  // That pinned the lie "child was stopped" without observing the child. The
+  // record write still fails, so the file has no spawnPid; "stopped" is now
+  // allowed only after probe.observe returns NOT_FOUND.
   const fs = memoryFs({
     files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
   });
@@ -1014,6 +1046,7 @@ test("a failed spawn-attempt record after a live spawn kills the child and fails
     neverWait: true,
     fs,
     spawn,
+    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "killed after failed record" }) },
     killTree: (pid) => {
       killed.push(pid);
       hung.forceExit(1);
@@ -1023,6 +1056,7 @@ test("a failed spawn-attempt record after a live spawn kills the child and fails
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.ok, false);
   assert.match(result.reason, /could not be recorded|ENOSPC/);
+  assert.match(result.reason, /child was stopped/);
   assert.ok(hung.softKills >= 1 || killed.includes(hung.pid), "the unrecorded child must be stopped");
   assert.ok(killed.includes(hung.pid), "killTree must run after a failed spawn record");
 
@@ -1031,23 +1065,74 @@ test("a failed spawn-attempt record after a live spawn kills the child and fails
   const parsed = runIntentFrom(JSON.parse(raw) as unknown);
   assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.reason);
   if (!parsed.ok) return;
-  assert.equal(answersAfterReboot(parsed.intent).started, false);
+  assert.equal(parsed.intent.spawnPid, null, "the failed record write left no spawnPid");
+});
+
+test("a child that survives kill and killTree after a failed record is still running, not stopped", async () => {
+  // Defect: kill() and killTree() failures were swallowed; the result said
+  // "child was stopped" while the child was alive and intent.json read started: false.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const original = fs.writeDurable.bind(fs);
+  let intentWrites = 0;
+  fs.writeDurable = (path, utf8) => {
+    if (path.endsWith("intent.json")) {
+      intentWrites += 1;
+      if (intentWrites >= 2) {
+        const error = new Error("ENOSPC");
+        (error as NodeJS.ErrnoException).code = "ENOSPC";
+        throw error;
+      }
+    }
+    original(path, utf8);
+  };
+  const hung = hangingProcess();
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    spawn: trackingSpawn(() => hung),
+    probe: { observe: () => foundObservation(RECORDED) },
+    killTree: () => {
+      throw new Error("Access is denied");
+    },
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /stillRunning: true/);
+  assert.match(result.reason, new RegExp(String(hung.pid)));
+  assert.doesNotMatch(result.reason, /child was stopped/);
+  assert.equal(hung.exited, false, "the child must still be alive");
 });
 
 // ---------------------------------------------------------------------------
 // Real wiring
 // ---------------------------------------------------------------------------
 
+test("createNodeSpawner refuses a forged permit before creating a process", () => {
+  const spawn = createNodeSpawner();
+  assert.throws(
+    () => spawn(
+      process.execPath,
+      ["-e", "process.exit(0)"],
+      { cwd: process.cwd(), env: {}, shell: false, windowsHide: true },
+      { intentPath: "C:\\tmp\\intent.json" } as never,
+    ),
+    /spawn is refused/,
+  );
+});
+
 test("a real node process is spawned with shell false and its exit is collected", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aion-run-mgr-"));
   try {
     const spawn = createNodeSpawner();
     let seenShell: boolean | null = null;
-    const wrapped: SpawnFnV1 = (exe, argv, options) => {
+    const wrapped: SpawnFnV1 = (exe, argv, options, permit) => {
+      requireSpawnPermit(permit);
       seenShell = options.shell;
       assert.equal(options.shell, false);
       assert.equal(options.windowsHide, true);
-      return spawn(exe, argv, options);
+      return spawn(exe, argv, options, permit);
     };
     const result = await executeRun(
       request({
