@@ -409,7 +409,11 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
         isFile: (path) => files.has(path),
         readUtf8(path) {
           const value = files.get(path);
-          if (value === undefined) throw new Error(`ENOENT ${path}`);
+          if (value === undefined) {
+            const error = new Error(`ENOENT ${path}`);
+            (error as NodeJS.ErrnoException).code = "ENOENT";
+            throw error;
+          }
           return value;
         },
         writeDurable(path, utf8) {

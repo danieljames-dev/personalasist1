@@ -51,6 +51,9 @@ const SPAWN_PERMIT = Symbol("aion.director.spawn-permit.v1");
 /** Values this module minted. A property read asks "does this look like a permit"; membership asks "did I mint this". */
 const MINTED_PERMITS = new WeakSet<object>();
 
+/** Minted permits already spent by a spawn. Membership, not a property. */
+const CONSUMED_PERMITS = new WeakSet<object>();
+
 export interface RunIntentV1 {
   readonly schema: typeof RUN_INTENT_SCHEMA_V1;
   readonly runId: OpaqueId;
@@ -99,16 +102,30 @@ export interface IntentStoreV1 {
 }
 
 /**
+ * The launch this permit authorises. Copied at mint time so a later spawn is
+ * checked against what was persisted, not against whatever the caller passes.
+ */
+export interface AuthorisedSpawnV1 {
+  readonly executable: string;
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly runId: OpaqueId;
+  readonly runNonce: string;
+}
+
+/**
  * The only value that makes a spawn legal.
  *
  * Produced solely by {@link persistRunIntent} after write-and-read-back. There is no public
  * constructor: {@link isSpawnPermit} is set membership, not a property read, so an inherited
- * brand or a Proxy cannot satisfy the gate.
+ * brand or a Proxy cannot satisfy the gate. {@link spendSpawnPermit} binds the launch to
+ * {@link AuthorisedSpawnV1} and consumes the handle.
  */
 export interface SpawnPermitV1 {
   readonly [SPAWN_PERMIT]: true;
   readonly intentPath: string;
   readonly intent: RunIntentV1;
+  readonly authorised: AuthorisedSpawnV1;
 }
 
 export type PersistRunIntentResultV1 =
@@ -238,12 +255,39 @@ export function isSpawnPermit(value: unknown): value is SpawnPermitV1 {
 
 /**
  * The spawn gate. A missing or forged permit throws; it does not return a "best-effort" go-ahead.
+ *
+ * This does not spend the permit. Membership is reusable so a caller can check
+ * before handing the same handle to the spawner. Spending happens in
+ * {@link spendSpawnPermit}.
  */
 export function requireSpawnPermit(value: unknown): SpawnPermitV1 {
   if (!isSpawnPermit(value)) {
     throw new Error("spawn is refused: no durable run intent permit");
   }
   return value;
+}
+
+/**
+ * Bind a launch to the permit and spend it.
+ *
+ * The authorised `{executable, argv, cwd, runId, runNonce}` was copied at mint
+ * time. A mismatch is a refusal, not a different process. The first matching
+ * spend consumes the permit; a second spawn with the same handle is refused.
+ * A reminted permit for an intent that already recorded a spawn is born spent.
+ */
+export function spendSpawnPermit(
+  value: unknown,
+  launch: { readonly executable: string; readonly argv: readonly string[]; readonly cwd: string },
+): SpawnPermitV1 {
+  const permit = requireSpawnPermit(value);
+  if (CONSUMED_PERMITS.has(permit)) {
+    throw new Error("spawn is refused: permit has already been spent");
+  }
+  if (!launchMatchesAuthorised(permit.authorised, launch)) {
+    throw new Error("spawn is refused: launch does not match the persisted intent");
+  }
+  CONSUMED_PERMITS.add(permit);
+  return permit;
 }
 
 /**
@@ -674,8 +718,12 @@ function existingIntentOn(store: IntentStoreV1, intentPath: string): "none" | "u
   let raw: string;
   try {
     raw = store.readUtf8(intentPath);
-  } catch {
-    return "none";
+  } catch (error) {
+    // Absence is ENOENT. EBUSY, EACCES, EMFILE, EIO, a throw with no code —
+    // those are unreadability. Treating them as "none" lets a second executor
+    // overwrite a live spawn the moment a scanner holds the file open.
+    if (errorCode(error) === "ENOENT") return "none";
+    return "unreadable";
   }
   const parsed = runIntentFrom(parseJson(raw));
   if (!parsed.ok) return "unreadable";
@@ -694,13 +742,40 @@ function permitMatchesIntent(permit: SpawnPermitV1, current: RunIntentV1): boole
 }
 
 function makePermit(intentPath: string, intent: RunIntentV1): SpawnPermitV1 {
+  const authorised = Object.freeze({
+    executable: intent.executablePath,
+    argv: Object.freeze([...intent.argv]),
+    cwd: intent.cwd,
+    runId: intent.runId,
+    runNonce: intent.runNonce,
+  });
   const permit = Object.freeze({
     [SPAWN_PERMIT]: true as const,
     intentPath,
     intent: Object.freeze(intent),
+    authorised,
   });
   MINTED_PERMITS.add(permit);
+  if (intentAlreadySpawned(intent)) {
+    CONSUMED_PERMITS.add(permit);
+  }
   return permit;
+}
+
+function intentAlreadySpawned(intent: RunIntentV1): boolean {
+  return intent.spawnAttemptedAt !== null
+    || intent.spawnPid !== null
+    || intent.processIdentity !== null;
+}
+
+function launchMatchesAuthorised(
+  authorised: AuthorisedSpawnV1,
+  launch: { readonly executable: string; readonly argv: readonly string[]; readonly cwd: string },
+): boolean {
+  return authorised.executable === launch.executable
+    && authorised.cwd === launch.cwd
+    && authorised.argv.length === launch.argv.length
+    && authorised.argv.every((item, index) => item === launch.argv[index]);
 }
 
 function refused(reason: string): { readonly ok: false; readonly permit: null; readonly intent: null; readonly reason: string } {
@@ -794,6 +869,12 @@ function own(obj: Record<string, unknown>, key: string): unknown {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorCode(error: unknown): string | null {
+  if (error === null || typeof error !== "object" || !("code" in error)) return null;
+  const code = (error as { readonly code: unknown }).code;
+  return typeof code === "string" && code !== "" ? code : null;
 }
 
 function containsSecret(text: string): boolean {

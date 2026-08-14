@@ -27,7 +27,12 @@ import {
   type HostProcessProbe,
   type ProcessObservationV1,
 } from "../src/process-identity.js";
-import { answersAfterReboot, requireSpawnPermit, runIntentFrom } from "../src/run-intent.js";
+import {
+  answersAfterReboot,
+  persistRunIntent,
+  requireSpawnPermit,
+  runIntentFrom,
+} from "../src/run-intent.js";
 import {
   CANCEL_HARD_MS,
   CANCEL_SOFT_MS,
@@ -152,7 +157,11 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
     },
     readUtf8(path) {
       const value = files.get(path);
-      if (value === undefined) throw new Error(`ENOENT ${path}`);
+      if (value === undefined) {
+        const error = new Error(`ENOENT ${path}`);
+        (error as NodeJS.ErrnoException).code = "ENOENT";
+        throw error;
+      }
       return value;
     },
     writeDurable(path, utf8) {
@@ -1220,4 +1229,147 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("createNodeSpawner refuses a permit used for a different executable", () => {
+  // Defect: requireSpawnPermit proved "some intent was persisted in this
+  // process", not "this launch was persisted". A grok.exe permit drove
+  // createNodeSpawner to launch a different executable.
+  const dir = mkdtempSync(join(tmpdir(), "aion-permit-mismatch-"));
+  try {
+    const persisted = persistRunIntent({
+      intentPath: join(dir, "intent.json"),
+      runId: "run-1",
+      missionId: "mission-1",
+      workItemId: "work-1",
+      worktree: dir,
+      branch: "executor/oracle",
+      executablePath: EXE,
+      argv: ["--prompt-file", join(dir, "PROMPT.md"), "--cwd", dir],
+      cwd: dir,
+      runNonce: NONCE,
+      now: NOW,
+    });
+    assert.equal(persisted.ok, true, persisted.ok ? "" : persisted.reason);
+    if (!persisted.ok) return;
+    assert.equal(persisted.permit.authorised.executable, EXE);
+    assert.deepEqual([...persisted.permit.authorised.argv], ["--prompt-file", join(dir, "PROMPT.md"), "--cwd", dir]);
+    assert.equal(persisted.permit.authorised.cwd, dir);
+    assert.equal(persisted.permit.authorised.runId, "run-1");
+    assert.equal(persisted.permit.authorised.runNonce, NONCE);
+
+    const spawn = createNodeSpawner();
+    assert.throws(
+      () => spawn(
+        process.execPath,
+        ["-e", "process.exit(0)"],
+        { cwd: dir, env: {}, shell: false, windowsHide: true },
+        persisted.permit,
+      ),
+      /does not match|persisted intent/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createNodeSpawner refuses a permit after it has been spent", async () => {
+  // Defect: the permit never expired. After the authorised run completed it
+  // was reused for further launches.
+  const dir = mkdtempSync(join(tmpdir(), "aion-permit-reuse-"));
+  try {
+    const argv = ["-e", "process.exit(0)"];
+    const persisted = persistRunIntent({
+      intentPath: join(dir, "intent.json"),
+      runId: "run-1",
+      missionId: "mission-1",
+      workItemId: "work-1",
+      worktree: dir,
+      branch: "executor/oracle",
+      executablePath: process.execPath,
+      argv,
+      cwd: dir,
+      runNonce: "nonce-spend-once",
+      now: NOW,
+    });
+    assert.equal(persisted.ok, true, persisted.ok ? "" : persisted.reason);
+    if (!persisted.ok) return;
+
+    const spawn = createNodeSpawner();
+    const options = { cwd: dir, env: {}, shell: false as const, windowsHide: true as const };
+    const first = spawn(process.execPath, argv, options, persisted.permit);
+    const ended = await first.exit;
+    assert.equal(ended.code, 0, "the authorised launch must run once");
+
+    assert.throws(
+      () => spawn(process.execPath, argv, options, persisted.permit),
+      /already been spent/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a live same-nonce grandchild with parent UNAVAILABLE withholds the writer lease", async () => {
+  // Defect: withholdProductionWriter read detectOrphan via liveSightings.
+  // detectOrphan answers "is this an orphan?" and returns orphan:false for a
+  // matching-nonce grandchild unless parentLiveness is DEAD_CONFIRMED.
+  // UNAVAILABLE is access-denied — the ordinary elevated-executor outcome —
+  // so the lease released while a live writer remained in the worktree.
+  // The nonce sweep also ran only on cancel, not on a clean exit 0.
+  const leases = memoryLeases();
+  const killed: number[] = [];
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "UNAVAILABLE", reason: "access-denied" },
+    ]),
+    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+    killTree: (pid) => {
+      killed.push(pid);
+    },
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-1"),
+    "a live same-nonce grandchild must leave the production-writer lease held when the parent probe is UNAVAILABLE",
+  );
+  assert.ok(
+    killed.includes(7777),
+    "the nonce sweep must run on a clean exit, not only on cancellation",
+  );
+});
+
+test("a dropped lease save is not a released lease and does not mint an exit proof", async () => {
+  // Defect: releasedLeaseId was derived from releaseLease(before, id)'s
+  // arguments and return value. A save that silently dropped the write left
+  // the lease in the store and still set releasedLeaseId, so proveWriterExit
+  // minted a proof.
+  let stored: LeaseV1[] = [];
+  const leases: LeaseStoreV1 = {
+    list: () => [...stored],
+    save(next) {
+      if (next.some((item) => item.leaseId === "lease-pw-1")) {
+        stored = [...next];
+      }
+    },
+  };
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "exited" },
+    ]),
+    scanOrphans: () => [],
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    stored.some((item) => item.leaseId === "lease-pw-1"),
+    "a save that dropped the release must leave the lease in the store",
+  );
 });

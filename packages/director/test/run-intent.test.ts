@@ -71,7 +71,11 @@ function failingStore(reason: string): IntentStoreV1 {
       throw new Error(reason);
     },
     readUtf8() {
-      throw new Error("read must not run after a failed write");
+      // Guard read of a missing file. Absence is ENOENT; any other code is
+      // unreadability and never reaches this write-failure path.
+      const error = new Error("ENOENT");
+      (error as NodeJS.ErrnoException).code = "ENOENT";
+      throw error;
     },
   };
 }
@@ -390,5 +394,54 @@ test("persistRunIntent refuses to overwrite an intent that already recorded a sp
     if (!reloaded.ok) return;
     assert.equal(reloaded.intent.spawnPid, 4812);
     assert.equal(reloaded.intent.spawnAttemptedAt, SPAWNED_AT);
+  });
+});
+
+test("a transient guard-read error is unreadable, not absence, and does not erase a live spawn", () => {
+  // Defect: existingIntentOn caught every readUtf8 failure as "none". EBUSY /
+  // EACCES / EMFILE / EIO from a scanner holding intent.json open looked like
+  // "file never existed", persist overwrote spawnPid, and a second executor
+  // launched. Truncated / unparseable already refused; only errno was treated
+  // as absence.
+  withDir((dir) => {
+    const persisted = persistRunIntent(inputIn(dir));
+    assert.equal(persisted.ok, true, persisted.ok ? "" : persisted.reason);
+    if (!persisted.ok) return;
+
+    const attempted = recordSpawnAttempt({
+      permit: persisted.permit,
+      pid: 4812,
+      now: SPAWNED_AT,
+    });
+    assert.equal(attempted.ok, true, attempted.ok ? "" : attempted.reason);
+    if (!attempted.ok) return;
+
+    const codes = ["EBUSY", "EACCES", "EMFILE", "EIO"] as const;
+    for (const code of codes) {
+      let guardReads = 0;
+      const flaky: IntentStoreV1 = {
+        writeDurable() {
+          throw new Error(`write must not run after a ${code} guard read`);
+        },
+        readUtf8() {
+          guardReads += 1;
+          const error = new Error(code);
+          (error as NodeJS.ErrnoException).code = code;
+          throw error;
+        },
+      };
+      const again = persistRunIntent(inputIn(dir), flaky);
+      assert.equal(again.ok, false, `${code} must not look like a missing file`);
+      assert.equal(again.permit, null);
+      assert.equal(guardReads, 1, `${code} must fail on the guard read, not skip it`);
+      assert.match(again.reason, /unreadable|refusing to overwrite/);
+    }
+
+    const reloaded = readRunIntent(inputIn(dir).intentPath);
+    assert.equal(reloaded.ok, true, reloaded.ok ? "" : reloaded.reason);
+    if (!reloaded.ok) return;
+    assert.equal(reloaded.intent.spawnPid, 4812, "the first writer's record must survive a busy guard read");
+    assert.equal(reloaded.intent.spawnAttemptedAt, SPAWNED_AT);
+    assert.equal(answersAfterReboot(reloaded.intent).started, true);
   });
 });

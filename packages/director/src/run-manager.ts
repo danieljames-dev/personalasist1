@@ -68,7 +68,6 @@ import {
   releaseLease,
   type LeaseKindV1,
   type LeaseV1,
-  type ProcessLivenessV1,
 } from "./leases.js";
 import {
   captureProcessIdentity,
@@ -84,6 +83,7 @@ import {
   recordSpawnAttempt,
   recordSpawnObservation,
   requireSpawnPermit,
+  spendSpawnPermit,
   withPersistedIntent,
   type IntentStoreV1,
   type RunIntentV1,
@@ -270,7 +270,12 @@ export interface WriterOrphanScanV1 {
   readonly performed: boolean;
   /** Every sighting the scan returned. The proof reads `detectOrphan` on these. */
   readonly sightings: readonly OrphanSightingV1[];
-  /** Sightings whose `detectOrphan` verdict was `orphan: true`. */
+  /**
+   * Sightings not proven absent from this run: normalised nonce is null or
+   * equals this run's nonce. Independent of `parentLiveness` and not routed
+   * through `detectOrphan` — a live grandchild is this run's tree, not an
+   * orphan question.
+   */
   readonly liveSightings: readonly OrphanSightingV1[];
 }
 
@@ -779,8 +784,10 @@ export async function executeRun(
         const before = deps.leases.list();
         const remaining = releaseLease(before, heldLease.leaseId);
         deps.leases.save(remaining);
+        // A write you did not read back is a request, not a fact.
+        const observed = deps.leases.list();
         const gone = before.some((item) => item.leaseId === heldLease.leaseId)
-          && remaining.every((item) => item.leaseId !== heldLease.leaseId);
+          && observed.every((item) => item.leaseId !== heldLease.leaseId);
         if (gone) releasedLeaseId = heldLease.leaseId;
       }
     }
@@ -913,12 +920,22 @@ export async function executeRun(
       }
       const confirmedStopped = observation.outcome === "NOT_FOUND";
       stillRunning = !confirmedStopped;
+      try {
+        killNonceBearingLeftovers({
+          scanOrphans: deps.scanOrphans,
+          killTree: deps.killTree,
+          childPid: child.pid,
+          recorded: null,
+          runNonce,
+          parentExited: confirmedStopped,
+        });
+      } catch {
+        // A failed leftover kill is not a confirmed absence.
+      }
       orphanScan = collectWriterOrphans({
         scanOrphans: deps.scanOrphans,
         recorded: null,
         runNonce,
-        parentStillRunning: stillRunning,
-        parentLiveness: stillRunning ? "ALIVE" : "DEAD_CONFIRMED",
       });
       const reason = confirmedStopped
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
@@ -994,6 +1011,20 @@ export async function executeRun(
     const logReport = log.report();
     const output = `${log.liveTail("stdout").toString("utf8")}\n${log.liveTail("stderr").toString("utf8")}`;
 
+    // Nonce sweep on every exit path, not only timeout / mustHalt.
+    try {
+      killNonceBearingLeftovers({
+        scanOrphans: deps.scanOrphans,
+        killTree: deps.killTree,
+        childPid: child.pid,
+        recorded: processIdentity,
+        runNonce,
+        parentExited: child.exited,
+      });
+    } catch {
+      // A failed leftover kill is not a confirmed absence.
+    }
+
     // 7. Independent Git after. Never taken from the handoff.
     const gitCollected = collectGitTruth({
       runner: deps.git,
@@ -1046,15 +1077,10 @@ export async function executeRun(
     // Writer-release is an exit proof or it is false. The probe is always of
     // the recorded holder. askWriterLiveness is not consulted.
     const observation = observeRecordedHolder(deps.probe, processIdentity);
-    const parentLiveness = processIdentity === null || observation === null
-      ? null
-      : holderLiveness(processIdentity, observation);
     orphanScan = collectWriterOrphans({
       scanOrphans: deps.scanOrphans,
       recorded: processIdentity,
       runNonce,
-      parentStillRunning: stillRunning,
-      parentLiveness,
     });
 
     releaseHeld();
@@ -1110,34 +1136,61 @@ function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
-  readonly parentStillRunning: boolean;
-  readonly parentLiveness: ProcessLivenessV1 | null;
 }): WriterOrphanScanV1 {
   if (input.scanOrphans === undefined) {
     return { performed: false, sightings: [], liveSightings: [] };
   }
   const createdNotBefore = input.recorded?.creationDate ?? "";
   const sightings = [...input.scanOrphans({ runNonce: input.runNonce, createdNotBefore })];
-  const parentLiveness: ProcessLivenessV1 = input.parentStillRunning
-    ? "ALIVE"
-    : (input.parentLiveness ?? "DEAD_CONFIRMED");
-  const liveSightings: OrphanSightingV1[] = [];
-  for (const sighting of sightings) {
-    if (input.recorded === null) {
-      const nonce = normaliseRunNonce(sighting.runNonce);
-      if (nonce === null || nonce === input.runNonce) {
-        liveSightings.push(sighting);
-      }
+  const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(sighting, input.runNonce));
+  return { performed: true, sightings, liveSightings };
+}
+
+/**
+ * "Not proven absent" for this run. A missing nonce or this run's nonce is
+ * our tree. `detectOrphan` answers a different question and must not decide
+ * whether the production-writer lease can be released.
+ */
+function writerSightingNotProvenAbsent(sighting: OrphanSightingV1, runNonce: string): boolean {
+  const nonce = normaliseRunNonce(sighting.runNonce);
+  return nonce === null || nonce === runNonce;
+}
+
+function killNonceBearingLeftovers(input: {
+  readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
+  readonly killTree: (pid: number) => void;
+  readonly childPid: number;
+  readonly recorded: ExecutorProcessIdentityV1 | null;
+  readonly runNonce: string;
+  readonly parentExited: boolean;
+}): boolean {
+  const createdNotBefore = input.recorded?.creationDate ?? "";
+  const leftovers = input.scanOrphans !== undefined
+    ? input.scanOrphans({ runNonce: input.runNonce, createdNotBefore })
+    : [];
+  let killedOrphan = false;
+  for (const leftover of leftovers) {
+    if (leftover.pid === input.childPid) continue;
+    if (!writerSightingNotProvenAbsent(leftover, input.runNonce)) continue;
+    if (
+      createdNotBefore !== ""
+      && leftover.creationDate !== undefined
+      && leftover.creationDate < createdNotBefore
+    ) {
       continue;
     }
-    const verdict = detectOrphan({
-      recorded: input.recorded,
-      observed: observationFromSighting(sighting),
-      parentLiveness,
-    });
-    if (verdict.orphan) liveSightings.push(sighting);
+    if (input.recorded !== null) {
+      const verdict = detectOrphan({
+        recorded: input.recorded,
+        observed: observationFromSighting(leftover),
+        parentLiveness: input.parentExited ? "DEAD_CONFIRMED" : "ALIVE",
+      });
+      if (verdict.kind === "NONCE_MISMATCH") continue;
+    }
+    input.killTree(leftover.pid);
+    killedOrphan = true;
   }
-  return { performed: true, sightings, liveSightings };
+  return killedOrphan;
 }
 
 function observationFromSighting(sighting: OrphanSightingV1): ProcessObservationV1 {
@@ -1201,33 +1254,14 @@ async function cancelLadder(
   const stillAfterHard = !child.exited;
 
   // ORPHAN: after cancel, scan by AION_RUN_NONCE and recorded creation time; kill leftovers.
-  const createdNotBefore = recorded?.creationDate ?? "";
-  const leftovers = deps.scanOrphans !== undefined
-    ? deps.scanOrphans({ runNonce, createdNotBefore })
-    : [];
-  let killedOrphan = false;
-  for (const leftover of leftovers) {
-    if (leftover.pid === child.pid) continue;
-    const leftoverNonce = normaliseRunNonce(leftover.runNonce);
-    if (leftoverNonce !== null && leftoverNonce !== runNonce) continue;
-    if (
-      createdNotBefore !== ""
-      && leftover.creationDate !== undefined
-      && leftover.creationDate < createdNotBefore
-    ) {
-      continue;
-    }
-    if (recorded !== null) {
-      const verdict = detectOrphan({
-        recorded,
-        observed: observationFromSighting(leftover),
-        parentLiveness: child.exited ? "DEAD_CONFIRMED" : "ALIVE",
-      });
-      if (verdict.kind === "NONCE_MISMATCH") continue;
-    }
-    deps.killTree(leftover.pid);
-    killedOrphan = true;
-  }
+  const killedOrphan = killNonceBearingLeftovers({
+    scanOrphans: deps.scanOrphans,
+    killTree: deps.killTree,
+    childPid: child.pid,
+    recorded,
+    runNonce,
+    parentExited: child.exited,
+  });
   if (killedOrphan) stages.push("ORPHAN");
 
   if (child.exited) {
@@ -1381,10 +1415,10 @@ function writeAtomic(target: string, contents: string): void {
 
 export function createNodeSpawner(): SpawnFnV1 {
   return (executable, argv, options, permit) => {
-    requireSpawnPermit(permit);
     if (options.shell !== false) {
       throw new Error("shell:true is forbidden");
     }
+    spendSpawnPermit(permit, { executable, argv, cwd: options.cwd });
     const child = spawn(executable, argv.slice(), {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
