@@ -6,7 +6,7 @@
  * "we never tried".
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -227,17 +227,26 @@ test("an inherited-prototype permit is not a minted permit", () => {
 });
 
 test("a stale permit cannot record a spawn against a later intent at the same path", () => {
-  // Defect: recordSpawnAttempt read whatever was at permit.intentPath now and
-  // never compared permit.intent. Persist of run B over an unstarted run A is
-  // allowed; replaying permit A then wrote spawnPid onto run B.
+  // Defect (R5-2): recordSpawnAttempt wrote spawnPid onto whatever sat at
+  // permit.intentPath. Persist of run B over unstarted run A used to plant
+  // that later intent; that overwrite is now refused (R7-1). The later
+  // intent is planted so the binding check is still the thing under test.
   withDir((dir) => {
     const first = persistRunIntent(inputIn(dir, { runId: "run-a", runNonce: "nonceA" }));
     assert.equal(first.ok, true, first.ok ? "" : first.reason);
     if (!first.ok) return;
 
-    const second = persistRunIntent(inputIn(dir, { runId: "run-b", runNonce: "nonceB" }));
-    assert.equal(second.ok, true, second.ok ? "" : second.reason);
-    if (!second.ok) return;
+    const overwritten = persistRunIntent(inputIn(dir, { runId: "run-b", runNonce: "nonceB" }));
+    assert.equal(overwritten.ok, false, "a readable intent is unresolvable, not a template to overwrite");
+    assert.equal(overwritten.permit, null);
+    assert.match(overwritten.reason, /unresolvable|refusing to overwrite/);
+
+    const planted = {
+      ...first.intent,
+      runId: "run-b",
+      runNonce: "nonceB",
+    };
+    writeFileSync(inputIn(dir).intentPath, `${JSON.stringify(planted, null, 2)}\n`);
 
     const replayed = recordSpawnAttempt({
       permit: first.permit,
@@ -261,6 +270,31 @@ test("a stale permit cannot record a spawn against a later intent at the same pa
     assert.equal(reloaded.intent.runNonce, "nonceB");
     assert.equal(reloaded.intent.spawnPid, null);
     assert.equal(reloaded.intent.processIdentity, null);
+    assert.equal(answersAfterReboot(reloaded.intent).started, false);
+  });
+});
+
+test("a second persist on an unstarted path does not mint another spendable permit", () => {
+  // Defect: persistRunIntent refused only "spawned" and "unreadable". Two
+  // calls on one unstarted path minted two simultaneously spendable permits.
+  withDir((dir) => {
+    const first = persistRunIntent(inputIn(dir));
+    assert.equal(first.ok, true, first.ok ? "" : first.reason);
+    if (!first.ok) return;
+    assert.ok(isSpawnPermit(first.permit));
+
+    const second = persistRunIntent(inputIn(dir));
+    assert.equal(second.ok, false);
+    assert.equal(second.permit, null);
+    assert.equal(isSpawnPermit(second.permit), false);
+    assert.match(second.reason, /unresolvable|refusing to overwrite/);
+
+    const reloaded = readRunIntent(inputIn(dir).intentPath);
+    assert.equal(reloaded.ok, true, reloaded.ok ? "" : reloaded.reason);
+    if (!reloaded.ok) return;
+    assert.equal(reloaded.intent.runId, first.intent.runId);
+    assert.equal(reloaded.intent.runNonce, first.intent.runNonce);
+    assert.equal(reloaded.intent.spawnAttemptedAt, null);
     assert.equal(answersAfterReboot(reloaded.intent).started, false);
   });
 });

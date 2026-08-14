@@ -21,8 +21,9 @@
  * collect Git truth after
  * parse the handoff
  * evaluate the success conjunction
+ * prove the writer exit (before any release)
+ * release the lease only when that proof exists
  * write the durable result
- * release the lease
  * ```
  *
  * Spawn, clock, filesystem, Git runner, process probe, capacity, leases, wait, and tree-kill
@@ -756,6 +757,7 @@ export async function executeRun(
   let capacityHeld = true;
   let stillRunning = false;
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
+  let exitProof: WriterExitProofV1 | null = null;
 
   const runNonce = normaliseRunNonce(request.runNonce);
   if (runNonce === null) {
@@ -778,8 +780,9 @@ export async function executeRun(
 
   const releaseHeld = (): void => {
     if (releasedLeaseId === null) {
-      const withholdProductionWriter = heldLease.kind === "PRODUCTION_WRITER"
-        && (stillRunning || (orphanScan.performed && orphanScan.liveSightings.length > 0));
+      // One predicate for the act and the record. A proof computed after
+      // release can only relabel what already happened.
+      const withholdProductionWriter = heldLease.kind === "PRODUCTION_WRITER" && exitProof === null;
       if (!withholdProductionWriter) {
         const before = deps.leases.list();
         const remaining = releaseLease(before, heldLease.leaseId);
@@ -1074,8 +1077,10 @@ export async function executeRun(
         : {}),
     });
 
-    // Writer-release is an exit proof or it is false. The probe is always of
-    // the recorded holder. askWriterLiveness is not consulted.
+    // Writer-release is an exit proof or it is false. Compute the proof
+    // before the irreversible release. releasedLeaseId is passed as the
+    // lease this proof would authorise releasing; the field is kept only
+    // if the store then shows that lease gone.
     const observation = observeRecordedHolder(deps.probe, processIdentity);
     orphanScan = collectWriterOrphans({
       scanOrphans: deps.scanOrphans,
@@ -1083,18 +1088,21 @@ export async function executeRun(
       runNonce,
     });
 
-    releaseHeld();
-    const proof = proveWriterExit({
+    exitProof = proveWriterExit({
       recordedLeaseKind: heldLease.kind,
       recordedLeaseId: heldLease.leaseId,
-      releasedLeaseId,
+      releasedLeaseId: heldLease.leaseId,
       recordedIdentity: processIdentity,
       observation,
       probedPid: processIdentity === null ? null : processIdentity.pid,
       orphanScanPerformed: orphanScan.performed,
       orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
     });
-    const writerFact = writerReleaseEvidence(proof);
+    releaseHeld();
+    if (heldLease.kind === "PRODUCTION_WRITER" && releasedLeaseId !== heldLease.leaseId) {
+      exitProof = null;
+    }
+    const writerFact = writerReleaseEvidence(exitProof);
 
     const reason = conjunction.ok
       ? "every success conjunct holds"
@@ -1140,10 +1148,16 @@ function collectWriterOrphans(input: {
   if (input.scanOrphans === undefined) {
     return { performed: false, sightings: [], liveSightings: [] };
   }
-  const createdNotBefore = input.recorded?.creationDate ?? "";
-  const sightings = [...input.scanOrphans({ runNonce: input.runNonce, createdNotBefore })];
-  const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(sighting, input.runNonce));
-  return { performed: true, sightings, liveSightings };
+  try {
+    const createdNotBefore = input.recorded?.creationDate ?? "";
+    const sightings = [...input.scanOrphans({ runNonce: input.runNonce, createdNotBefore })];
+    const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(sighting, input.runNonce));
+    return { performed: true, sightings, liveSightings };
+  } catch {
+    // A throwing CIM/WMI scan is not a completed scan. Escaping executeRun
+    // used to release the writer lease from `finally` with no result.json.
+    return { performed: false, sightings: [], liveSightings: [] };
+  }
 }
 
 /**

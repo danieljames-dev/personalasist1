@@ -398,6 +398,16 @@ function finding(result: Awaited<ReturnType<typeof executeRun>>, name: SuccessCo
   return hit;
 }
 
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 2000; i++) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
 // ---------------------------------------------------------------------------
 // Happy path: the conjunction can be true
 // ---------------------------------------------------------------------------
@@ -1114,6 +1124,78 @@ test("a child that survives kill and killTree after a failed record is still run
   assert.equal(hung.exited, false, "the child must still be alive");
 });
 
+test("a process death between spawn and its record refuses a same-runId restart", async () => {
+  // Defect: spawnAttemptedAt was written only after deps.spawn returned.
+  // Director death in that window left spawnAttemptedAt=null / spawnPid=null.
+  // persist treated "unstarted" as resumable, minted a fresh permit, and
+  // acquireLease returned ok for the same runId. Two executors in one worktree.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const filesAtCrash = new Map<string, string>();
+  const original = fs.writeDurable.bind(fs);
+  fs.writeDurable = (path, utf8) => {
+    original(path, utf8);
+    if (path.endsWith("intent.json") && filesAtCrash.size === 0) {
+      for (const [key, value] of fs.files) filesAtCrash.set(key, value);
+    }
+  };
+
+  const hung = hangingProcess();
+  const firstSpawn = trackingSpawn(() => hung);
+  const leases = memoryLeases();
+  const first = executeRun(request(), {
+    clock: createFixedClock(NOW),
+    fs,
+    spawn: firstSpawn,
+    git: matchingGit(),
+    probe: probeFound(RECORDED),
+    capacity: memoryCapacity(),
+    leases,
+    wait: () => new Promise(() => {}),
+    killTree: () => undefined,
+  });
+
+  await until(() => firstSpawn.calls === 1 && filesAtCrash.size > 0, "first persist and spawn");
+
+  const crashIntent = filesAtCrash.get(join(RUN_ROOT, "intent.json"));
+  assert.ok(crashIntent, "persist must have landed before spawn returned");
+  const crashParsed = runIntentFrom(JSON.parse(crashIntent) as unknown);
+  assert.equal(crashParsed.ok, true, crashParsed.ok ? "" : crashParsed.reason);
+  if (!crashParsed.ok) return;
+  assert.equal(crashParsed.intent.spawnAttemptedAt, null);
+  assert.equal(crashParsed.intent.spawnPid, null);
+  assert.equal(crashParsed.intent.processIdentity, null);
+  const crashAnswers = answersAfterReboot(crashParsed.intent);
+  assert.equal(crashAnswers.supposedToRun, true);
+  assert.equal(crashAnswers.started, false);
+
+  const secondSpawn = trackingSpawn(() => exitingProcess());
+  const second = await executeRun(request(), {
+    clock: createFixedClock(NOW),
+    fs: memoryFs({
+      files: Object.fromEntries(filesAtCrash),
+      dirs: [CWD, RUN_ROOT],
+    }),
+    spawn: secondSpawn,
+    git: matchingGit(),
+    probe: probeFound(RECORDED),
+    capacity: memoryCapacity(),
+    leases: memoryLeases(leases.list()),
+    wait: async () => undefined,
+    killTree: () => undefined,
+  });
+
+  assert.equal(secondSpawn.calls, 0, second.reason);
+  assert.equal(second.spawned, false, second.reason);
+  assert.match(second.reason, /unresolvable|existing intent|refusing to overwrite/);
+  assert.equal(hung.exited, false, "the first child must still be alive");
+  assert.equal(firstSpawn.calls, 1);
+
+  hung.forceExit(1);
+  await first;
+});
+
 // ---------------------------------------------------------------------------
 // Real wiring
 // ---------------------------------------------------------------------------
@@ -1340,6 +1422,63 @@ test("a live same-nonce grandchild with parent UNAVAILABLE withholds the writer 
   assert.ok(
     killed.includes(7777),
     "the nonce sweep must run on a clean exit, not only on cancellation",
+  );
+});
+
+test("an ALIVE probe of the recorded holder leaves the production-writer lease held", async () => {
+  // Defect: releaseHeld withheld only on stillRunning || liveSightings.
+  // child.once("exit") made stillRunning false, the scan was empty, and the
+  // lease was released while holderLiveness of the recorded identity was ALIVE.
+  // proveWriterExit ran after the act and could only relabel it.
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      foundObservation(RECORDED),
+    ]),
+    scanOrphans: () => [],
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-1"),
+    "ALIVE is not a writer-exit proof; the production-writer lease must stay held",
+  );
+});
+
+test("a throwing orphan scan leaves the writer lease held and still writes a durable result", async () => {
+  // Defect: collectWriterOrphans called scanOrphans unguarded. A CIM/WMI
+  // throw escaped executeRun after finally released the PRODUCTION_WRITER
+  // lease, and no result.json was written.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "exited" },
+    ]),
+    scanOrphans: () => {
+      throw new Error("CIM/WMI error");
+    },
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  const raw = fs.files.get(join(RUN_ROOT, "result.json"));
+  assert.ok(raw, "a throwing scanOrphans must still write result.json");
+  const parsed = JSON.parse(raw) as { productionWriterLeaseReleasedByThisRun: boolean };
+  assert.equal(parsed.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-1"),
+    "a scan that could not finish must leave the production-writer lease held",
   );
 });
 

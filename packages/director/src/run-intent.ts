@@ -2,11 +2,12 @@
  * The record written before anything is launched.
  *
  * A run intent says: the Director decided to launch this, with these arguments, in this directory.
- * It is written and flushed to disk *before* the process is spawned, so that a crash in between is
- * recoverable and never reads as "nothing was ever attempted". After a reboot, with the process
- * not alive, the file has to answer: was this supposed to run; did it start; which worktree, branch,
- * mission and work item; what exact executable and argv; the run nonce; when the intent was written;
- * when the spawn was observed.
+ * It is written and flushed to disk *before* the process is spawned, so a crash in between never
+ * reads as "nothing was ever attempted". An existing readable intent at this path is unresolvable,
+ * not resumable: a crash may have left a live child, and the file cannot tell that from a clean
+ * abort. After a reboot the file still answers: was this supposed to run; did it start; which
+ * worktree, branch, mission and work item; what exact executable and argv; the run nonce; when
+ * the intent was written; when the spawn was observed.
  *
  * ## The ordering is the property
  *
@@ -176,6 +177,10 @@ export interface RebootAnswersV1 {
  *
  * If any of those steps fail, `permit` is null and a spawn is impossible. The failure is the
  * result, not a log line next to a successful launch.
+ *
+ * An existing readable intent at this path is unresolvable, not resumable. `existing !== "none"`
+ * is a refusal — including `"unstarted"`. A crash between persist and `recordSpawnAttempt` leaves
+ * the same bytes as a clean abort, and a reminted permit is a second executor.
  */
 export function persistRunIntent(
   input: PersistRunIntentInputV1,
@@ -186,11 +191,14 @@ export function persistRunIntent(
 
   const { intent, intentPath } = built;
   const existing = existingIntentOn(store, intentPath);
-  if (existing === "spawned") {
-    return refused("a recorded spawn already exists; refusing to overwrite it");
-  }
-  if (existing === "unreadable") {
-    return refused("an existing intent at this path is unreadable; refusing to overwrite it");
+  if (existing !== "none") {
+    if (existing === "spawned") {
+      return refused("a recorded spawn already exists; refusing to overwrite it");
+    }
+    if (existing === "unreadable") {
+      return refused("an existing intent at this path is unreadable; refusing to overwrite it");
+    }
+    return refused("an existing intent at this path is unresolvable; refusing to overwrite it");
   }
 
   const serialised = serialiseIntent(intent);
