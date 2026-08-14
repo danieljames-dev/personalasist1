@@ -114,8 +114,11 @@ export function selectExecutor(input: {
   probedAt: IsoTimestamp;
 }): ExecutorDiscoveryV1 {
   const considered = input.candidates.map((c) => c.path);
+  // Same spawnable-exe rule as discoverGrokExecutor / discoverClaudeExecutor:
+  // Win32 strips trailing dots and spaces, so `grok.cmd.` opens `grok.cmd`.
+  // A closed suffix list with an open boundary is how those disagreed.
   const usable = input.candidates.filter(
-    (c) => c.isFile && c.version !== null && !/\.(cmd|bat|ps1)$/i.test(c.path),
+    (c) => c.isFile && c.version !== null && isDirectlySpawnableWindowsExe(c.path),
   );
 
   if (usable.length === 0) {
@@ -305,7 +308,19 @@ export function buildLaunchPlan(input: {
  * so that a future call site which reintroduces a shell cannot also quietly reintroduce injection —
  * the argv would already have been rejected here.
  */
-const SHELL_METACHARACTERS = /[;&|`$><\n\r]|\$\(|&&|\|\|/;
+// `>` is a redirect unless it is the arrow in `=>`, which node -e scripts use.
+const SHELL_METACHARACTERS = /[;&|`$<\n\r]|\$\(|&&|\|\||(?<![=])>/;
+
+/**
+ * The live discovery ladder only returns a `.exe`. Trailing dots/spaces on the
+ * last segment are stripped by Win32 before open, so they are refused here
+ * rather than treated as a distinct suffix.
+ */
+export function isDirectlySpawnableWindowsExe(filePath: string): boolean {
+  const base = filePath.replace(/\\/g, "/").split("/").pop() ?? "";
+  if (base === "" || /[. ]$/.test(base)) return false;
+  return /\.exe$/i.test(base);
+}
 
 export function argvIsSafe(argv: readonly string[]): { safe: boolean; offending: string | null } {
   for (const token of argv) {

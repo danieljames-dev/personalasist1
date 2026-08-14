@@ -113,18 +113,19 @@ const REDACTED = "[REDACTED]";
  * Incomplete secrets are held in a small suffix, never in the whole buffer. Scanning a 16 MiB
  * flood for a prefix of `sk-` at every index is how a bound-test hangs the process.
  */
-const MAX_TOKEN_HOLD = 128;
+/** Line-sized token hold. Still bounded so a 16 MiB flood cannot be scanned unbounded. */
 const MAX_PEM_HOLD = 64 * 1024;
+const MAX_TOKEN_HOLD = MAX_PEM_HOLD;
 const MAX_STARTER_LEN = 14; // "Authorization:"
 
 /** Longest starter we have to recognise as a *prefix* at a chunk boundary. */
 const HOLD_STARTERS: ReadonlyArray<{ readonly min: string; readonly full: string }> = [
   { min: "Auth", full: "Authorization:" },
-  { min: "Bear", full: "Bearer " },
-  { min: "ghp", full: "ghp_" },
-  { min: "github_pat", full: "github_pat_" },
-  { min: "sk-", full: "sk-" },
-  { min: "AKI", full: "AKIA" },
+  { min: "B", full: "Bearer " },
+  { min: "g", full: "ghp_" },
+  { min: "g", full: "github_pat_" },
+  { min: "s", full: "sk-" },
+  { min: "A", full: "AKIA" },
   { min: "-----BEGIN", full: "-----BEGIN " },
 ];
 
@@ -357,8 +358,10 @@ function splitHoldback(pending: string): { emit: string; hold: string } {
   let emit = pending.slice(0, lineStart) + split.emit;
   let hold = split.hold;
   if (hold.length > MAX_TOKEN_HOLD) {
-    emit += hold.slice(0, hold.length - MAX_TOKEN_HOLD);
-    hold = hold.slice(hold.length - MAX_TOKEN_HOLD);
+    // Mirror the PEM overflow: emit the whole hold. Retaining a starter-less
+    // tail is how a 358-char token leaked after the front was redacted.
+    emit += hold;
+    hold = "";
   }
   return { emit, hold };
 }
@@ -397,9 +400,17 @@ function trailingStarterPrefix(text: string): number {
 
 function isStarterPrefix(rest: string): boolean {
   const lower = rest.toLowerCase();
+  if (lower.length === 0) return false;
   for (const starter of HOLD_STARTERS) {
     const full = starter.full.toLowerCase();
-    if (full.startsWith(lower) && lower.length >= starter.min.length && lower.length < full.length) {
+    // Min is 1 for token starters so "g"/"B"/"s" hold. Authorization stays
+    // "Auth" and AKIA stays "AKI" so a 16 MiB flood of `a` is not held back
+    // one byte at a time.
+    if (
+      full.startsWith(lower)
+      && lower.length >= starter.min.length
+      && lower.length < full.length
+    ) {
       return true;
     }
   }

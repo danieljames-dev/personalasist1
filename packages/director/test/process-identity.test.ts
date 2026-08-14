@@ -475,6 +475,60 @@ test("a shadowed orphan scan that fails does not report an empty match list", ()
   );
 });
 
+test("an earlier observed creation instant is UNKNOWN, not DEAD_CONFIRMED", () => {
+  const earlier = found({ creationDate: "2026-08-13T09:00:00.000Z", omitNonce: true });
+  assert.equal(holderLiveness(RECORDED, earlier), "UNKNOWN");
+  assert.notEqual(holderLiveness(RECORDED, earlier), "DEAD_CONFIRMED");
+});
+
+test("a strictly later observed instant with a different image is still DEAD_CONFIRMED", () => {
+  const later = found({
+    creationDate: T1,
+    executablePath: NODE,
+    omitNonce: true,
+  });
+  assert.equal(holderLiveness(RECORDED, later), "DEAD_CONFIRMED");
+});
+
+test("equal instants in two encodings stay MATCH / ALIVE", () => {
+  const dmtf = found({
+    creationDate: "20260813100000.000000+000",
+  });
+  assert.equal(compareProcessIdentity(RECORDED, dmtf), "MATCH");
+  assert.equal(holderLiveness(RECORDED, dmtf), "ALIVE");
+});
+
+test("unreadable > 0 is UNAVAILABLE and distinguishable from unreadable 0", () => {
+  const unread = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":1}",
+    stderr: "",
+  });
+  assert.equal(unread.outcome, "UNAVAILABLE");
+  const empty = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}",
+    stderr: "",
+  });
+  assert.equal(empty.outcome, "SCANNED");
+  if (empty.outcome === "SCANNED") assert.deepEqual(empty.sightings, []);
+});
+
+test("the orphan-scan script restricts unreadable to the holder descendant chain", () => {
+  let script = "";
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: (_cmd, args) => {
+      script = String(args[3] ?? "");
+      return { status: 0, stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}", stderr: "" };
+    },
+  });
+  scanner({ runNonce: NONCE_A, createdNotBefore: "", holderPid: 4812 });
+  assert.match(script, /unreadable/);
+  assert.match(script, /ParentProcessId/);
+  assert.match(script, /holderPid/);
+  assert.match(script, /\$desc/);
+});
+
 test("the orphan scanner keeps only this nonce and drops processes created too early", () => {
   const scanner = createWindowsOrphanScanner({
     spawnSync: () => ({

@@ -109,6 +109,7 @@ export interface NonceBearingProcessV1 {
   readonly pid: number;
   readonly creationDate?: string;
   readonly runNonce?: string;
+  readonly parentPid?: number;
 }
 
 export type OrphanScanInterpretationV1 =
@@ -235,10 +236,12 @@ export function holderLiveness(
   if (verdict === "MATCH") return "ALIVE";
   if (verdict === "UNVERIFIABLE") return "UNKNOWN";
 
-  // MISMATCH. Same slot, later start: the original process is gone — but only when the
-  // nonce does not contradict that certificate. The nonce is this module's own
-  // "survives PID reuse outright" evidence; a date-encoding difference that still
-  // carries our nonce is UNKNOWN, not death. Unparseable-and-unequal is UNKNOWN.
+  // MISMATCH. Same slot, *later* start: the original process is gone — but only when
+  // the nonce does not contradict that certificate and the observed instant is
+  // strictly later than the recorded one. An earlier instant, or one that cannot
+  // be ordered, is UNKNOWN: two timestamps that cannot both be true prove nothing
+  // about the holder. A date-encoding difference that still carries our nonce is
+  // UNKNOWN, not death.
   if (observation.creationDate !== undefined) {
     const dates = compareCreationDates(recorded.creationDate, observation.creationDate);
     if (dates === "DIFFERENT") {
@@ -246,7 +249,12 @@ export function holderLiveness(
       if (observedNonce !== null && observedNonce === recorded.runNonce) {
         return "UNKNOWN";
       }
-      return "DEAD_CONFIRMED";
+      const recordedMs = parseProcessTimestamp(recorded.creationDate);
+      const observedMs = parseProcessTimestamp(observation.creationDate);
+      if (recordedMs !== null && observedMs !== null && observedMs > recordedMs) {
+        return "DEAD_CONFIRMED";
+      }
+      return "UNKNOWN";
     }
   }
   return "UNKNOWN";
@@ -552,15 +560,31 @@ export function interpretWindowsOrphanScanOutput(input: {
     return { outcome: "UNAVAILABLE", reason: "scan did not return a process list" };
   }
 
+  // unreadable > 0 is not an empty match list. A PEB read that failed on a
+  // descendant of the recorded holder is UNKNOWN about that occupant, not
+  // "not ours". Missing `unreadable` is treated as 0 so a well-formed empty
+  // envelope from a host that could read every descendant stays SCANNED.
+  const unreadableRaw = parsed.unreadable;
+  if (typeof unreadableRaw === "number") {
+    if (!Number.isInteger(unreadableRaw) || unreadableRaw < 0) {
+      return { outcome: "UNAVAILABLE", reason: "scan unreadable count is not a usable integer" };
+    }
+    if (unreadableRaw > 0) {
+      return { outcome: "UNAVAILABLE", reason: "unreadable descendants" };
+    }
+  }
+
   const sightings: NonceBearingProcessV1[] = [];
   for (const row of rows) {
     if (!isUsablePid(row.pid)) continue;
     const runNonce = asUsableToken(row.runNonce);
     const creationDate = normalisedCreationDate(row.creationDate);
+    const parentPid = isUsablePid(row.parentPid) ? row.parentPid : undefined;
     sightings.push({
       pid: row.pid,
       ...(creationDate !== null ? { creationDate } : {}),
       ...(runNonce !== null ? { runNonce } : {}),
+      ...(parentPid !== undefined ? { parentPid } : {}),
     });
   }
 
@@ -580,6 +604,7 @@ export function interpretWindowsOrphanScanOutput(input: {
 export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly runNonce: string;
   readonly createdNotBefore: string;
+  readonly holderPid?: number;
 }) => readonly NonceBearingProcessV1[] {
   const spawn = host?.spawnSync ?? spawnSync;
   return (query) => {
@@ -588,7 +613,8 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       throw new Error("orphan scan unavailable: run nonce is empty or contains control bytes");
     }
 
-    const script = windowsOrphanScanScript(psSingleQuoted(runNonce));
+    const holderPid = isUsablePid(query.holderPid) ? query.holderPid : 0;
+    const script = windowsOrphanScanScript(psSingleQuoted(runNonce), holderPid);
     let result: WindowsProbeSpawnResultV1;
     try {
       result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -620,10 +646,48 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     }
 
     return interpreted.sightings.filter((sighting) => {
-      if (asUsableToken(sighting.runNonce) !== runNonce) return false;
+      const nonce = asUsableToken(sighting.runNonce);
+      const nonceMatch = nonce === runNonce;
+      const descendant = holderPid > 0
+        && sighting.pid !== holderPid
+        && isInHolderTree(sighting, holderPid, interpreted.sightings);
+      if (!nonceMatch && !descendant) return false;
       return sightingCreatedNotBefore(sighting, query.createdNotBefore);
     });
   };
+}
+
+function isInHolderTree(
+  sighting: NonceBearingProcessV1,
+  holderPid: number,
+  rows: readonly NonceBearingProcessV1[],
+): boolean {
+  return descendantPidsOf(holderPid, rows).has(sighting.pid);
+}
+
+/** Walk ParentProcessId from CIM rows. No PEB read is required. */
+export function descendantPidsOf(
+  holderPid: number,
+  rows: readonly { readonly pid: number; readonly parentPid?: number }[],
+): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const row of rows) {
+    if (row.parentPid === undefined) continue;
+    const list = children.get(row.parentPid) ?? [];
+    list.push(row.pid);
+    children.set(row.parentPid, list);
+  }
+  const out = new Set<number>();
+  const stack = [holderPid];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const child of children.get(current) ?? []) {
+      if (out.has(child)) continue;
+      out.add(child);
+      stack.push(child);
+    }
+  }
+  return out;
 }
 
 function asFoundObservation(
@@ -840,7 +904,7 @@ function sightingCreatedNotBefore(
   return Date.parse(at) >= Date.parse(floor);
 }
 
-function windowsOrphanScanScript(quotedNonce: string): string {
+function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string {
   return [
     "$ProgressPreference = 'SilentlyContinue';",
     "try {",
@@ -880,18 +944,44 @@ function windowsOrphanScanScript(quotedNonce: string): string {
     "}",
     "'@ -ErrorAction Stop;",
     `$target = ${quotedNonce};`,
+    `$holderPid = ${holderPid};`,
     "$rows = Get-CimInstance Win32_Process -ErrorAction Stop;",
-    "$hits = New-Object System.Collections.Generic.List[object];",
+    "$byParent = @{};",
     "foreach ($p in $rows) {",
-    "  $n = $null;",
-    "  if ($p.CommandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
-    "  if (-not $n) { $n = [AionPebEnv]::GetNonce([int]$p.ProcessId) };",
-    "  if ($n -eq $target) {",
-    "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
-    "    [void]$hits.Add([ordered]@{ pid = [int]$p.ProcessId; creationDate = $cd; runNonce = $n });",
+    "  $pp = [int]$p.ParentProcessId;",
+    "  if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = New-Object System.Collections.Generic.List[object] };",
+    "  [void]$byParent[$pp].Add($p);",
+    "}",
+    "$desc = New-Object 'System.Collections.Generic.HashSet[int]';",
+    "if ($holderPid -gt 0) {",
+    "  $stack = New-Object System.Collections.Generic.Stack[int];",
+    "  $stack.Push([int]$holderPid);",
+    "  while ($stack.Count -gt 0) {",
+    "    $cur = $stack.Pop();",
+    "    if ($byParent.ContainsKey($cur)) {",
+    "      foreach ($ch in $byParent[$cur]) {",
+    "        $id = [int]$ch.ProcessId;",
+    "        if ($desc.Add($id)) { $stack.Push($id) };",
+    "      }",
+    "    }",
     "  }",
     "}",
-    "[ordered]@{ ok = $true; processes = $hits } | ConvertTo-Json -Compress -Depth 5;",
+    "$hits = New-Object System.Collections.Generic.List[object];",
+    "$unreadable = 0;",
+    "foreach ($p in $rows) {",
+    "  $id = [int]$p.ProcessId;",
+    "  $isDesc = $desc.Contains($id);",
+    "  $n = $null;",
+    "  if ($p.CommandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
+    "  if (-not $n) { $n = [AionPebEnv]::GetNonce($id) };",
+    "  if ($isDesc -and -not $n) { $unreadable++ };",
+    "  if ($n -eq $target -or $isDesc) {",
+    "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
+    "    $ppid = [int]$p.ParentProcessId;",
+    "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid });",
+    "  }",
+    "}",
+    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",
     "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",

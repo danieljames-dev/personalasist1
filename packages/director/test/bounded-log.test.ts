@@ -35,7 +35,8 @@ function logger(): {
   return { log, stdout, stderr };
 }
 
-function fill(bytes: number, code = 0x61): Buffer {
+/** 0x78 is not a secret-starter prefix, so a bound flood is not held back one byte. */
+function fill(bytes: number, code = 0x78): Buffer {
   return Buffer.alloc(bytes, code);
 }
 
@@ -76,7 +77,7 @@ test("live tail one byte over the bound drops the head, keeps the tail, and name
   assert.deepEqual(live.subarray(0, marker.length), marker);
   const payload = live.subarray(marker.length);
   assert.equal(payload.length, LIVE_TAIL_BYTES);
-  assert.equal(payload[0], 0x61);
+  assert.equal(payload[0], 0x78);
   assert.equal(payload[payload.length - 1], 0x5a);
 });
 
@@ -100,7 +101,7 @@ test("when the live tail is truncated the head is what goes and the tail is what
 
 test("file log one byte under the bound is appended in full with no marker", () => {
   const { log, stdout } = logger();
-  log.write("stdout", fill(FILE_LOG_BYTES - 1, 0x62));
+  log.write("stdout", fill(FILE_LOG_BYTES - 1));
   const report = log.report();
   assert.equal(report.stdout.fileTruncated, false);
   assert.equal(report.stdout.droppedFileBytes, 0);
@@ -111,7 +112,7 @@ test("file log one byte under the bound is appended in full with no marker", () 
 
 test("file log exactly at the bound is appended in full with no marker", () => {
   const { log, stdout } = logger();
-  log.write("stdout", fill(FILE_LOG_BYTES, 0x62));
+  log.write("stdout", fill(FILE_LOG_BYTES));
   const report = log.report();
   assert.equal(report.stdout.fileTruncated, false);
   assert.equal(report.stdout.droppedFileBytes, 0);
@@ -121,7 +122,7 @@ test("file log exactly at the bound is appended in full with no marker", () => {
 
 test("file log one byte over the bound replaces the sink with marker plus tail", () => {
   const { log, stdout } = logger();
-  log.write("stdout", Buffer.concat([fill(FILE_LOG_BYTES, 0x62), Buffer.from("Z")]));
+  log.write("stdout", Buffer.concat([fill(FILE_LOG_BYTES), Buffer.from("Z")]));
   const report = log.report();
   assert.equal(report.stdout.fileTruncated, true);
   assert.equal(report.stdout.droppedFileBytes, 1);
@@ -300,4 +301,59 @@ test("a private key block split across two writes is still redacted", () => {
   assert.match(text, /before/);
   assert.match(text, /after/);
   assert.match(text, /\[REDACTED\]/);
+});
+
+test("every split point of each secret shape redacts the raw token", () => {
+  const secrets: ReadonlyArray<{ line: string; token: string }> = [
+    { line: "clone ghp_abcdefghijklmnopqrstuvwxyz012345 extra\n", token: "ghp_abcdefghijklmnopqrstuvwxyz012345" },
+    { line: "key: sk-abcdefghijklmnopqrstuvwxyz012345\n", token: "sk-abcdefghijklmnopqrstuvwxyz012345" },
+    { line: "aws=AKIAIOSFODNN7EXAMPLE extra\n", token: "AKIAIOSFODNN7EXAMPLE" },
+    { line: "pat=github_pat_abcdefghijklmnopqrstuvwxyz extra\n", token: "github_pat_abcdefghijklmnopqrstuvwxyz" },
+    { line: "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig\n", token: "eyJhbGciOiJIUzI1NiJ9.payload.sig" },
+  ];
+  for (const secret of secrets) {
+    for (let cut = 0; cut <= secret.line.length; cut += 1) {
+      const { log, stdout } = logger();
+      log.write("stdout", secret.line.slice(0, cut));
+      log.write("stdout", secret.line.slice(cut));
+      log.flush();
+      const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
+      assert.equal(
+        text.includes(secret.token),
+        false,
+        `token leaked at cut=${cut} for ${secret.token.slice(0, 12)}…: ${text}`,
+      );
+    }
+  }
+});
+
+test("a 358-char bearer token is redacted at overflow cut points", () => {
+  const token = `eyJ${"A".repeat(200)}.${"B".repeat(80)}.${"C".repeat(56)}rEaLsIgNaTuRe9911`;
+  assert.equal(token.length, 358);
+  const line = `calling api\nAuthorization: Bearer ${token}\n`;
+  for (const cut of [60, 120, 150, 160, 200, 260, 300]) {
+    const { log, stdout } = logger();
+    log.write("stdout", line.slice(0, cut));
+    log.write("stdout", line.slice(cut));
+    log.flush();
+    const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
+    assert.equal(text.includes(token), false, `358-char token leaked at cut=${cut}`);
+    assert.equal(text.includes("rEaLsIgNaTuRe9911"), false, `signature leaked at cut=${cut}`);
+    assert.match(text, /\[REDACTED\]/);
+  }
+});
+
+test("a 1 MiB non-secret flood still completes promptly", () => {
+  const { log } = logger();
+  const started = Date.now();
+  const chunk = "the quick brown fox jumps over the lazy dog\n";
+  let written = 0;
+  while (written < 1024 * 1024) {
+    log.write("stdout", chunk);
+    written += chunk.length;
+  }
+  log.flush();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 15_000, `1 MiB flood took ${elapsed}ms`);
+  assert.ok(log.liveTail("stdout").length > 0);
 });

@@ -31,7 +31,7 @@
  * a real one.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import {
@@ -49,7 +49,7 @@ import {
   type ExecutorDiscoveryResultV1,
   type FileSystemProbe,
 } from "./executor-discovery.js";
-import type { ExecutorNameV1 } from "./executors.js";
+import { argvIsSafe, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
 import {
   collectGitTruth,
   verifyGitTruth,
@@ -58,6 +58,7 @@ import {
   type GitVerdictV1,
 } from "./git-truth.js";
 import {
+  artifactPathWithinRoot,
   findHandoffContradictions,
   parseHandoff,
   type ExecutorHandoffV1,
@@ -65,7 +66,13 @@ import {
 } from "./handoff.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
+  createNodeLeaseStore,
+  sandboxDirectorStoreRoot,
+} from "./lease-store.js";
+import {
   acquireLease,
+  heartbeat,
+  LEASE_TTL_MS,
   releaseLease,
   type LeaseKindV1,
   type LeaseV1,
@@ -73,6 +80,7 @@ import {
 import {
   captureProcessIdentity,
   createWindowsOrphanScanner,
+  descendantPidsOf,
   detectOrphan,
   holderLiveness,
   normaliseRunNonce,
@@ -110,7 +118,8 @@ export type SuccessConjunctNameV1 =
   | "artifactsInsideRunRoot"
   | "gitAgreesWithHandoff"
   | "spendIsZero"
-  | "productionClaimAgrees";
+  | "productionClaimAgrees"
+  | "executorTreeIsGone";
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -181,6 +190,7 @@ export interface OrphanSightingV1 {
   readonly pid: number;
   readonly creationDate?: string;
   readonly runNonce?: string;
+  readonly parentPid?: number;
 }
 
 /**
@@ -201,7 +211,8 @@ export interface RunManagerDepsV1 {
   readonly git: GitRunner;
   readonly probe: HostProcessProbe;
   readonly capacity: CapacityGateV1;
-  readonly leases: LeaseStoreV1;
+  /** When omitted, {@link createNodeLeaseStore} under {@link sandboxDirectorStoreRoot}. */
+  readonly leases?: LeaseStoreV1;
   readonly wait: (ms: number) => Promise<void>;
   readonly killTree: (pid: number) => void;
   /**
@@ -209,8 +220,17 @@ export interface RunManagerDepsV1 {
    * {@link createWindowsOrphanScanner}. A missing implementation used to
    * withhold every production-writer lease forever.
    */
-  readonly scanOrphans?: (query: { runNonce: string; createdNotBefore: string }) => readonly OrphanSightingV1[];
+  readonly scanOrphans?: (query: {
+    runNonce: string;
+    createdNotBefore: string;
+    holderPid?: number;
+  }) => readonly OrphanSightingV1[];
   readonly logSinks?: { readonly stdout: LogSinkV1; readonly stderr: LogSinkV1 };
+  /**
+   * Re-check each parsed artifact after resolving junctions. Default is
+   * `realpathSync.native`, fail-closed on throw.
+   */
+  readonly resolveArtifactPath?: (absolutePath: string) => string;
   /**
    * Ignored by the writer-exit proof. Kept so a test can still inject a
    * death certificate for another identity and observe that the field stays
@@ -254,6 +274,11 @@ export interface ExecuteRunRequestV1 {
  */
 export type LaunchRunRequestV1 = Omit<ExecuteRunRequestV1, "executablePath" | "argv"> & {
   readonly promptPath: string;
+  /**
+   * Defaults to `IMPLEMENT` (measured implementer argv). `ADVERSARIAL_REVIEW`
+   * is the only role that must not receive write permission.
+   */
+  readonly role?: ExecutorRoleV1;
 };
 
 export interface RunResultV1 {
@@ -302,6 +327,22 @@ export interface WriterExitProofV1 {
   readonly [WRITER_EXIT_PROOF]: true;
 }
 
+/**
+ * Exit fact taken from the spawn handle this run owns, used only when identity
+ * capture lost the race against a child that had already exited.
+ */
+export interface OwnedHandleExitV1 {
+  readonly spawnOccurred: boolean;
+  readonly handleExited: boolean;
+  readonly exitSettledWithCode: boolean;
+  /**
+   * Identity is absent because capture saw `NOT_FOUND` after this handle had
+   * already exited. Distinct from probe `UNAVAILABLE` while the child is still
+   * alive, which must keep denying.
+   */
+  readonly identityAbsentBecauseAlreadyExited: boolean;
+}
+
 export interface WriterExitProofInputV1 {
   /**
    * This module's verdict after the SOFT/HARD ladder (and mustHalt). The first
@@ -319,6 +360,9 @@ export interface WriterExitProofInputV1 {
   readonly probedPid: number | null;
   readonly orphanScanPerformed: boolean;
   readonly orphanSightings: readonly OrphanSightingV1[] | null;
+  /** Sightings not proven absent from this run's tree. Consumed here. */
+  readonly liveSightings?: readonly OrphanSightingV1[] | null;
+  readonly ownedHandleExit?: OwnedHandleExitV1 | null;
 }
 
 /**
@@ -350,15 +394,36 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
   try {
     // Fail closed: only an explicit false proceeds. A missing field must not mint a proof.
     if (input.processStillRunning !== false) return null;
-    if (input.recordedLeaseKind !== "PRODUCTION_WRITER") return null;
+    // Kind is a label, not the physical fact. The proof is "the recorded holder
+    // of THIS lease is gone". The reported writer-release field stays kind-scoped.
+    // A missing kind is "no lease was recorded". Any of the five kinds may mint;
+    // the reported writer-release field stays scoped to PRODUCTION_WRITER.
+    if (input.recordedLeaseKind === null) return null;
     if (input.recordedLeaseId === null || input.releasedLeaseId === null) return null;
     if (input.releasedLeaseId !== input.recordedLeaseId) return null;
-    if (input.recordedIdentity === null) return null;
+    if (!input.orphanScanPerformed) return null;
+    if (input.orphanSightings === null) return null;
+    const live = input.liveSightings ?? [];
+    if (live.length > 0) return null;
+
+    if (input.recordedIdentity === null) {
+      // Two reasons identity can be absent. Only the first may mint:
+      // 1. The child had already exited before capture. The handle this run
+      //    owns is stronger than a CIM sighting of a process that is gone.
+      // 2. Any other reason (probe UNAVAILABLE while the child is still
+      //    alive) must keep denying.
+      const owned = input.ownedHandleExit;
+      if (owned === null || owned === undefined) return null;
+      if (owned.spawnOccurred !== true) return null;
+      if (owned.handleExited !== true) return null;
+      if (owned.exitSettledWithCode !== true) return null;
+      if (owned.identityAbsentBecauseAlreadyExited !== true) return null;
+      return makeWriterExitProof();
+    }
+
     if (input.observation === null) return null;
     if (input.probedPid === null) return null;
     if (input.probedPid !== input.recordedIdentity.pid) return null;
-    if (!input.orphanScanPerformed) return null;
-    if (input.orphanSightings === null) return null;
 
     if (!observationIsAboutRecorded(input.recordedIdentity, input.probedPid, input.observation)) {
       return null;
@@ -368,6 +433,11 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
     if (liveness !== "DEAD_CONFIRMED") return null;
 
     for (const sighting of input.orphanSightings) {
+      const inTree = writerSightingNotProvenAbsent(sighting, input.recordedIdentity.runNonce, {
+        holderPid: input.recordedIdentity.pid,
+        rows: input.orphanSightings,
+      });
+      if (!inTree) continue;
       const verdict: OrphanVerdictV1 = detectOrphan({
         recorded: input.recordedIdentity,
         observed: observationFromSighting(sighting),
@@ -416,6 +486,12 @@ export function evaluateSuccessConjunction(input: {
   readonly gitAfter: GitObservationV1 | null;
   readonly gitVerdict: GitVerdictV1 | null;
   readonly authorisedProductionMutated: boolean;
+  /** Physical containment after realpath, not "the handoff parsed". */
+  readonly artifactsInsideRunRoot: boolean;
+  readonly artifactsInsideRunRootReason: string;
+  /** Holder gone AND scan performed AND no live sighting remains. */
+  readonly executorTreeGone: boolean;
+  readonly executorTreeReason: string;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -491,17 +567,8 @@ export function evaluateSuccessConjunction(input: {
     identitiesReason = `workItemId ${reportedWorkItem} is not the dispatched ${input.expectedWorkItemId}`;
   }
 
-  const artifactProblems = parsed.problems.filter((problem) => /artifact/i.test(problem));
-  let artifactsOk = false;
-  let artifactsReason: string;
-  if (handoff !== null) {
-    artifactsOk = true;
-    artifactsReason = "every artifact is inside the run root";
-  } else if (artifactProblems.length > 0) {
-    artifactsReason = artifactProblems[0]!;
-  } else {
-    artifactsReason = "no parsed handoff whose artifacts can be confined to the run root";
-  }
+  const artifactsOk = input.artifactsInsideRunRoot === true;
+  const artifactsReason = input.artifactsInsideRunRootReason;
 
   const gitContradiction = contradictions.find((item) => item.field === "headAfter" || item.field === "branch");
   let gitOk = false;
@@ -558,6 +625,11 @@ export function evaluateSuccessConjunction(input: {
     { name: "gitAgreesWithHandoff", ok: gitOk, reason: gitReason },
     { name: "spendIsZero", ok: spendOk, reason: spendReason },
     { name: "productionClaimAgrees", ok: productionOk, reason: productionReason },
+    {
+      name: "executorTreeIsGone",
+      ok: input.executorTreeGone === true,
+      reason: input.executorTreeReason,
+    },
   ];
 
   const failedConjuncts = findings.filter((finding) => !finding.ok).map((finding) => finding.name);
@@ -592,10 +664,13 @@ export async function launchRun(
     return refusedBeforeSpawn(request, deps, "run nonce is empty or contains control bytes");
   }
 
+  // Default is the implementer list. State it: absent role is IMPLEMENT.
+  const role: ExecutorRoleV1 = request.role ?? "IMPLEMENT";
   const adapted = buildExecutorLaunch(request.executor, {
     promptPath: request.promptPath,
     cwd: request.cwd,
     runNonce,
+    role,
   });
   if (!adapted.ok || adapted.launch === null) {
     return refusedBeforeSpawn(request, deps, `executor adapter: ${adapted.reason}`);
@@ -641,6 +716,10 @@ function refusedBeforeSpawn(
     gitAfter: null,
     gitVerdict: null,
     authorisedProductionMutated: request.authorisedProductionMutated,
+    artifactsInsideRunRoot: false,
+    artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
+    executorTreeGone: true,
+    executorTreeReason: "this launch never created a process",
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -663,12 +742,7 @@ function refusedBeforeSpawn(
     cancel: { timedOut: false, stages: [] },
     log: null,
   };
-  try {
-    deps.fs.mkdirp(request.runRoot);
-    deps.fs.writeDurable(resultPath, `${JSON.stringify(result, null, 2)}\n`);
-  } catch {
-    // In-memory result is authoritative if the write fails.
-  }
+  writeResultIfPermitted(deps.fs, request.runRoot, resultPath, result, false);
   return result;
 }
 
@@ -698,126 +772,254 @@ export async function executeRun(
     gitAfter: null,
     gitVerdict: null,
     authorisedProductionMutated: request.authorisedProductionMutated,
+    artifactsInsideRunRoot: false,
+    artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
+    executorTreeGone: true,
+    executorTreeReason: "this run never created a process",
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
   });
 
+  const leaseStore = deps.leases ?? createNodeLeaseStore(sandboxDirectorStoreRoot());
+
   const finish = (partial: Omit<RunResultV1, "schema" | "resultPath">): RunResultV1 => {
     const result: RunResultV1 = { schema: RUN_RESULT_SCHEMA_V1, resultPath, ...partial };
-    try {
-      deps.fs.mkdirp(runRoot);
-      deps.fs.writeDurable(resultPath, `${JSON.stringify(result, null, 2)}\n`);
-    } catch {
-      // A failed result write is reported on the in-memory object; it must not hide the run outcome.
-    }
+    writeResultIfPermitted(deps.fs, runRoot, resultPath, result, partial.spawned === true);
     return result;
   };
 
-  // 1. A missing cwd is a spawn ENOENT that reads as an executable problem. Refuse it first.
-  if (!isResolvedHostPath(request.cwd) || !deps.fs.isDirectory(request.cwd)) {
-    return finish({
-      ok: false,
-      spawned: false,
-      reason: "cwd does not name an existing directory; validating before spawn so a missing cwd is not reported as an executable ENOENT",
-      conjunction: emptyConjunction,
-      exitCode: null,
-      processIdentity: null,
-      intent: null,
-      handoff: null,
-      gitAfter: null,
-      lease: null,
-      productionWriterLeaseReleasedByThisRun: false,
-      cancel: emptyCancel,
-      log: null,
-    });
-  }
-
-  // 2. Capacity AND the typed lease. Evaluate both; neither substitutes for the other.
-  const leaseAttempt = acquireLease({
-    existing: deps.leases.list(),
-    leaseId: request.lease.leaseId,
-    kind: request.lease.kind,
-    resource: request.lease.resource,
-    missionId: request.missionId,
-    runId: request.runId,
-    now: deps.clock.now(),
-  });
-  const capacityAttempt = deps.capacity.tryAcquire(request.executor);
-
-  if (!capacityAttempt.ok || !leaseAttempt.ok || leaseAttempt.lease === null) {
-    if (capacityAttempt.ok) deps.capacity.release(request.executor);
-    const why = [
-      capacityAttempt.ok ? null : `capacity refused: ${capacityAttempt.reason}`,
-      leaseAttempt.ok ? null : `lease refused: ${leaseAttempt.reason}`,
-    ].filter((part): part is string => part !== null).join("; ");
-    return finish({
-      ok: false,
-      spawned: false,
-      reason: why || "capacity and lease were not both acquired",
-      conjunction: emptyConjunction,
-      exitCode: null,
-      processIdentity: null,
-      intent: null,
-      handoff: null,
-      gitAfter: null,
-      lease: null,
-      productionWriterLeaseReleasedByThisRun: false,
-      cancel: emptyCancel,
-      log: null,
-    });
-  }
-
-  const heldLease = leaseAttempt.lease;
-  deps.leases.save([...deps.leases.list().filter((item) => item.leaseId !== heldLease.leaseId), heldLease]);
+  let heldLease: LeaseV1 | null = null;
   let releasedLeaseId: string | null = null;
-  let capacityHeld = true;
+  let capacityHeld = false;
   let stillRunning = false;
+  let spawnOccurred = false;
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
   let exitProof: WriterExitProofV1 | null = null;
-
-  const runNonce = normaliseRunNonce(request.runNonce);
-  if (runNonce === null) {
-    return finish({
-      ok: false,
-      spawned: false,
-      reason: "run nonce is empty or contains control bytes",
-      conjunction: emptyConjunction,
-      exitCode: null,
-      processIdentity: null,
-      intent: null,
-      handoff: null,
-      gitAfter: null,
-      lease: heldLease,
-      productionWriterLeaseReleasedByThisRun: writerReleaseEvidence(null),
-      cancel: emptyCancel,
-      log: null,
-    });
-  }
+  let identityAbsentBecauseAlreadyExited = false;
 
   const releaseHeld = (): void => {
-    if (releasedLeaseId === null) {
-      // One predicate for the act and the record. A proof computed after
-      // release can only relabel what already happened.
-      const withholdProductionWriter = heldLease.kind === "PRODUCTION_WRITER" && exitProof === null;
-      if (!withholdProductionWriter) {
-        const before = deps.leases.list();
-        const remaining = releaseLease(before, heldLease.leaseId);
-        deps.leases.save(remaining);
-        // A write you did not read back is a request, not a fact.
-        const observed = deps.leases.list();
-        const gone = before.some((item) => item.leaseId === heldLease.leaseId)
-          && observed.every((item) => item.leaseId !== heldLease.leaseId);
-        if (gone) releasedLeaseId = heldLease.leaseId;
+    if (heldLease !== null && releasedLeaseId === null) {
+      // One predicate: withhold only when this run created a process and
+      // has not proven that process gone. Kind is not the fact.
+      const withhold = spawnOccurred && exitProof === null;
+      if (!withhold) {
+        try {
+          const before = leaseStore.list();
+          const remaining = releaseLease(before, heldLease.leaseId);
+          leaseStore.save(remaining);
+          const observed = leaseStore.list();
+          const gone = before.some((item) => item.leaseId === heldLease!.leaseId)
+            && observed.every((item) => item.leaseId !== heldLease!.leaseId);
+          if (gone) releasedLeaseId = heldLease.leaseId;
+        } catch {
+          // A failed release must not prevent capacity return.
+        }
       }
     }
     if (capacityHeld) {
-      deps.capacity.release(request.executor);
+      try {
+        deps.capacity.release(request.executor);
+      } catch {
+        // Capacity return is best-effort; do not escape executeRun.
+      }
       capacityHeld = false;
     }
   };
 
   try {
+    // 1. cwd, then nonce, then argv. Pure input checks — nothing acquired yet.
+    let cwdOk = false;
+    try {
+      cwdOk = isResolvedHostPath(request.cwd) && deps.fs.isDirectory(request.cwd);
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `cwd check failed: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (!cwdOk) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "cwd does not name an existing directory; validating before spawn so a missing cwd is not reported as an executable ENOENT",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    const runNonce = normaliseRunNonce(request.runNonce);
+    if (runNonce === null) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "run nonce is empty or contains control bytes",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: writerReleaseEvidence(null),
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    const argvSafety = argvIsSafe(request.argv);
+    if (!argvSafety.safe) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `argv is not safe: ${argvSafety.offending ?? "metacharacter"}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    // 2. Capacity AND the typed lease. Inside try so finally covers them.
+    let leaseAttempt;
+    try {
+      leaseAttempt = acquireLease({
+        existing: leaseStore.list(),
+        leaseId: request.lease.leaseId,
+        kind: request.lease.kind,
+        resource: request.lease.resource,
+        missionId: request.missionId,
+        runId: request.runId,
+        now: deps.clock.now(),
+      });
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `lease check failed: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    let capacityAttempt;
+    try {
+      capacityAttempt = deps.capacity.tryAcquire(request.executor);
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `capacity check failed: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    if (capacityAttempt.ok) capacityHeld = true;
+
+    if (!capacityAttempt.ok || !leaseAttempt.ok || leaseAttempt.lease === null) {
+      const why = [
+        capacityAttempt.ok ? null : `capacity refused: ${capacityAttempt.reason}`,
+        leaseAttempt.ok ? null : `lease refused: ${leaseAttempt.reason}`,
+      ].filter((part): part is string => part !== null).join("; ");
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: why || "capacity and lease were not both acquired",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    heldLease = leaseAttempt.lease;
+    if (heldLease === null) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "capacity and lease were not both acquired",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    try {
+      leaseStore.save([
+        ...leaseStore.list().filter((item) => item.leaseId !== heldLease!.leaseId),
+        heldLease,
+      ]);
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `lease persist failed: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
     // 3. Persist the intent. The only value that permits a spawn is returned after write-and-read-back.
     const intentStore = intentStoreFromFs(deps.fs);
     const persistInput = {
@@ -881,6 +1083,7 @@ export async function executeRun(
       }
       permit = launched.permit;
       child = launched.launched;
+      spawnOccurred = true;
     } catch (error) {
       return finish({
         ok: false,
@@ -919,9 +1122,30 @@ export async function executeRun(
     // 5. Record that spawn returned, then try to capture identity.
     // An unobservable process (access-denied, elevated executor) still started.
     // processIdentity === null must not mean "never spawned".
+    let childPid: number;
+    try {
+      childPid = child.pid;
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: true,
+        reason: `spawn handle pid is unreadable: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: permit.intent,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
     const attempted = recordSpawnAttempt({
       permit,
-      pid: child.pid,
+      pid: childPid,
       now: deps.clock.now(),
       store: intentStore,
     });
@@ -932,13 +1156,13 @@ export async function executeRun(
         // Best effort. killTree is the follow-up.
       }
       try {
-        deps.killTree(child.pid);
+        deps.killTree(childPid);
       } catch {
         // A failed kill is not a confirmed stop.
       }
       let observation: ProcessObservationV1;
       try {
-        observation = deps.probe.observe(child.pid);
+        observation = deps.probe.observe(childPid);
       } catch (error) {
         observation = { outcome: "UNAVAILABLE", reason: `probe threw: ${errorMessage(error)}` };
       }
@@ -948,10 +1172,11 @@ export async function executeRun(
         killNonceBearingLeftovers({
           scanOrphans: deps.scanOrphans,
           killTree: deps.killTree,
-          childPid: child.pid,
+          childPid,
           recorded: null,
           runNonce,
           parentExited: confirmedStopped,
+          holderPid: childPid,
         });
       } catch {
         // A failed leftover kill is not a confirmed absence.
@@ -960,6 +1185,7 @@ export async function executeRun(
         scanOrphans: deps.scanOrphans,
         recorded: null,
         runNonce,
+        holderPid: childPid,
       });
       const reason = confirmedStopped
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
@@ -981,8 +1207,17 @@ export async function executeRun(
       });
     }
     permit = attempted.permit;
+    heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null);
 
-    const captured = captureProcessIdentity(deps.probe, { pid: child.pid, runNonce });
+    const captured = captureProcessIdentity(deps.probe, { pid: childPid, runNonce });
+    if (
+      !captured.ok
+      && captured.observation !== null
+      && captured.observation.outcome === "NOT_FOUND"
+      && child.exited
+    ) {
+      identityAbsentBecauseAlreadyExited = true;
+    }
     const processIdentity = captured.ok ? captured.identity : null;
     if (processIdentity !== null) {
       const observed = recordSpawnObservation({
@@ -992,6 +1227,7 @@ export async function executeRun(
         store: intentStore,
       });
       if (observed.ok && observed.permit !== null) permit = observed.permit;
+      heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, processIdentity);
     }
 
     const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
@@ -1009,7 +1245,11 @@ export async function executeRun(
       const ended = await child.exit;
       exitCode = ended.code;
     } else {
-      const raced = await raceExit(child, request.timeoutMs, deps.wait);
+      const raced = await raceExit(child, request.timeoutMs, deps.wait, () => {
+        if (heldLease === null) return;
+        const renewed = heartbeat(heldLease, deps.clock.now());
+        heldLease = persistLeaseHolder(leaseStore, renewed, renewed.pid, null, renewed);
+      });
       if (raced.tag === "exit") {
         exitCode = raced.exit.code;
       } else {
@@ -1036,17 +1276,19 @@ export async function executeRun(
     const output = `${log.liveTail("stdout").toString("utf8")}\n${log.liveTail("stderr").toString("utf8")}`;
 
     // Nonce sweep on every exit path, not only timeout / mustHalt.
+    let leftoverSweep: LeftoverSweepV1 = { confirmed: false, remaining: [], killed: false };
     try {
-      killNonceBearingLeftovers({
+      leftoverSweep = killNonceBearingLeftovers({
         scanOrphans: deps.scanOrphans,
         killTree: deps.killTree,
-        childPid: child.pid,
+        childPid,
         recorded: processIdentity,
         runNonce,
         parentExited: child.exited,
+        holderPid: processIdentity?.pid ?? childPid,
       });
     } catch {
-      // A failed leftover kill is not a confirmed absence.
+      leftoverSweep = { confirmed: false, remaining: [], killed: false };
     }
 
     // 7. Independent Git after. Never taken from the handoff.
@@ -1078,6 +1320,29 @@ export async function executeRun(
       requireAttachedBranch: request.branch !== null,
     });
 
+    // Writer-release and the eighth conjunct share one observation and one scan.
+    const observation = observeRecordedHolder(deps.probe, processIdentity);
+    orphanScan = collectWriterOrphans({
+      scanOrphans: deps.scanOrphans,
+      recorded: processIdentity,
+      runNonce,
+      holderPid: processIdentity?.pid ?? childPid,
+    });
+
+    const tree = describeExecutorTree({
+      recorded: processIdentity,
+      observation,
+      orphanScan,
+      leftoverConfirmed: leftoverSweep.confirmed,
+      leftoverRemaining: leftoverSweep.remaining,
+    });
+    const artifactCheck = artifactsConfinedToRunRoot({
+      runRoot,
+      handoff,
+      parsed,
+      resolve: deps.resolveArtifactPath ?? defaultResolveArtifactPath,
+    });
+
     // 9. The conjunction. Each finding is kept so a failure names the conjunct.
     const conjunction = evaluateSuccessConjunction({
       exitCode,
@@ -1093,21 +1358,21 @@ export async function executeRun(
       gitAfter,
       gitVerdict,
       authorisedProductionMutated: request.authorisedProductionMutated,
+      artifactsInsideRunRoot: artifactCheck.ok,
+      artifactsInsideRunRootReason: artifactCheck.reason,
+      executorTreeGone: tree.ok,
+      executorTreeReason: tree.reason,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
     });
 
-    // Writer-release is an exit proof or it is false. Compute the proof
-    // before the irreversible release. releasedLeaseId is passed as the
-    // lease this proof would authorise releasing; the field is kept only
-    // if the store then shows that lease gone.
-    const observation = observeRecordedHolder(deps.probe, processIdentity);
-    orphanScan = collectWriterOrphans({
-      scanOrphans: deps.scanOrphans,
-      recorded: processIdentity,
-      runNonce,
-    });
+    const ownedHandleExit: OwnedHandleExitV1 = {
+      spawnOccurred,
+      handleExited: child.exited,
+      exitSettledWithCode: child.exited && exitCode !== null,
+      identityAbsentBecauseAlreadyExited,
+    };
 
     exitProof = proveWriterExit({
       processStillRunning: stillRunning,
@@ -1119,12 +1384,14 @@ export async function executeRun(
       probedPid: processIdentity === null ? null : processIdentity.pid,
       orphanScanPerformed: orphanScan.performed,
       orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
+      liveSightings: orphanScan.liveSightings,
+      ownedHandleExit,
     });
     releaseHeld();
-    if (heldLease.kind === "PRODUCTION_WRITER" && releasedLeaseId !== heldLease.leaseId) {
+    if (releasedLeaseId !== heldLease.leaseId) {
       exitProof = null;
     }
-    const writerFact = writerReleaseEvidence(exitProof);
+    const writerFact = writerReleaseEvidence(exitProof) && heldLease.kind === "PRODUCTION_WRITER";
 
     const reason = conjunction.ok
       ? "every success conjunct holds"
@@ -1145,8 +1412,137 @@ export async function executeRun(
       cancel: { timedOut, stages: cancelStages },
       log: logReport,
     });
+  } catch (error) {
+    return finish({
+      ok: false,
+      spawned: spawnOccurred,
+      reason: `run failed: ${errorMessage(error)}`,
+      conjunction: emptyConjunction,
+      exitCode: null,
+      processIdentity: null,
+      intent: null,
+      handoff: null,
+      gitAfter: null,
+      lease: heldLease,
+      productionWriterLeaseReleasedByThisRun: false,
+      cancel: emptyCancel,
+      log: null,
+    });
   } finally {
     releaseHeld();
+  }
+}
+
+function persistLeaseHolder(
+  store: LeaseStoreV1,
+  lease: LeaseV1,
+  pid: number | null,
+  identity: ExecutorProcessIdentityV1 | null,
+  base: LeaseV1 = lease,
+): LeaseV1 {
+  const updated: LeaseV1 = {
+    ...base,
+    pid,
+    ...(identity !== null
+      ? {
+          processIdentity: {
+            pid: identity.pid,
+            startedAt: identity.creationDate,
+            runToken: identity.runNonce,
+          },
+        }
+      : base.processIdentity !== undefined
+        ? { processIdentity: base.processIdentity }
+        : {}),
+  };
+  store.save([...store.list().filter((item) => item.leaseId !== updated.leaseId), updated]);
+  return updated;
+}
+
+function describeExecutorTree(input: {
+  readonly recorded: ExecutorProcessIdentityV1 | null;
+  readonly observation: ProcessObservationV1 | null;
+  readonly orphanScan: WriterOrphanScanV1;
+  readonly leftoverConfirmed: boolean;
+  readonly leftoverRemaining: readonly OrphanSightingV1[];
+}): { ok: boolean; reason: string } {
+  if (input.recorded !== null && input.observation !== null) {
+    const liveness = holderLiveness(input.recorded, input.observation);
+    if (liveness === "ALIVE") {
+      return { ok: false, reason: "the recorded holder is still ALIVE" };
+    }
+  }
+  if (!input.orphanScan.performed) {
+    return { ok: false, reason: "the process-tree scan was not performed" };
+  }
+  if (input.orphanScan.liveSightings.length > 0) {
+    return {
+      ok: false,
+      reason: `live process-tree sightings remain: ${input.orphanScan.liveSightings.map((item) => item.pid).join(", ")}`,
+    };
+  }
+  if (!input.leftoverConfirmed) {
+    return { ok: false, reason: "leftover kill could not be confirmed by a re-scan" };
+  }
+  if (input.leftoverRemaining.length > 0) {
+    return {
+      ok: false,
+      reason: `leftover processes remain after kill: ${input.leftoverRemaining.map((item) => item.pid).join(", ")}`,
+    };
+  }
+  return { ok: true, reason: "the executor process tree is gone" };
+}
+
+function artifactsConfinedToRunRoot(input: {
+  readonly runRoot: string;
+  readonly handoff: ExecutorHandoffV1 | null;
+  readonly parsed: HandoffParseV1;
+  readonly resolve: (absolutePath: string) => string;
+}): { ok: boolean; reason: string } {
+  if (input.handoff === null) {
+    const artifactProblems = input.parsed.problems.filter((problem) => /artifact/i.test(problem));
+    return {
+      ok: false,
+      reason: artifactProblems[0] ?? "no parsed handoff whose artifacts can be confined to the run root",
+    };
+  }
+  try {
+    const rootReal = input.resolve(input.runRoot);
+    for (const artifact of input.handoff.artifacts) {
+      const candidate = input.resolve(join(input.runRoot, artifact));
+      if (!artifactPathWithinRoot(rootReal, candidate)) {
+        return { ok: false, reason: `artifact ${artifact} resolves outside the run root` };
+      }
+    }
+    return { ok: true, reason: "every artifact is inside the run root" };
+  } catch {
+    return { ok: false, reason: "an artifact path could not be resolved" };
+  }
+}
+
+function defaultResolveArtifactPath(absolutePath: string): string {
+  return realpathSync.native(absolutePath);
+}
+
+function writeResultIfPermitted(
+  fs: RunFileSystemV1,
+  runRoot: string,
+  resultPath: string,
+  result: RunResultV1,
+  spawned: boolean,
+): void {
+  let existing = false;
+  try {
+    existing = fs.isFile(resultPath);
+  } catch {
+    existing = false;
+  }
+  if (existing && !spawned) return;
+  try {
+    fs.mkdirp(runRoot);
+    fs.writeDurable(resultPath, `${JSON.stringify(result, null, 2)}\n`);
+  } catch {
+    // A failed result write is reported on the in-memory object.
   }
 }
 
@@ -1172,14 +1568,21 @@ function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
+  readonly holderPid?: number;
 }): WriterOrphanScanV1 {
   try {
     const createdNotBefore = input.recorded?.creationDate ?? "";
+    const holderPid = input.holderPid ?? input.recorded?.pid;
     const sightings = [...resolveOrphanScanner(input.scanOrphans)({
       runNonce: input.runNonce,
       createdNotBefore,
+      ...(holderPid !== undefined ? { holderPid } : {}),
     })];
-    const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(sighting, input.runNonce));
+    const liveSightings = sightings.filter((sighting) => writerSightingNotProvenAbsent(
+      sighting,
+      input.runNonce,
+      { holderPid: holderPid ?? null, rows: sightings },
+    ));
     return { performed: true, sightings, liveSightings };
   } catch {
     // A throwing CIM/WMI scan is not a completed scan. Escaping executeRun
@@ -1189,13 +1592,28 @@ function collectWriterOrphans(input: {
 }
 
 /**
- * "Not proven absent" for this run. A missing nonce or this run's nonce is
- * our tree. `detectOrphan` answers a different question and must not decide
- * whether the production-writer lease can be released.
+ * "Not proven absent" for this run. A sighting is this run's tree if its
+ * nonce matches or it is in the recorded holder's ParentProcessId chain.
+ * A foreign process with a different nonce and no ancestry is not ours.
  */
-function writerSightingNotProvenAbsent(sighting: OrphanSightingV1, runNonce: string): boolean {
+export function writerSightingNotProvenAbsent(
+  sighting: OrphanSightingV1,
+  runNonce: string,
+  tree: { readonly holderPid: number | null; readonly rows: readonly OrphanSightingV1[] } = {
+    holderPid: null,
+    rows: [],
+  },
+): boolean {
   const nonce = normaliseRunNonce(sighting.runNonce);
-  return nonce === null || nonce === runNonce;
+  if (nonce === runNonce) return true;
+  if (tree.holderPid === null) return false;
+  return descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid);
+}
+
+interface LeftoverSweepV1 {
+  readonly confirmed: boolean;
+  readonly remaining: readonly OrphanSightingV1[];
+  readonly killed: boolean;
 }
 
 function killNonceBearingLeftovers(input: {
@@ -1205,21 +1623,26 @@ function killNonceBearingLeftovers(input: {
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
   readonly parentExited: boolean;
-}): boolean {
+  readonly holderPid?: number;
+}): LeftoverSweepV1 {
   const createdNotBefore = input.recorded?.creationDate ?? "";
-  let leftovers: readonly OrphanSightingV1[] = [];
+  const holderPid = input.holderPid ?? input.recorded?.pid ?? null;
+  const query = {
+    runNonce: input.runNonce,
+    createdNotBefore,
+    ...(holderPid !== null ? { holderPid } : {}),
+  };
+  let leftovers: readonly OrphanSightingV1[];
   try {
-    leftovers = resolveOrphanScanner(input.scanOrphans)({
-      runNonce: input.runNonce,
-      createdNotBefore,
-    });
+    leftovers = resolveOrphanScanner(input.scanOrphans)(query);
   } catch {
-    leftovers = [];
+    return { confirmed: false, remaining: [], killed: false };
   }
-  let killedOrphan = false;
+  const tree = { holderPid, rows: leftovers };
+  let killed = false;
   for (const leftover of leftovers) {
     if (leftover.pid === input.childPid) continue;
-    if (!writerSightingNotProvenAbsent(leftover, input.runNonce)) continue;
+    if (!writerSightingNotProvenAbsent(leftover, input.runNonce, tree)) continue;
     if (
       createdNotBefore !== ""
       && leftover.creationDate !== undefined
@@ -1236,9 +1659,20 @@ function killNonceBearingLeftovers(input: {
       if (verdict.kind === "NONCE_MISMATCH") continue;
     }
     input.killTree(leftover.pid);
-    killedOrphan = true;
+    killed = true;
   }
-  return killedOrphan;
+  let remaining: readonly OrphanSightingV1[];
+  try {
+    const after = resolveOrphanScanner(input.scanOrphans)(query);
+    remaining = after.filter((sighting) => writerSightingNotProvenAbsent(
+      sighting,
+      input.runNonce,
+      { holderPid, rows: after },
+    ));
+  } catch {
+    return { confirmed: false, remaining: [], killed };
+  }
+  return { confirmed: true, remaining, killed };
 }
 
 function observationFromSighting(sighting: OrphanSightingV1): ProcessObservationV1 {
@@ -1249,6 +1683,7 @@ function observationFromSighting(sighting: OrphanSightingV1): ProcessObservation
     pid: sighting.pid,
     ...(sighting.creationDate !== undefined ? { creationDate: sighting.creationDate } : {}),
     ...(nonce !== null ? { runNonce: nonce } : {}),
+    ...(sighting.parentPid !== undefined ? { parentPid: sighting.parentPid } : {}),
   };
 }
 
@@ -1256,22 +1691,32 @@ async function raceExit(
   child: SpawnHandleV1,
   timeoutMs: number,
   wait: (ms: number) => Promise<void>,
+  onHeartbeat?: () => void,
 ): Promise<{ tag: "exit"; exit: SpawnExitV1 } | { tag: "timeout" }> {
   if (child.exited) return { tag: "exit", exit: await child.exit };
-  let settled = false;
-  return new Promise((resolve) => {
-    void child.exit.then((exit) => {
-      if (settled) return;
-      settled = true;
-      resolve({ tag: "exit", exit });
-    });
-    void wait(timeoutMs).then(() => {
-      if (settled) return;
-      if (child.exited) return;
-      settled = true;
-      resolve({ tag: "timeout" });
-    });
-  });
+  const chunk = Math.max(1, Math.min(60_000, Math.floor(LEASE_TTL_MS / 2)));
+  let waited = 0;
+  while (waited < timeoutMs) {
+    if (child.exited) return { tag: "exit", exit: await child.exit };
+    const slice = Math.min(chunk, timeoutMs - waited);
+    try {
+      await Promise.race([
+        child.exit.then(() => "exit" as const).catch(() => "exit" as const),
+        wait(slice).then(() => "tick" as const).catch(() => "tick" as const),
+      ]);
+    } catch {
+      // A rejecting wait must not escape or become an unhandled rejection.
+    }
+    if (child.exited) return { tag: "exit", exit: await child.exit };
+    waited += slice;
+    try {
+      onHeartbeat?.();
+    } catch {
+      // A failed heartbeat must not abort the run.
+    }
+  }
+  if (child.exited) return { tag: "exit", exit: await child.exit };
+  return { tag: "timeout" };
 }
 
 async function cancelLadder(
@@ -1302,15 +1747,16 @@ async function cancelLadder(
   const stillAfterHard = !child.exited;
 
   // ORPHAN: after cancel, scan by AION_RUN_NONCE and recorded creation time; kill leftovers.
-  const killedOrphan = killNonceBearingLeftovers({
+  const leftoverSweep = killNonceBearingLeftovers({
     scanOrphans: deps.scanOrphans,
     killTree: deps.killTree,
     childPid: child.pid,
     recorded,
     runNonce,
     parentExited: child.exited,
+    holderPid: recorded?.pid ?? child.pid,
   });
-  if (killedOrphan) stages.push("ORPHAN");
+  if (leftoverSweep.killed) stages.push("ORPHAN");
 
   if (child.exited) {
     const ended = await child.exit;
@@ -1350,7 +1796,13 @@ async function settleStreams(
 }
 
 function readHandoffText(fs: RunFileSystemV1, handoffPath: string, stdout: string): string | null {
-  if (fs.isFile(handoffPath)) {
+  let present = false;
+  try {
+    present = fs.isFile(handoffPath);
+  } catch {
+    present = false;
+  }
+  if (present) {
     try {
       const text = fs.readUtf8(handoffPath);
       if (text.trim() !== "") return text;

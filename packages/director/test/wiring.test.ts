@@ -103,6 +103,16 @@ test("every src module is imported by a non-test module, or is the package entry
   assert.deepEqual(orphans, [], `unreachable src modules: ${orphans.join(", ")}`);
 });
 
+test("index.ts does not export a launch path that bypasses the adapter", async () => {
+  const director = await import("../src/index.js");
+  assert.equal(
+    "executeRun" in director,
+    false,
+    "executeRun must not be a public entry; launchRun is the only launch path",
+  );
+  assert.equal(typeof director.launchRun, "function");
+});
+
 test("there is exactly one argv builder: the adapter, reached through buildLaunchPlan", () => {
   const files = sourceFiles();
   const executors = files.get("executors.ts") ?? "";

@@ -21,6 +21,47 @@ export * from "./executor-adapters.js";
 export * from "./run-intent.js";
 export * from "./process-identity.js";
 export * from "./bounded-log.js";
-export * from "./run-manager.js";
+export {
+  RUN_RESULT_SCHEMA_V1,
+  CANCEL_SOFT_MS,
+  CANCEL_HARD_MS,
+  launchRun,
+  proveWriterExit,
+  writerReleaseEvidence,
+  isWriterExitProof,
+  evaluateSuccessConjunction,
+  writerSightingNotProvenAbsent,
+  createNodeRunFileSystem,
+  createNodeSpawner,
+  wrapChildProcess,
+  createNodeWait,
+  killProcessTreeStandIn,
+} from "./run-manager.js";
+export type {
+  SuccessConjunctNameV1,
+  ConjunctFindingV1,
+  SuccessConjunctionV1,
+  CancelStageV1,
+  CancelReportV1,
+  SpawnOptionsV1,
+  SpawnExitV1,
+  SpawnHandleV1,
+  SpawnFnV1,
+  RunFileSystemV1,
+  CapacityGateV1,
+  LeaseStoreV1,
+  OrphanSightingV1,
+  WriterLivenessQuestionV1,
+  RunManagerDepsV1,
+  LaunchRunDepsV1,
+  ExecuteRunRequestV1,
+  LaunchRunRequestV1,
+  RunResultV1,
+  WriterOrphanScanV1,
+  WriterExitProofV1,
+  WriterExitProofInputV1,
+  OwnedHandleExitV1,
+} from "./run-manager.js";
+export * from "./lease-store.js";
 export * from "./work-items.js";
 export * from "./store-contract.js";

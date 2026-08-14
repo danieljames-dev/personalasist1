@@ -83,6 +83,25 @@ test("a batch shim is never selected, because spawn runs without a shell", () =>
   assert.match(found.reason, /none answered a version probe as a real executable/);
 });
 
+test("selectExecutor refuses the same non-exe boundary as the live discovery ladder", () => {
+  const hostile = [
+    "C:/tools/grok.cmd.",
+    "C:/tools/grok.bat ",
+    "C:/tools/grok.vbs",
+    "C:/tools/grok.js",
+    "C:/tools/grok.lnk",
+    "C:/tools/grok",
+  ];
+  for (const path of hostile) {
+    const found = selectExecutor({
+      executor: "grok",
+      candidates: [candidate({ path, source: "PATH", version: "1.0.3" })],
+      probedAt: NOW,
+    });
+    assert.equal(found.available, false, path);
+  }
+});
+
 test("nothing installed is an answer, not a crash", () => {
   const none = selectExecutor({ executor: "grok", candidates: [], probedAt: NOW });
   assert.equal(none.available, false);
