@@ -213,12 +213,28 @@ test("an expired lease that recorded no pid can still be reclaimed with DEAD_CON
     existing: [], leaseId: "l1", kind: "WORKTREE", resource: "C:/wt-a",
     missionId: "m1", runId: "r1", pid: null, now: LONG_AGO,
   }).lease!;
-  const reclaimed = reclaimStaleLease({
+  const refused = reclaimStaleLease({
     existing: [held], kind: "WORKTREE", resource: "C:/wt-a",
     holderLiveness: "DEAD_CONFIRMED", now: NOW,
   });
-  assert.equal(reclaimed.ok, true, "a lease with no pid has no holder slot to observe");
-  assert.deepEqual(reclaimed.remaining, []);
+  assert.equal(refused.ok, false, "a label with nothing to observe is not a death certificate");
+  assert.equal(refused.refusal, "HOLDER_UNOBSERVABLE");
+  assert.deepEqual(refused.remaining, [held]);
+});
+
+test("a lease with pid null and no processIdentity is refused a reclaim", () => {
+  const held = acquireLease({
+    existing: [], leaseId: "l1", kind: "WORKTREE", resource: "C:/wt-a",
+    missionId: "m1", runId: "r1", pid: null, now: LONG_AGO,
+  }).lease!;
+  assert.equal(held.pid, null);
+  assert.equal(held.processIdentity, undefined);
+  const refused = reclaimStaleLease({
+    existing: [held], kind: "WORKTREE", resource: "C:/wt-a",
+    holderLiveness: "DEAD_CONFIRMED", now: NOW,
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.refusal, "HOLDER_UNOBSERVABLE");
 });
 
 test("DEAD_CONFIRMED against a lease that has not expired still reclaims nothing", () => {

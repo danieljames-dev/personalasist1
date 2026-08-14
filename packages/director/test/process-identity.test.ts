@@ -249,17 +249,33 @@ test("DMTF and ISO spellings of the same creation instant are the same process, 
 });
 
 test("two encodings of one live process are not a death certificate", () => {
-  // A zone-less string is not a comparable instant. Treating it as UTC made
-  // the Z form MATCH/ALIVE, and the same guess later minted DEAD_CONFIRMED
-  // when the offset-bearing encoding was the recorded side.
+  // A zone-less string is not a comparable instant. Constructors must refuse
+  // it rather than stamp Z — a literal record hid the guess from this test.
   const unspecified = "2026-08-13T12:00:01.0000000";
-  const zulu = "2026-08-13T12:00:01.000Z";
-  const recorded: ExecutorProcessIdentityV1 = { ...RECORDED, creationDate: unspecified };
-  const observed = found({ creationDate: zulu, runNonce: RECORDED.runNonce });
-  assert.notEqual(holderLiveness(recorded, observed), "DEAD_CONFIRMED");
-  assert.equal(detectOrphan({ recorded, observed }).orphan, false);
-  assert.equal(compareProcessIdentity(recorded, observed), "UNVERIFIABLE");
-  assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
+  const constructed = processIdentityFrom({
+    pid: RECORDED.pid,
+    creationDate: unspecified,
+    executablePath: RECORDED.executablePath,
+    runNonce: RECORDED.runNonce,
+  });
+  assert.equal(constructed.ok, false, "a constructor must refuse a zone-less creationDate");
+  assert.equal(constructed.identity, null);
+  assert.equal(identityFromObservation(found({ creationDate: unspecified })), null);
+
+  const probed = interpretWindowsProbeOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      pid: RECORDED.pid,
+      executablePath: RECORDED.executablePath,
+      creationDate: unspecified,
+    }),
+    stderr: "",
+  });
+  assert.equal(probed.outcome, "FOUND");
+  if (probed.outcome === "FOUND") {
+    assert.equal(probed.creationDate, undefined, "a zone-less CIM token is not stamped Z");
+  }
 });
 
 test("a zone-less re-encoding of a zoned instant is UNKNOWN, not a death certificate", () => {
@@ -585,4 +601,153 @@ test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its env
       child.once("exit", () => resolve());
     });
   }
+});
+
+test("a real-shaped zoned CIM instant still produces a recorded identity", () => {
+  const zoned = "2026-08-14T10:41:20.8867590-04:00";
+  const read = processIdentityFrom({
+    pid: 4812,
+    creationDate: zoned,
+    executablePath: GROK,
+    runNonce: NONCE_A,
+  });
+  assert.equal(read.ok, true, read.ok ? "" : read.reason);
+  assert.equal(read.identity?.creationDate, "2026-08-14T14:41:20.886Z");
+
+  const observed = interpretWindowsProbeOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      pid: 4812,
+      executablePath: GROK,
+      creationDate: zoned,
+    }),
+    stderr: "",
+  });
+  assert.equal(observed.outcome, "FOUND");
+  if (observed.outcome === "FOUND") {
+    assert.equal(observed.creationDate, "2026-08-14T14:41:20.886Z");
+  }
+});
+
+test("holderLiveness of a different pid is UNKNOWN, not a death certificate", () => {
+  const stranger: ProcessObservationV1 = {
+    outcome: "FOUND",
+    reason: "injected",
+    pid: 9999,
+    creationDate: "2026-08-13T13:00:00.000Z",
+    executablePath: "C:\\Windows\\System32\\svchost.exe",
+  };
+  assert.equal(compareProcessIdentity(RECORDED, stranger), "MISMATCH");
+  assert.equal(holderLiveness(RECORDED, stranger), "UNKNOWN");
+  assert.equal(livenessGrants(holderLiveness(RECORDED, stranger)).reclaim, false);
+});
+
+test("the orphan scanner sees a child whose argv names a different nonce than its environment", async () => {
+  const nonce = `nonce-scan-decoy-${process.pid}-${Date.now()}`;
+  const child = spawn(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 30000)", `AION_RUN_NONCE=someothervalue`],
+    {
+      env: { ...process.env, AION_RUN_NONCE: nonce },
+      windowsHide: true,
+      stdio: "ignore",
+    },
+  );
+  try {
+    assert.ok(child.pid && child.pid > 0, "the child must have a pid");
+    const sightings = createWindowsOrphanScanner()({
+      runNonce: nonce,
+      createdNotBefore: "",
+    });
+    assert.ok(
+      sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
+      `decoy argv must not hide pid ${child.pid}: ${JSON.stringify(sightings)}`,
+    );
+  } finally {
+    child.kill();
+    await new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+    });
+  }
+});
+
+test("a successful PEB read with no nonce is not overridden by argv text", () => {
+  let script = "";
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: (_cmd, args) => {
+      script = String(args[3] ?? "");
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          unreadable: 0,
+          processes: [{
+            pid: 4120,
+            creationDate: "2026-08-14T14:00:00.000Z",
+            runNonce: null,
+            parentPid: 1,
+            nonceReadable: true,
+            parentPresent: true,
+          }],
+        }),
+        stderr: "",
+      };
+    },
+  });
+  const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z" });
+  assert.deepEqual(hits, []);
+  const pebAt = script.indexOf("[AionPebEnv]::GetNonce");
+  const cmdAt = script.indexOf("CommandLine -match");
+  assert.ok(pebAt >= 0 && cmdAt >= 0 && pebAt < cmdAt, "PEB must be read before CommandLine");
+  assert.match(script, /return ""/);
+});
+
+test("a nonce-unreadable orphan after the floor makes the scan UNAVAILABLE", () => {
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      unreadable: 0,
+      processes: [{
+        pid: 21780,
+        parentPid: 7504,
+        creationDate: "2026-08-14T14:00:00.000Z",
+        nonceReadable: false,
+        parentPresent: false,
+      }],
+    }),
+    stderr: "",
+    createdNotBefore: "2026-08-14T14:00:00.000Z",
+  });
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
+});
+
+test("unreadable rows with live parents or older creation still yield a performed scan", () => {
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      unreadable: 0,
+      processes: [
+        {
+          pid: 4,
+          parentPid: 0,
+          creationDate: "2026-01-01T00:00:00.000Z",
+          nonceReadable: false,
+          parentPresent: false,
+        },
+        {
+          pid: 100,
+          parentPid: 99,
+          creationDate: "2026-08-14T15:00:00.000Z",
+          nonceReadable: false,
+          parentPresent: true,
+        },
+      ],
+    }),
+    stderr: "",
+    createdNotBefore: "2026-08-14T14:00:00.000Z",
+  });
+  assert.equal(interpreted.outcome, "SCANNED");
 });

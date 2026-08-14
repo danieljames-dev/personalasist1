@@ -25,7 +25,9 @@
  * date; same PID, different executable; a nonce that is not ours — are testable without spawning
  * anything. A real Windows probe exists so one test can confirm the probe works at all. A real
  * Windows orphan scanner enumerates CIM `Win32_Process` rows and reads `AION_RUN_NONCE` from
- * CommandLine or the PEB environment block. A failed scan is `UNAVAILABLE`, never "no orphans".
+ * the PEB environment block first. CommandLine is a proxy used only when that read failed.
+ * A row whose membership in this run's tree cannot be decided is UNKNOWN, not absent. A failed
+ * scan is `UNAVAILABLE`, never "no orphans".
  */
 import { spawnSync } from "node:child_process";
 import type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
@@ -110,6 +112,10 @@ export interface NonceBearingProcessV1 {
   readonly creationDate?: string;
   readonly runNonce?: string;
   readonly parentPid?: number;
+  /** True only when the PEB environment block was actually read. */
+  readonly nonceReadable?: boolean;
+  /** True only when ParentProcessId names a row present in the same CIM snapshot. */
+  readonly parentPresent?: boolean;
 }
 
 export type OrphanScanInterpretationV1 =
@@ -231,6 +237,8 @@ export function holderLiveness(
 ): ProcessLivenessV1 {
   if (observation.outcome === "UNAVAILABLE") return "UNKNOWN";
   if (observation.outcome === "NOT_FOUND") return "DEAD_CONFIRMED";
+  // An answer about another slot is not an answer about the recorded holder.
+  if (observation.pid !== recorded.pid) return "UNKNOWN";
 
   const verdict = compareProcessIdentity(recorded, observation);
   if (verdict === "MATCH") return "ALIVE";
@@ -523,6 +531,8 @@ export function interpretWindowsOrphanScanOutput(input: {
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
+  /** Spawn floor. Used to decide whether an unread orphan is in this run's window. */
+  readonly createdNotBefore?: string;
 }): OrphanScanInterpretationV1 {
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
@@ -580,12 +590,24 @@ export function interpretWindowsOrphanScanOutput(input: {
     const runNonce = asUsableToken(row.runNonce);
     const creationDate = normalisedCreationDate(row.creationDate);
     const parentPid = isUsablePid(row.parentPid) ? row.parentPid : undefined;
+    const nonceReadable = typeof row.nonceReadable === "boolean" ? row.nonceReadable : undefined;
+    const parentPresent = typeof row.parentPresent === "boolean" ? row.parentPresent : undefined;
     sightings.push({
       pid: row.pid,
       ...(creationDate !== null ? { creationDate } : {}),
       ...(runNonce !== null ? { runNonce } : {}),
       ...(parentPid !== undefined ? { parentPid } : {}),
+      ...(nonceReadable !== undefined ? { nonceReadable } : {}),
+      ...(parentPresent !== undefined ? { parentPresent } : {}),
     });
+  }
+
+  // A row whose membership cannot be decided is UNKNOWN, not absent.
+  for (const sighting of sightings) {
+    if (sighting.nonceReadable !== false) continue;
+    if (sighting.parentPresent !== false) continue;
+    if (!provenCreatedAtOrAfterFloor(sighting.creationDate, input.createdNotBefore)) continue;
+    return { outcome: "UNAVAILABLE", reason: "undecidable process-tree membership" };
   }
 
   return { outcome: "SCANNED", sightings, reason: "cim" };
@@ -597,9 +619,10 @@ export function interpretWindowsOrphanScanOutput(input: {
  * Uses the same CIM `Win32_Process` path as {@link createWindowsProcessProbe}.
  * The adapter puts the nonce in the child environment, not argv, so CommandLine
  * alone cannot see a correctly-spawned writer. After the CIM listing, each
- * row's PEB environment is read. A CIM, parser, or host failure throws —
- * `collectWriterOrphans` treats a throw as `{performed: false}`, never as
- * "no orphans found".
+ * row's PEB environment is read first; CommandLine is consulted only when that
+ * read failed. A successful PEB read that found no nonce is not overridden by
+ * argv text. A CIM, parser, or host failure throws — `collectWriterOrphans`
+ * treats a throw as `{performed: false}`, never as "no orphans found".
  */
 export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly runNonce: string;
@@ -640,6 +663,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       status: result.status,
       stdout: stripBom(String(result.stdout ?? "")).trim(),
       stderr: String(result.stderr ?? "").trim(),
+      createdNotBefore: query.createdNotBefore,
     });
     if (interpreted.outcome === "UNAVAILABLE") {
       throw new Error(`orphan scan unavailable: ${interpreted.reason}`);
@@ -732,7 +756,75 @@ function timestampHasExplicitZone(value: string): boolean {
   return match[8] !== undefined;
 }
 
-function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {
+/**
+ * The one answer to "is this a placeable instant": an explicit zone, and a
+ * parse that does not invent one.
+ */
+export function isPlaceableInstant(value: string): boolean {
+  return timestampHasExplicitZone(value) && parseProcessTimestamp(value) !== null;
+}
+
+/** Milliseconds since epoch, or null when the token is not a placeable instant. */
+export function placeableInstantMs(value: string): number | null {
+  if (!timestampHasExplicitZone(value)) return null;
+  return parseProcessTimestamp(value);
+}
+
+/**
+ * Whether `candidate` is at or after `floor`. An unplaceable operand cannot
+ * exclude the candidate: UNKNOWN stays UNKNOWN, so this returns true.
+ */
+export function createdAtOrAfterFloor(
+  candidate: string | undefined,
+  floor: string | undefined,
+): boolean {
+  const floorToken = asUsableToken(floor);
+  if (floorToken === null) return true;
+  const floorMs = placeableInstantMs(floorToken);
+  if (floorMs === null) return true;
+  if (candidate === undefined) return true;
+  const at = placeableInstantMs(candidate);
+  if (at === null) return true;
+  return at >= floorMs;
+}
+
+/**
+ * Whether `candidate` is *proven* at or after `floor`. An unplaceable operand
+ * does not establish the claim — UNKNOWN stays UNKNOWN, so this returns false.
+ */
+export function provenCreatedAtOrAfterFloor(
+  candidate: string | undefined,
+  floor: string | undefined,
+): boolean {
+  const floorToken = asUsableToken(floor);
+  if (floorToken === null) return false;
+  const floorMs = placeableInstantMs(floorToken);
+  if (floorMs === null) return false;
+  if (candidate === undefined) return false;
+  const at = placeableInstantMs(candidate);
+  if (at === null) return false;
+  return at >= floorMs;
+}
+
+/**
+ * Whether `candidate` is proven strictly earlier than `floor`. Unplaceable
+ * operands are not proven earlier.
+ */
+export function createdBeforeFloor(
+  candidate: string | undefined,
+  floor: string | undefined,
+): boolean {
+  const floorToken = asUsableToken(floor);
+  if (floorToken === null) return false;
+  const floorMs = placeableInstantMs(floorToken);
+  if (floorMs === null) return false;
+  if (candidate === undefined) return false;
+  const at = placeableInstantMs(candidate);
+  if (at === null) return false;
+  return at < floorMs;
+}
+
+export function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {
   if (!timestampHasExplicitZone(recorded) || !timestampHasExplicitZone(observed)) {
     return "UNCOMPARABLE";
   }
@@ -767,7 +859,8 @@ function parseIso8601Instant(value: string): number | null {
   if (!Number.isFinite(ms)) return null;
   const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, ms);
   if (!Number.isFinite(asUtc)) return null;
-  if (match[8] === undefined) return asUtc;
+  if (/Z$/i.test(value)) return asUtc;
+  if (match[8] === undefined) return null;
   const offsetHours = Number(match[9]);
   const offsetMinutes = Number(match[10]);
   if (offsetHours > 23 || offsetMinutes > 59) return null;
@@ -795,9 +888,9 @@ function parseDmtfDatetime(value: string): number | null {
   return sign === "+" ? asUtc - offsetMs : asUtc + offsetMs;
 }
 
-function normalisedCreationDate(value: unknown): string | null {
+export function normalisedCreationDate(value: unknown): string | null {
   const token = asUsableToken(value);
-  if (token === null) return null;
+  if (token === null || !timestampHasExplicitZone(token)) return null;
   const ms = parseProcessTimestamp(token);
   if (ms === null) return null;
   return new Date(ms).toISOString();
@@ -908,14 +1001,7 @@ function sightingCreatedNotBefore(
   sighting: NonceBearingProcessV1,
   createdNotBefore: string,
 ): boolean {
-  const floorToken = asUsableToken(createdNotBefore);
-  if (floorToken === null) return true;
-  const floor = normalisedCreationDate(floorToken);
-  if (floor === null) return true;
-  if (sighting.creationDate === undefined) return true;
-  const at = normalisedCreationDate(sighting.creationDate);
-  if (at === null) return true;
-  return Date.parse(at) >= Date.parse(floor);
+  return createdAtOrAfterFloor(sighting.creationDate, createdNotBefore);
 }
 
 function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string {
@@ -952,7 +1038,7 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string
     "      foreach (string e in s.Split(new char[]{(char)0})) {",
     "        if (e.StartsWith(\"AION_RUN_NONCE=\")) return e.Substring(15);",
     "      }",
-    "      return null;",
+    "      return \"\";",
     "    } finally { CloseHandle(h); }",
     "  }",
     "}",
@@ -980,19 +1066,26 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string
     "    }",
     "  }",
     "}",
+    "$pidSet = New-Object 'System.Collections.Generic.HashSet[int]';",
+    "foreach ($p in $rows) { [void]$pidSet.Add([int]$p.ProcessId) };",
     "$hits = New-Object System.Collections.Generic.List[object];",
     "$unreadable = 0;",
     "foreach ($p in $rows) {",
     "  $id = [int]$p.ProcessId;",
     "  $isDesc = $desc.Contains($id);",
-    "  $n = $null;",
-    "  if ($p.CommandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
-    "  if (-not $n) { $n = [AionPebEnv]::GetNonce($id) };",
-    "  if ($isDesc -and -not $n) { $unreadable++ };",
-    "  if ($n -eq $target -or $isDesc) {",
+    "  $ppid = [int]$p.ParentProcessId;",
+    "  $parentPresent = $pidSet.Contains($ppid);",
+    "  $n = [AionPebEnv]::GetNonce($id);",
+    "  $nonceReadable = $null -ne $n;",
+    "  if (-not $nonceReadable) {",
+    "    if ($p.CommandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
+    "  } elseif ($n -eq '') {",
+    "    $n = $null;",
+    "  };",
+    "  if ($isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
+    "  if ($n -eq $target -or $isDesc -or (-not $nonceReadable -and -not $parentPresent)) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
-    "    $ppid = [int]$p.ParentProcessId;",
-    "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid });",
+    "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent });",
     "  }",
     "}",
     "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable } | ConvertTo-Json -Compress -Depth 5;",

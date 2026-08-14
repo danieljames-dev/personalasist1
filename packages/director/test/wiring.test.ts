@@ -113,17 +113,13 @@ test("index.ts does not export a launch path that bypasses the adapter", async (
   assert.equal(typeof director.launchRun, "function");
 });
 
-test("there is exactly one argv builder: the adapter, reached through buildLaunchPlan", () => {
+test("there is exactly one argv builder: the adapter, reached through launchRun", () => {
   const files = sourceFiles();
   const executors = files.get("executors.ts") ?? "";
 
   assert.ok(
-    calledIn(executors, "buildExecutorLaunch"),
-    "buildLaunchPlan must call the adapter, not merely import it",
-  );
-  assert.ok(
     modulesCalling(files, "buildExecutorLaunch").includes("run-manager.ts"),
-    "the run path must call the adapter",
+    "the live launch path must call the adapter directly",
   );
   assert.doesNotMatch(
     executors,
@@ -131,6 +127,21 @@ test("there is exactly one argv builder: the adapter, reached through buildLaunc
     "the old capability-driven argv list must not remain beside the adapter",
   );
   assert.doesNotMatch(executors, /argv\.push/);
+});
+
+test("deleted discovery and launch-plan names are not on the public surface of index.ts", async () => {
+  const director = await import("../src/index.js");
+  const removed = [
+    "selectExecutor",
+    "buildLaunchPlan",
+    "capabilitiesFromHelp",
+    "isDirectlySpawnableWindowsExe",
+    "readCapacity",
+    "capacityFallback",
+  ];
+  for (const name of removed) {
+    assert.equal(name in director, false, `${name} must not be exported`);
+  }
 });
 
 test("there is exactly one discovery ladder, and the launch path uses it", () => {

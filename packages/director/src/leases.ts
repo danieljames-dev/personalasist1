@@ -272,7 +272,8 @@ export type ReclaimRefusalV1 =
   | "LIVENESS_UNKNOWN"
   | "IDENTITY_MISMATCH"
   | "IDENTITY_UNVERIFIABLE"
-  | "HOLDER_UNOBSERVED";
+  | "HOLDER_UNOBSERVED"
+  | "HOLDER_UNOBSERVABLE";
 
 /**
  * What a probe reported about a specific pid. A liveness enum is not this.
@@ -364,8 +365,16 @@ export function reclaimStaleLease(input: {
     };
   }
 
-  // DEAD_CONFIRMED from here. A recorded pid requires a look at that pid, and the look is read.
+  // DEAD_CONFIRMED from here. A label with nothing to observe is not a death certificate.
   const recordedPid = held.pid;
+  if (!isRecordedHolderPid(recordedPid) && !hasStrongIdentity(held.processIdentity)) {
+    return {
+      ok: false,
+      remaining: unchanged,
+      reason: "the lease recorded no holder pid and no process identity; a label is not an observation",
+      refusal: "HOLDER_UNOBSERVABLE",
+    };
+  }
   if (isRecordedHolderPid(recordedPid)) {
     const observation = input.holderObservation;
     const observedId = input.observedIdentity;

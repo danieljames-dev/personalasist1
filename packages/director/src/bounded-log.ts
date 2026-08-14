@@ -24,9 +24,10 @@
  * catch every secret, a novel encoding, or a token the next vendor invents, and it must not be
  * treated as a confidentiality boundary.
  *
- * A secret that arrives split across two `write` calls is still redacted: each stream holds
- * back an incomplete token prefix (and an unclosed `BEGIN`/`END` key block) until the next
- * chunk completes it, or until `flush` forces the remainder through the same redaction.
+ * A secret that arrives split across two `write` calls is still redacted when the whole
+ * secret plus its terminator fits in the line-sized hold (`MAX_TOKEN_HOLD`, 64 KiB). A
+ * secret larger than that hold, split across writes, still emits its tail starter-less.
+ * `flush` forces whatever remains through the same redaction.
  *
  * ## Clock and sink are injected
  *
@@ -88,6 +89,7 @@ export interface BoundedLogReportV1 {
   readonly haltReason: string | null;
   readonly haltedAt: IsoTimestamp | null;
   readonly lastWriteAt: IsoTimestamp | null;
+  readonly drainIncomplete: boolean;
   readonly stdout: StreamReportV1;
   readonly stderr: StreamReportV1;
 }
@@ -102,6 +104,7 @@ export interface LogWriteResultV1 {
 export interface BoundedLogV1 {
   write(stream: LogStreamV1, chunk: string | Uint8Array): LogWriteResultV1;
   flush(): void;
+  markDrainIncomplete(): void;
   liveTail(stream: LogStreamV1): Buffer;
   fileImage(stream: LogStreamV1): Buffer;
   report(): BoundedLogReportV1;
@@ -116,20 +119,6 @@ const REDACTED = "[REDACTED]";
 /** Line-sized token hold. Still bounded so a 16 MiB flood cannot be scanned unbounded. */
 const MAX_PEM_HOLD = 64 * 1024;
 const MAX_TOKEN_HOLD = MAX_PEM_HOLD;
-const MAX_STARTER_LEN = 14; // "Authorization:"
-
-/** Longest starter we have to recognise as a *prefix* at a chunk boundary. */
-const HOLD_STARTERS: ReadonlyArray<{ readonly min: string; readonly full: string }> = [
-  { min: "Auth", full: "Authorization:" },
-  { min: "B", full: "Bearer " },
-  { min: "g", full: "ghp_" },
-  { min: "g", full: "github_pat_" },
-  { min: "s", full: "sk-" },
-  { min: "A", full: "AKIA" },
-  { min: "-----BEGIN", full: "-----BEGIN " },
-];
-
-const STARTER_FIND = /Authorization:|Bearer |ghp_|github_pat_|sk-|AKIA|-----BEGIN /gi;
 
 /**
  * Marker written when the head of a bound has been dropped.
@@ -174,8 +163,11 @@ export function redactLogText(text: string): string {
     /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----\r?\n[\s\S]*?-----END \1-----/g,
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
-  out = out.replace(/Authorization:\s+Bearer\s+\S+/gi, `Authorization: Bearer ${REDACTED}`);
-  out = out.replace(/Authorization:\s+(?!Bearer\b)\S+/gi, `Authorization: ${REDACTED}`);
+  out = out.replace(
+    /((?:Proxy-)?Authorization:\s+)(\S+)(?:\s+(\S+))?/gi,
+    (_m, head: string, scheme: string, cred: string | undefined) =>
+      cred === undefined ? head + REDACTED : `${head}${scheme} ${REDACTED}`,
+  );
   out = out.replace(/(?<![A-Za-z-])Bearer\s+\S+/g, `Bearer ${REDACTED}`);
   out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{8,}/g, REDACTED);
   out = out.replace(/\bghp_[A-Za-z0-9_]{8,}/g, REDACTED);
@@ -193,6 +185,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   let haltReason: string | null = null;
   let haltedAt: IsoTimestamp | null = null;
   let lastWriteAt: IsoTimestamp | null = null;
+  let drainIncomplete = false;
 
   function ingestRedacted(stream: LogStreamV1, payload: Buffer): void {
     if (payload.length === 0) return;
@@ -279,6 +272,11 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   return {
     write,
     flush,
+    markDrainIncomplete() {
+      if (drainIncomplete) return;
+      drainIncomplete = true;
+      write("stdout", "\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n");
+    },
     liveTail(stream) {
       return liveTailOf(streams[stream]);
     },
@@ -293,6 +291,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
         haltReason,
         haltedAt,
         lastWriteAt,
+        drainIncomplete,
         stdout: reportStream(stdout),
         stderr: reportStream(stderr),
       };
@@ -337,13 +336,14 @@ function fileImageOf(state: StreamState): Buffer {
 /**
  * Hold back bytes that might be the start of a secret so a chunk boundary cannot leak them.
  *
- * Complete lines are emitted (and redacted) immediately. An unclosed private-key block is held
- * from its `BEGIN` line. An incomplete token prefix at the end of an unfinished line is held
- * until a terminator arrives or `flush` forces redaction of whatever is left.
+ * Every redaction regex assumes whole lines. An unclosed private-key block is held from its
+ * `BEGIN` line until the same `END … PRIVATE KEY-----` line the redactor needs, plus its
+ * newline. Otherwise the entire unterminated last line is held. Incomplete-starter scanning
+ * is not a second spelling of "block open".
  */
 function splitHoldback(pending: string): { emit: string; hold: string } {
   const begin = pending.lastIndexOf("-----BEGIN ");
-  if (begin >= 0 && pending.indexOf("-----END ", begin) < 0) {
+  if (begin >= 0 && !/-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/.test(pending.slice(begin))) {
     const held = pending.slice(begin);
     if (held.length > MAX_PEM_HOLD) {
       return { emit: pending, hold: "" };
@@ -353,66 +353,11 @@ function splitHoldback(pending: string): { emit: string; hold: string } {
 
   const lastNl = pending.lastIndexOf("\n");
   const lineStart = lastNl + 1;
-  const rest = pending.slice(lineStart);
-  const split = splitTokenPrefix(rest);
-  let emit = pending.slice(0, lineStart) + split.emit;
-  let hold = split.hold;
+  let emit = pending.slice(0, lineStart);
+  let hold = pending.slice(lineStart);
   if (hold.length > MAX_TOKEN_HOLD) {
-    // Mirror the PEM overflow: emit the whole hold. Retaining a starter-less
-    // tail is how a 358-char token leaked after the front was redacted.
     emit += hold;
     hold = "";
   }
   return { emit, hold };
-}
-
-function splitTokenPrefix(text: string): { emit: string; hold: string } {
-  const incomplete = earliestIncompleteStarter(text);
-  if (incomplete >= 0) {
-    return { emit: text.slice(0, incomplete), hold: text.slice(incomplete) };
-  }
-  const prefixAt = trailingStarterPrefix(text);
-  if (prefixAt >= 0) {
-    return { emit: text.slice(0, prefixAt), hold: text.slice(prefixAt) };
-  }
-  return { emit: text, hold: "" };
-}
-
-function earliestIncompleteStarter(text: string): number {
-  STARTER_FIND.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = STARTER_FIND.exec(text)) !== null) {
-    const start = match.index;
-    const after = text.slice(start + match[0].length);
-    if (/[\s,;]/.test(after)) continue;
-    return start;
-  }
-  return -1;
-}
-
-function trailingStarterPrefix(text: string): number {
-  const start = Math.max(0, text.length - MAX_STARTER_LEN);
-  for (let index = start; index < text.length; index += 1) {
-    if (isStarterPrefix(text.slice(index))) return index;
-  }
-  return -1;
-}
-
-function isStarterPrefix(rest: string): boolean {
-  const lower = rest.toLowerCase();
-  if (lower.length === 0) return false;
-  for (const starter of HOLD_STARTERS) {
-    const full = starter.full.toLowerCase();
-    // Min is 1 for token starters so "g"/"B"/"s" hold. Authorization stays
-    // "Auth" and AKIA stays "AKI" so a 16 MiB flood of `a` is not held back
-    // one byte at a time.
-    if (
-      full.startsWith(lower)
-      && lower.length >= starter.min.length
-      && lower.length < full.length
-    ) {
-      return true;
-    }
-  }
-  return false;
 }

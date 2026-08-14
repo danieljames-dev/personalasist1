@@ -216,6 +216,23 @@ test("an Authorization header value is redacted and the rest of the line survive
   assert.match(text, /hdr Authorization: Bearer \[REDACTED\] debug=yes/);
 });
 
+test("non-Bearer Authorization schemes redact the credential, not only the scheme word", () => {
+  const cases: ReadonlyArray<{ line: string; leaked: string }> = [
+    { line: "Authorization: Basic dXNlcjpodW50ZXIyLXByb2Q=\n", leaked: "dXNlcjpodW50ZXIyLXByb2Q=" },
+    { line: "Proxy-Authorization: Basic dXNlcjpodW50ZXIyLXByb2Q=\n", leaked: "dXNlcjpodW50ZXIyLXByb2Q=" },
+    { line: "authorization: basic dXNlcjpodW50ZXIyLXByb2Q=\n", leaked: "dXNlcjpodW50ZXIyLXByb2Q=" },
+    { line: "Authorization: Token tok_hdr_secret_xx\n", leaked: "tok_hdr_secret_xx" },
+  ];
+  for (const item of cases) {
+    const { log, stdout } = logger();
+    log.write("stdout", item.line);
+    log.flush();
+    const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
+    assert.equal(text.includes(item.leaked), false, item.line);
+    assert.match(text, /\[REDACTED\]/);
+  }
+});
+
 test("a ghp_ token is redacted and the rest of the line survives", () => {
   const { log } = logger();
   log.write("stdout", "clone ghp_abcdefghijklmnopqrstuvwxyz012345 extra\n");
@@ -304,12 +321,18 @@ test("a private key block split across two writes is still redacted", () => {
 });
 
 test("every split point of each secret shape redacts the raw token", () => {
+  const pem = [
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "MIIEowIBAAKCAQEA_THIS_IS_THE_PRIVATE_KEY_MATERIAL_9911",
+    "-----END RSA PRIVATE KEY-----",
+  ].join("\n");
   const secrets: ReadonlyArray<{ line: string; token: string }> = [
     { line: "clone ghp_abcdefghijklmnopqrstuvwxyz012345 extra\n", token: "ghp_abcdefghijklmnopqrstuvwxyz012345" },
     { line: "key: sk-abcdefghijklmnopqrstuvwxyz012345\n", token: "sk-abcdefghijklmnopqrstuvwxyz012345" },
     { line: "aws=AKIAIOSFODNN7EXAMPLE extra\n", token: "AKIAIOSFODNN7EXAMPLE" },
     { line: "pat=github_pat_abcdefghijklmnopqrstuvwxyz extra\n", token: "github_pat_abcdefghijklmnopqrstuvwxyz" },
     { line: "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig\n", token: "eyJhbGciOiJIUzI1NiJ9.payload.sig" },
+    { line: `before\n${pem}\nafter\n`, token: "MIIEowIBAAKCAQEA_THIS_IS_THE_PRIVATE_KEY_MATERIAL_9911" },
   ];
   for (const secret of secrets) {
     for (let cut = 0; cut <= secret.line.length; cut += 1) {

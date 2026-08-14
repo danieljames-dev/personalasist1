@@ -19,6 +19,7 @@ import {
   recordSpawnAttempt,
   recordSpawnObservation,
   requireSpawnPermit,
+  runIntentFrom,
   RUN_INTENT_SCHEMA_V1,
   withPersistedIntent,
   type IntentStoreV1,
@@ -342,6 +343,52 @@ test("a secret in argv refuses persist, so the secret never becomes the 2am reco
     assert.equal(result.permit, null);
     assert.match(result.reason, /secret/);
   });
+});
+
+test("bare ghp_, github_pat_ and Bearer JWT in argv refuse persist", () => {
+  const secrets = [
+    "ghp_abcdefghijklmnopqrstuvwxyz012345",
+    "github_pat_11AAAAAAA_abcdefghijklmnopqrstuvwxyz",
+    "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+  ];
+  for (const token of secrets) {
+    withDir((dir) => {
+      const result = persistRunIntent(inputIn(dir, {
+        argv: ["--prompt-file", join(dir, "PROMPT.md"), token],
+      }));
+      assert.equal(result.ok, false, token);
+      assert.equal(result.permit, null, token);
+      assert.match(result.reason, /secret/, token);
+    });
+  }
+});
+
+test("runIntentFrom refuses a zone-less processIdentity.creationDate", () => {
+  const parsed = runIntentFrom({
+    schema: RUN_INTENT_SCHEMA_V1,
+    runId: "run-1",
+    missionId: "mission-1",
+    workItemId: "work-1",
+    worktree: "C:\\wt",
+    branch: "executor/x",
+    executablePath: EXE,
+    argv: ["--prompt-file", "C:\\wt\\PROMPT.md"],
+    cwd: "C:\\wt",
+    runNonce: NONCE,
+    intendedAt: NOW,
+    spawnAttemptedAt: null,
+    spawnPid: null,
+    spawnObservedAt: null,
+    processIdentity: {
+      pid: 4812,
+      creationDate: "2026-08-14T10:00:00.0000000",
+      executablePath: EXE,
+      runNonce: NONCE,
+    },
+    secretsPresent: false,
+  });
+  assert.equal(parsed.ok, false);
+  assert.match(parsed.ok ? "" : parsed.reason, /processIdentity is unreadable/);
 });
 
 // ---------------------------------------------------------------------------

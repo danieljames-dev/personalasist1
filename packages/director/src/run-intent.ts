@@ -31,8 +31,10 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
+import { redactLogText } from "./bounded-log.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
+  isPlaceableInstant,
   isUsablePid,
   processIdentityFrom,
   type ExecutorProcessIdentityV1,
@@ -43,9 +45,6 @@ export const RUN_INTENT_SCHEMA_V1 = "aion.director.run-intent.v1" as const;
 
 /** Control bytes, NUL first. Written as escapes so a raw byte never sits in source. */
 const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
-
-/** Instants this module will persist. A date without a time is a finite parse and not an instant. */
-const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 const SPAWN_PERMIT = Symbol("aion.director.spawn-permit.v1");
 
@@ -884,8 +883,7 @@ function readHostPath(obj: Record<string, unknown>, key: string): string | null 
 function isIsoTimestamp(value: unknown): value is IsoTimestamp {
   if (typeof value !== "string" || value === "") return false;
   if (CONTROL_BYTES.test(value)) return false;
-  if (!ISO_UTC.test(value)) return false;
-  return Number.isFinite(Date.parse(value));
+  return isPlaceableInstant(value);
 }
 
 function asUsableToken(value: unknown): string | null {
@@ -914,9 +912,7 @@ function errorCode(error: unknown): string | null {
 }
 
 function containsSecret(text: string): boolean {
-  return /AKIA[0-9A-Z]{16}/.test(text)
-    || /sk-[A-Za-z0-9]{10,}/.test(text)
-    || /tskey-[A-Za-z0-9_-]+/.test(text)
-    || /(authorization|api[_-]?key|token)\s*[:=]\s*\S+/i.test(text)
-    || /-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(text);
+  if (redactLogText(text) !== text) return true;
+  return /tskey-[A-Za-z0-9_-]+/.test(text)
+    || /(api[_-]?key|token)\s*[:=]\s*\S+/i.test(text);
 }

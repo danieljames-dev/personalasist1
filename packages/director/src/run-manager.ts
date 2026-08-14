@@ -80,9 +80,11 @@ import {
 import {
   captureProcessIdentity,
   createWindowsOrphanScanner,
+  createdBeforeFloor,
   descendantPidsOf,
   detectOrphan,
   holderLiveness,
+  isPlaceableInstant,
   normaliseRunNonce,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -119,7 +121,8 @@ export type SuccessConjunctNameV1 =
   | "gitAgreesWithHandoff"
   | "spendIsZero"
   | "productionClaimAgrees"
-  | "executorTreeIsGone";
+  | "executorTreeIsGone"
+  | "runCompletedWithinBudget";
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -191,6 +194,8 @@ export interface OrphanSightingV1 {
   readonly creationDate?: string;
   readonly runNonce?: string;
   readonly parentPid?: number;
+  readonly nonceReadable?: boolean;
+  readonly parentPresent?: boolean;
 }
 
 /**
@@ -472,7 +477,7 @@ function observationIsAboutRecorded(
 ): boolean {
   if (probedPid !== recorded.pid) return false;
   if (observation.outcome !== "FOUND") return true;
-  if (observation.pid !== recorded.pid) return false;
+  // holderLiveness binds FOUND observations to recorded.pid. Do not re-spell it.
   const observedNonce = normaliseRunNonce(observation.runNonce);
   if (observedNonce !== null && observedNonce !== recorded.runNonce) return false;
   return true;
@@ -499,6 +504,8 @@ export function evaluateSuccessConjunction(input: {
   /** Holder gone AND scan performed AND no live sighting remains. */
   readonly executorTreeGone: boolean;
   readonly executorTreeReason: string;
+  /** The Director cancelled this run for exceeding its budget. */
+  readonly timedOut: boolean;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -637,6 +644,13 @@ export function evaluateSuccessConjunction(input: {
       ok: input.executorTreeGone === true,
       reason: input.executorTreeReason,
     },
+    {
+      name: "runCompletedWithinBudget",
+      ok: input.timedOut !== true,
+      reason: input.timedOut === true
+        ? "the Director cancelled the run for exceeding its budget"
+        : "the run completed within its budget",
+    },
   ];
 
   const failedConjuncts = findings.filter((finding) => !finding.ok).map((finding) => finding.name);
@@ -727,6 +741,7 @@ function refusedBeforeSpawn(
     artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
     executorTreeGone: true,
     executorTreeReason: "this launch never created a process",
+    timedOut: false,
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -783,6 +798,7 @@ export async function executeRun(
     artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
     executorTreeGone: true,
     executorTreeReason: "this run never created a process",
+    timedOut: false,
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -801,9 +817,38 @@ export async function executeRun(
   let capacityHeld = false;
   let stillRunning = false;
   let spawnOccurred = false;
+  let cancelStages: CancelStageV1[] = [];
+  let timedOut = false;
+  let processIdentity: ExecutorProcessIdentityV1 | null = null;
+  let spawnedAtFloor: string | null = null;
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
   let exitProof: WriterExitProofV1 | null = null;
   let captureTimeIdentityNotFound = false;
+
+  const interruptedAfterSpawn = (timedOutFlag: boolean): SuccessConjunctionV1 =>
+    evaluateSuccessConjunction({
+      exitCode: null,
+      stillRunning: false,
+      executor: request.executor,
+      output: "",
+      parsed: emptyParsed,
+      reportedWorkItemId: null,
+      expectedMissionId: request.missionId,
+      expectedRunId: request.runId,
+      expectedWorkItemId: request.workItemId,
+      runRoot,
+      gitAfter: null,
+      gitVerdict: null,
+      authorisedProductionMutated: request.authorisedProductionMutated,
+      artifactsInsideRunRoot: false,
+      artifactsInsideRunRootReason: "no parsed handoff whose artifacts can be confined to the run root",
+      executorTreeGone: false,
+      executorTreeReason: "the run threw before the process tree could be observed",
+      timedOut: timedOutFlag,
+      ...(request.knownSuccessExitCodes !== undefined
+        ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
+        : {}),
+    });
 
   const releaseHeld = (): void => {
     if (heldLease !== null && releasedLeaseId === null) {
@@ -1054,6 +1099,7 @@ export async function executeRun(
             argv: request.argv,
             cwd: request.cwd,
           });
+          spawnedAtFloor = deps.clock.now();
           return deps.spawn(
             request.executablePath,
             request.argv,
@@ -1137,15 +1183,15 @@ export async function executeRun(
         ok: false,
         spawned: true,
         reason: `spawn handle pid is unreadable: ${errorMessage(error)}`,
-        conjunction: emptyConjunction,
+        conjunction: interruptedAfterSpawn(timedOut),
         exitCode: null,
-        processIdentity: null,
+        processIdentity,
         intent: permit.intent,
         handoff: null,
         gitAfter: null,
         lease: heldLease,
         productionWriterLeaseReleasedByThisRun: false,
-        cancel: emptyCancel,
+        cancel: { timedOut, stages: cancelStages },
         log: null,
       });
     }
@@ -1184,6 +1230,7 @@ export async function executeRun(
           runNonce,
           parentExited: confirmedStopped,
           holderPid: childPid,
+          createdNotBefore: spawnedAtFloor ?? "",
         });
       } catch {
         // A failed leftover kill is not a confirmed absence.
@@ -1193,6 +1240,7 @@ export async function executeRun(
         recorded: null,
         runNonce,
         holderPid: childPid,
+        createdNotBefore: spawnedAtFloor ?? "",
       });
       const reason = confirmedStopped
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
@@ -1201,15 +1249,15 @@ export async function executeRun(
         ok: false,
         spawned: true,
         reason,
-        conjunction: emptyConjunction,
+        conjunction: interruptedAfterSpawn(timedOut),
         exitCode: child.exited ? (await child.exit).code : null,
-        processIdentity: null,
+        processIdentity,
         intent: permit.intent,
         handoff: null,
         gitAfter: null,
         lease: heldLease,
         productionWriterLeaseReleasedByThisRun: false,
-        cancel: emptyCancel,
+        cancel: { timedOut, stages: cancelStages },
         log: null,
       });
     }
@@ -1224,7 +1272,7 @@ export async function executeRun(
       !captured.ok
       && captured.observation !== null
       && captured.observation.outcome === "NOT_FOUND";
-    const processIdentity = captured.ok ? captured.identity : null;
+    processIdentity = captured.ok ? captured.identity : null;
     if (processIdentity !== null) {
       const observed = recordSpawnObservation({
         permit,
@@ -1258,12 +1306,10 @@ export async function executeRun(
 
     const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
     const log = createBoundedLog({ clock: deps.clock, sinks });
-    const stdoutDone = pumpStream(child.stdout, (chunk) => log.write("stdout", chunk));
-    const stderrDone = pumpStream(child.stderr, (chunk) => log.write("stderr", chunk));
+    const stdoutDone = pumpStream(child.stdout, (chunk) => log.write("stdout", chunk)).catch(() => undefined);
+    const stderrDone = pumpStream(child.stderr, (chunk) => log.write("stderr", chunk)).catch(() => undefined);
 
     // 6. Timeout / cancel ladder.
-    const cancelStages: CancelStageV1[] = [];
-    let timedOut = false;
     let exitCode: number | null = null;
 
     const exitWon = child.exited;
@@ -1280,23 +1326,34 @@ export async function executeRun(
         exitCode = raced.exit.code;
       } else {
         timedOut = true;
-        const cancelled = await cancelLadder(child, deps, processIdentity, runNonce);
-        cancelStages.push(...cancelled.stages);
+        const cancelled = await cancelLadder(
+          child,
+          deps,
+          processIdentity,
+          runNonce,
+          cancelStages,
+          spawnedAtFloor ?? "",
+        );
         stillRunning = cancelled.stillRunning;
         exitCode = cancelled.exitCode;
       }
     }
 
     if (log.report().mustHalt && !child.exited) {
-      const cancelled = await cancelLadder(child, deps, processIdentity, runNonce);
-      for (const stage of cancelled.stages) {
-        if (!cancelStages.includes(stage)) cancelStages.push(stage);
-      }
+      const cancelled = await cancelLadder(
+        child,
+        deps,
+        processIdentity,
+        runNonce,
+        cancelStages,
+        spawnedAtFloor ?? "",
+      );
       stillRunning = cancelled.stillRunning;
       if (cancelled.exitCode !== null) exitCode = cancelled.exitCode;
     }
 
-    await settleStreams(stdoutDone, stderrDone, deps.wait);
+    const streamsSettled = await settleStreams(stdoutDone, stderrDone, deps.wait);
+    if (!streamsSettled) log.markDrainIncomplete();
     log.flush();
     const logReport = log.report();
     const output = `${log.liveTail("stdout").toString("utf8")}\n${log.liveTail("stderr").toString("utf8")}`;
@@ -1312,6 +1369,7 @@ export async function executeRun(
         runNonce,
         parentExited: child.exited,
         holderPid: processIdentity?.pid ?? childPid,
+        createdNotBefore: spawnedAtFloor ?? "",
       });
     } catch {
       leftoverSweep = { confirmed: false, remaining: [], killed: false };
@@ -1353,6 +1411,7 @@ export async function executeRun(
       recorded: processIdentity,
       runNonce,
       holderPid: processIdentity?.pid ?? childPid,
+      createdNotBefore: spawnedAtFloor ?? "",
     });
 
     const tree = describeExecutorTree({
@@ -1388,6 +1447,7 @@ export async function executeRun(
       artifactsInsideRunRootReason: artifactCheck.reason,
       executorTreeGone: tree.ok,
       executorTreeReason: tree.reason,
+      timedOut,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
@@ -1443,15 +1503,15 @@ export async function executeRun(
       ok: false,
       spawned: spawnOccurred,
       reason: `run failed: ${errorMessage(error)}`,
-      conjunction: emptyConjunction,
+      conjunction: spawnOccurred ? interruptedAfterSpawn(timedOut) : emptyConjunction,
       exitCode: null,
-      processIdentity: null,
+      processIdentity,
       intent: null,
       handoff: null,
       gitAfter: null,
       lease: heldLease,
       productionWriterLeaseReleasedByThisRun: false,
-      cancel: emptyCancel,
+      cancel: { timedOut, stages: cancelStages },
       log: null,
     });
   } finally {
@@ -1504,8 +1564,13 @@ function describeExecutorTree(input: {
 }): { ok: boolean; reason: string } {
   if (input.recorded !== null && input.observation !== null) {
     const liveness = holderLiveness(input.recorded, input.observation);
-    if (liveness === "ALIVE") {
-      return { ok: false, reason: "the recorded holder is still ALIVE" };
+    if (liveness !== "DEAD_CONFIRMED") {
+      return {
+        ok: false,
+        reason: liveness === "ALIVE"
+          ? "the recorded holder is still ALIVE"
+          : "the recorded holder is not DEAD_CONFIRMED",
+      };
     }
   }
   if (!input.orphanScan.performed) {
@@ -1605,9 +1670,10 @@ function collectWriterOrphans(input: {
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
   readonly holderPid?: number;
+  readonly createdNotBefore: string;
 }): WriterOrphanScanV1 {
   try {
-    const createdNotBefore = input.recorded?.creationDate ?? "";
+    const createdNotBefore = input.createdNotBefore;
     const holderPid = input.holderPid ?? input.recorded?.pid;
     const sightings = [...resolveOrphanScanner(input.scanOrphans)({
       runNonce: input.runNonce,
@@ -1641,6 +1707,7 @@ export function writerSightingNotProvenAbsent(
   },
 ): boolean {
   const nonce = normaliseRunNonce(sighting.runNonce);
+  if (nonce !== null && nonce !== runNonce) return false;
   if (nonce === runNonce) return true;
   if (tree.holderPid === null) return false;
   return descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid);
@@ -1660,8 +1727,9 @@ function killNonceBearingLeftovers(input: {
   readonly runNonce: string;
   readonly parentExited: boolean;
   readonly holderPid?: number;
+  readonly createdNotBefore: string;
 }): LeftoverSweepV1 {
-  const createdNotBefore = input.recorded?.creationDate ?? "";
+  const createdNotBefore = input.createdNotBefore;
   const holderPid = input.holderPid ?? input.recorded?.pid ?? null;
   const query = {
     runNonce: input.runNonce,
@@ -1679,20 +1747,11 @@ function killNonceBearingLeftovers(input: {
   for (const leftover of leftovers) {
     if (leftover.pid === input.childPid) continue;
     if (!writerSightingNotProvenAbsent(leftover, input.runNonce, tree)) continue;
-    if (
-      createdNotBefore !== ""
-      && leftover.creationDate !== undefined
-      && leftover.creationDate < createdNotBefore
-    ) {
-      continue;
-    }
-    if (input.recorded !== null) {
-      const verdict = detectOrphan({
-        recorded: input.recorded,
-        observed: observationFromSighting(leftover),
-        parentLiveness: input.parentExited ? "DEAD_CONFIRMED" : "ALIVE",
-      });
-      if (verdict.kind === "NONCE_MISMATCH") continue;
+    if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
+    const leftoverNonce = normaliseRunNonce(leftover.runNonce);
+    if (leftoverNonce !== input.runNonce) {
+      // Ancestry-only: never kill without a placeable floor.
+      if (!isPlaceableInstant(createdNotBefore)) continue;
     }
     input.killTree(leftover.pid);
     killed = true;
@@ -1760,29 +1819,29 @@ async function cancelLadder(
   deps: RunManagerDepsV1,
   recorded: ExecutorProcessIdentityV1 | null,
   runNonce: string,
-): Promise<{ stages: CancelStageV1[]; stillRunning: boolean; exitCode: number | null }> {
-  const stages: CancelStageV1[] = [];
-
+  stages: CancelStageV1[],
+  createdNotBefore: string,
+): Promise<{ stillRunning: boolean; exitCode: number | null }> {
   // SOFT: terminate the tracked root only. child.kill() is TerminateProcess on this PID.
   try {
     child.kill();
   } catch {
     // Already gone.
   }
-  stages.push("SOFT");
+  if (!stages.includes("SOFT")) stages.push("SOFT");
   await deps.wait(CANCEL_SOFT_MS);
   if (child.exited) {
     const ended = await child.exit;
-    return { stages, stillRunning: false, exitCode: ended.code };
+    return { stillRunning: false, exitCode: ended.code };
   }
 
-  // HARD: kill the tree. child.kill() does not reach grandchildren on Windows.
+  // HARD: record the attempt before the call that may throw.
+  if (!stages.includes("HARD")) stages.push("HARD");
   deps.killTree(child.pid);
-  stages.push("HARD");
   await deps.wait(CANCEL_HARD_MS);
   const stillAfterHard = !child.exited;
 
-  // ORPHAN: after cancel, scan by AION_RUN_NONCE and recorded creation time; kill leftovers.
+  // ORPHAN: after cancel, scan by AION_RUN_NONCE and spawn floor; kill leftovers.
   const leftoverSweep = killNonceBearingLeftovers({
     scanOrphans: deps.scanOrphans,
     killTree: deps.killTree,
@@ -1791,24 +1850,25 @@ async function cancelLadder(
     runNonce,
     parentExited: child.exited,
     holderPid: recorded?.pid ?? child.pid,
+    createdNotBefore,
   });
-  if (leftoverSweep.killed) stages.push("ORPHAN");
+  if (leftoverSweep.killed && !stages.includes("ORPHAN")) stages.push("ORPHAN");
 
   if (child.exited) {
     const ended = await child.exit;
-    return { stages, stillRunning: false, exitCode: ended.code };
+    return { stillRunning: false, exitCode: ended.code };
   }
-  return { stages, stillRunning: stillAfterHard, exitCode: null };
+  return { stillRunning: stillAfterHard, exitCode: null };
 }
 
 function pumpStream(stream: Readable | null, write: (chunk: Uint8Array) => void): Promise<void> {
   if (stream === null) return Promise.resolve();
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     stream.on("data", (chunk: unknown) => {
       write(chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk)));
     });
     stream.on("end", () => resolve());
-    stream.on("error", (error: unknown) => reject(error));
+    stream.on("error", () => resolve());
     stream.resume();
   });
 }
@@ -1817,18 +1877,23 @@ async function settleStreams(
   stdoutDone: Promise<void>,
   stderrDone: Promise<void>,
   wait: (ms: number) => Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   let done = false;
   void Promise.all([stdoutDone, stderrDone]).then(() => {
     done = true;
   }, () => {
     done = true;
   });
-  if (done) return;
+  if (done) return true;
   await Promise.race([
-    Promise.all([stdoutDone, stderrDone]).catch(() => undefined),
+    Promise.all([stdoutDone, stderrDone]).then(() => {
+      done = true;
+    }).catch(() => {
+      done = true;
+    }),
     wait(50),
   ]);
+  return done;
 }
 
 function readHandoffText(fs: RunFileSystemV1, handoffPath: string, stdout: string): string | null {
