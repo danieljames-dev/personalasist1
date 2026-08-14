@@ -103,7 +103,8 @@
     "aion:v13r1:demo": "npm run aion:build --silent && node apps/aion-v13-r1-demo.mjs",
     "aion:v13r2:demo": "npm run aion:build --silent && node apps/aion-v13-r2-demo.mjs",
     "delegated-operator:test": "npm run test --workspace @aion/delegated-operator",
-    "delegated-operator:build": "npm run build --workspace @aion/delegated-operator"
+    "delegated-operator:build": "npm run build --workspace @aion/delegated-operator",
+    "director:run": "npm run build --workspace @aion/director --silent && node apps/director-cli.mjs"
   },
   "engines": {
     "node": ">=22"

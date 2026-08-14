@@ -72,8 +72,10 @@ import {
 } from "./lease-store.js";
 import {
   acquireLease,
+  conflicts,
   heartbeat,
   LEASE_TTL_MS,
+  processIdentityMatches,
   reclaimStaleLease,
   releaseLease,
   type LeaseKindV1,
@@ -87,10 +89,11 @@ import {
   descendantPidsOf,
   detectOrphan,
   holderLiveness,
-  isPlaceableInstant,
   isUsablePid,
   normaliseRunNonce,
   parentlessAfterFloorMakesScanUndecidable,
+  placeableInstantMs,
+  provenCreatedAtOrAfterFloor,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type OrphanVerdictV1,
@@ -107,14 +110,12 @@ import {
   type RunIntentV1,
   type SpawnPermitV1,
 } from "./run-intent.js";
+import { CONTROL_BYTES } from "./control-bytes.js";
 
 export const RUN_RESULT_SCHEMA_V1 = "aion.director.run-result.v1" as const;
 
 export const CANCEL_SOFT_MS = 5_000;
 export const CANCEL_HARD_MS = 10_000;
-
-/** Control bytes, NUL first. Written as escapes so a raw byte never sits in source. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 
 const KNOWN_SUCCESS_EXIT_CODES: readonly number[] = [0];
 
@@ -128,7 +129,16 @@ export type SuccessConjunctNameV1 =
   | "productionClaimAgrees"
   | "executorTreeIsGone"
   | "runCompletedWithinBudget"
-  | "logStayedWithinBudget";
+  | "logStayedWithinBudget"
+  | "reviewLeftTreeUnchanged"
+  | "writeMovedHead";
+
+const WRITE_ROLES: ReadonlySet<ExecutorRoleV1> = new Set([
+  "IMPLEMENT",
+  "REPAIR",
+  "INTEGRATE",
+  "DEPLOY",
+]);
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -295,6 +305,7 @@ export type LaunchRunRequestV1 = Omit<ExecuteRunRequestV1, "executablePath" | "a
 
 export interface RunResultV1 {
   readonly schema: typeof RUN_RESULT_SCHEMA_V1;
+  readonly runId: string;
   readonly ok: boolean;
   readonly spawned: boolean;
   readonly reason: string;
@@ -303,6 +314,7 @@ export interface RunResultV1 {
   readonly processIdentity: ExecutorProcessIdentityV1 | null;
   readonly intent: RunIntentV1 | null;
   readonly handoff: ExecutorHandoffV1 | null;
+  readonly gitBefore: GitObservationV1 | null;
   readonly gitAfter: GitObservationV1 | null;
   readonly lease: LeaseV1 | null;
   readonly productionWriterLeaseReleasedByThisRun: boolean;
@@ -426,7 +438,6 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
     // the reported writer-release field stays scoped to PRODUCTION_WRITER.
     if (input.recordedLeaseKind === null) return null;
     if (input.recordedLeaseId === null || input.releasedLeaseId === null) return null;
-    if (input.releasedLeaseId !== input.recordedLeaseId) return null;
     if (!input.orphanScanPerformed) return null;
     if (input.orphanSightings === null) return null;
     if (input.liveSightings === null || input.liveSightings === undefined) return null;
@@ -511,6 +522,7 @@ export function evaluateSuccessConjunction(input: {
   readonly expectedWorkItemId: string;
   readonly runRoot: string;
   readonly gitAfter: GitObservationV1 | null;
+  readonly gitBefore?: GitObservationV1 | null;
   readonly gitVerdict: GitVerdictV1 | null;
   readonly authorisedProductionMutated: boolean;
   /** Declared artifacts realpath'd inside the run root. Not every file written. */
@@ -523,6 +535,8 @@ export function evaluateSuccessConjunction(input: {
   readonly timedOut: boolean;
   /** The bounded log did not demand a halt. */
   readonly logStayedWithinBudget: boolean;
+  readonly role?: ExecutorRoleV1;
+  readonly spawnedAtFloor?: string | null;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -561,10 +575,18 @@ export function evaluateSuccessConjunction(input: {
 
   const statusContradiction = contradictions.find((item) => item.field === "status");
   const selfTiming = contradictions.find((item) => item.field === "finishedAt");
+  const floorMs = input.spawnedAtFloor === undefined || input.spawnedAtFloor === null
+    ? null
+    : placeableInstantMs(input.spawnedAtFloor);
+  const finishedMs = handoff === null ? null : placeableInstantMs(handoff.finishedAt);
+  const handoffInThisRunWindow = handoff === null
+    ? false
+    : finishedMs !== null && floorMs !== null && finishedMs >= floorMs;
   const handoffParsedOk = handoff !== null
     && handoff.status === "PASS"
     && statusContradiction === undefined
-    && selfTiming === undefined;
+    && selfTiming === undefined
+    && handoffInThisRunWindow;
 
   let handoffParsedReason: string;
   if (handoff === null) {
@@ -575,6 +597,12 @@ export function evaluateSuccessConjunction(input: {
     handoffParsedReason = statusContradiction.detail;
   } else if (selfTiming !== undefined) {
     handoffParsedReason = selfTiming.detail;
+  } else if (!handoffInThisRunWindow) {
+    handoffParsedReason = finishedMs === null
+      ? "handoff finishedAt is not a placeable instant; UNKNOWN does not bind the report to this run"
+      : floorMs === null
+        ? "this run's spawn floor is not a placeable instant; UNKNOWN does not bind the report to this run"
+        : "handoff finishedAt precedes this run's spawn floor; the file is not this invocation's report";
   } else {
     handoffParsedReason = "handoff parsed";
   }
@@ -644,6 +672,46 @@ export function evaluateSuccessConjunction(input: {
     productionReason = "compared the handoff production claim with the authorisation flag; production itself was not observed";
   }
 
+  const beforeSha = observedHeadSha(input.gitBefore ?? null);
+  const afterSha = observedHeadSha(input.gitAfter);
+  const role = input.role;
+  let reviewOk = true;
+  let reviewReason = "role is not a review that must leave the tree unchanged";
+  if (role === "ADVERSARIAL_REVIEW") {
+    if (beforeSha === null || afterSha === null) {
+      reviewOk = false;
+      reviewReason = beforeSha === null
+        ? "review git-before HEAD is UNAVAILABLE; UNKNOWN does not license a review verdict"
+        : "review git-after HEAD is UNAVAILABLE; UNKNOWN does not license a review verdict";
+    } else if (beforeSha !== afterSha) {
+      reviewOk = false;
+      reviewReason = "ADVERSARIAL_REVIEW moved HEAD; a reviewer that writes is not a review";
+    } else {
+      reviewReason = "ADVERSARIAL_REVIEW left HEAD unchanged";
+    }
+  }
+
+  let writeMovedOk = true;
+  let writeMovedReason = "role is not a write role that must advance HEAD";
+  if (role !== undefined && WRITE_ROLES.has(role)) {
+    if (beforeSha === null || afterSha === null) {
+      writeMovedOk = false;
+      writeMovedReason = beforeSha === null
+        ? "write-role git-before HEAD is UNAVAILABLE; UNKNOWN is not a written tree"
+        : "write-role git-after HEAD is UNAVAILABLE; UNKNOWN is not a written tree";
+    } else if (beforeSha === afterSha) {
+      writeMovedOk = false;
+      writeMovedReason = "write role exited having left HEAD unchanged";
+    } else {
+      writeMovedReason = "write role advanced HEAD";
+    }
+  }
+
+  const logBudgetOk = input.logStayedWithinBudget === true;
+  const logBudgetReason = input.logStayedWithinBudget === true
+    ? "the run log stayed within its byte budget"
+    : "the run log exceeded its byte budget; the executor must be halted";
+
   const findings: ConjunctFindingV1[] = [
     { name: "processExitedWithKnownSuccessCode", ok: exitOk, reason: exitReason },
     {
@@ -670,11 +738,11 @@ export function evaluateSuccessConjunction(input: {
     },
     {
       name: "logStayedWithinBudget",
-      ok: input.logStayedWithinBudget === true,
-      reason: input.logStayedWithinBudget === true
-        ? "the run log stayed within its byte budget"
-        : "the run log exceeded its byte budget; the executor must be halted",
+      ok: logBudgetOk,
+      reason: logBudgetReason,
     },
+    { name: "reviewLeftTreeUnchanged", ok: reviewOk, reason: reviewReason },
+    { name: "writeMovedHead", ok: writeMovedOk, reason: writeMovedReason },
   ];
 
   const failedConjuncts = findings.filter((finding) => !finding.ok).map((finding) => finding.name);
@@ -783,6 +851,7 @@ function refusedBeforeSpawn(
   const result: RunResultV1 = {
     schema: RUN_RESULT_SCHEMA_V1,
     resultPath,
+    runId: request.runId,
     ok: false,
     spawned: false,
     reason,
@@ -791,6 +860,7 @@ function refusedBeforeSpawn(
     processIdentity: null,
     intent: null,
     handoff: null,
+    gitBefore: null,
     gitAfter: null,
     lease: null,
     productionWriterLeaseReleasedByThisRun: false,
@@ -809,6 +879,7 @@ export async function executeRun(
   const intentPath = join(runRoot, "intent.json");
   const resultPath = join(runRoot, "result.json");
   const handoffPath = join(runRoot, "handoff.json");
+  const gitBeforePath = join(runRoot, "git-before.json");
   const gitAfterPath = join(runRoot, "git-after.json");
 
   const emptyCancel: CancelReportV1 = { timedOut: false, stages: [] };
@@ -840,14 +911,25 @@ export async function executeRun(
 
   const leaseStore = deps.leases ?? createNodeLeaseStore(sandboxDirectorStoreRoot());
 
-  const finish = (partial: Omit<RunResultV1, "schema" | "resultPath">): RunResultV1 => {
-    const result: RunResultV1 = { schema: RUN_RESULT_SCHEMA_V1, resultPath, ...partial };
+  const finish = (
+    partial: Omit<RunResultV1, "schema" | "resultPath" | "runId" | "gitBefore"> & {
+      readonly gitBefore?: GitObservationV1 | null;
+    },
+  ): RunResultV1 => {
+    const result: RunResultV1 = {
+      ...partial,
+      schema: RUN_RESULT_SCHEMA_V1,
+      resultPath,
+      runId: request.runId,
+      gitBefore: partial.gitBefore ?? null,
+    };
     writeResultIfPermitted(deps.fs, runRoot, resultPath, result, partial.spawned === true);
     return result;
   };
 
   let heldLease: LeaseV1 | null = null;
   let releasedLeaseId: string | null = null;
+  let adoptedExistingHolder = false;
   let capacityHeld = false;
   let stillRunning = false;
   let spawnOccurred = false;
@@ -855,6 +937,7 @@ export async function executeRun(
   let timedOut = false;
   let processIdentity: ExecutorProcessIdentityV1 | null = null;
   let spawnedAtFloor: string | null = null;
+  let gitBefore: GitObservationV1 | null = null;
   let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
   let exitProof: WriterExitProofV1 | null = null;
   let captureTimeIdentityNotFound = false;
@@ -887,17 +970,18 @@ export async function executeRun(
 
   const releaseHeld = (): void => {
     if (heldLease !== null && releasedLeaseId === null) {
-      // One predicate: withhold only when this run created a process and
-      // has not proven that process gone. Kind is not the fact.
-      const withhold = spawnOccurred && exitProof === null;
+      if (adoptedExistingHolder && exitProof === null) {
+        exitProof = proveAdoptedHolderDead(heldLease, deps.probe);
+      }
+      const withhold = (spawnOccurred || adoptedExistingHolder) && exitProof === null;
       if (!withhold) {
         try {
           const before = leaseStore.list();
-          const remaining = releaseLease(before, heldLease.leaseId);
+          const remaining = releaseLease(before, heldLease);
           leaseStore.save(remaining);
           const observed = leaseStore.list();
-          const gone = before.some((item) => item.leaseId === heldLease!.leaseId)
-            && observed.every((item) => item.leaseId !== heldLease!.leaseId);
+          const gone = before.some((item) => leaseIdentityEquals(item, heldLease!))
+            && observed.every((item) => !leaseIdentityEquals(item, heldLease!));
           if (gone) releasedLeaseId = heldLease.leaseId;
         } catch {
           // A failed release must not prevent capacity return.
@@ -1096,6 +1180,7 @@ export async function executeRun(
     }
 
     heldLease = leaseAttempt.lease;
+    adoptedExistingHolder = leaseAttempt.adoptedExistingHolder === true;
     if (heldLease === null) {
       return finish({
         ok: false,
@@ -1115,7 +1200,7 @@ export async function executeRun(
     }
     try {
       leaseStore.save([
-        ...leaseStore.list().filter((item) => item.leaseId !== heldLease!.leaseId),
+        ...leaseStore.list().filter((item) => !leaseIdentityEquals(item, heldLease!)),
         heldLease,
       ]);
     } catch (error) {
@@ -1170,6 +1255,19 @@ export async function executeRun(
         cancel: emptyCancel,
         log: null,
       });
+    }
+
+    const gitBeforePathLocal = gitBeforePath;
+    try {
+      const collectedBefore = collectGitTruth({
+        runner: deps.git,
+        worktreePath: request.worktree,
+        now: deps.clock.now(),
+      });
+      gitBefore = collectedBefore.observation;
+      deps.fs.writeDurable(gitBeforePathLocal, `${JSON.stringify(gitBefore, null, 2)}\n`);
+    } catch {
+      gitBefore = gitBefore ?? null;
     }
 
     // 3. Persist the intent. The only value that permits a spawn is returned after write-and-read-back.
@@ -1382,7 +1480,11 @@ export async function executeRun(
     permit = attempted.permit;
     heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null, runNonce);
 
-    const captured = captureProcessIdentity(deps.probe, { pid: childPid, runNonce });
+    const captured = captureProcessIdentity(deps.probe, {
+      pid: childPid,
+      runNonce,
+      expectedExecutable: request.executablePath,
+    });
     // Capture asked about `childPid`. NOT_FOUND is therefore about that pid.
     // Do not read `child.exited` here: a synchronous probe owns the event
     // loop, so the handle cannot have settled even when the OS process is gone.
@@ -1533,11 +1635,22 @@ export async function executeRun(
     const handoff = parsed.ok ? parsed.handoff : null;
     const reportedWorkItemId = workItemIdFrom(handoffRaw === null ? null : extractJsonObject(handoffRaw));
 
+    const beforeHead = observedHeadSha(gitBefore);
+    const afterHead = observedHeadSha(gitAfter);
+    const descendsFromExpected = beforeHead === null || afterHead === null
+      ? null
+      : gitHeadDescendsFrom(deps.git, beforeHead, afterHead);
     const gitVerdict = verifyGitTruth(gitAfter, {
       ...(handoff !== null ? { claimedHead: handoff.headAfter } : {}),
       ...(request.branch !== null ? { expectedBranch: request.branch } : {}),
       requireClean: true,
       requireAttachedBranch: request.branch !== null,
+      ...(beforeHead !== null
+        ? {
+          mustDescendFrom: beforeHead,
+          descendsFromExpected: descendsFromExpected === true,
+        }
+        : {}),
     });
 
     // Writer-release and the eighth conjunct share one observation and one scan.
@@ -1585,6 +1698,7 @@ export async function executeRun(
       expectedWorkItemId: request.workItemId,
       runRoot,
       gitAfter,
+      gitBefore,
       gitVerdict,
       authorisedProductionMutated: request.authorisedProductionMutated,
       declaredArtifactsInsideRunRoot: artifactCheck.ok,
@@ -1593,6 +1707,8 @@ export async function executeRun(
       executorTreeReason: tree.reason,
       timedOut,
       logStayedWithinBudget: logReport.mustHalt !== true,
+      ...(request.role !== undefined ? { role: request.role } : {}),
+      spawnedAtFloor,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
@@ -1630,6 +1746,7 @@ export async function executeRun(
       processIdentity,
       intent: permit.intent,
       handoff,
+      gitBefore,
       gitAfter,
       lease: heldLease,
       productionWriterLeaseReleasedByThisRun: writerFact,
@@ -1695,7 +1812,7 @@ function persistLeaseHolder(
       runToken: token,
     },
   };
-  store.save([...store.list().filter((item) => item.leaseId !== updated.leaseId), updated]);
+  store.save([...store.list().filter((item) => !leaseIdentityEquals(item, updated)), updated]);
   return updated;
 }
 
@@ -1703,29 +1820,16 @@ function persistLeaseHolder(
  * The eighth success conjunct: whether this run's executor tree was observed
  * gone enough that the next run may take the writer lease.
  *
- * KNOWN LIMIT. What is proven: no process carrying this run's nonce remains;
- * no descendant of the recorded holder in the CIM ParentProcessId chain
- * remains; no parentless row created inside this run's window whose
- * environment could not be read remains; the recorded holder is
+ * Proven when the scan is SCANNED: no process carrying this run's nonce
+ * remains; no descendant of the recorded holder in the CIM ParentProcessId
+ * chain remains; no parentless row created at or after the spawn floor whose
+ * nonce is not this run's remains (that row makes the scan UNAVAILABLE, and
+ * UNAVAILABLE withholds the writer lease). The recorded holder is
  * DEAD_CONFIRMED or the owned handle settled after a capture-time NOT_FOUND.
  *
- * What is not proven: a child that double-forks and scrubs the grandchild's
- * environment breaks both proxies at once — one intervening exit breaks the
- * ancestry chain and a readable environment with no nonce defeats the
- * environment test. Executed evidence: holder -> mid -> leaf, mid exits
- * (standard daemonize double-fork); the live leaf's CIM ParentProcessId is
- * the dead mid (absent from the rows); the orphan scan returns [] and this
- * function reports success. That is not "the executor process tree is gone".
- *
- * The durable fix: assign the child to a Windows Job Object created with
- * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and enumerate
- * JOBOBJECT_BASIC_PROCESS_ID_LIST for membership. The handle must be held
- * open for the life of the run, so it needs a sidecar process that outlives
- * the spawn (Add-Type P/Invoke is already used in process-identity, so no
- * native addon is required). Do not attempt it in this commit.
- *
- * The conjunct key stays `executorTreeIsGone`. The reason string is the
- * honest claim.
+ * A parentless nonce-less row from *before* the floor is host noise and is
+ * not emitted. An unplaceable floor makes the scan UNAVAILABLE rather than
+ * falling back to a narrower emit predicate.
  */
 function describeExecutorTree(input: {
   readonly recorded: ExecutorProcessIdentityV1 | null;
@@ -1901,8 +2005,9 @@ export function writerSightingNotProvenAbsent(
   if (tree.holderPid !== null && descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid)) {
     return true;
   }
+  if (sighting.nonceReadable === false) return true;
   const nonce = normaliseRunNonce(sighting.runNonce);
-  if (nonce !== null && nonce !== runNonce) return false;
+  if (nonce === null) return true;
   return nonce === runNonce;
 }
 
@@ -1942,12 +2047,18 @@ function killNonceBearingLeftovers(input: {
     if (!writerSightingNotProvenAbsent(leftover, input.runNonce, tree)) continue;
     if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
     const leftoverNonce = normaliseRunNonce(leftover.runNonce);
-    if (leftoverNonce !== input.runNonce) {
-      // Ancestry-only: never kill without a placeable floor.
-      if (!isPlaceableInstant(createdNotBefore)) continue;
+    if (leftoverNonce === input.runNonce) {
+      if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
+      input.killTree(leftover.pid);
+      killed = true;
+      continue;
     }
-    input.killTree(leftover.pid);
-    killed = true;
+    // Ancestry-only: a PID slot is not a process. Kill only when the recorded
+    // holder is still identity-MATCH and the leftover started at or after that
+    // holder's creationDate. A reused slot's older children are strangers.
+    if (input.recorded === null) continue;
+    if (!provenCreatedAtOrAfterFloor(leftover.creationDate, input.recorded.creationDate)) continue;
+    continue;
   }
   let remaining: readonly OrphanSightingV1[];
   try {
@@ -2149,6 +2260,57 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function observedHeadSha(observation: GitObservationV1 | null | undefined): string | null {
+  if (observation === null || observation === undefined) return null;
+  if (observation.head.outcome !== "FOUND") return null;
+  return observation.head.sha;
+}
+
+function gitHeadDescendsFrom(git: GitRunner, ancestor: string, head: string): boolean | null {
+  if (ancestor === head) return true;
+  try {
+    const result = git.run(["merge-base", "--is-ancestor", ancestor, head]);
+    if (result.error !== null || result.status === null) return null;
+    return result.status === 0;
+  } catch {
+    return null;
+  }
+}
+
+function leaseIdentityEquals(
+  a: { readonly kind: LeaseKindV1; readonly resource: string; readonly runId: string },
+  b: { readonly kind: LeaseKindV1; readonly resource: string; readonly runId: string },
+): boolean {
+  return a.runId === b.runId && conflicts(a, b);
+}
+
+function proveAdoptedHolderDead(
+  lease: LeaseV1,
+  probe: HostProcessProbe,
+): WriterExitProofV1 | null {
+  if (!isUsablePid(lease.pid)) return null;
+  let observation: ProcessObservationV1;
+  try {
+    observation = probe.observe(lease.pid);
+  } catch {
+    observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
+  }
+  if (observation.outcome === "UNAVAILABLE") return null;
+  if (observation.outcome === "NOT_FOUND") return makeWriterExitProof();
+  if (lease.processIdentity !== undefined) {
+    const observedIdentity: ProcessIdentityV1 = {
+      pid: observation.pid,
+      ...(observation.creationDate !== undefined ? { startedAt: observation.creationDate } : {}),
+      ...(normaliseRunNonce(observation.runNonce) !== null
+        ? { runToken: normaliseRunNonce(observation.runNonce)! }
+        : {}),
+    };
+    const match = processIdentityMatches(lease.processIdentity, observedIdentity);
+    if (match === "MATCH") return null;
+  }
+  return null;
 }
 
 function errorCode(error: unknown): string | null {

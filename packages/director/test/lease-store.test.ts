@@ -202,6 +202,9 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
               if (key === "status --porcelain") {
                 return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
               }
+              if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
+                return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+              }
               return { argv: [...argv], status: 128, stdout: "", stderr: "fatal\n", error: null };
             },
           },

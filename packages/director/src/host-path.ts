@@ -90,6 +90,8 @@
  * module exists to prevent. `store-contract.ts` already encoded the stripping rule for identifiers.
  */
 
+import { CONTROL_BYTES } from "./control-bytes.js";
+
 /**
  * What a path is anchored to, which is what decides whether it may be compared to another.
  *
@@ -141,11 +143,6 @@ export interface HostPathV1 {
 }
 
 const INVALID: HostPathV1 = { path: "", pathClass: "INVALID", ascends: 0, identifiable: false };
-
-/** Control bytes, NUL first. Win32 native APIs terminate at a NUL, so the validated path and the
- * opened path stop being the same path. Refused at this boundary so no caller downstream has to
- * remember: `C:/wt-a\0` was a second identifiable key for a directory another run already held. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 
 /**
  * The NTFS 8.3 generated-alias shape: up to eight characters, `~`, a digit run, optional extension.

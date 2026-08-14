@@ -22,6 +22,7 @@
 import { readFileSync } from "node:fs";
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 import { writeAtomic } from "./atomic-write.js";
+import { CONTROL_BYTES } from "./control-bytes.js";
 import { redactLogText } from "./bounded-log.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
@@ -34,9 +35,6 @@ import { isExecutorRole, type ExecutorRoleV1 } from "./executors.js";
 import { validatePathSegment } from "./store-contract.js";
 
 export const RUN_INTENT_SCHEMA_V1 = "aion.director.run-intent.v1" as const;
-
-/** Control bytes, NUL first. Written as escapes so a raw byte never sits in source. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 
 const SPAWN_PERMIT = Symbol("aion.director.spawn-permit.v1");
 
@@ -196,6 +194,10 @@ export function persistRunIntent(
 
   const serialised = serialiseIntent(intent);
 
+  // KNOWN LIMIT, next to the permit mint: writeAtomic opens the temp with
+  // `w` (create-or-truncate), not O_EXCL. Two Director processes that both
+  // observe `existing === "none"` can both persist and both receive a permit.
+  // Single-process-correct only.
   try {
     store.writeDurable(intentPath, serialised);
   } catch (error) {

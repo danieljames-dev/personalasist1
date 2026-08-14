@@ -30,11 +30,9 @@
  * scan is `UNAVAILABLE`, never "no orphans".
  */
 import { spawnSync } from "node:child_process";
+import { CONTROL_BYTES } from "./control-bytes.js";
 import type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
 import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
-
-/** Control bytes, NUL first. Written as escapes; a raw control byte in source is how it reaches a file. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 
 /**
  * Who was spawned, in more than a PID.
@@ -140,7 +138,7 @@ export interface OrphanVerdictV1 {
  */
 export function captureProcessIdentity(
   probe: HostProcessProbe,
-  input: { readonly pid: number; readonly runNonce: string },
+  input: { readonly pid: number; readonly runNonce: string; readonly expectedExecutable?: string },
 ): CaptureIdentityResultV1 {
   if (!isUsablePid(input.pid)) {
     return { ok: false, identity: null, observation: null, reason: "pid is not a positive integer" };
@@ -182,6 +180,25 @@ export function captureProcessIdentity(
   if (executablePath === null || !isResolvedHostPath(executablePath)) {
     return { ok: false, identity: null, observation, reason: "observation has no identifiable executable path" };
   }
+  if (input.expectedExecutable !== undefined) {
+    const expected = asUsableToken(input.expectedExecutable);
+    if (expected === null || !isResolvedHostPath(expected)) {
+      return {
+        ok: false,
+        identity: null,
+        observation,
+        reason: "expected executable is not an identifiable path; an unbindable slot is not a holder record",
+      };
+    }
+    if (!sameExecutable(expected, executablePath)) {
+      return {
+        ok: false,
+        identity: null,
+        observation,
+        reason: "the occupant of this pid is not the executable this run launched; a reused slot is not a holder record",
+      };
+    }
+  }
 
   return {
     ok: true,
@@ -217,7 +234,9 @@ export function compareProcessIdentity(
   if (!sameExecutable(recorded.executablePath, sighting.executablePath)) return "MISMATCH";
 
   if (sighting.runNonce !== undefined && sighting.runNonce !== null) {
-    if (recorded.runNonce !== sighting.runNonce) return "MISMATCH";
+    const observedNonce = normaliseRunNonce(sighting.runNonce);
+    const recordedNonce = normaliseRunNonce(recorded.runNonce);
+    if (observedNonce !== recordedNonce) return "MISMATCH";
   }
 
   return "MATCH";
@@ -642,7 +661,12 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     }
 
     const holderPid = isUsablePid(query.holderPid) ? query.holderPid : 0;
-    const script = windowsOrphanScanScript(psSingleQuoted(runNonce), holderPid);
+    const floorMs = placeableInstantMs(query.createdNotBefore);
+    if (floorMs === null) {
+      throw new Error("orphan scan unavailable: createdNotBefore is not a placeable instant");
+    }
+    const floorIso = new Date(floorMs).toISOString();
+    const script = windowsOrphanScanScript(psSingleQuoted(runNonce), holderPid, psSingleQuoted(floorIso));
     let result: WindowsProbeSpawnResultV1;
     try {
       result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -1032,7 +1056,7 @@ function sightingCreatedNotBefore(
   return createdAtOrAfterFloor(sighting.creationDate, createdNotBefore);
 }
 
-function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string {
+function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedFloorIso: string): string {
   return [
     "$ProgressPreference = 'SilentlyContinue';",
     "try {",
@@ -1073,6 +1097,7 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string
     "'@ -ErrorAction Stop;",
     `$target = ${quotedNonce};`,
     `$holderPid = ${holderPid};`,
+    `$floorUtc = [datetimeoffset]::Parse(${quotedFloorIso}).UtcDateTime;`,
     "$rows = Get-CimInstance Win32_Process -ErrorAction Stop;",
     "$byParent = @{};",
     "foreach ($p in $rows) {",
@@ -1111,12 +1136,14 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number): string
     "    $n = $null;",
     "  };",
     "  if ($isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
-    "  # Every parentless CIM row was emitted for one commit; on a real host that",
-    "  # makes an ordinary parentless process (sleep.exe, launcher exited)",
-    "  # undecidable, and the writer-release anchor failed one run in three.",
-    "  # A row reaches interpret through ancestry or an unreadable environment;",
-    "  # a parentless row that is neither is machine noise.",
-    "  if ($n -eq $target -or $isDesc -or (-not $nonceReadable -and -not $parentPresent)) {",
+    "  $atOrAfterFloor = $false;",
+    "  if ($p.CreationDate) {",
+    "    try {",
+    "      $cdUtc = ([datetime]$p.CreationDate).ToUniversalTime();",
+    "      $atOrAfterFloor = $cdUtc -ge $floorUtc;",
+    "    } catch { $atOrAfterFloor = $false }",
+    "  };",
+    "  if ($n -eq $target -or $isDesc -or (-not $parentPresent -and -not $n -and $atOrAfterFloor)) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "    [void]$hits.Add([ordered]@{ pid = $id; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent });",
     "  }",

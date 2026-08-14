@@ -5,6 +5,7 @@
  * lives in `executor-adapters.ts`. This module keeps the two pure tables those paths share,
  * and the one argv-safety check `executeRun` applies to every token.
  */
+import { CONTROL_BYTES } from "./control-bytes.js";
 import { inspectHostPath } from "./host-path.js";
 
 export type ExecutorNameV1 = "claude" | "grok" | "local";
@@ -102,12 +103,14 @@ const PATH_ILLEGAL_SHELL = /[;|<>\n\r]/;
 
 export function argvIsSafe(argv: readonly string[]): { safe: boolean; offending: string | null } {
   for (const token of argv) {
+    if (CONTROL_BYTES.test(token)) return { safe: false, offending: String(token) };
     if (tokenCarriesShellMetacharacters(String(token))) return { safe: false, offending: String(token) };
   }
   return { safe: true, offending: null };
 }
 
 function tokenCarriesShellMetacharacters(token: string): boolean {
+  if (CONTROL_BYTES.test(token)) return true;
   // Consume `=>` as one token so a leftover `>` is still a redirect.
   const withoutArrows = token.replace(/=>/g, "");
   // Multi-character operators and `;` are never legal in argv. Test them on

@@ -59,6 +59,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // stem at the first "." only, so `NUL` was refused and `NUL:` was accepted — and `NUL:` opens the null
 // device in any real directory. Two predicates for one Windows rule will always drift apart; this is
 // the pure leaf both path layers already depend on, so there is no new coupling and no cycle.
+import { CONTROL_BYTES as CONTROL_BYTES_IN_PATH } from "./control-bytes.js";
 import { namesReservedDeviceSegment, isResolvedHostPath } from "./host-path.js";
 
 export const HANDOFF_SCHEMA_V1 = "aion.director.handoff.v1" as const;
@@ -160,9 +161,6 @@ export interface HandoffParseOptionsV1 {
 }
 
 const SHA = /^[0-9a-f]{40}$/i;
-
-/** Written as escapes, never as the characters themselves — typing them is how they reach source. */
-const CONTROL_BYTES_IN_PATH = /[\u0000-\u001f\u007f]/;
 
 interface NormalizedPathV1 {
   /** Lowercased drive letter when the path named one, else null. */

@@ -302,6 +302,9 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
             if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
               return { argv: [...argv], status: 128, stdout: "", stderr: "fatal: no upstream configured\n", error: null };
             }
+            if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
+              return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+            }
             throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
           },
         },
@@ -460,6 +463,9 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
           if (key === "status --porcelain") return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
           if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
             return { argv: [...argv], status: 128, stdout: "", stderr: "fatal: no upstream configured\n", error: null };
+          }
+          if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
+            return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
           }
           throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
         },

@@ -246,6 +246,9 @@ function matchingGit(head = HEAD_AFTER): GitRunner {
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
+      if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
+        return gitResult(argv, { status: 0 });
+      }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
   };
@@ -1675,6 +1678,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         leases,
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
+        scanOrphans: () => [],
       },
     );
     assert.equal(first.spawned, true, first.reason);
@@ -1709,6 +1713,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         leases,
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
+        scanOrphans: () => [],
       },
     );
     assert.equal(second.spawned, true, second.reason);
@@ -2487,7 +2492,7 @@ test("exit 0 with a throwing scanner fails executorTreeIsGone", async () => {
 test("a clean run passes all ten success conjuncts", async () => {
   const result = await runWith({ neverWait: true });
   assert.equal(result.ok, true, result.reason);
-  assert.equal(result.conjunction.findings.length, 10);
+  assert.equal(result.conjunction.findings.length, 12);
   assert.deepEqual(result.conjunction.failedConjuncts, []);
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
@@ -2846,8 +2851,9 @@ test("unreadable system rows with live parents do not withhold a writer lease", 
       },
     ],
   });
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), false);
+  // D2: a nonce that could not be read is UNKNOWN, not "not ours". UNKNOWN withholds.
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), true);
 });
 
 test("a timeout with exit code 0 fails runCompletedWithinBudget", async () => {
@@ -2925,11 +2931,9 @@ test("without a captured identity the kill sweep still keeps the spawn floor and
     },
   });
   assert.equal(result.processIdentity, null);
-  // 1234 is a descendant created before the floor: do not kill.
-  // 1238 is a descendant that wrote a foreign nonce after the floor: it is
-  // still this run's tree, so the sweep must reach it.
-  // 1239 is a foreign nonce with no ancestry: not ours.
-  assert.deepEqual(killed, [1238]);
+  // C2: a PID slot is not a process. Ancestry-only leftovers with a foreign
+  // nonce are not killed. 1234 is also before the floor. 1239 has no ancestry.
+  assert.deepEqual(killed, []);
 });
 
 test("a stdout stream error before settleStreams still returns a RunResultV1", async () => {

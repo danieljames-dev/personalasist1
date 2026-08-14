@@ -21,6 +21,7 @@
  * a singleton whose exclusivity must not depend on whether somebody typed `C:\foo`, `C:/foo` or
  * `\\?\C:\foo`.
  */
+import { CONTROL_BYTES } from "./control-bytes.js";
 import { canonicalizeHostPath, isResolvedHostPath, namesReservedDevice } from "./host-path.js";
 
 /**
@@ -60,8 +61,7 @@ export const IDENTITY_MODEL: Readonly<Record<LeaseKindV1, ResourceIdentityModelV
   PRODUCTION_WRITER: "SINGLETON",
 };
 
-/** Written as escapes, never as the characters themselves — typing them is how they get into source. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
+
 
 /**
  * Anything carrying a drive, a root, a separator or a traversal.

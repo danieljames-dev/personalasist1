@@ -49,6 +49,10 @@ export function writeAtomic(
 ): void {
   io.mkdirSync(dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.tmp`;
+  // KNOWN LIMIT. `w` is create-or-truncate, not O_EXCL. Two Director processes
+  // on one runRoot can both read "none" and both mint a permit. Single-process
+  // correct only. Closing this needs a lock or exclusive-create at the permit
+  // mint, which this mission does not enlarge.
   const fd = io.openSync(tmp, "w");
   try {
     io.writeSync(fd, contents);

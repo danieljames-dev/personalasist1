@@ -49,6 +49,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // and `store-contract.ts` is where filesystem code lands. A private copy here would drift from the
 // store's idea of which directory a path names, and that alias collision comes back as a lease held
 // under one spelling and a lock file created under another.
+import { CONTROL_BYTES } from "./control-bytes.js";
 import { compareCreationDates } from "./process-identity.js";
 import { canonicalResource, resourceIsIdentifiable, type LeaseKindV1 } from "./resource-identity.js";
 
@@ -122,6 +123,11 @@ export interface LeaseAttemptV1 {
   reason: string;
   /** True when the holder looks stale and the caller should verify before reclaiming. */
   requiresStalenessCheck: boolean;
+  /**
+   * This invocation adopted a lease another invocation of the same run already
+   * recorded a holder on. Typed so release cannot string-match a reason.
+   */
+  readonly adoptedExistingHolder: boolean;
 }
 
 // Identity lives in its own pure module so the lease rules and the lock-file rules cannot disagree
@@ -136,6 +142,19 @@ export {
 
 function sameResource(a: LeaseV1, kind: LeaseKindV1, resource: string): boolean {
   return a.kind === kind && canonicalResource(a.kind, a.resource) === canonicalResource(kind, resource);
+}
+
+/** Same refusals validatePathSegment names: empty, control bytes, separators, `..`. */
+function leaseIdIsSafe(value: string): { ok: boolean; reason: string } {
+  if (value === "") return { ok: false, reason: "an empty id addresses the parent directory" };
+  if (CONTROL_BYTES.test(value)) return { ok: false, reason: "ids may not contain control bytes" };
+  if (value.includes("/") || value.includes("\\")) {
+    return { ok: false, reason: "an id is one path segment and may not contain a separator" };
+  }
+  if (value === "." || value === ".." || value.includes("..")) {
+    return { ok: false, reason: "an id may not walk out of the store root" };
+  }
+  return { ok: true, reason: "safe path segment" };
 }
 
 /**
@@ -206,14 +225,55 @@ export function acquireLease(input: {
       heldBy: null,
       reason: "the resource does not name one identifiable place; resolve it against a base before claiming it",
       requiresStalenessCheck: false,
+      adoptedExistingHolder: false,
     };
   }
 
-  const held = input.existing.find((lease) => sameResource(lease, input.kind, input.resource));
+  const leaseIdCheck = leaseIdIsSafe(input.leaseId);
+  if (!leaseIdCheck.ok) {
+    return {
+      ok: false,
+      lease: null,
+      heldBy: null,
+      reason: `lease id is not a safe path segment: ${leaseIdCheck.reason}`,
+      requiresStalenessCheck: false,
+      adoptedExistingHolder: false,
+    };
+  }
+
+  const requested = { kind: input.kind, resource: input.resource };
+  const duplicateId = input.existing.find((lease) =>
+    lease.leaseId === input.leaseId && !conflicts(lease, requested),
+  );
+  if (duplicateId !== undefined) {
+    return {
+      ok: false,
+      lease: null,
+      heldBy: {
+        missionId: duplicateId.missionId,
+        runId: duplicateId.runId,
+        pid: duplicateId.pid,
+        processIdentity: duplicateId.processIdentity ?? null,
+      },
+      reason: "lease id already identifies a different resource",
+      requiresStalenessCheck: false,
+      adoptedExistingHolder: false,
+    };
+  }
+
+  const held = input.existing.find((lease) => conflicts(lease, requested));
   if (held) {
     const expired = Date.parse(held.expiresAt) < Date.parse(input.now);
     if (held.runId === input.runId) {
-      return { ok: true, lease: held, heldBy: null, reason: "already held by this run", requiresStalenessCheck: false };
+      const adoptedExistingHolder = held.pid !== null || held.processIdentity !== undefined;
+      return {
+        ok: true,
+        lease: held,
+        heldBy: null,
+        reason: "already held by this run",
+        requiresStalenessCheck: false,
+        adoptedExistingHolder,
+      };
     }
     return {
       ok: false,
@@ -229,6 +289,7 @@ export function acquireLease(input: {
         ? "the holder's heartbeat has stopped; confirm the process is gone before taking this"
         : "another run holds this",
       requiresStalenessCheck: expired,
+      adoptedExistingHolder: false,
     };
   }
 
@@ -239,6 +300,7 @@ export function acquireLease(input: {
     heldBy: null,
     reason: "acquired",
     requiresStalenessCheck: false,
+    adoptedExistingHolder: false,
     lease: {
       schema: LEASE_SCHEMA_V1,
       leaseId: input.leaseId,
@@ -266,8 +328,15 @@ export function heartbeat(lease: LeaseV1, now: IsoTimestamp, ttlMs = LEASE_TTL_M
   };
 }
 
-export function releaseLease(existing: readonly LeaseV1[], leaseId: OpaqueId): LeaseV1[] {
-  return existing.filter((lease) => lease.leaseId !== leaseId);
+/**
+ * Drop the lease this run holds for this kind+resource, not every row that
+ * happens to share a string. Identity is {@link conflicts} plus `runId`.
+ */
+export function releaseLease(
+  existing: readonly LeaseV1[],
+  held: { readonly kind: LeaseKindV1; readonly resource: string; readonly runId: string },
+): LeaseV1[] {
+  return existing.filter((lease) => !(lease.runId === held.runId && conflicts(lease, held)));
 }
 
 /** Why a reclaim was refused, in a form a caller can branch on instead of matching prose. */

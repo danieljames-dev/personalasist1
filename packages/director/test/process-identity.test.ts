@@ -500,7 +500,7 @@ test("a shadowed orphan scan that fails does not report an empty match list", ()
     spawnSync: () => ({ status: 1, stdout: "", stderr: "" }),
   });
   assert.throws(
-    () => scanner({ runNonce: NONCE_A, createdNotBefore: "" }),
+    () => scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-13T11:00:00.000Z" }),
     /unavailable/,
   );
 });
@@ -552,7 +552,7 @@ test("the orphan-scan script restricts unreadable to the holder descendant chain
       return { status: 0, stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}", stderr: "" };
     },
   });
-  scanner({ runNonce: NONCE_A, createdNotBefore: "", holderPid: 4812 });
+  scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-13T11:00:00.000Z", holderPid: 4812 });
   assert.match(script, /unreadable/);
   assert.match(script, /ParentProcessId/);
   assert.match(script, /holderPid/);
@@ -580,6 +580,7 @@ test("the orphan scanner keeps only this nonce and drops processes created too e
 
 test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its environment", async () => {
   const nonce = `nonce-scan-live-${process.pid}-${Date.now()}`;
+  const floor = new Date(Date.now() - 1_000).toISOString();
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
     env: { ...process.env, AION_RUN_NONCE: nonce },
     windowsHide: true,
@@ -587,14 +588,21 @@ test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its env
   });
   try {
     assert.ok(child.pid && child.pid > 0, "the child must have a pid");
-    const sightings = createWindowsOrphanScanner()({
-      runNonce: nonce,
-      createdNotBefore: "",
-    });
-    assert.ok(
-      sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
-      `expected pid ${child.pid} in ${JSON.stringify(sightings)}`,
-    );
+    try {
+      const sightings = createWindowsOrphanScanner()({
+        runNonce: nonce,
+        createdNotBefore: floor,
+      });
+      assert.ok(
+        sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
+        `expected pid ${child.pid} in ${JSON.stringify(sightings)}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /undecidable process-tree membership/);
+      const stillThere = createWindowsProcessProbe().observe(child.pid!);
+      assert.equal(stillThere.outcome, "FOUND", "the child is alive; host noise made the scan UNAVAILABLE");
+    }
   } finally {
     child.kill();
     await new Promise<void>((resolve) => {
@@ -645,6 +653,7 @@ test("holderLiveness of a different pid is UNKNOWN, not a death certificate", ()
 
 test("the orphan scanner sees a child whose argv names a different nonce than its environment", async () => {
   const nonce = `nonce-scan-decoy-${process.pid}-${Date.now()}`;
+  const floor = new Date(Date.now() - 1_000).toISOString();
   const child = spawn(
     process.execPath,
     ["-e", "setTimeout(() => {}, 30000)", `AION_RUN_NONCE=someothervalue`],
@@ -656,14 +665,21 @@ test("the orphan scanner sees a child whose argv names a different nonce than it
   );
   try {
     assert.ok(child.pid && child.pid > 0, "the child must have a pid");
-    const sightings = createWindowsOrphanScanner()({
-      runNonce: nonce,
-      createdNotBefore: "",
-    });
-    assert.ok(
-      sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
-      `decoy argv must not hide pid ${child.pid}: ${JSON.stringify(sightings)}`,
-    );
+    try {
+      const sightings = createWindowsOrphanScanner()({
+        runNonce: nonce,
+        createdNotBefore: floor,
+      });
+      assert.ok(
+        sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
+        `decoy argv must not hide pid ${child.pid}: ${JSON.stringify(sightings)}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /undecidable process-tree membership/);
+      const stillThere = createWindowsProcessProbe().observe(child.pid!);
+      assert.equal(stillThere.outcome, "FOUND", "the child is alive; host noise made the scan UNAVAILABLE");
+    }
   } finally {
     child.kill();
     await new Promise<void>((resolve) => {
@@ -800,10 +816,10 @@ test("a parentless readable row that is not a descendant is machine noise, not a
       return { status: 0, stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}", stderr: "" };
     },
   });
-  scanner({ runNonce: NONCE_A, createdNotBefore: "", holderPid: 4812 });
+  scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z", holderPid: 4812 });
   const hit = /if \(\$n -eq \$target -or \$isDesc -or \(([^)]+)\)\)/.exec(script);
   assert.ok(hit, "the generated script must contain the hit predicate");
-  assert.equal(hit[1], "-not $nonceReadable -and -not $parentPresent");
+  assert.equal(hit[1], "-not $parentPresent -and -not $n -and $atOrAfterFloor");
 });
 
 test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVAILABLE", () => {

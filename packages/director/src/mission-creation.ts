@@ -25,10 +25,8 @@ import {
   type MissionStateRecordV1,
   type MissionStateV1,
 } from "./mission.js";
+import { CONTROL_BYTES } from "./control-bytes.js";
 import { validatePathSegment } from "./store-contract.js";
-
-/** Written as escapes. A raw control byte in source is how it reaches a file. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 
 /**
  * The instants this module will persist. Stricter than `Date.parse` alone: a year or a date without

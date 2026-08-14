@@ -24,10 +24,10 @@
  * catch every secret, a novel encoding, or a token the next vendor invents, and it must not be
  * treated as a confidentiality boundary.
  *
- * A secret that arrives split across two `write` calls is still redacted when the whole
- * secret plus its terminator fits in the line-sized hold (`MAX_TOKEN_HOLD`, 64 KiB). A
- * secret larger than that hold, split across writes, still emits its tail starter-less.
- * `flush` forces whatever remains through the same redaction.
+ * A secret that arrives split across two `write` calls is still redacted when the secret
+ * itself (not the whole line) fits in the tail hold (`SECRET_TAIL_BYTES`, 4 KiB). The
+ * overflow path keeps that bounded tail rather than clearing the hold. `flush` force-emits
+ * an unterminated PRIVATE KEY block as `[REDACTED]`, not as plaintext.
  *
  * ## Clock and sink are injected
  *
@@ -89,7 +89,6 @@ export interface BoundedLogReportV1 {
   readonly haltReason: string | null;
   readonly haltedAt: IsoTimestamp | null;
   readonly lastWriteAt: IsoTimestamp | null;
-  readonly drainIncomplete: boolean;
   readonly stdout: StreamReportV1;
   readonly stderr: StreamReportV1;
 }
@@ -119,6 +118,8 @@ const REDACTED = "[REDACTED]";
 /** Line-sized token hold. Still bounded so a 16 MiB flood cannot be scanned unbounded. */
 const MAX_PEM_HOLD = 64 * 1024;
 const MAX_TOKEN_HOLD = MAX_PEM_HOLD;
+/** Tail kept when a line exceeds MAX_TOKEN_HOLD so a split secret still redacts. */
+const SECRET_TAIL_BYTES = 4 * 1024;
 
 /**
  * Marker written when the head of a bound has been dropped.
@@ -204,7 +205,6 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   let haltReason: string | null = null;
   let haltedAt: IsoTimestamp | null = null;
   let lastWriteAt: IsoTimestamp | null = null;
-  let drainIncomplete = false;
 
   function ingestRedacted(stream: LogStreamV1, payload: Buffer): void {
     if (payload.length === 0) return;
@@ -240,7 +240,14 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   function emitPending(stream: LogStreamV1, force: boolean): void {
     const state = streams[stream];
     if (state.pending.length === 0) return;
-    const split = force ? { emit: state.pending, hold: "" } : splitHoldback(state.pending);
+    if (force) {
+      const emit = redactOpenPrivateKey(state.pending);
+      state.pending = "";
+      if (emit.length === 0) return;
+      ingestRedacted(stream, Buffer.from(redactLogText(emit), "utf8"));
+      return;
+    }
+    const split = splitHoldback(state.pending);
     state.pending = split.hold;
     if (split.emit.length === 0) return;
     ingestRedacted(stream, Buffer.from(redactLogText(split.emit), "utf8"));
@@ -292,8 +299,6 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     write,
     flush,
     markDrainIncomplete() {
-      if (drainIncomplete) return;
-      drainIncomplete = true;
       write("stdout", "\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n");
     },
     liveTail(stream) {
@@ -310,7 +315,6 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
         haltReason,
         haltedAt,
         lastWriteAt,
-        drainIncomplete,
         stdout: reportStream(stdout),
         stderr: reportStream(stderr),
       };
@@ -375,8 +379,42 @@ function splitHoldback(pending: string): { emit: string; hold: string } {
   let emit = pending.slice(0, lineStart);
   let hold = pending.slice(lineStart);
   if (hold.length > MAX_TOKEN_HOLD) {
-    emit += hold;
-    hold = "";
+    const keepFrom = secretHoldStart(hold);
+    if (keepFrom >= 0) {
+      emit += hold.slice(0, keepFrom);
+      hold = hold.slice(keepFrom);
+      if (hold.length > SECRET_TAIL_BYTES) {
+        emit += hold.slice(0, hold.length - SECRET_TAIL_BYTES);
+        hold = hold.slice(hold.length - SECRET_TAIL_BYTES);
+      }
+    } else {
+      emit += hold;
+      hold = "";
+    }
   }
   return { emit, hold };
+}
+
+const SECRET_STARTERS = ["ghp_", "github_pat_", "sk-", "AKIA", "Bearer ", "Authorization:", "-----BEGIN "] as const;
+
+function secretHoldStart(hold: string): number {
+  const windowStart = Math.max(0, hold.length - SECRET_TAIL_BYTES - 32);
+  const window = hold.slice(windowStart);
+  let earliest = -1;
+  for (const starter of SECRET_STARTERS) {
+    const at = window.lastIndexOf(starter);
+    if (at < 0) continue;
+    const abs = windowStart + at;
+    if (earliest < 0 || abs < earliest) earliest = abs;
+  }
+  return earliest;
+}
+
+function redactOpenPrivateKey(pending: string): string {
+  const begin = firstUnterminatedPemBegin(pending);
+  if (begin < 0) return pending;
+  const held = pending.slice(begin);
+  const match = /^-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/.exec(held);
+  if (match === null) return pending;
+  return `${pending.slice(0, begin)}-----BEGIN ${match[1]}-----\n[REDACTED]\n`;
 }

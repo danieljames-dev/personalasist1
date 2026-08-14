@@ -430,7 +430,7 @@ test("a heartbeat extends a lease, and release frees it", () => {
   const beat = heartbeat(lease, LATER);
   assert.ok(Date.parse(beat.expiresAt) > Date.parse(lease.expiresAt));
   assert.equal(Date.parse(beat.expiresAt) - Date.parse(LATER), LEASE_TTL_MS);
-  assert.deepEqual(releaseLease([beat], "l1"), []);
+  assert.deepEqual(releaseLease([beat], beat), []);
 });
 
 // ---------------------------------------------------------------------------

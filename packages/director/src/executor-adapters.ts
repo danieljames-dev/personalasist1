@@ -15,6 +15,7 @@
  * environment does this executor take?
  */
 import { statSync } from "node:fs";
+import { CONTROL_BYTES } from "./control-bytes.js";
 import { isExecutorRole, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
 import { isResolvedHostPath } from "./host-path.js";
 
@@ -26,10 +27,6 @@ export const GROK_MAX_TURNS = 50;
 
 /** Child-environment key for the run nonce. The nonce must not appear on the command line. */
 export const RUN_NONCE_ENV = "AION_RUN_NONCE";
-
-/** Control bytes, NUL first. Win32 native APIs terminate at a NUL, so the validated string and the
- * opened string stop being the same string. */
-const CONTROL_BYTES = /[\u0000-\u001f\u007f]/;
 
 /** Claude 2.1.231, unauthenticated. Distinct from a crash and from a failed work item. */
 const CLAUDE_NOT_LOGGED_IN = "Not logged in · Please run /login";
