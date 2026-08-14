@@ -18,12 +18,12 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { writeAtomic } from "./atomic-write.js";
 import { DIRECTOR_ROOT_ENV } from "./contracts.js";
 import {
   LEASE_SCHEMA_V1,
@@ -166,30 +166,4 @@ function isLeaseRecord(value: unknown): value is LeaseV1 {
   return row.schema === LEASE_SCHEMA_V1 && typeof row.leaseId === "string" && typeof row.kind === "string";
 }
 
-function writeAtomic(target: string, contents: string): void {
-  mkdirSync(dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.tmp`;
-  const fd = openSync(tmp, "w");
-  try {
-    writeSync(fd, contents);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    renameSync(tmp, target);
-  } catch (error) {
-    const code = error !== null && typeof error === "object" && "code" in error ? String(error.code) : "";
-    if (code === "EEXIST" || code === "EPERM") {
-      unlinkSync(target);
-      renameSync(tmp, target);
-      return;
-    }
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // Leave the temp file.
-    }
-    throw error;
-  }
-}
+

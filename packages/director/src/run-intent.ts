@@ -19,18 +19,9 @@
  * The record is for a person debugging at 2am. It carries no secrets, no environment, and no
  * prompt body — only paths, ids, argv the Director built, and the identity recorded after spawn.
  */
-import {
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
+import { writeAtomic } from "./atomic-write.js";
 import { redactLogText } from "./bounded-log.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
@@ -830,34 +821,6 @@ function sameRecordedIdentity(a: ExecutorProcessIdentityV1, b: ExecutorProcessId
     && a.creationDate === b.creationDate
     && a.executablePath === b.executablePath
     && a.runNonce === b.runNonce;
-}
-
-function writeAtomic(target: string, contents: string): void {
-  mkdirSync(dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.tmp`;
-  const fd = openSync(tmp, "w");
-  try {
-    writeSync(fd, contents);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    renameSync(tmp, target);
-  } catch (error) {
-    const code = error !== null && typeof error === "object" && "code" in error ? String(error.code) : "";
-    if (code === "EEXIST" || code === "EPERM") {
-      unlinkSync(target);
-      renameSync(tmp, target);
-      return;
-    }
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // Leave the temp file. Deleting evidence of a failed persist is worse than leaving it.
-    }
-    throw error;
-  }
 }
 
 function parseJson(raw: string): unknown {

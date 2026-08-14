@@ -338,6 +338,94 @@ test("two records agreeing on nothing but a PID have agreed on nothing", () => {
   assert.equal(processIdentityMatches({ pid: null, runToken: "run-a" }, { pid: null, runToken: "run-a" }), "MATCH");
 });
 
+test("ISO-Z and DMTF of one live holder do not reclaim that holder's lease", () => {
+  const iso = "2026-08-14T12:00:01.000Z";
+  const dmtf = "20260814120001.000000+000";
+  const held = acquireLease({
+    existing: [], leaseId: "l-pw-dmtf", kind: "PRODUCTION_WRITER", resource: "default",
+    missionId: "m1", runId: "r1", pid: 100, now: LONG_AGO,
+    processIdentity: { pid: 100, startedAt: iso, runToken: "run-a" },
+  }).lease!;
+  const refused = reclaimStaleLease({
+    existing: [held], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "FOUND", pid: 100 },
+    observedIdentity: { pid: 100, startedAt: dmtf, runToken: "run-a" },
+    now: NOW,
+  });
+  assert.equal(refused.ok, false, "the same process in two encodings is not a death certificate");
+  assert.equal(refused.refusal, "IDENTITY_UNVERIFIABLE");
+  assert.equal(refused.remaining.length, 1);
+});
+
+test("unparseable startedAt values are UNVERIFIABLE, never MATCH or MISMATCH", () => {
+  assert.equal(
+    processIdentityMatches(
+      { pid: 100, startedAt: "yesterday" },
+      { pid: 100, startedAt: "yesterday" },
+    ),
+    "UNVERIFIABLE",
+  );
+  assert.equal(
+    processIdentityMatches(
+      { pid: 100, startedAt: "build-7" },
+      { pid: 100, startedAt: "build-8" },
+    ),
+    "UNVERIFIABLE",
+  );
+});
+
+test("a zone-less startedAt on either side is UNVERIFIABLE", () => {
+  assert.equal(
+    processIdentityMatches(
+      { pid: 100, startedAt: "2026-08-14T12:00:01" },
+      { pid: 100, startedAt: "2026-08-14T12:00:01.000Z" },
+    ),
+    "UNVERIFIABLE",
+  );
+  assert.equal(
+    processIdentityMatches(
+      { pid: 100, startedAt: "2026-08-14T12:00:01.000Z" },
+      { pid: 100, startedAt: "2026-08-14T12:00:01" },
+    ),
+    "UNVERIFIABLE",
+  );
+});
+
+test("two encodings of one instant MATCH; a later placeable instant is PID reuse", () => {
+  const iso = "2026-08-14T12:00:01.000Z";
+  const dmtf = "20260814120001.000000+000";
+  assert.equal(
+    processIdentityMatches(
+      { pid: 100, startedAt: iso, runToken: "run-a" },
+      { pid: 100, startedAt: dmtf, runToken: "run-a" },
+    ),
+    "MATCH",
+  );
+  const later = "2026-08-14T16:00:01.000Z";
+  assert.equal(
+    processIdentityMatches(
+      { pid: 100, startedAt: iso },
+      { pid: 100, startedAt: later },
+    ),
+    "MISMATCH",
+  );
+  const held = acquireLease({
+    existing: [], leaseId: "l-pw-reuse", kind: "PRODUCTION_WRITER", resource: "default",
+    missionId: "m1", runId: "r1", pid: 100, now: LONG_AGO,
+    processIdentity: { pid: 100, startedAt: iso, runToken: "run-a" },
+  }).lease!;
+  const reclaimed = reclaimStaleLease({
+    existing: [held], kind: "PRODUCTION_WRITER", resource: "default",
+    holderLiveness: "DEAD_CONFIRMED",
+    holderObservation: { outcome: "FOUND", pid: 100 },
+    observedIdentity: { pid: 100, startedAt: later, runToken: "run-b" },
+    now: NOW,
+  });
+  assert.equal(reclaimed.ok, true, "a later placeable instant on the same slot is reuse");
+  assert.deepEqual(reclaimed.remaining, []);
+});
+
 test("the identity a refusal hands back is the one a caller must go and match", () => {
   const taken = acquireLease({
     existing: [], leaseId: "l1", kind: "WORKTREE", resource: "C:/wt-a",

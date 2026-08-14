@@ -49,6 +49,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // and `store-contract.ts` is where filesystem code lands. A private copy here would drift from the
 // store's idea of which directory a path names, and that alias collision comes back as a lease held
 // under one spelling and a lock file created under another.
+import { compareCreationDates } from "./process-identity.js";
 import { canonicalResource, resourceIsIdentifiable, type LeaseKindV1 } from "./resource-identity.js";
 
 export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
@@ -155,8 +156,12 @@ export function processIdentityMatches(
     if (recorded.runToken !== observed.runToken) return "MISMATCH";
   }
   if (recorded.startedAt !== undefined && observed.startedAt !== undefined) {
-    // Compared as instants, because two encodings of one moment are not two processes.
-    if (Date.parse(recorded.startedAt) !== Date.parse(observed.startedAt)) return "MISMATCH";
+    // One instant comparator. Date.parse is a second spelling that treats two
+    // unplaceable tokens as different processes and two encodings of one
+    // moment as a mismatch. UNCOMPARABLE is not evidence of death.
+    const dates = compareCreationDates(recorded.startedAt, observed.startedAt);
+    if (dates === "DIFFERENT") return "MISMATCH";
+    if (dates === "UNCOMPARABLE") return "UNVERIFIABLE";
   }
   if (recorded.pid !== null && observed.pid !== null && recorded.pid !== observed.pid) return "MISMATCH";
 

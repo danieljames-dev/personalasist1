@@ -49,6 +49,7 @@ import {
   killProcessTreeStandIn,
   launchRun,
   proveWriterExit,
+  RUN_RESULT_SCHEMA_V1,
   writerReleaseEvidence,
   writerSightingNotProvenAbsent,
   type CapacityGateV1,
@@ -101,6 +102,7 @@ function writerProofInput(over: Partial<WriterExitProofInputV1> = {}): WriterExi
     probedPid: RECORDED.pid,
     orphanScanPerformed: true,
     orphanSightings: [],
+    liveSightings: [],
     ...over,
   };
 }
@@ -2909,13 +2911,18 @@ test("without a captured identity the kill sweep still keeps the spawn floor and
     scanOrphans: () => [
       { pid: 1234, parentPid: childPid, creationDate: "2023-01-01T00:00:00.000Z" },
       { pid: 1238, parentPid: childPid, creationDate: T0, runNonce: "nonce-other-run" },
+      { pid: 1239, parentPid: 1, creationDate: T0, runNonce: "nonce-other-run" },
     ],
     killTree: (pid) => {
       killed.push(pid);
     },
   });
   assert.equal(result.processIdentity, null);
-  assert.deepEqual(killed, []);
+  // 1234 is a descendant created before the floor: do not kill.
+  // 1238 is a descendant that wrote a foreign nonce after the floor: it is
+  // still this run's tree, so the sweep must reach it.
+  // 1239 is a foreign nonce with no ancestry: not ours.
+  assert.deepEqual(killed, [1238]);
 });
 
 test("a stdout stream error before settleStreams still returns a RunResultV1", async () => {
@@ -2987,4 +2994,247 @@ test("an R&D worktree path in argv still spawns and completes", async () => {
   });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.ok, true, result.reason);
+});
+
+// ---------------------------------------------------------------------------
+// Round 10 GROUP A
+// ---------------------------------------------------------------------------
+
+test("a spawn handle with pid 0 did not create a process and releases the writer lease", async () => {
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    leases,
+    spawn: trackingSpawn(() => exitingProcess({ pid: 0 })),
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-nopid" } },
+  });
+  assert.equal(result.spawned, false, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-nopid"), false);
+  const persisted = JSON.parse(fs.files.get(join(RUN_ROOT, "result.json")) ?? "null") as { spawned?: boolean };
+  assert.equal(persisted.spawned, false);
+});
+
+test("UNAVAILABLE identity capture still records a reclaimable runToken on the lease", async () => {
+  const leases = memoryLeases();
+  await runWith({
+    neverWait: true,
+    leases,
+    spawn: trackingSpawn(() => exitingProcess()),
+    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    scanOrphans: () => [],
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-token" } },
+  });
+  const held = leases.list().find((item) => item.leaseId === "lease-pw-token");
+  assert.ok(held, "the lease must remain so the stored identity can be inspected");
+  assert.equal(held.processIdentity?.runToken, NONCE);
+});
+
+test("proveWriterExit denies when liveSightings is omitted or null", () => {
+  const base = {
+    processStillRunning: false as const,
+    recordedLeaseKind: "PRODUCTION_WRITER" as const,
+    recordedLeaseId: "L",
+    releasedLeaseId: "L",
+    recordedIdentity: null,
+    observation: null,
+    probedPid: null,
+    orphanScanPerformed: true,
+    orphanSightings: [{
+      pid: 31337,
+      runNonce: "nonce-run-1",
+      creationDate: "2026-08-13T12:00:05.000Z",
+      parentPid: 4812,
+    }],
+    ownedHandleExit: {
+      spawnOccurred: true,
+      handleExited: true,
+      exitSettledWithCode: true,
+      identityAbsentBecauseAlreadyExited: true,
+    },
+  };
+  const omitted = { ...base } as unknown as WriterExitProofInputV1;
+  delete (omitted as { liveSightings?: unknown }).liveSightings;
+  assert.equal(proveWriterExit(omitted), null);
+  assert.equal(proveWriterExit({ ...base, liveSightings: null }), null);
+  assert.ok(proveWriterExit({ ...base, liveSightings: [] }));
+});
+
+test("a descendant carrying a different nonce is still this run's tree", () => {
+  const rows = [
+    { pid: 33776, runNonce: "nonce-some-other-run", parentPid: RECORDED.pid, creationDate: T0 },
+  ];
+  assert.equal(
+    writerSightingNotProvenAbsent(rows[0]!, NONCE, { holderPid: RECORDED.pid, rows }),
+    true,
+  );
+});
+
+test("executeRun retains the writer lease when a descendant carries a foreign nonce", async () => {
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-desc-nonce" } },
+    scanOrphans: () => [{
+      pid: 33776,
+      runNonce: "nonce-some-other-run",
+      parentPid: RECORDED.pid,
+      creationDate: T0,
+    }],
+  });
+  assert.equal(result.ok, false, result.reason);
+  assert.ok(leases.list().some((item) => item.leaseId === "lease-pw-desc-nonce"));
+});
+
+test("UNAVAILABLE capture does not report the executor tree gone", async () => {
+  const result = await runWith({
+    neverWait: true,
+    spawn: trackingSpawn(() => exitingProcess()),
+    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    scanOrphans: () => [],
+  });
+  assert.equal(finding(result, "executorTreeIsGone").ok, false);
+  assert.equal(result.ok, false, result.reason);
+  assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"));
+});
+
+test("NOT_FOUND capture with a settled owned handle still reports the tree gone", async () => {
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    spawn: trackingSpawn(() => alreadyExitedProcess()),
+    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
+    scanOrphans: () => [],
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-fast-ok" } },
+  });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
+  assert.equal(leases.list().length, 0);
+});
+
+function expiredProductionWriter(pid: number): LeaseV1 {
+  const attempt = acquireLease({
+    existing: [],
+    leaseId: "lease-stale-pw",
+    kind: "PRODUCTION_WRITER",
+    resource: "default",
+    missionId: "mission-old",
+    runId: "run-old",
+    pid,
+    now: "2026-08-13T10:00:00.000Z",
+  });
+  if (!attempt.ok || attempt.lease === null) throw new Error(attempt.reason);
+  return attempt.lease;
+}
+
+test("executeRun reclaims an expired writer whose holder is NOT_FOUND", async () => {
+  const stalePid = 36232;
+  const leases = memoryLeases([expiredProductionWriter(stalePid)]);
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    probe: {
+      observe(pid) {
+        if (pid === stalePid) return { outcome: "NOT_FOUND", reason: "gone" };
+        return foundObservation(RECORDED);
+      },
+    },
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-reclaim" } },
+  });
+  assert.equal(result.spawned, true, result.reason);
+});
+
+test("executeRun does not reclaim an expired writer whose holder is FOUND", async () => {
+  const stalePid = 36232;
+  const stale = expiredProductionWriter(stalePid);
+  const leases = memoryLeases([stale]);
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    probe: {
+      observe() {
+        return {
+          outcome: "FOUND",
+          reason: "alive",
+          pid: stalePid,
+          creationDate: T0,
+          executablePath: EXE,
+          runNonce: "nonce-old",
+        };
+      },
+    },
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-stale" } },
+  });
+  assert.equal(result.spawned, false, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === stale.leaseId), true);
+});
+
+test("executeRun does not reclaim an expired writer when the probe is UNAVAILABLE", async () => {
+  const stalePid = 36232;
+  const stale = expiredProductionWriter(stalePid);
+  const leases = memoryLeases([stale]);
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-unavail-stale" } },
+  });
+  assert.equal(result.spawned, false, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === stale.leaseId), true);
+});
+
+test("a completion record with spawned true refuses a second spawn without intent.json", async () => {
+  const fs = memoryFs({
+    files: {
+      [join(RUN_ROOT, "result.json")]: JSON.stringify({
+        schema: RUN_RESULT_SCHEMA_V1,
+        ok: true,
+        spawned: true,
+        runId: "run-1",
+      }),
+    },
+  });
+  const leases = memoryLeases();
+  const capacity = memoryCapacity();
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    leases,
+    capacity,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-replay-result" } },
+  });
+  assert.equal(result.spawned, false, result.reason);
+  assert.match(result.reason, /completion|already exists/i);
+  assert.equal(leases.list().length, 0);
+  assert.equal(capacity.used, 0);
+});
+
+test("an unparseable result.json without intent.json is refused", async () => {
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "result.json")]: "{not-json" },
+  });
+  const result = await runWith({ neverWait: true, fs });
+  assert.equal(result.spawned, false, result.reason);
+  assert.match(result.reason, /unreadable/i);
+});
+
+test("a result.json that records spawned false does not block a later spawn", async () => {
+  const fs = memoryFs({
+    files: {
+      [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()),
+      [join(RUN_ROOT, "result.json")]: JSON.stringify({
+        schema: RUN_RESULT_SCHEMA_V1,
+        ok: false,
+        spawned: false,
+        runId: "run-1",
+      }),
+    },
+  });
+  const result = await runWith({ neverWait: true, fs });
+  assert.equal(result.spawned, true, result.reason);
 });

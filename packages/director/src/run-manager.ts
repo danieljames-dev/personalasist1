@@ -31,9 +31,10 @@
  * a real one.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
+import { writeAtomic } from "./atomic-write.js";
 import {
   createBoundedLog,
   createMemoryLogSink,
@@ -73,9 +74,11 @@ import {
   acquireLease,
   heartbeat,
   LEASE_TTL_MS,
+  reclaimStaleLease,
   releaseLease,
   type LeaseKindV1,
   type LeaseV1,
+  type ProcessIdentityV1,
 } from "./leases.js";
 import {
   captureProcessIdentity,
@@ -85,6 +88,7 @@ import {
   detectOrphan,
   holderLiveness,
   isPlaceableInstant,
+  isUsablePid,
   normaliseRunNonce,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -371,8 +375,16 @@ export interface WriterExitProofInputV1 {
   readonly probedPid: number | null;
   readonly orphanScanPerformed: boolean;
   readonly orphanSightings: readonly OrphanSightingV1[] | null;
-  /** Sightings not proven absent from this run's tree. Consumed here. */
-  readonly liveSightings?: readonly OrphanSightingV1[] | null;
+  /**
+   * Sightings not proven absent from this run's tree. Required: omitted and
+   * `null` are "nobody looked", which is not "the scan found nothing live".
+   */
+  readonly liveSightings: readonly OrphanSightingV1[] | null;
+  /**
+   * Optional only because the identity-present branch does not consult it.
+   * On the identity-absent branch, `undefined` already denies — it is not a
+   * safe default.
+   */
   readonly ownedHandleExit?: OwnedHandleExitV1 | null;
 }
 
@@ -414,8 +426,8 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
     if (input.releasedLeaseId !== input.recordedLeaseId) return null;
     if (!input.orphanScanPerformed) return null;
     if (input.orphanSightings === null) return null;
-    const live = input.liveSightings ?? [];
-    if (live.length > 0) return null;
+    if (input.liveSightings === null || input.liveSightings === undefined) return null;
+    if (input.liveSightings.length > 0) return null;
 
     if (input.recordedIdentity === null) {
       // Two reasons identity can be absent. Only the first may mint:
@@ -1010,6 +1022,34 @@ export async function executeRun(
 
     if (capacityAttempt.ok) capacityHeld = true;
 
+    // A stale-holder refusal is an instruction to look. Wire the existing
+    // reclaim rule; do not invent a second one. Retry acquire once.
+    if (!leaseAttempt.ok && leaseAttempt.requiresStalenessCheck === true) {
+      try {
+        const reclaimed = reclaimExpiredHolder({
+          store: leaseStore,
+          kind: request.lease.kind,
+          resource: request.lease.resource,
+          heldBy: leaseAttempt.heldBy,
+          probe: deps.probe,
+          now: deps.clock.now(),
+        });
+        if (reclaimed.ok) {
+          leaseAttempt = acquireLease({
+            existing: leaseStore.list(),
+            leaseId: request.lease.leaseId,
+            kind: request.lease.kind,
+            resource: request.lease.resource,
+            missionId: request.missionId,
+            runId: request.runId,
+            now: deps.clock.now(),
+          });
+        }
+      } catch {
+        // A throwing reclaim is not a granted reclaim. The original refusal stands.
+      }
+    }
+
     if (!capacityAttempt.ok || !leaseAttempt.ok || leaseAttempt.lease === null) {
       const why = [
         capacityAttempt.ok ? null : `capacity refused: ${capacityAttempt.reason}`,
@@ -1072,6 +1112,43 @@ export async function executeRun(
         log: null,
       });
     }
+
+    const completion = existingCompletionOn(deps.fs, resultPath, request.runId);
+    if (completion === "spawned") {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "a recorded completion already exists; refusing to overwrite it",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (completion === "unreadable") {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "an existing result at this path is unreadable; refusing to overwrite it",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
     // 3. Persist the intent. The only value that permits a spawn is returned after write-and-read-back.
     const intentStore = intentStoreFromFs(deps.fs);
     const persistInput = {
@@ -1136,7 +1213,6 @@ export async function executeRun(
       }
       permit = launched.permit;
       child = launched.launched;
-      spawnOccurred = true;
     } catch (error) {
       return finish({
         ok: false,
@@ -1172,18 +1248,18 @@ export async function executeRun(
       });
     }
 
-    // 5. Record that spawn returned, then try to capture identity.
-    // An unobservable process (access-denied, elevated executor) still started.
-    // processIdentity === null must not mean "never spawned".
+    // 5. A process exists only when the handle names a usable OS pid.
+    // spawn() returning is not that fact: libuv reports ENOENT/EACCES on the
+    // handle after the call, and `pid` is then undefined → 0.
     let childPid: number;
     try {
       childPid = child.pid;
     } catch (error) {
       return finish({
         ok: false,
-        spawned: true,
+        spawned: false,
         reason: `spawn handle pid is unreadable: ${errorMessage(error)}`,
-        conjunction: interruptedAfterSpawn(timedOut),
+        conjunction: emptyConjunction,
         exitCode: null,
         processIdentity,
         intent: permit.intent,
@@ -1192,6 +1268,24 @@ export async function executeRun(
         lease: heldLease,
         productionWriterLeaseReleasedByThisRun: false,
         cancel: { timedOut, stages: cancelStages },
+        log: null,
+      });
+    }
+    spawnOccurred = isUsablePid(childPid);
+    if (!spawnOccurred) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "spawn returned no operating-system process",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity,
+        intent: permit.intent,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
         log: null,
       });
     }
@@ -1262,7 +1356,7 @@ export async function executeRun(
       });
     }
     permit = attempted.permit;
-    heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null);
+    heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, null, runNonce);
 
     const captured = captureProcessIdentity(deps.probe, { pid: childPid, runNonce });
     // Capture asked about `childPid`. NOT_FOUND is therefore about that pid.
@@ -1281,11 +1375,12 @@ export async function executeRun(
         store: intentStore,
       });
       if (observed.ok && observed.permit !== null) permit = observed.permit;
-      heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, processIdentity);
+      heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, processIdentity, runNonce);
     } else if (
       captured.observation !== null
       && (
         captured.observation.outcome === "NOT_FOUND"
+        || captured.observation.outcome === "UNAVAILABLE"
         || (captured.observation.outcome === "FOUND" && captured.observation.pid === childPid)
       )
     ) {
@@ -1295,7 +1390,9 @@ export async function executeRun(
           ? { creationDate: captured.observation.creationDate }
           : {}),
         runNonce,
-      });
+      }, runNonce);
+    } else {
+      heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, { pid: childPid, runNonce }, runNonce);
     }
 
     if (!child.exited) {
@@ -1320,7 +1417,7 @@ export async function executeRun(
       const raced = await raceExit(child, request.timeoutMs, deps.wait, () => {
         if (heldLease === null) return;
         const renewed = heartbeat(heldLease, deps.clock.now());
-        heldLease = persistLeaseHolder(leaseStore, renewed, renewed.pid, null, renewed);
+        heldLease = persistLeaseHolder(leaseStore, renewed, renewed.pid, null, runNonce, renewed);
       });
       if (raced.tag === "exit") {
         exitCode = raced.exit.code;
@@ -1414,12 +1511,20 @@ export async function executeRun(
       createdNotBefore: spawnedAtFloor ?? "",
     });
 
+    const ownedHandleExit: OwnedHandleExitV1 = {
+      spawnOccurred,
+      handleExited: child.exited,
+      exitSettledWithCode: child.exited && exitCode !== null,
+      identityAbsentBecauseAlreadyExited: captureTimeIdentityNotFound && child.exited,
+    };
+
     const tree = describeExecutorTree({
       recorded: processIdentity,
       observation,
       orphanScan,
       leftoverConfirmed: leftoverSweep.confirmed,
       leftoverRemaining: leftoverSweep.remaining,
+      ownedHandleExit,
     });
     const artifactCheck = artifactsConfinedToRunRoot({
       runRoot,
@@ -1453,13 +1558,6 @@ export async function executeRun(
         : {}),
     });
 
-    const ownedHandleExit: OwnedHandleExitV1 = {
-      spawnOccurred,
-      handleExited: child.exited,
-      exitSettledWithCode: child.exited && exitCode !== null,
-      identityAbsentBecauseAlreadyExited: captureTimeIdentityNotFound && child.exited,
-    };
-
     exitProof = proveWriterExit({
       processStillRunning: stillRunning,
       recordedLeaseKind: heldLease.kind,
@@ -1485,7 +1583,7 @@ export async function executeRun(
 
     return finish({
       ok: conjunction.ok,
-      spawned: true,
+      spawned: spawnOccurred,
       reason,
       conjunction,
       exitCode,
@@ -1530,26 +1628,32 @@ function persistLeaseHolder(
   lease: LeaseV1,
   pid: number | null,
   identity: PersistableHolderIdentityV1 | null,
+  runNonce: string,
   base: LeaseV1 = lease,
 ): LeaseV1 {
+  const token = identity !== null && identity.runNonce !== undefined && identity.runNonce !== ""
+    ? identity.runNonce
+    : base.processIdentity !== undefined
+      && base.processIdentity.runToken !== undefined
+      && base.processIdentity.runToken !== ""
+      ? base.processIdentity.runToken
+      : runNonce;
+  const startedAt = identity !== null && identity.creationDate !== undefined && identity.creationDate !== ""
+    ? identity.creationDate
+    : base.processIdentity?.startedAt;
+  const identityPid = identity !== null
+    ? identity.pid
+    : typeof pid === "number"
+      ? pid
+      : (base.processIdentity?.pid ?? null);
   const updated: LeaseV1 = {
     ...base,
     pid,
-    ...(identity !== null
-      ? {
-          processIdentity: {
-            pid: identity.pid,
-            ...(identity.creationDate !== undefined && identity.creationDate !== ""
-              ? { startedAt: identity.creationDate }
-              : {}),
-            ...(identity.runNonce !== undefined && identity.runNonce !== ""
-              ? { runToken: identity.runNonce }
-              : {}),
-          },
-        }
-      : base.processIdentity !== undefined
-        ? { processIdentity: base.processIdentity }
-        : {}),
+    processIdentity: {
+      pid: identityPid,
+      ...(startedAt !== undefined ? { startedAt } : {}),
+      runToken: token,
+    },
   };
   store.save([...store.list().filter((item) => item.leaseId !== updated.leaseId), updated]);
   return updated;
@@ -1561,8 +1665,19 @@ function describeExecutorTree(input: {
   readonly orphanScan: WriterOrphanScanV1;
   readonly leftoverConfirmed: boolean;
   readonly leftoverRemaining: readonly OrphanSightingV1[];
+  readonly ownedHandleExit: OwnedHandleExitV1;
 }): { ok: boolean; reason: string } {
-  if (input.recorded !== null && input.observation !== null) {
+  if (input.recorded === null) {
+    // Same conjunct proveWriterExit requires when identity is absent.
+    const owned = input.ownedHandleExit;
+    const settledAbsent =
+      owned.identityAbsentBecauseAlreadyExited === true
+      && owned.exitSettledWithCode === true
+      && owned.handleExited === true;
+    if (!settledAbsent) {
+      return { ok: false, reason: "the executor process tree could not be observed" };
+    }
+  } else if (input.observation !== null) {
     const liveness = holderLiveness(input.recorded, input.observation);
     if (liveness !== "DEAD_CONFIRMED") {
       return {
@@ -1572,6 +1687,8 @@ function describeExecutorTree(input: {
           : "the recorded holder is not DEAD_CONFIRMED",
       };
     }
+  } else {
+    return { ok: false, reason: "the executor process tree could not be observed" };
   }
   if (!input.orphanScan.performed) {
     return { ok: false, reason: "the process-tree scan was not performed" };
@@ -1706,11 +1823,14 @@ export function writerSightingNotProvenAbsent(
     rows: [],
   },
 ): boolean {
+  // Ancestry is a fact this Director walked. A nonce the child wrote cannot
+  // discharge a descendant of the recorded holder.
+  if (tree.holderPid !== null && descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid)) {
+    return true;
+  }
   const nonce = normaliseRunNonce(sighting.runNonce);
   if (nonce !== null && nonce !== runNonce) return false;
-  if (nonce === runNonce) return true;
-  if (tree.holderPid === null) return false;
-  return descendantPidsOf(tree.holderPid, tree.rows).has(sighting.pid);
+  return nonce === runNonce;
 }
 
 interface LeftoverSweepV1 {
@@ -1958,6 +2078,100 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function errorCode(error: unknown): string | null {
+  if (error === null || typeof error !== "object" || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function existingCompletionOn(
+  fs: RunFileSystemV1,
+  resultPath: string,
+  runId: string,
+): "none" | "spawned" | "unstarted" | "unreadable" {
+  let present = false;
+  try {
+    present = fs.isFile(resultPath);
+  } catch {
+    return "unreadable";
+  }
+  if (!present) return "none";
+  let raw: string;
+  try {
+    raw = fs.readUtf8(resultPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return "none";
+    return "unreadable";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return "unreadable";
+  }
+  if (!isPlainObject(parsed)) return "unreadable";
+  if (parsed.spawned === true) {
+    const recordedRunId = parsed.runId;
+    if (typeof recordedRunId === "string" && recordedRunId !== runId) return "unreadable";
+    return "spawned";
+  }
+  if (parsed.spawned === false) return "unstarted";
+  return "unreadable";
+}
+
+function reclaimExpiredHolder(input: {
+  readonly store: LeaseStoreV1;
+  readonly kind: LeaseKindV1;
+  readonly resource: string;
+  readonly heldBy: {
+    readonly pid: number | null;
+    readonly processIdentity: ProcessIdentityV1 | null;
+  } | null;
+  readonly probe: HostProcessProbe;
+  readonly now: string;
+}): { ok: boolean } {
+  const recordedPid = input.heldBy?.pid ?? null;
+  let observation: ProcessObservationV1;
+  if (isUsablePid(recordedPid)) {
+    try {
+      observation = input.probe.observe(recordedPid);
+    } catch {
+      observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
+    }
+  } else {
+    observation = { outcome: "UNAVAILABLE", reason: "recorded holder pid is not observable" };
+  }
+
+  // Same mapping holderLiveness uses for these outcomes. FOUND is not death:
+  // reclaimStaleLease's FOUND branch decides via occupant identity.
+  const liveness = observation.outcome === "UNAVAILABLE" ? "UNKNOWN" : "DEAD_CONFIRMED";
+
+  const observedIdentity = leaseIdentityFromObservation(observation);
+  const result = reclaimStaleLease({
+    existing: input.store.list(),
+    kind: input.kind,
+    resource: input.resource,
+    holderLiveness: liveness,
+    now: input.now,
+    ...(isUsablePid(recordedPid)
+      ? { holderObservation: { outcome: observation.outcome, pid: recordedPid } }
+      : {}),
+    ...(observedIdentity !== undefined ? { observedIdentity } : {}),
+  });
+  if (result.ok) input.store.save(result.remaining);
+  return { ok: result.ok };
+}
+
+function leaseIdentityFromObservation(observation: ProcessObservationV1): ProcessIdentityV1 | undefined {
+  if (observation.outcome !== "FOUND") return undefined;
+  const token = normaliseRunNonce(observation.runNonce);
+  return {
+    pid: observation.pid,
+    ...(observation.creationDate !== undefined ? { startedAt: observation.creationDate } : {}),
+    ...(token !== null ? { runToken: token } : {}),
+  };
+}
+
 export function createNodeRunFileSystem(): RunFileSystemV1 {
   return {
     isDirectory(absolutePath) {
@@ -1984,34 +2198,6 @@ export function createNodeRunFileSystem(): RunFileSystemV1 {
       mkdirSync(absolutePath, { recursive: true });
     },
   };
-}
-
-function writeAtomic(target: string, contents: string): void {
-  mkdirSync(dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.tmp`;
-  const fd = openSync(tmp, "w");
-  try {
-    writeSync(fd, contents);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    renameSync(tmp, target);
-  } catch (error) {
-    const code = error !== null && typeof error === "object" && "code" in error ? String(error.code) : "";
-    if (code === "EEXIST" || code === "EPERM") {
-      unlinkSync(target);
-      renameSync(tmp, target);
-      return;
-    }
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // Leave the temp file. Deleting evidence of a failed persist is worse than leaving it.
-    }
-    throw error;
-  }
 }
 
 const NODE_SPAWNER_USED = new WeakSet<object>();
