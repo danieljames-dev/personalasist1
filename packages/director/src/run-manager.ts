@@ -72,9 +72,10 @@ import {
 } from "./leases.js";
 import {
   captureProcessIdentity,
+  compareProcessIdentity,
+  detectOrphan,
   holderLiveness,
   identityFromObservation,
-  livenessGrants,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type ProcessObservationV1,
@@ -257,6 +258,11 @@ export interface RunResultV1 {
   readonly resultPath: string | null;
 }
 
+export interface WriterOrphanScanV1 {
+  readonly performed: boolean;
+  readonly liveSightings: readonly OrphanSightingV1[];
+}
+
 export interface WriterReleaseEvidenceInputV1 {
   readonly recordedLeaseKind: LeaseKindV1 | null;
   readonly recordedLeaseId: string | null;
@@ -264,32 +270,50 @@ export interface WriterReleaseEvidenceInputV1 {
   readonly recordedIdentity: ExecutorProcessIdentityV1 | null;
   readonly liveness: ProcessLivenessV1 | null;
   readonly livenessAskedAbout: ExecutorProcessIdentityV1 | null;
+  /** `null` means the run did not establish whether the child is still running. */
+  readonly stillRunning: boolean | null;
+  /** `null` or `performed: false` means no orphan scan ran. Absence is not emptiness. */
+  readonly orphanScan: WriterOrphanScanV1 | null;
 }
 
 /**
- * `productionWriterLeaseReleasedByThisRun` may be true only from an explicit
- * release of *this run's recorded* PRODUCTION_WRITER lease id.
+ * `productionWriterLeaseReleasedByThisRun` is a process fact, not a lease fact.
  *
- * Liveness never sets the field. {@link livenessGrants} is the single rule:
- * `writerFinished` is false for `DEAD_CONFIRMED`, `UNKNOWN`, and `ALIVE`. A
- * process that is gone is not a writer that completed, and a dead parent is
- * not a dead tree. Lease kinds other than PRODUCTION_WRITER never qualify.
+ * True only when every conjunct holds:
+ * - the recorded lease is `PRODUCTION_WRITER`
+ * - this run's recorded lease id was explicitly released
+ * - the child is confirmed exited (`stillRunning === false`)
+ * - an orphan scan for this run's nonce ran and found nothing alive
+ * - `recordedIdentity` names the holder this run captured
+ * - if the probe named a process, it is this run's recorded holder
  *
- * `livenessAskedAbout` is the identity the probe observed, not the recorded
- * record compared to itself. See the `DEPLOY_COMPLETED` branch in `mission.ts`.
+ * A released lease, a `DEPLOY_COMPLETED` event, a free lease slot, or
+ * `DEAD_CONFIRMED` of the parent is not enough. Unknown or missing ⇒ false.
  */
 export function writerReleaseEvidence(input: WriterReleaseEvidenceInputV1): boolean {
+  if (input.recordedLeaseKind !== "PRODUCTION_WRITER") return false;
+  if (input.recordedLeaseId === null || input.releasedLeaseId === null) return false;
+  if (input.releasedLeaseId !== input.recordedLeaseId) return false;
+  if (input.stillRunning !== false) return false;
+  if (input.orphanScan === null || !input.orphanScan.performed) return false;
+  if (input.orphanScan.liveSightings.length > 0) return false;
+  if (input.recordedIdentity === null) return false;
+  if (input.liveness === "ALIVE") return false;
   if (
-    input.recordedLeaseKind === "PRODUCTION_WRITER"
-    && input.recordedLeaseId !== null
-    && input.releasedLeaseId !== null
-    && input.releasedLeaseId === input.recordedLeaseId
+    input.livenessAskedAbout !== null
+    && !askedAboutThisHolder(input.recordedIdentity, input.livenessAskedAbout)
   ) {
-    return true;
+    return false;
   }
+  return true;
+}
 
-  if (input.liveness === null) return false;
-  return livenessGrants(input.liveness).writerFinished;
+function askedAboutThisHolder(
+  recorded: ExecutorProcessIdentityV1,
+  askedAbout: ExecutorProcessIdentityV1,
+): boolean {
+  return compareProcessIdentity(recorded, askedAbout) === "MATCH"
+    && recorded.runNonce === askedAbout.runNonce;
 }
 
 export function evaluateSuccessConjunction(input: {
@@ -657,15 +681,21 @@ export async function executeRun(
   deps.leases.save([...deps.leases.list().filter((item) => item.leaseId !== heldLease.leaseId), heldLease]);
   let releasedLeaseId: string | null = null;
   let capacityHeld = true;
+  let stillRunning = false;
+  let orphanScan: WriterOrphanScanV1 = { performed: false, liveSightings: [] };
 
   const releaseHeld = (): void => {
     if (releasedLeaseId === null) {
-      const before = deps.leases.list();
-      const remaining = releaseLease(before, heldLease.leaseId);
-      deps.leases.save(remaining);
-      const gone = before.some((item) => item.leaseId === heldLease.leaseId)
-        && remaining.every((item) => item.leaseId !== heldLease.leaseId);
-      if (gone) releasedLeaseId = heldLease.leaseId;
+      const withholdProductionWriter = heldLease.kind === "PRODUCTION_WRITER"
+        && (stillRunning || (orphanScan.performed && orphanScan.liveSightings.length > 0));
+      if (!withholdProductionWriter) {
+        const before = deps.leases.list();
+        const remaining = releaseLease(before, heldLease.leaseId);
+        deps.leases.save(remaining);
+        const gone = before.some((item) => item.leaseId === heldLease.leaseId)
+          && remaining.every((item) => item.leaseId !== heldLease.leaseId);
+        if (gone) releasedLeaseId = heldLease.leaseId;
+      }
     }
     if (capacityHeld) {
       deps.capacity.release(request.executor);
@@ -710,6 +740,8 @@ export async function executeRun(
           recordedIdentity: null,
           liveness: null,
           livenessAskedAbout: null,
+          stillRunning: false,
+          orphanScan: { performed: false, liveSightings: [] },
         }),
         cancel: emptyCancel,
         log: null,
@@ -757,7 +789,42 @@ export async function executeRun(
       now: deps.clock.now(),
       store: intentStore,
     });
-    if (attempted.ok && attempted.permit !== null) permit = attempted.permit;
+    if (!attempted.ok || attempted.permit === null) {
+      try {
+        child.kill();
+      } catch {
+        // Best effort. killTree is the follow-up.
+      }
+      try {
+        deps.killTree(child.pid);
+      } catch {
+        // A failed kill must not leave the run looking successful.
+      }
+      stillRunning = !child.exited;
+      orphanScan = collectWriterOrphans({
+        scanOrphans: deps.scanOrphans,
+        recorded: null,
+        runNonce: request.runNonce,
+        parentStillRunning: stillRunning,
+        parentLiveness: stillRunning ? "ALIVE" : "DEAD_CONFIRMED",
+      });
+      return finish({
+        ok: false,
+        spawned: true,
+        reason: `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`,
+        conjunction: emptyConjunction,
+        exitCode: child.exited ? (await child.exit).code : null,
+        processIdentity: null,
+        intent: persisted.intent,
+        handoff: null,
+        gitAfter: null,
+        lease: heldLease,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    permit = attempted.permit;
 
     const captured = captureProcessIdentity(deps.probe, { pid: child.pid, runNonce: request.runNonce });
     const processIdentity = captured.ok ? captured.identity : null;
@@ -779,7 +846,6 @@ export async function executeRun(
     // 6. Timeout / cancel ladder.
     const cancelStages: CancelStageV1[] = [];
     let timedOut = false;
-    let stillRunning = false;
     let exitCode: number | null = null;
 
     const exitWon = child.exited;
@@ -862,23 +928,41 @@ export async function executeRun(
         : {}),
     });
 
-    // Writer-release evidence is computed from the lease we actually released and from a
-    // liveness question asked about a named identity — never from the exit code.
+    // Writer-release evidence is a process observation: confirmed exit plus an
+    // orphan scan that found nothing alive. A released lease is not enough.
     const livenessQuestion = resolveWriterLiveness(deps, processIdentity);
+    if (processIdentity !== null && livenessQuestion.observation !== null) {
+      detectOrphan({
+        recorded: processIdentity,
+        observed: livenessQuestion.observation,
+        parentLiveness: livenessQuestion.liveness ?? (stillRunning ? "ALIVE" : "DEAD_CONFIRMED"),
+      });
+    }
+    orphanScan = collectWriterOrphans({
+      scanOrphans: deps.scanOrphans,
+      recorded: processIdentity,
+      runNonce: request.runNonce,
+      parentStillRunning: stillRunning,
+      parentLiveness: livenessQuestion.liveness,
+    });
+
+    releaseHeld();
     const writerFact = writerReleaseEvidence({
       recordedLeaseKind: heldLease.kind,
       recordedLeaseId: heldLease.leaseId,
-      releasedLeaseId: null,
+      releasedLeaseId,
       recordedIdentity: processIdentity,
       liveness: livenessQuestion.liveness,
       livenessAskedAbout: livenessQuestion.askedAbout,
+      stillRunning,
+      orphanScan,
     });
 
     const reason = conjunction.ok
       ? "every success conjunct holds"
       : `success conjunction failed: ${conjunction.failedConjuncts.join(", ")}`;
 
-    const result = finish({
+    return finish({
       ok: conjunction.ok,
       spawned: true,
       reason,
@@ -893,26 +977,6 @@ export async function executeRun(
       cancel: { timedOut, stages: cancelStages },
       log: logReport,
     });
-
-    releaseHeld();
-    const afterRelease = writerReleaseEvidence({
-      recordedLeaseKind: heldLease.kind,
-      recordedLeaseId: heldLease.leaseId,
-      releasedLeaseId,
-      recordedIdentity: processIdentity,
-      liveness: livenessQuestion.liveness,
-      livenessAskedAbout: livenessQuestion.askedAbout,
-    });
-
-    if (afterRelease === result.productionWriterLeaseReleasedByThisRun) return result;
-
-    const corrected: RunResultV1 = { ...result, productionWriterLeaseReleasedByThisRun: afterRelease };
-    try {
-      deps.fs.writeDurable(resultPath, `${JSON.stringify(corrected, null, 2)}\n`);
-    } catch {
-      // In-memory result is authoritative if the rewrite fails.
-    }
-    return corrected;
   } finally {
     releaseHeld();
   }
@@ -921,14 +985,62 @@ export async function executeRun(
 function resolveWriterLiveness(
   deps: RunManagerDepsV1,
   recorded: ExecutorProcessIdentityV1 | null,
-): { liveness: ProcessLivenessV1 | null; askedAbout: ExecutorProcessIdentityV1 | null } {
-  if (recorded === null) return { liveness: null, askedAbout: null };
+): {
+  liveness: ProcessLivenessV1 | null;
+  askedAbout: ExecutorProcessIdentityV1 | null;
+  observation: ProcessObservationV1 | null;
+} {
+  if (recorded === null) return { liveness: null, askedAbout: null, observation: null };
   const asked = deps.askWriterLiveness !== undefined
     ? deps.askWriterLiveness(recorded)
     : { subject: recorded, observation: deps.probe.observe(recorded.pid) };
   return {
     liveness: holderLiveness(asked.subject, asked.observation),
     askedAbout: identityFromObservation(asked.observation),
+    observation: asked.observation,
+  };
+}
+
+function collectWriterOrphans(input: {
+  readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
+  readonly recorded: ExecutorProcessIdentityV1 | null;
+  readonly runNonce: string;
+  readonly parentStillRunning: boolean;
+  readonly parentLiveness: ProcessLivenessV1 | null;
+}): WriterOrphanScanV1 {
+  if (input.scanOrphans === undefined) {
+    return { performed: false, liveSightings: [] };
+  }
+  const createdNotBefore = input.recorded?.creationDate ?? "";
+  const sightings = input.scanOrphans({ runNonce: input.runNonce, createdNotBefore });
+  const parentLiveness: ProcessLivenessV1 = input.parentStillRunning
+    ? "ALIVE"
+    : (input.parentLiveness ?? "DEAD_CONFIRMED");
+  const liveSightings: OrphanSightingV1[] = [];
+  for (const sighting of sightings) {
+    const observed = observationFromSighting(sighting);
+    if (input.recorded !== null) {
+      detectOrphan({
+        recorded: input.recorded,
+        observed,
+        parentLiveness,
+      });
+    }
+    const nonceOk = sighting.runNonce === undefined || sighting.runNonce === input.runNonce;
+    if (nonceOk && observed.outcome === "FOUND") {
+      liveSightings.push(sighting);
+    }
+  }
+  return { performed: true, liveSightings };
+}
+
+function observationFromSighting(sighting: OrphanSightingV1): ProcessObservationV1 {
+  return {
+    outcome: "FOUND",
+    reason: "orphan-scan",
+    pid: sighting.pid,
+    ...(sighting.creationDate !== undefined ? { creationDate: sighting.creationDate } : {}),
+    ...(sighting.runNonce !== undefined ? { runNonce: sighting.runNonce } : {}),
   };
 }
 
@@ -996,6 +1108,13 @@ async function cancelLadder(
       && leftover.creationDate < createdNotBefore
     ) {
       continue;
+    }
+    if (recorded !== null) {
+      detectOrphan({
+        recorded,
+        observed: observationFromSighting(leftover),
+        parentLiveness: child.exited ? "DEAD_CONFIRMED" : "ALIVE",
+      });
     }
     deps.killTree(leftover.pid);
     killedOrphan = true;

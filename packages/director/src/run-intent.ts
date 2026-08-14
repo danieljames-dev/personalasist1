@@ -164,6 +164,14 @@ export function persistRunIntent(
   if (!built.ok) return built;
 
   const { intent, intentPath } = built;
+  const existing = existingIntentOn(store, intentPath);
+  if (existing === "spawned") {
+    return refused("a recorded spawn already exists; refusing to overwrite it");
+  }
+  if (existing === "unreadable") {
+    return refused("an existing intent at this path is unreadable; refusing to overwrite it");
+  }
+
   const serialised = serialiseIntent(intent);
 
   try {
@@ -650,6 +658,25 @@ function buildIntent(input: PersistRunIntentInputV1): BuiltIntentV1 {
   }
 
   return { ok: true, intent, intentPath: input.intentPath };
+}
+
+function existingIntentOn(store: IntentStoreV1, intentPath: string): "none" | "unstarted" | "spawned" | "unreadable" {
+  let raw: string;
+  try {
+    raw = store.readUtf8(intentPath);
+  } catch {
+    return "none";
+  }
+  const parsed = runIntentFrom(parseJson(raw));
+  if (!parsed.ok) return "unreadable";
+  if (
+    parsed.intent.spawnAttemptedAt !== null
+    || parsed.intent.spawnPid !== null
+    || parsed.intent.processIdentity !== null
+  ) {
+    return "spawned";
+  }
+  return "unstarted";
 }
 
 function makePermit(intentPath: string, intent: RunIntentV1): SpawnPermitV1 {

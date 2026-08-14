@@ -331,6 +331,7 @@ async function runWith(
     wait?: (ms: number) => Promise<void>;
     killTree?: (pid: number) => void;
     askWriterLiveness?: RunManagerDepsV1["askWriterLiveness"];
+    scanOrphans?: RunManagerDepsV1["scanOrphans"];
     handoff?: Record<string, unknown> | null;
     neverWait?: boolean;
   } = {},
@@ -352,6 +353,7 @@ async function runWith(
     wait: over.wait ?? (over.neverWait ? (() => new Promise(() => {})) : async () => undefined),
     killTree: over.killTree ?? (() => undefined),
     ...(over.askWriterLiveness !== undefined ? { askWriterLiveness: over.askWriterLiveness } : {}),
+    ...(over.scanOrphans !== undefined ? { scanOrphans: over.scanOrphans } : {}),
   };
   return executeRun(request(over.request), deps);
 }
@@ -596,6 +598,8 @@ test("UNKNOWN liveness does not set the writer-release fact", async () => {
       recordedIdentity: RECORDED,
       liveness: "UNKNOWN",
       livenessAskedAbout: RECORDED,
+      stillRunning: false,
+      orphanScan: { performed: true, liveSightings: [] },
     }),
     false,
   );
@@ -623,25 +627,46 @@ test("DEAD_CONFIRMED for a different identity does not set the writer-release fa
     writerReleaseEvidence({
       recordedLeaseKind: "PRODUCTION_WRITER",
       recordedLeaseId: "lease-pw-1",
-      releasedLeaseId: null,
+      releasedLeaseId: "lease-pw-1",
       recordedIdentity: RECORDED,
       liveness: "DEAD_CONFIRMED",
       livenessAskedAbout: OTHER_IDENTITY,
+      stillRunning: false,
+      orphanScan: { performed: true, liveSightings: [] },
     }),
     false,
   );
 });
 
-test("an explicit release of this run's recorded production-writer lease id is the fact itself", async () => {
+test("a production-writer lease release is evidence only after confirmed exit and an empty orphan scan", async () => {
+  // Was: "an explicit release of this run's recorded production-writer lease id is the fact itself".
+  // That encoded the defect: releasedLeaseId === heldLease.leaseId with no process observation.
   const result = await runWith({
     neverWait: true,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    askWriterLiveness: (recorded) => ({
-      subject: recorded,
-      observation: { outcome: "UNAVAILABLE", reason: "not asked; the release is the evidence" },
-    }),
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "exited" },
+    ]),
+    scanOrphans: () => [],
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
+  const proven = {
+    recordedLeaseKind: "PRODUCTION_WRITER" as const,
+    recordedLeaseId: "lease-pw-1",
+    releasedLeaseId: "lease-pw-1",
+    recordedIdentity: RECORDED,
+    liveness: "DEAD_CONFIRMED" as const,
+    livenessAskedAbout: null,
+    stillRunning: false,
+    orphanScan: { performed: true, liveSightings: [] as const },
+  };
+  assert.equal(writerReleaseEvidence(proven), true);
+  assert.equal(writerReleaseEvidence({ ...proven, stillRunning: null }), false);
+  assert.equal(
+    writerReleaseEvidence({ ...proven, orphanScan: { performed: false, liveSightings: [] } }),
+    false,
+  );
 });
 
 test("DEAD_CONFIRMED of this run's identity is not writer-release evidence", async () => {
@@ -670,6 +695,8 @@ test("DEAD_CONFIRMED of this run's identity is not writer-release evidence", asy
       recordedIdentity: RECORDED,
       liveness: "DEAD_CONFIRMED",
       livenessAskedAbout: RECORDED,
+      stillRunning: false,
+      orphanScan: { performed: true, liveSightings: [] },
     }),
     false,
   );
@@ -706,6 +733,8 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
         recordedIdentity: RECORDED,
         liveness: "DEAD_CONFIRMED",
         livenessAskedAbout: RECORDED,
+        stillRunning: false,
+        orphanScan: { performed: true, liveSightings: [] },
       }),
       false,
       `${lease.kind} explicit release is not a production-writer release`,
@@ -719,6 +748,8 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
       recordedIdentity: RECORDED,
       liveness: "DEAD_CONFIRMED",
       livenessAskedAbout: RECORDED,
+      stillRunning: false,
+      orphanScan: { performed: true, liveSightings: [] },
     }),
     false,
   );
@@ -782,6 +813,123 @@ test("an unobservable spawn is recorded as attempted, not as never started", asy
   assert.equal(answers.started, true, "a spawn that returned must not look like it never started");
   assert.equal(answers.spawnPid, RECORDED.pid);
   assert.equal(answers.spawnAttemptedAt, NOW);
+});
+
+test("a production writer that ignores kill and survives killTree does not release the lease or set the field", async () => {
+  // Defect: releasedLeaseId === heldLease.leaseId set the field while the child was still running.
+  const hung = hangingProcess();
+  const leases = memoryLeases();
+  const result = await runWith({
+    spawn: trackingSpawn(() => hung),
+    leases,
+    request: {
+      lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-survive" },
+      timeoutMs: 1,
+    },
+    wait: async () => undefined,
+    killTree: () => undefined,
+    scanOrphans: () => [{ pid: hung.pid, runNonce: NONCE, creationDate: T0 }],
+  });
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(result.cancel.timedOut, true);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-survive"),
+    "PRODUCTION_WRITER must stay held while the child is alive",
+  );
+  assert.equal(
+    writerReleaseEvidence({
+      recordedLeaseKind: "PRODUCTION_WRITER",
+      recordedLeaseId: "lease-pw-survive",
+      releasedLeaseId: "lease-pw-survive",
+      recordedIdentity: RECORDED,
+      liveness: "ALIVE",
+      livenessAskedAbout: RECORDED,
+      stillRunning: true,
+      orphanScan: { performed: true, liveSightings: [{ pid: hung.pid, runNonce: NONCE }] },
+    }),
+    false,
+  );
+});
+
+test("a clean parent exit with a live nonce-bearing child is not writer-release evidence", async () => {
+  // Defect: detectOrphan had no callers. A parent exit 0 plus NOT_FOUND for the parent
+  // set the field while scanOrphans reported live pid 7777 carrying this run's nonce.
+  const leases = memoryLeases();
+  const result = await runWith({
+    neverWait: true,
+    leases,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
+    probe: sequentialProbe([
+      foundObservation(RECORDED),
+      { outcome: "NOT_FOUND", reason: "parent gone" },
+    ]),
+    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+  });
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.ok(
+    leases.list().some((item) => item.leaseId === "lease-pw-1"),
+    "a live child carrying the nonce must leave the production-writer lease held",
+  );
+  assert.equal(
+    writerReleaseEvidence({
+      recordedLeaseKind: "PRODUCTION_WRITER",
+      recordedLeaseId: "lease-pw-1",
+      releasedLeaseId: "lease-pw-1",
+      recordedIdentity: RECORDED,
+      liveness: "DEAD_CONFIRMED",
+      livenessAskedAbout: null,
+      stillRunning: false,
+      orphanScan: { performed: true, liveSightings: [{ pid: 7777, runNonce: NONCE, creationDate: T0 }] },
+    }),
+    false,
+  );
+});
+
+test("a failed spawn-attempt record after a live spawn kills the child and fails the run", async () => {
+  // Defect: the second intent.json write failed ENOSPC after spawn; the child stayed up
+  // and answersAfterReboot().started was false, so recovery relaunched a second writer.
+  const fs = memoryFs({
+    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+  });
+  const original = fs.writeDurable.bind(fs);
+  let intentWrites = 0;
+  fs.writeDurable = (path, utf8) => {
+    if (path.endsWith("intent.json")) {
+      intentWrites += 1;
+      if (intentWrites >= 2) {
+        const error = new Error("ENOSPC");
+        (error as NodeJS.ErrnoException).code = "ENOSPC";
+        throw error;
+      }
+    }
+    original(path, utf8);
+  };
+  const hung = hangingProcess();
+  const killed: number[] = [];
+  const spawn = trackingSpawn(() => hung);
+  const result = await runWith({
+    neverWait: true,
+    fs,
+    spawn,
+    killTree: (pid) => {
+      killed.push(pid);
+      hung.forceExit(1);
+    },
+  });
+  assert.equal(spawn.calls, 1, result.reason);
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /could not be recorded|ENOSPC/);
+  assert.ok(hung.softKills >= 1 || killed.includes(hung.pid), "the unrecorded child must be stopped");
+  assert.ok(killed.includes(hung.pid), "killTree must run after a failed spawn record");
+
+  const raw = fs.files.get(join(RUN_ROOT, "intent.json"));
+  assert.ok(raw, "the pre-spawn intent must still exist");
+  const parsed = runIntentFrom(JSON.parse(raw) as unknown);
+  assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.reason);
+  if (!parsed.ok) return;
+  assert.equal(answersAfterReboot(parsed.intent).started, false);
 });
 
 // ---------------------------------------------------------------------------

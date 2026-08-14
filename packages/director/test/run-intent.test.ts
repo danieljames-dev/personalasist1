@@ -274,3 +274,32 @@ test("a spawn whose identity cannot be captured is still a started run", () => {
     assert.equal(answers.spawnAttemptedAt, SPAWNED_AT);
   });
 });
+
+test("persistRunIntent refuses to overwrite an intent that already recorded a spawn", () => {
+  // Defect: persistRunIntent rewrote a file that recordSpawnAttempt refuses to
+  // overwrite, wiping spawnAttemptedAt / spawnPid so a live process read as never started.
+  withDir((dir) => {
+    const persisted = persistRunIntent(inputIn(dir));
+    assert.equal(persisted.ok, true, persisted.ok ? "" : persisted.reason);
+    if (!persisted.ok) return;
+
+    const attempted = recordSpawnAttempt({
+      permit: persisted.permit,
+      pid: 4812,
+      now: SPAWNED_AT,
+    });
+    assert.equal(attempted.ok, true, attempted.ok ? "" : attempted.reason);
+    if (!attempted.ok) return;
+
+    const again = persistRunIntent(inputIn(dir));
+    assert.equal(again.ok, false);
+    assert.equal(again.permit, null);
+    assert.match(again.reason, /already recorded|refusing to overwrite/);
+
+    const reloaded = readRunIntent(inputIn(dir).intentPath);
+    assert.equal(reloaded.ok, true, reloaded.ok ? "" : reloaded.reason);
+    if (!reloaded.ok) return;
+    assert.equal(reloaded.intent.spawnPid, 4812);
+    assert.equal(reloaded.intent.spawnAttemptedAt, SPAWNED_AT);
+  });
+});

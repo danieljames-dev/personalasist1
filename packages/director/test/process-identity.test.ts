@@ -15,6 +15,7 @@ import {
   detectOrphan,
   holderLiveness,
   identityFromObservation,
+  interpretWindowsProbeOutput,
   livenessGrants,
   processIdentityFrom,
   type ExecutorProcessIdentityV1,
@@ -213,6 +214,33 @@ test("an UNAVAILABLE observation is not an orphan to be reaped", () => {
   assert.equal(orphan.kind, null);
 });
 
+test("DMTF and ISO spellings of the same creation instant are the same process, not PID reuse", () => {
+  // Defect: sameCreationDate fell back to string equality. WMI emits
+  // 20260813120001.000000+000; a later ISO observation of the same instant
+  // was treated as DEAD_CONFIRMED and reclaim: true.
+  const recorded: ExecutorProcessIdentityV1 = {
+    ...RECORDED,
+    creationDate: "20260813120001.000000+000",
+  };
+  const observed = found({ creationDate: "2026-08-13T12:00:01.0000000+00:00" });
+  assert.equal(compareProcessIdentity(recorded, observed), "MATCH");
+  assert.equal(holderLiveness(recorded, observed), "ALIVE");
+  assert.equal(livenessGrants(holderLiveness(recorded, observed)).reclaim, false);
+});
+
+test("unparseable unequal creation dates are UNKNOWN, not confirmed death", () => {
+  // Defect: unparseable-and-unequal returned false from sameCreationDate,
+  // which holderLiveness read as PID reuse → DEAD_CONFIRMED.
+  const recorded: ExecutorProcessIdentityV1 = {
+    ...RECORDED,
+    creationDate: "cim-unparsed-A",
+  };
+  const observed = found({ creationDate: "cim-unparsed-B" });
+  assert.equal(compareProcessIdentity(recorded, observed), "UNVERIFIABLE");
+  assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
+  assert.equal(livenessGrants(holderLiveness(recorded, observed)).reclaim, false);
+});
+
 // ---------------------------------------------------------------------------
 // Capture at spawn
 // ---------------------------------------------------------------------------
@@ -274,4 +302,61 @@ test("the Windows host probe can observe this process by more than its pid", () 
     runNonce: captured.identity.runNonce,
   };
   assert.equal(compareProcessIdentity(captured.identity, hostFields), "MATCH");
+});
+
+test("a shadowed powershell that exits non-zero with empty stdout is UNAVAILABLE, not death", () => {
+  // Defect: JSON.parse(stdout || '{"ok":false}') plus a default reason of
+  // "not-found" turned a live process into DEAD_CONFIRMED / reclaim: true
+  // whenever powershell.exe was missing, shadowed, or WMI failed.
+  const probe = createWindowsProcessProbe({
+    spawnSync: () => ({ status: 1, stdout: "", stderr: "" }),
+  });
+  const observation = probe.observe(process.pid);
+  assert.equal(observation.outcome, "UNAVAILABLE", JSON.stringify(observation));
+  assert.notEqual(observation.outcome, "NOT_FOUND");
+  const recorded: ExecutorProcessIdentityV1 = {
+    pid: process.pid,
+    creationDate: T0,
+    executablePath: NODE,
+    runNonce: NONCE_A,
+  };
+  assert.equal(holderLiveness(recorded, observation), "UNKNOWN");
+  assert.equal(livenessGrants(holderLiveness(recorded, observation)).reclaim, false);
+});
+
+test("probe failure envelopes are UNAVAILABLE even when they look like not-found", () => {
+  assert.equal(
+    interpretWindowsProbeOutput({ status: 0, stdout: "", stderr: "" }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsProbeOutput({ status: 1, stdout: "", stderr: "" }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsProbeOutput({
+      status: 1,
+      stdout: "{\"ok\":false,\"reason\":\"not-found\"}",
+      stderr: "",
+    }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsProbeOutput({ status: 0, stdout: "{\"ok\":false}", stderr: "" }).outcome,
+    "UNAVAILABLE",
+  );
+  assert.equal(
+    interpretWindowsProbeOutput({
+      status: 0,
+      stdout: "{\"ok\":false,\"reason\":\"cim-error\"}",
+      stderr: "",
+    }).outcome,
+    "UNAVAILABLE",
+  );
+  const gone = interpretWindowsProbeOutput({
+    status: 0,
+    stdout: "{\"ok\":false,\"reason\":\"not-found\"}",
+    stderr: "",
+  });
+  assert.equal(gone.outcome, "NOT_FOUND");
 });

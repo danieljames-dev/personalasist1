@@ -167,4 +167,9 @@ test("the executor launch path is discovery → adapters → intent → spawn �
   assert.match(runManager, /\bcollectGitTruth\s*\(/);
   assert.match(runManager, /\bverifyGitTruth\s*\(/);
   assert.match(runManager, /\bevaluateSuccessConjunction\s*\(/);
+  assert.match(
+    runManager,
+    /\bdetectOrphan\s*\(/,
+    "a clean parent exit must run detectOrphan; cancelLadder is not the only exit path",
+  );
 });

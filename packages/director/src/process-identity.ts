@@ -151,7 +151,7 @@ export function captureProcessIdentity(
   if (observation.pid !== input.pid) {
     return { ok: false, identity: null, observation, reason: "observation is about a different pid than the one just spawned" };
   }
-  const creationDate = asUsableToken(observation.creationDate);
+  const creationDate = normalisedCreationDate(observation.creationDate);
   if (creationDate === null) {
     return { ok: false, identity: null, observation, reason: "observation has no creation date; a pid-only record is how reuse is misread as the holder" };
   }
@@ -186,7 +186,9 @@ export function compareProcessIdentity(
   if (recorded.pid !== sighting.pid) return "MISMATCH";
 
   if (sighting.creationDate === undefined) return "UNVERIFIABLE";
-  if (!sameCreationDate(recorded.creationDate, sighting.creationDate)) return "MISMATCH";
+  const dates = compareCreationDates(recorded.creationDate, sighting.creationDate);
+  if (dates === "UNCOMPARABLE") return "UNVERIFIABLE";
+  if (dates === "DIFFERENT") return "MISMATCH";
 
   if (sighting.executablePath === undefined) return "UNVERIFIABLE";
   if (!sameExecutable(recorded.executablePath, sighting.executablePath)) return "MISMATCH";
@@ -216,13 +218,12 @@ export function holderLiveness(
   if (verdict === "MATCH") return "ALIVE";
   if (verdict === "UNVERIFIABLE") return "UNKNOWN";
 
-  // MISMATCH. Same slot, later start: the original process is gone. Any other mismatch is a live
-  // occupant we cannot treat as the holder, which is not a death certificate.
-  if (
-    observation.creationDate !== undefined
-    && !sameCreationDate(recorded.creationDate, observation.creationDate)
-  ) {
-    return "DEAD_CONFIRMED";
+  // MISMATCH. Same slot, later start: the original process is gone. Reuse is only that case —
+  // both dates must parse and differ. Unparseable-and-unequal is UNKNOWN, not a death certificate.
+  // Any other mismatch is a live occupant we cannot treat as the holder.
+  if (observation.creationDate !== undefined) {
+    const dates = compareCreationDates(recorded.creationDate, observation.creationDate);
+    if (dates === "DIFFERENT") return "DEAD_CONFIRMED";
   }
   return "UNKNOWN";
 }
@@ -250,7 +251,7 @@ export function livenessGrants(liveness: ProcessLivenessV1): LivenessGrantV1 {
 export function identityFromObservation(observation: ProcessObservationV1): ExecutorProcessIdentityV1 | null {
   if (observation.outcome !== "FOUND") return null;
   if (!isUsablePid(observation.pid)) return null;
-  const creationDate = asUsableToken(observation.creationDate);
+  const creationDate = normalisedCreationDate(observation.creationDate);
   const executablePath = asUsableToken(observation.executablePath);
   const runNonce = asUsableToken(observation.runNonce);
   if (creationDate === null || executablePath === null || runNonce === null) return null;
@@ -321,7 +322,7 @@ export function processIdentityFrom(value: unknown): ProcessIdentityReadV1 {
     return { ok: false, identity: null, reason: "pid is not a positive integer" };
   }
 
-  const creationDate = asUsableToken(own(value, "creationDate"));
+  const creationDate = normalisedCreationDate(own(value, "creationDate"));
   if (creationDate === null) {
     return { ok: false, identity: null, reason: "creationDate is missing or not a usable token" };
   }
@@ -339,13 +340,32 @@ export function processIdentityFrom(value: unknown): ProcessIdentityReadV1 {
   return { ok: true, identity: { pid, creationDate, executablePath, runNonce } };
 }
 
+/** What the Windows probe's `spawnSync` must return. Tests inject a shadowed host. */
+export interface WindowsProbeSpawnResultV1 {
+  readonly status: number | null;
+  readonly stdout?: string | Buffer | null;
+  readonly stderr?: string | Buffer | null;
+  readonly error?: Error | null;
+}
+
+export interface WindowsProbeHostV1 {
+  readonly spawnSync: (
+    command: string,
+    args: readonly string[],
+    options: { encoding: "utf8"; timeout: number; windowsHide: boolean; shell: false },
+  ) => WindowsProbeSpawnResultV1;
+}
+
 /**
  * CIM query of one PID on this Windows host.
  *
- * Access-denied, a timeout, a parser failure and a process on another account all come back as
- * `UNAVAILABLE`. Absence comes back as `NOT_FOUND`. Those two must not be collapsed.
+ * Access-denied, a timeout, a parser failure, a non-zero exit and a process on another
+ * account all come back as `UNAVAILABLE`. Absence comes back as `NOT_FOUND` only from
+ * `status === 0` and an explicit `{ ok: false, reason: "not-found" }` envelope.
+ * Those two must not be collapsed: a failed probe is not a dead process.
  */
-export function createWindowsProcessProbe(): HostProcessProbe {
+export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProcessProbe {
+  const spawn = host?.spawnSync ?? spawnSync;
   return {
     observe(pid: number): ProcessObservationV1 {
       if (!isUsablePid(pid)) {
@@ -354,15 +374,21 @@ export function createWindowsProcessProbe(): HostProcessProbe {
 
       const script = [
         "$ProgressPreference = 'SilentlyContinue';",
-        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue;`,
-        "if (-not $p) { Write-Output '{\"ok\":false,\"reason\":\"not-found\"}'; exit 0 }",
+        "try {",
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop;`,
+        "if (-not $p) { Write-Output '{\"ok\":false,\"reason\":\"not-found\"}'; exit 0 };",
         "$o = [ordered]@{ ok = $true; pid = [int]$p.ProcessId; name = $p.Name; executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; creationDate = $p.CreationDate.ToString('o'); parentPid = [int]$p.ParentProcessId };",
-        "$o | ConvertTo-Json -Compress",
+        "$o | ConvertTo-Json -Compress;",
+        "exit 0",
+        "} catch {",
+        "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",
+        "exit 1",
+        "}",
       ].join(" ");
 
-      let result: ReturnType<typeof spawnSync>;
+      let result: WindowsProbeSpawnResultV1;
       try {
-        result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
           encoding: "utf8",
           timeout: 15_000,
           windowsHide: true,
@@ -380,46 +406,76 @@ export function createWindowsProcessProbe(): HostProcessProbe {
         };
       }
 
-      const stdout = stripBom(String(result.stdout ?? "")).trim();
-      const stderr = String(result.stderr ?? "").trim();
-      const combined = `${stdout}\n${stderr}`;
-      if (/access is denied/i.test(combined)) {
-        return { outcome: "UNAVAILABLE", reason: "access-denied" };
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(stdout || "{\"ok\":false}");
-      } catch {
-        return { outcome: "UNAVAILABLE", reason: "probe output was not parseable" };
-      }
-      if (!isPlainObject(parsed)) {
-        return { outcome: "UNAVAILABLE", reason: "probe output was not an object" };
-      }
-
-      if (parsed.ok !== true) {
-        const why = typeof parsed.reason === "string" ? parsed.reason : "not-found";
-        if (why === "not-found") return { outcome: "NOT_FOUND", reason: "no process occupies this pid" };
-        return { outcome: "UNAVAILABLE", reason: why };
-      }
-
-      const observedPid = parsed.pid;
-      if (!isUsablePid(observedPid)) {
-        return { outcome: "UNAVAILABLE", reason: "probe did not return a pid" };
-      }
-
-      const found: ProcessObservationV1 = {
-        outcome: "FOUND",
-        reason: "cim",
-        pid: observedPid,
-        ...(usableOrOmit("creationDate", parsed.creationDate)),
-        ...(usableOrOmit("executablePath", parsed.executablePath)),
-        ...(usableOrOmit("name", parsed.name)),
-        ...(parentPidField(parsed.parentPid)),
-        ...nonceFromThisProcess(observedPid, parsed.commandLine),
-      };
-      return found;
+      return interpretWindowsProbeOutput({
+        status: result.status,
+        stdout: stripBom(String(result.stdout ?? "")).trim(),
+        stderr: String(result.stderr ?? "").trim(),
+      });
     },
+  };
+}
+
+/**
+ * Map a PowerShell spawn result to a process observation.
+ *
+ * Empty, unparseable, or non-zero-exit output is `UNAVAILABLE`. `NOT_FOUND` requires
+ * exit 0 and an explicit not-found envelope. A missing `reason` is never treated as
+ * not-found.
+ */
+export function interpretWindowsProbeOutput(input: {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}): ProcessObservationV1 {
+  const combined = `${input.stdout}\n${input.stderr}`;
+  if (/access is denied/i.test(combined)) {
+    return { outcome: "UNAVAILABLE", reason: "access-denied" };
+  }
+
+  if (input.status !== 0) {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: input.status === null ? "probe exited without a status" : `probe exited ${input.status}`,
+    };
+  }
+
+  if (input.stdout === "") {
+    return { outcome: "UNAVAILABLE", reason: "probe produced no output" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input.stdout);
+  } catch {
+    return { outcome: "UNAVAILABLE", reason: "probe output was not parseable" };
+  }
+  if (!isPlainObject(parsed)) {
+    return { outcome: "UNAVAILABLE", reason: "probe output was not an object" };
+  }
+
+  if (parsed.ok !== true) {
+    if (parsed.reason === "not-found") {
+      return { outcome: "NOT_FOUND", reason: "no process occupies this pid" };
+    }
+    const why = typeof parsed.reason === "string" ? parsed.reason : "probe returned a failure envelope";
+    return { outcome: "UNAVAILABLE", reason: why };
+  }
+
+  const observedPid = parsed.pid;
+  if (!isUsablePid(observedPid)) {
+    return { outcome: "UNAVAILABLE", reason: "probe did not return a pid" };
+  }
+
+  const creationDate = normalisedCreationDate(parsed.creationDate);
+  return {
+    outcome: "FOUND",
+    reason: "cim",
+    pid: observedPid,
+    ...(creationDate !== null ? { creationDate } : {}),
+    ...(usableOrOmit("executablePath", parsed.executablePath)),
+    ...(usableOrOmit("name", parsed.name)),
+    ...(parentPidField(parsed.parentPid)),
+    ...nonceFromThisProcess(observedPid, parsed.commandLine),
   };
 }
 
@@ -438,11 +494,56 @@ function asFoundObservation(
   return observed;
 }
 
-function sameCreationDate(recorded: string, observed: string): boolean {
-  const a = Date.parse(recorded);
-  const b = Date.parse(observed);
-  if (Number.isFinite(a) && Number.isFinite(b)) return a === b;
-  return recorded === observed;
+type CreationDateComparisonV1 = "SAME" | "DIFFERENT" | "UNCOMPARABLE";
+
+/**
+ * CIM DATETIME as WMI emits it: `yyyymmddHHMMSS.mmmmmmsUUU` where `sUUU` is
+ * the signed UTC offset in minutes (`+000` is UTC).
+ */
+const DMTF_DATETIME = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/;
+
+function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {
+  const a = parseProcessTimestamp(recorded);
+  const b = parseProcessTimestamp(observed);
+  if (a !== null && b !== null) return a === b ? "SAME" : "DIFFERENT";
+  if (recorded === observed) return "SAME";
+  return "UNCOMPARABLE";
+}
+
+function parseProcessTimestamp(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const dmtf = parseDmtfDatetime(trimmed);
+  if (dmtf !== null) return dmtf;
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseDmtfDatetime(value: string): number | null {
+  const match = DMTF_DATETIME.exec(value);
+  if (match === null) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const micro = Number(match[7]);
+  const sign = match[8];
+  const offsetMinutes = Number(match[9]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, Math.floor(micro / 1000));
+  if (!Number.isFinite(asUtc)) return null;
+  const offsetMs = offsetMinutes * 60 * 1000;
+  return sign === "+" ? asUtc - offsetMs : asUtc + offsetMs;
+}
+
+function normalisedCreationDate(value: unknown): string | null {
+  const token = asUsableToken(value);
+  if (token === null) return null;
+  const ms = parseProcessTimestamp(token);
+  return ms === null ? token : new Date(ms).toISOString();
 }
 
 function sameExecutable(recorded: string, observed: string): boolean {
