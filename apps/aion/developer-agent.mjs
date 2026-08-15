@@ -7,7 +7,9 @@ import {
 import {
   acquireDeveloperAgentWorktreeLease,
   createNodeFileSystemProbe,
+  directorPermitAuthorizesWrite,
   discoverClaudeExecutor,
+  mintDirectorWritePermit,
   releaseDeveloperAgentWorktreeLease,
 } from "../../packages/director/dist/index.js";
 
@@ -135,9 +137,23 @@ export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {
       throw new Error(`developer-agent refused: ${acquired.reason}`);
     }
     try {
+      const permit = mintDirectorWritePermit({
+        leaseId: acquired.lease.leaseId,
+        store: acquired.store,
+      });
+      const now = options.now ?? task.now ?? new Date().toISOString();
+      const held = directorPermitAuthorizesWrite({
+        permit,
+        repositoryRoot,
+        now,
+      });
+      if (!held.ok) {
+        throw new Error(`developer-agent refused: ${held.reason}`);
+      }
       return await originalRun({
         ...task,
-        directorMintedPermit: { leaseId: acquired.lease.leaseId },
+        directorMintedPermit: permit,
+        now,
       }, signal);
     } finally {
       releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease);

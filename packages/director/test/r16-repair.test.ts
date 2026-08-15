@@ -66,7 +66,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function grokImplementerArgv(promptPath = PROMPT, cwd = CWD): string[] {
   return [
@@ -220,6 +220,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
@@ -406,7 +412,7 @@ test("F1 a lease holder with no intent.json refuses to spawn", async () => {
     probe: {
       observe: (pid) => {
         if (pid === 4812) return foundObservation(RECORDED);
-        return { outcome: "NOT_FOUND", reason: "other" };
+        return { outcome: "NOT_FOUND", reason: "other", pid: 4812 };
       },
     },
     request: {
@@ -468,7 +474,7 @@ test("F2 adopted path does not release on a nonce-less broker-parented in-window
     pid: 7777,
     name: "node.exe",
     parentPid: 1,
-    parentName: "svchost.exe",
+    parentName: "dllhost.exe",
     parentPresent: true,
     nonceReadable: true,
     creationDate: AFTER,
@@ -476,7 +482,7 @@ test("F2 adopted path does not release on a nonce-less broker-parented in-window
   const result = await runWith({
     leases,
     fs: memoryFs({ dirs: [CWD, RUN_ROOT_RETRY] }),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     scanOrphans: () => writerOrphanScanResult([brokerRow]),
     request: {
       runRoot: RUN_ROOT_RETRY,
@@ -530,7 +536,7 @@ test("F3 a real child that prints and exits during a blocking probe keeps its st
             while (Date.now() < end) {
               // Blocking CIM stand-in. The child exits inside this window.
             }
-            return { outcome: "NOT_FOUND", reason: "exited during probe" };
+            return { outcome: "NOT_FOUND", reason: "exited during probe", pid: 4812 };
           },
         },
         capacity: memoryCapacity(),

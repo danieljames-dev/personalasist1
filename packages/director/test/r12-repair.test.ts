@@ -72,7 +72,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function grokImplementerArgv(promptPath = PROMPT, cwd = CWD): string[] {
   return [
@@ -223,6 +223,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
@@ -674,6 +680,37 @@ test("D1 the real Windows orphan scanner with a 5-minute floor and unused nonce 
   const rows = scanner({ runNonce: nonce, createdNotBefore: floor, holderPid: 0 });
   assert.ok(Array.isArray(rows.snapshot));
   assert.ok(Array.isArray(rows.killable));
+});
+
+test("D1 a 1800s window WmiPrvSE/svchost host row does not block the production interpreter", () => {
+  const floor = "2026-08-15T10:00:00.000Z";
+  const exit = "2026-08-15T10:30:00.000Z";
+  const interpreted = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      directorSessionId: 1,
+      unreadable: 0,
+      processes: [{
+        pid: 151452,
+        name: "WmiPrvSE.exe",
+        parentPid: 888,
+        parentName: "svchost.exe",
+        parentPresent: true,
+        parentCreationDate: "2026-08-01T00:00:00.000Z",
+        creationDate: "2026-08-15T10:10:00.000Z",
+        sessionId: 0,
+        nonceReadable: true,
+      }],
+    }),
+    stderr: "",
+    createdNotBefore: floor,
+    runNonce: NONCE,
+    holderPid: 4812,
+    holderExitedAt: exit,
+    observedPids: [4812],
+  });
+  assert.equal(interpreted.outcome, "SCANNED", interpreted.reason);
 });
 
 test("D1 executeRun with the production scanner rather than an empty stub still settles", async () => {

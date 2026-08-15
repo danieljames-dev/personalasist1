@@ -75,7 +75,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 const CLASS1_ROW = {
   pid: 9911,
@@ -220,6 +220,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
   };
@@ -351,7 +357,7 @@ async function runWith(over: {
     fs,
     spawn,
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? { observe: () => HOLDER_GONE },
+    probe: over.probe ?? { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
@@ -539,7 +545,7 @@ test("T1.4 session-0 broker-parented row still ties when the Director is interac
     name: "RuntimeBroker.exe",
     parentPid: 1612,
     parentPresent: true,
-    parentName: "svchost.exe",
+    parentName: "dllhost.exe",
     parentCreationDate: BOOT,
     creationDate: AFTER,
     nonceReadable: true,
@@ -617,7 +623,7 @@ test("C6 adopted lease with a mismatched invocation nonce refuses the writer pro
   const leases = memoryLeases([held]);
   const result = await runWith({
     leases,
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     scanOrphans: () => writerOrphanScanResult([leftover as never]),
     request: {
       runNonce: "NEW-NONCE",
@@ -639,7 +645,7 @@ test("C6 a nonce mismatch refuses even when the scan is empty", async () => {
   const leases = memoryLeases([held]);
   const result = await runWith({
     leases,
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
     request: {
       runNonce: "NEW-NONCE",
@@ -660,7 +666,7 @@ test("C6 liveness: matching tokens and a clean scan still release the adopted wr
   const leases = memoryLeases([held]);
   const result = await runWith({
     leases,
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
     request: {
       runNonce: NONCE,
@@ -871,7 +877,7 @@ test("C8 UNAVAILABLE refuses as UNKNOWN", async () => {
   const result = await recoverAbandonedRun(RUN_ROOT, {
     fs,
     clock: createFixedClock(NOW),
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "denied", pid }) },
   });
   assert.match(result.reason, /UNKNOWN/);
 });
@@ -928,7 +934,7 @@ test("C9 recover with FOUND / UNAVAILABLE / throwing probe leaves result.json by
     },
     {
       label: "UNAVAILABLE",
-      probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "denied" }) },
+      probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "denied", pid }) },
     },
     {
       label: "throwing",
@@ -1304,7 +1310,7 @@ test("C9 liveness: NOT_FOUND with no existing result.json still writes a termina
   const result = await recoverAbandonedRun(RUN_ROOT, {
     fs,
     clock: createFixedClock(NOW),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
   });
   assert.equal(fs.isFile(join(RUN_ROOT, "result.json")), true);
   assert.equal(result.spawned, true);

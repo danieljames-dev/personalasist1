@@ -127,17 +127,30 @@ export const GROK_WRITE_ALWAYS_APPROVE_FLAG = "--always-approve" as const;
 export const READ_ONLY_PERMISSION_MODE = "plan" as const;
 
 /**
+ * The only `--sandbox` value measured as read-only (Codex vocabulary).
+ * Every other spelling grants write. Absence of the flag does not grant.
+ */
+export const READ_ONLY_SANDBOX_MODE = "read-only" as const;
+
+/**
  * Whether `argv` handed the child write authority. Closed at the
- * read-only allowlist, not at one write token: a new vendor mode then
+ * read-only allowlist across both vocabularies (`--permission-mode` and
+ * `--sandbox`), not at one write token: a new vendor mode then
  * denies the "not a write launch" claim instead of granting it.
+ * Absence of either flag does not grant; every unknown spelling grants.
  */
 export function argvGrantsWritePermission(argv: readonly string[]): boolean {
   if (!Array.isArray(argv)) return false;
   if (argv.includes(GROK_WRITE_ALWAYS_APPROVE_FLAG)) return true;
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] !== "--permission-mode") continue;
-    const mode = argv[i + 1];
-    if (typeof mode !== "string" || mode !== READ_ONLY_PERMISSION_MODE) return true;
+    if (argv[i] === "--permission-mode") {
+      const mode = argv[i + 1];
+      if (typeof mode !== "string" || mode !== READ_ONLY_PERMISSION_MODE) return true;
+    }
+    if (argv[i] === "--sandbox") {
+      const mode = argv[i + 1];
+      if (typeof mode !== "string" || mode !== READ_ONLY_SANDBOX_MODE) return true;
+    }
   }
   return false;
 }

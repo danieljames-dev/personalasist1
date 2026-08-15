@@ -104,7 +104,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function claudeImplementerArgv(): string[] {
   return ["-p", "--permission-mode", "bypassPermissions"];
@@ -240,6 +240,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
   };
@@ -365,7 +371,7 @@ async function runWith(over: {
     fs,
     spawn,
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? { observe: () => HOLDER_GONE },
+    probe: over.probe ?? { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
@@ -974,7 +980,7 @@ test("C7 liveness: a review-role stand-in still writes handoff.json", async () =
         return exitingProcess();
       },
       git: matchingGit(HEAD_BEFORE),
-      probe: { observe: () => HOLDER_GONE },
+      probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
       capacity: memoryCapacity(),
       leases: memoryLeases(),
       wait: async () => undefined,
@@ -1194,7 +1200,7 @@ test("C8 a host lock whose recorded holder is NOT_FOUND is reclaimed", () => {
     });
     assert.equal(existsSync(lockPath), true);
     acquireAndSaveWriter(root, arb, {
-      observe: () => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid" }),
+      observe: (pid) => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid", pid }),
     }, "lease-pw-reclaim");
     assert.equal(existsSync(lockPath), true, "the next holder must replace the lock, not leave the slot empty");
     const raw = readFileSync(lockPath, "utf8");
@@ -1225,7 +1231,7 @@ test("C8 a host lock whose holder probe is UNAVAILABLE is refused and names the 
     let message = "";
     try {
       acquireAndSaveWriter(root, arb, {
-        observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }),
+        observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access-denied", pid }),
       }, "lease-pw-unk");
       assert.fail("expected save to refuse");
     } catch (error) {
@@ -1249,7 +1255,7 @@ test("C8 an unparseable host lock is refused, names the path, and is not deleted
     let message = "";
     try {
       acquireAndSaveWriter(root, arb, {
-        observe: () => ({ outcome: "NOT_FOUND", reason: "must not be consulted for garbage" }),
+        observe: (pid) => ({ outcome: "NOT_FOUND", reason: "must not be consulted for garbage", pid }),
       }, "lease-pw-bad");
       assert.fail("expected save to refuse");
     } catch (error) {
@@ -1354,7 +1360,7 @@ test("C12 a stale host writer lock whose holder is DEAD_CONFIRMED lets the devel
       repositoryRoot: CWD,
       now: NOW,
       store,
-      probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid" }) },
+      probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid", pid }) },
     });
     assert.equal(attempt.ok, true, !attempt.ok ? attempt.reason : "");
   } finally {
@@ -1373,7 +1379,7 @@ test("C12 an unlistable host locks directory refuses the developer-agent", () =>
       repositoryRoot: CWD,
       now: NOW,
       store,
-      probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "must not be consulted" }) },
+      probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "must not be consulted", pid }) },
     });
     assert.equal(attempt.ok, false);
     if (!attempt.ok) assert.match(attempt.reason, /UNKNOWN|unlistable/i);
@@ -1412,7 +1418,7 @@ test("C10 executeRun and launchRun return RunResultV1 for hostile runRoot and ar
     fs: memoryFs(),
     spawn: trackingSpawn(() => exitingProcess()),
     git: matchingGit(),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: memoryLeases(),
     wait: async () => undefined,
@@ -1516,7 +1522,7 @@ test("C11 recoverAbandonedRun records a terminal result when the holder is gone"
   const result = await recoverAbandonedRun(RUN_ROOT, {
     fs,
     clock: createFixedClock(NOW),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
   });
   assert.equal(result.ok, false);
   assert.equal(result.spawned, true);

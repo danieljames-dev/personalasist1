@@ -58,7 +58,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 /** R14 F2 / R15 F2 hostile row. Unreadable PEB, parentless, in-window. */
 const DETACHED_GRANDCHILD = {
@@ -91,7 +91,7 @@ const OPEN_CONSOLE = {
   nonceReadable: false,
   runNonce: null,
   parentPresent: true,
-  parentName: "svchost.exe",
+  parentName: "dllhost.exe",
 };
 
 function grokImplementerArgv(promptPath = PROMPT, cwd = CWD): string[] {
@@ -242,6 +242,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },

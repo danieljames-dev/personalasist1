@@ -9,6 +9,7 @@
  * share a machine safely, and it is asserted rather than assumed.
  */
 export * from "./contracts.js";
+export { isResolvedHostPath } from "./host-path.js";
 export * from "./mission.js";
 export * from "./mission-creation.js";
 export * from "./gates.js";

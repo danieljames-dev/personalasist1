@@ -247,9 +247,18 @@ test("a non-fast-forward is refused", () => {
 test("a large tracked artifact is reported without blocking, because some are legitimate", () => {
   // The case this exists for: a 5.2 MB generated language file that passed every check looking for
   // images, keys and secrets, because none of them looked at size.
-  const verdict = verifyGitTruth(snapshot({
-    largeTrackedFiles: [{ path: "eng.traineddata", bytes: 5_199_098 }],
-  }));
+  // Exercise the live observation path, not the snapshot adapter.
+  const verdict = verifyGitTruth({
+    schema: "aion.director.git-observation.v1",
+    worktreePath: "C:/AION-HQ-claude-director-v01",
+    collectedAt: NOW,
+    head: { outcome: "FOUND", sha: "a".repeat(40) },
+    branch: { outcome: "ATTACHED", name: "executor/claude-director-v01" },
+    branchHead: { outcome: "FOUND", sha: "a".repeat(40) },
+    upstream: { outcome: "NO_UPSTREAM" },
+    status: { outcome: "CLEAN", porcelain: "" },
+    largeTrackedFiles: { outcome: "FOUND", files: [{ path: "eng.traineddata", bytes: 5_199_098 }] },
+  });
   assert.equal(verdict.ok, true, "a person should look, but this alone does not stop a mission");
   assert.equal(verdict.findings[0]!.kind, "UNEXPECTED_LARGE_ARTIFACT");
   assert.match(verdict.findings[0]!.detail, /5\.0 MB|5\.2 MB/);

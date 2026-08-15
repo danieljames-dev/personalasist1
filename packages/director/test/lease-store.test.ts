@@ -212,7 +212,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
             },
           },
           probe: {
-            observe: () => ({ outcome: "NOT_FOUND" as const, reason: "gone" }),
+            observe: (pid) => ({ outcome: "NOT_FOUND" as const, reason: "gone", pid }),
           },
           capacity: {
             tryAcquire: () => ({ ok: true, reason: "ok" }),

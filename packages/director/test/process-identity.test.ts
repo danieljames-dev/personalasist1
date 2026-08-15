@@ -116,7 +116,7 @@ test("UNKNOWN liveness permits neither a reclaim nor a writer-finished conclusio
 
 test("an access-denied probe is UNKNOWN and therefore grants nothing", () => {
   // Defect: probe failure mapped to DEAD_CONFIRMED because "we could not see it".
-  const denied: ProcessObservationV1 = { outcome: "UNAVAILABLE", reason: "access-denied" };
+  const denied: ProcessObservationV1 = { outcome: "UNAVAILABLE", reason: "access-denied", pid: RECORDED.pid };
   const liveness = asLeaseLiveness(holderLiveness(RECORDED, denied));
   assert.equal(liveness, "UNKNOWN");
   const granted = livenessGrants(liveness);
@@ -150,8 +150,8 @@ test("the observed identity is taken from the probe, never filled in from the re
   assert.equal(observed.creationDate, T1);
   assert.equal(observed.runNonce, NONCE_B);
   assert.notEqual(observed.pid, RECORDED.pid);
-  assert.equal(identityFromObservation({ outcome: "NOT_FOUND", reason: "gone" }), null);
-  assert.equal(identityFromObservation({ outcome: "UNAVAILABLE", reason: "access-denied" }), null);
+  assert.equal(identityFromObservation({ outcome: "NOT_FOUND", reason: "gone", pid: 4812 }), null);
+  assert.equal(identityFromObservation({ outcome: "UNAVAILABLE", reason: "access-denied", pid: 4812 }), null);
   assert.equal(identityFromObservation(found({ omitNonce: true })), null);
 });
 
@@ -228,7 +228,7 @@ test("UNKNOWN parent liveness does not invent a dead-parent orphan", () => {
 test("an UNAVAILABLE observation is not an orphan to be reaped", () => {
   const orphan = detectOrphan({
     recorded: RECORDED,
-    observed: { outcome: "UNAVAILABLE", reason: "access-denied" },
+    observed: { outcome: "UNAVAILABLE", reason: "access-denied", pid: 4812 },
   });
   assert.equal(orphan.orphan, false);
   assert.equal(orphan.kind, null);
@@ -262,7 +262,7 @@ test("two encodings of one live process are not a death certificate", () => {
   assert.equal(constructed.identity, null);
   assert.equal(identityFromObservation(found({ creationDate: unspecified })), null);
 
-  const probed = interpretWindowsProbeOutput({
+  const probed = interpretWindowsProbeOutput({ askedPid: 4812,
     status: 0,
     stdout: JSON.stringify({
       ok: true,
@@ -421,15 +421,15 @@ test("a shadowed powershell that exits non-zero with empty stdout is UNAVAILABLE
 
 test("probe failure envelopes are UNAVAILABLE even when they look like not-found", () => {
   assert.equal(
-    interpretWindowsProbeOutput({ status: 0, stdout: "", stderr: "" }).outcome,
+    interpretWindowsProbeOutput({ askedPid: 4812, status: 0, stdout: "", stderr: "" }).outcome,
     "UNAVAILABLE",
   );
   assert.equal(
-    interpretWindowsProbeOutput({ status: 1, stdout: "", stderr: "" }).outcome,
+    interpretWindowsProbeOutput({ askedPid: 4812, status: 1, stdout: "", stderr: "" }).outcome,
     "UNAVAILABLE",
   );
   assert.equal(
-    interpretWindowsProbeOutput({
+    interpretWindowsProbeOutput({ askedPid: 4812,
       status: 1,
       stdout: "{\"ok\":false,\"reason\":\"not-found\"}",
       stderr: "",
@@ -437,18 +437,18 @@ test("probe failure envelopes are UNAVAILABLE even when they look like not-found
     "UNAVAILABLE",
   );
   assert.equal(
-    interpretWindowsProbeOutput({ status: 0, stdout: "{\"ok\":false}", stderr: "" }).outcome,
+    interpretWindowsProbeOutput({ askedPid: 4812, status: 0, stdout: "{\"ok\":false}", stderr: "" }).outcome,
     "UNAVAILABLE",
   );
   assert.equal(
-    interpretWindowsProbeOutput({
+    interpretWindowsProbeOutput({ askedPid: 4812,
       status: 0,
       stdout: "{\"ok\":false,\"reason\":\"cim-error\"}",
       stderr: "",
     }).outcome,
     "UNAVAILABLE",
   );
-  const gone = interpretWindowsProbeOutput({
+  const gone = interpretWindowsProbeOutput({ askedPid: 4812,
     status: 0,
     stdout: "{\"ok\":false,\"reason\":\"not-found\"}",
     stderr: "",
@@ -626,7 +626,7 @@ test("a real-shaped zoned CIM instant still produces a recorded identity", () =>
   assert.equal(read.ok, true, read.ok ? "" : read.reason);
   assert.equal(read.identity?.creationDate, "2026-08-14T14:41:20.886Z");
 
-  const observed = interpretWindowsProbeOutput({
+  const observed = interpretWindowsProbeOutput({ askedPid: 4812,
     status: 0,
     stdout: JSON.stringify({
       ok: true,

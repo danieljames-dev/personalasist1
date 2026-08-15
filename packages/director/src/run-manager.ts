@@ -350,7 +350,7 @@ export interface ExecuteRunRequestV1 {
     readonly resource: string;
     readonly leaseId: string;
   };
-  readonly authorisedProductionMutated: boolean;
+  readonly authorisedProductionMutated?: boolean | null;
   readonly childEnv?: Readonly<Record<string, string>>;
   readonly role?: ExecutorRoleV1;
 }
@@ -572,6 +572,7 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
 
     if (input.observation === null) return null;
     if (input.probedPid === null) return null;
+    if (input.observation.pid !== input.recordedIdentity.pid) return null;
     if (input.probedPid !== input.recordedIdentity.pid) return null;
 
     if (!observationIsAboutRecorded(input.recordedIdentity, input.probedPid, input.observation)) {
@@ -653,11 +654,28 @@ function observationIsAboutRecorded(
   probedPid: number,
   observation: ProcessObservationV1,
 ): boolean {
+  // One subject: the observation names the pid it is about. probedPid is
+  // a second belt, not a substitute for the observation's own pid.
+  if (observation.pid !== recorded.pid) return false;
   if (probedPid !== recorded.pid) return false;
   if (observation.outcome !== "FOUND") return true;
-  // holderLiveness binds FOUND observations to recorded.pid. Do not re-spell it.
   const observedNonce = normaliseRunNonce(observation.runNonce);
   if (observedNonce !== null && observedNonce !== recorded.runNonce) return false;
+  return true;
+}
+
+function porcelainLineSet(observation: GitStatusObservationV1): ReadonlySet<string> {
+  if (observation.outcome === "CLEAN") return new Set();
+  if (observation.outcome === "UNAVAILABLE") return new Set();
+  const lines = observation.porcelain.split(/\r?\n/).filter((line) => line.length > 0);
+  return new Set(lines);
+}
+
+function porcelainLineSetsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const line of left) {
+    if (!right.has(line)) return false;
+  }
   return true;
 }
 
@@ -675,7 +693,7 @@ export function evaluateSuccessConjunction(input: {
   readonly gitAfter: GitObservationV1 | null;
   readonly gitBefore?: GitObservationV1 | null;
   readonly gitVerdict: GitVerdictV1 | null;
-  readonly authorisedProductionMutated: boolean;
+  readonly authorisedProductionMutated?: boolean | null | undefined;
   /** Declared artifacts realpath'd inside the run root. Not every file written. */
   readonly declaredArtifactsInsideRunRoot: boolean;
   readonly declaredArtifactsInsideRunRootReason: string;
@@ -700,11 +718,17 @@ export function evaluateSuccessConjunction(input: {
    */
   readonly argvGrantedWrite?: boolean;
   /**
-   * `git status --porcelain --ignored` collected for a review role.
-   * Omitted or UNAVAILABLE is UNKNOWN and does not license "left the
-   * tree unchanged".
+   * `git status --porcelain --ignored` collected for a review role after
+   * the child exits. Compared as a set of lines against
+   * {@link treeIncludingIgnoredBefore}. Omitted or UNAVAILABLE is UNKNOWN
+   * and does not license "left the tree unchanged".
    */
   readonly treeIncludingIgnored?: GitStatusObservationV1 | null;
+  /**
+   * The same ignored-inclusive reading collected *before* spawn.
+   * A claim about what this run changed requires both ends.
+   */
+  readonly treeIncludingIgnoredBefore?: GitStatusObservationV1 | null;
   /**
    * This run's Director-minted nonce. A parsed handoff must echo it.
    * Omitted is UNKNOWN: a report cannot bind to an unnamed invocation.
@@ -748,7 +772,9 @@ export function evaluateSuccessConjunction(input: {
     : findHandoffContradictions({
       handoff,
       ...(observedBranch !== undefined ? { observedBranch } : {}),
-      authorisedProductionMutation: input.authorisedProductionMutated,
+      ...(input.authorisedProductionMutated !== undefined
+        ? { authorisedProductionMutated: input.authorisedProductionMutated }
+        : {}),
     });
 
   const statusContradiction = contradictions.find((item) => item.field === "status");
@@ -872,6 +898,13 @@ export function evaluateSuccessConjunction(input: {
     productionReason = handoff.productionMutated
       ? "handoff claims production was mutated; that was not authorised"
       : "handoff claims production was left alone; mutation was authorised and the claims disagree";
+  } else if (typeof input.authorisedProductionMutated !== "boolean") {
+    if (handoff.productionMutated === true) {
+      productionReason = "authorisation is UNKNOWN; a claimed production mutation is not authorised";
+    } else {
+      productionOk = true;
+      productionReason = "handoff claims production was left alone; authorisation was not a boolean so no comparison was required";
+    }
   } else {
     productionOk = true;
     productionReason = "compared the handoff production claim with the authorisation flag; production itself was not observed";
@@ -911,18 +944,23 @@ export function evaluateSuccessConjunction(input: {
       reviewOk = false;
       reviewReason = `${role} moved HEAD; a reviewer that writes is not a review`;
     } else {
-      const ignored = input.treeIncludingIgnored;
-      if (ignored === undefined || ignored === null) {
+      const after = input.treeIncludingIgnored;
+      const before = input.treeIncludingIgnoredBefore;
+      if (after === undefined || after === null || before === undefined || before === null) {
         reviewOk = false;
-        reviewReason = `${role} ignored-inclusive worktree status was not collected; UNKNOWN does not license a review verdict`;
-      } else if (ignored.outcome === "UNAVAILABLE") {
+        reviewReason = `${role} ignored-inclusive worktree status was not collected before and after; UNKNOWN does not license a review verdict`;
+      } else if (after.outcome === "UNAVAILABLE" || before.outcome === "UNAVAILABLE") {
         reviewOk = false;
         reviewReason = `${role} ignored-inclusive worktree status is UNAVAILABLE; UNKNOWN does not license a review verdict`;
-      } else if (ignored.outcome === "DIRTY") {
-        reviewOk = false;
-        reviewReason = `${role} left the worktree dirty (including ignored files)`;
       } else {
-        reviewReason = `${role} left the tree unchanged`;
+        const beforeLines = porcelainLineSet(before);
+        const afterLines = porcelainLineSet(after);
+        if (!porcelainLineSetsEqual(beforeLines, afterLines)) {
+          reviewOk = false;
+          reviewReason = `${role} left the worktree dirty (including ignored files)`;
+        } else {
+          reviewReason = `${role} left the tree unchanged`;
+        }
       }
     }
   }
@@ -1063,6 +1101,9 @@ function invalidLaunchOrExecuteRequest(
   if (typeof row.runRoot !== "string") {
     return namedRequestRefusal("runRoot is not a string", request);
   }
+  if (!isResolvedHostPath(row.runRoot)) {
+    return namedRequestRefusal("runRoot is not an identifiable absolute path", request);
+  }
   if (opts.requireArgv) {
     if (!Array.isArray(row.argv) || !row.argv.every((item) => typeof item === "string")) {
       return namedRequestRefusal("argv is not an array of strings", request);
@@ -1170,11 +1211,18 @@ export async function recoverAbandonedRun(
       );
     }
     const spawnPid = answers.spawnPid;
-    const probePid = isUsablePid(spawnPid)
-      ? spawnPid
-      : (recorded !== null && isUsablePid(recorded.pid) ? recorded.pid : leasePid);
+    const probePid = recorded !== null && isUsablePid(recorded.pid)
+      ? recorded.pid
+      : (isUsablePid(spawnPid) ? spawnPid : leasePid);
     if (!answers.started && probePid === null) {
       return finish(UNRESOLVABLE_EXISTING_INTENT_REASON, "REFUSED_UNKNOWN", false);
+    }
+    if (recorded !== null && probePid !== null && probePid !== recorded.pid) {
+      return finish(
+        `recover refused: probe pid ${probePid} is not the recorded holder ${recorded.pid}`,
+        "REFUSED_UNKNOWN",
+        false,
+      );
     }
     if (probePid !== null) {
       let observation: ProcessObservationV1;
@@ -2130,6 +2178,20 @@ export async function executeRun(
       gitBefore = gitBefore ?? null;
     }
 
+    const collectIgnoredDelta = isExecutorRole(role) && NON_WRITING_ROLES.has(role) && !argvGrantedWrite;
+    let treeIncludingIgnoredBefore: GitStatusObservationV1 | null = null;
+    if (collectIgnoredDelta) {
+      try {
+        treeIncludingIgnoredBefore = collectGitStatusIncludingIgnored(deps.git);
+      } catch {
+        treeIncludingIgnoredBefore = {
+          outcome: "UNAVAILABLE",
+          reason: "ignored-inclusive status threw before spawn",
+          command: { argv: ["status", "--porcelain", "--ignored"], status: null, stdout: "", stderr: "", error: "threw" },
+        };
+      }
+    }
+
     // 3. Persist the intent. The only value that permits a spawn is returned after write-and-read-back.
     // Build the child environment once. childEnvKeys is derived from this
     // object — the durable record of what the child is actually handed.
@@ -2336,7 +2398,7 @@ export async function executeRun(
       try {
         observation = deps.probe.observe(childPid);
       } catch (error) {
-        observation = { outcome: "UNAVAILABLE", reason: `probe threw: ${errorMessage(error)}` };
+        observation = { outcome: "UNAVAILABLE", reason: `probe threw: ${errorMessage(error)}`, pid: childPid };
       }
       const confirmedStopped = observation.outcome === "NOT_FOUND";
       stillRunning = !confirmedStopped;
@@ -2674,6 +2736,7 @@ export async function executeRun(
       expectedRunNonce: runNonce,
       observedCompletedAt: holderExitedAt ?? deps.clock.now(),
       ...(treeIncludingIgnored !== undefined ? { treeIncludingIgnored } : {}),
+      ...(treeIncludingIgnoredBefore !== undefined ? { treeIncludingIgnoredBefore } : {}),
     });
 
     exitProof = proveWriterExit({
@@ -2961,7 +3024,7 @@ function observeRecordedHolder(
   try {
     return probe.observe(recorded.pid);
   } catch {
-    return { outcome: "UNAVAILABLE", reason: "probe threw" };
+    return { outcome: "UNAVAILABLE", reason: "probe threw", pid: recorded.pid };
   }
 }
 
@@ -3721,10 +3784,10 @@ async function proveAdoptedWriterExit(input: {
     try {
       observation = input.probe.observe(probedPid);
     } catch {
-      observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
+      observation = { outcome: "UNAVAILABLE", reason: "probe threw", pid: probedPid };
     }
   }
-  // The holder exited at or before this instant (or we just failed to see
+  // The holder exited at or before this instant (or we just failed to see)
   // it). [floor, now] is the maximally-uncertain but sound window. A
   // missing ceiling would answer the opposite of the live path.
   const holderExitedAt = input.clock.now();
@@ -3824,7 +3887,11 @@ function existingCompletionOn(
   }
   if (!isPlainObject(parsed)) return "unreadable";
   const recoverOutcome = parsed.recoverOutcome;
-  if (recoverOutcome === "REFUSED_UNKNOWN" || recoverOutcome === "REFUSED_ALIVE") {
+  // This gate reads the recorded spawn, not the recovery label.
+  // REFUSED_ALIVE with spawned:true is a record that a process was
+  // created for this runId and was last seen present.
+  if ((recoverOutcome === "REFUSED_UNKNOWN" || recoverOutcome === "REFUSED_ALIVE")
+    && parsed.spawned !== true) {
     return "none";
   }
   if (parsed.spawned === true) {
@@ -3877,15 +3944,14 @@ function reclaimExpiredHolder(input: {
   readonly now: string;
 }): { ok: boolean } {
   const recordedPid = input.heldBy?.pid ?? null;
+  if (!isUsablePid(recordedPid)) {
+    return { ok: false };
+  }
   let observation: ProcessObservationV1;
-  if (isUsablePid(recordedPid)) {
-    try {
-      observation = input.probe.observe(recordedPid);
-    } catch {
-      observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
-    }
-  } else {
-    observation = { outcome: "UNAVAILABLE", reason: "recorded holder pid is not observable" };
+  try {
+    observation = input.probe.observe(recordedPid);
+  } catch {
+    observation = { outcome: "UNAVAILABLE", reason: "probe threw", pid: recordedPid };
   }
 
   // Same mapping holderLiveness uses for these outcomes. FOUND is not death:
@@ -3899,9 +3965,7 @@ function reclaimExpiredHolder(input: {
     resource: input.resource,
     holderLiveness: liveness,
     now: input.now,
-    ...(isUsablePid(recordedPid)
-      ? { holderObservation: { outcome: observation.outcome, pid: recordedPid } }
-      : {}),
+    holderObservation: { outcome: observation.outcome, pid: recordedPid },
     ...(observedIdentity !== undefined ? { observedIdentity } : {}),
   });
   if (result.ok) input.store.save(result.remaining);
@@ -4032,8 +4096,12 @@ export function wrapChildProcess(child: ChildProcess): SpawnHandleV1 {
       resolve({ code, signal });
     });
     child.once("error", () => {
-      exited = true;
-      resolve({ code: null, signal: null });
+      // Post-spawn 'error' is a failed kill (EPERM), not an exit.
+      // Only a process that never started (no pid) settles here.
+      if (child.pid === undefined) {
+        exited = true;
+        resolve({ code: null, signal: null });
+      }
     });
   });
   return {

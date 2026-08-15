@@ -75,7 +75,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function claudeImplementerArgv(): string[] {
   return ["-p", "--permission-mode", "bypassPermissions"];
@@ -211,6 +211,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
   };
@@ -315,7 +321,7 @@ async function runWith(over: {
     fs,
     spawn,
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? { observe: () => HOLDER_GONE },
+    probe: over.probe ?? { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
@@ -374,7 +380,7 @@ function wmiSessionZeroRow() {
     pid: 90001,
     name: "WmiPrvSE.exe",
     parentPid: 1612,
-    parentName: "svchost.exe",
+    parentName: "dllhost.exe",
     parentPresent: true,
     parentCreationDate: "2026-08-13T09:00:00.000Z",
     creationDate: HOLDER_EXIT,
@@ -388,7 +394,7 @@ function afterCeilingBrokerRow() {
     pid: 55040,
     name: "node.exe",
     parentPid: 1220,
-    parentName: "svchost.exe",
+    parentName: "dllhost.exe",
     parentPresent: true,
     parentCreationDate: PARENT_OLD,
     creationDate: AFTER_CEILING,
@@ -415,7 +421,7 @@ test("P1a benign powershell.exe host noise still releases the PRODUCTION_WRITER 
     try {
       const store = createNodeLeaseStore(storeRoot, {
         hostArbitrationRoot: arbRoot,
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid: number) => ({ ...HOLDER_GONE, pid }) },
       });
       const runId = `run-p1a-${item.label}`;
       const result = await runWith({
@@ -662,7 +668,7 @@ test("P2a unstarted intent with no recoverable pid is UNKNOWN and not a completi
   const later = await recoverAbandonedRun(RUN_ROOT, {
     fs,
     clock: createFixedClock(NOW),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid: number) => ({ ...HOLDER_GONE, pid }) },
     leases: memoryLeases([attempt.lease]),
   } as never);
   assert.equal((later as { recoverOutcome?: string }).recoverOutcome, "TERMINAL");
@@ -692,7 +698,7 @@ test("P2b a REFUSED_UNKNOWN recover record is replaced by a later DEAD_CONFIRMED
   const second = await recoverAbandonedRun(RUN_ROOT, {
     fs,
     clock: createFixedClock(NOW),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid: number) => ({ ...HOLDER_GONE, pid }) },
   });
   assert.match(second.reason, /DEAD_CONFIRMED|NOT_FOUND|terminal result/);
   assert.equal((second as { recoverOutcome?: string }).recoverOutcome, "TERMINAL");

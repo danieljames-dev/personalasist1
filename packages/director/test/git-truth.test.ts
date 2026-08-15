@@ -43,6 +43,12 @@ function scripted(replies: ReadonlyArray<{ argv: readonly string[]; reply: Parti
       calls.push([...argv]);
       const hit = replies.find((entry) => entry.argv.length === argv.length && entry.argv.every((token, i) => token === argv[i]));
       if (hit === undefined) {
+        if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+          return { argv: [...argv], status: 0, stdout: `${"a".repeat(40)}\n`, stderr: "", error: null };
+        }
+        if (argv.join(" ") === "ls-tree -r -l HEAD") {
+          return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+        }
         throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
       }
       return result(argv, hit.reply);

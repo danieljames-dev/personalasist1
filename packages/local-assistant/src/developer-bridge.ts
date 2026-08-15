@@ -4,6 +4,7 @@ import {
   adapterPermissionModeForRole,
   argvGrantsWritePermission,
 } from "@aion/director/executor-adapters";
+import { directorPermitAuthorizesWrite } from "@aion/director";
 import type { DeveloperAgentBridgeV1, DeveloperAgentModeV1, DeveloperAgentStatusV1 } from "./contracts.js";
 
 type DeveloperAgentRunTaskV1 = {
@@ -12,6 +13,8 @@ type DeveloperAgentRunTaskV1 = {
   mode: DeveloperAgentModeV1;
   /** Director-minted lease identity. Write spawn is refused without one. */
   directorMintedPermit?: { readonly leaseId: string };
+  /** Instant used to re-check lease expiry. Omitted means wall clock. */
+  now?: string;
 };
 
 const OUTPUT_LIMIT = 1024 * 1024;
@@ -133,8 +136,13 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
     if (task.mode === "read-only" && grantsWrite) {
       throw new Error("read-only argv grants write");
     }
-    if ((task.mode === "workspace-write" || grantsWrite) && task.directorMintedPermit === undefined) {
-      throw new Error("write argv on a path holding no Director-minted permit");
+    if (task.mode === "workspace-write" || grantsWrite) {
+      const verdict = directorPermitAuthorizesWrite({
+        permit: task.directorMintedPermit,
+        repositoryRoot: this.approvedRepositoryRoot,
+        now: typeof task.now === "string" ? task.now : new Date().toISOString(),
+      });
+      if (!verdict.ok) throw new Error(verdict.reason);
     }
     const result = await this.invoke(argv, { input: `${instruction}\n`, signal, timeoutMs: TASK_TIMEOUT_MS });
     if (result.timedOut) throw new Error("Developer-agent task exceeded its timeout and was stopped.");

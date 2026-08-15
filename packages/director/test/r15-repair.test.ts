@@ -67,7 +67,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 const DETACHED_GRANDCHILD = {
   pid: 7777,
@@ -227,6 +227,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
       }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
   };
@@ -375,6 +381,8 @@ function gitObs(sha: string): GitObservationV1 {
     branch: { outcome: "ATTACHED", name: "executor/oracle" },
     upstream: { outcome: "NO_UPSTREAM" },
     status: { outcome: "CLEAN", porcelain: "" },
+    branchHead: { outcome: "FOUND", sha },
+    largeTrackedFiles: { outcome: "FOUND", files: [] },
   };
 }
 
@@ -458,7 +466,7 @@ test("F1 every broker-host name with a foreign nonce, off-chain, before the floo
       name,
       parentPid: 1612,
       parentPresent: true,
-      parentName: "svchost.exe",
+      parentName: "dllhost.exe",
       runNonce: "nonce-foreign",
       nonceReadable: true,
       creationDate: "2026-01-01T00:00:00.000Z",
@@ -677,7 +685,7 @@ test("F2 both membership predicates never disagree as ours vs absent", () => {
         name: "WmiPrvSE.exe",
         parentPid: 1612,
         parentPresent: true,
-        parentName: "svchost.exe",
+        parentName: "dllhost.exe",
         nonceReadable: false,
         creationDate: AFTER,
       },

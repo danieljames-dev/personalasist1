@@ -85,7 +85,7 @@ const AFTER = "2026-08-13T12:00:05.000Z";
 const BOOT = "2026-08-01T00:00:00.000Z";
 const EXPIRED = "2026-08-13T12:20:00.000Z";
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function claudeImplementerArgv(): string[] {
   return ["-p", "--permission-mode", "bypassPermissions"];
@@ -218,6 +218,12 @@ function matchingGit(head = HEAD_AFTER): GitRunner {
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
   };
@@ -279,7 +285,7 @@ async function runWith(over: {
     fs,
     spawn,
     git: matchingGit(),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: async () => undefined,
@@ -533,7 +539,7 @@ test("P2a a broker-parented in-window session-0 row is not excluded when directo
     name: "WmiPrvSE.exe",
     parentPid: 1500,
     parentPresent: true,
-    parentName: "svchost.exe",
+    parentName: "dllhost.exe",
     parentCreationDate: BOOT,
     creationDate: AFTER,
     nonceReadable: true,
@@ -584,7 +590,7 @@ test("P2a interpretWindowsOrphanScanOutput does not flip to SCANNED when directo
       name: "WmiPrvSE.exe",
       parentPid: 1500,
       parentPresent: true,
-      parentName: "svchost.exe",
+      parentName: "dllhost.exe",
       parentCreationDate: BOOT,
       creationDate: AFTER,
       nonceReadable: true,
@@ -922,7 +928,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 when leases.list throws", async
   const result = await recoverAbandonedRun(RUN_ROOT, {
     fs,
     clock: createFixedClock(NOW),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     leases: throwingStore,
   });
   assert.equal(result.schema, RUN_RESULT_SCHEMA_V1);
@@ -953,7 +959,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 for each throwing dependency", 
       deps: {
         fs,
         clock: createFixedClock(NOW),
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
         leases: {
           list() {
             const error = new Error("lease store unreadable");
@@ -969,7 +975,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 for each throwing dependency", 
       deps: {
         fs,
         clock: createFixedClock(NOW),
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
         leases: {
           list() {
             const error = new Error("lease store unreadable");
@@ -985,7 +991,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 for each throwing dependency", 
       deps: {
         fs,
         clock: createFixedClock(NOW),
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
         leases: {
           list() {
             throw new Error("lease store unreadable");
@@ -1004,7 +1010,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 for each throwing dependency", 
           },
         },
         clock: createFixedClock(NOW),
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
       },
     },
     {
@@ -1016,7 +1022,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 for each throwing dependency", 
             throw new Error("clock boom");
           },
         },
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
       },
     },
   ];

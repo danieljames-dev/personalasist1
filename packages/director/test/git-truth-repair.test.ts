@@ -69,7 +69,18 @@ test("HEAD and the branch it claims to be on pointing at different commits is a 
   // Nobody asks for this check, which is why it is unconditional: an interrupted checkout leaves a
   // tree at one commit and the branch ref at another, and every SHA compared afterwards is compared
   // against a ref the next command will not use.
-  const verdict = verifyGitTruth(snapshot({ localBranchHead: "c".repeat(40) }));
+  // Exercise the live observation path, not the snapshot adapter.
+  const verdict = verifyGitTruth({
+    schema: "aion.director.git-observation.v1",
+    worktreePath: "C:/AION-HQ-claude-director-v01",
+    collectedAt: NOW,
+    head: { outcome: "FOUND", sha: "a".repeat(40) },
+    branch: { outcome: "ATTACHED", name: "executor/claude-director-v01" },
+    branchHead: { outcome: "FOUND", sha: "c".repeat(40) },
+    upstream: { outcome: "NO_UPSTREAM" },
+    status: { outcome: "CLEAN", porcelain: "" },
+    largeTrackedFiles: { outcome: "FOUND", files: [] },
+  });
   assert.equal(verdict.ok, false);
   assert.deepEqual(kinds(verdict.findings), ["HEAD_REF_INCONSISTENT"]);
   assert.match(verdict.findings[0]!.detail, /executor\/claude-director-v01 points at c{40}/);

@@ -70,7 +70,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 const PARENTLESS_CTX = {
   runNonce: NONCE,
@@ -223,6 +223,7 @@ function gitResult(argv: readonly string[], over: { status?: number; stdout?: st
 
 function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; readonly ignored?: string } = {}): GitRunner {
   let revParses = 0;
+  let ignoredCalls = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
@@ -234,13 +235,21 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (key === "status --porcelain --ignored") {
-        return gitResult(argv, { stdout: opts.ignored ?? "" });
+        ignoredCalls += 1;
+        const stdout = ignoredCalls === 1 ? "" : (opts.ignored ?? "");
+        return gitResult(argv, { stdout });
       }
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
@@ -645,7 +654,7 @@ test("F3 adopted {pid, runToken} lease plus NOT_FOUND and a clean scan releases 
   const result = await runWith({
     leases,
     fs: memoryFs({ dirs: [CWD, RUN_ROOT] }),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-adopt" } },
   });
@@ -676,7 +685,7 @@ test("F3 adopted crash-window safety: UNAVAILABLE, FOUND, missing scan, and live
     });
     return { released: result.productionWriterLeaseReleasedByThisRun, left: leases.list().length };
   };
-  assert.deepEqual(await make({ outcome: "UNAVAILABLE", reason: "denied" }, () => writerOrphanScanResult([])), { released: false, left: 1 });
+  assert.deepEqual(await make({ outcome: "UNAVAILABLE", reason: "denied", pid: 4812 }, () => writerOrphanScanResult([])), { released: false, left: 1 });
   assert.deepEqual(await make(foundObservation(RECORDED), () => writerOrphanScanResult([])), { released: false, left: 1 });
   assert.deepEqual(await make(HOLDER_GONE, "throw"), { released: false, left: 1 });
   assert.deepEqual(await make(HOLDER_GONE, () => writerOrphanScanResult([parentlessInWindow({ nonceReadable: true, runNonce: "x" })])), {

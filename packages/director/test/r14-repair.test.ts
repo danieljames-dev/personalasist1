@@ -80,7 +80,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function grokImplementerArgv(promptPath = PROMPT, cwd = CWD): string[] {
   return [
@@ -230,6 +230,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
@@ -434,7 +440,7 @@ test("A adopted PRODUCTION_WRITER with a live nonce-bearing descendant retains t
   const leases = memoryLeases([crashedWriterLease()]);
   const result = await runWith({
     leases,
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
     scanOrphans: () => writerOrphanScanResult([LIVE_GRANDCHILD]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
@@ -452,7 +458,7 @@ test("A adopted WORKTREE with a live descendant is retained and a second run is 
   })]);
   const first = await runWith({
     leases,
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
     scanOrphans: () => writerOrphanScanResult([LIVE_GRANDCHILD]),
     request: { lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-CRASHED" } },
@@ -477,7 +483,7 @@ test("A adopted NOT_FOUND holder whose scan throws never reports productionWrite
   const leases = memoryLeases([crashedWriterLease()]);
   const result = await runWith({
     leases,
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
     fs: memoryFs({
       files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
     }),
@@ -495,7 +501,7 @@ test("A liveness: adopted NOT_FOUND holder with a clean scan releases the writer
   const leases = memoryLeases([crashedWriterLease()]);
   const result = await runWith({
     leases,
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
     scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
@@ -707,7 +713,7 @@ test("C processRowMakesScanUndecidable is couldBelong and not classified as ours
       row: {
         pid: 8000,
         parentPid: 1612,
-        parentName: "svchost.exe",
+        parentName: "dllhost.exe",
         parentPresent: true,
         creationDate: AFTER,
       },
@@ -743,7 +749,7 @@ const wmiSelfRow = {
   pid: 19576,
   name: "WmiPrvSE.exe",
   parentPid: 1612,
-  parentName: "svchost.exe",
+  parentName: "dllhost.exe",
   parentPresent: true,
   nonceReadable: false,
   creationDate: "2026-08-14T21:32:15.336Z",

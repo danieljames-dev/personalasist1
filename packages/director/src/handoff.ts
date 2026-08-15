@@ -756,7 +756,12 @@ export function findHandoffContradictions(input: {
   observedHeadAfter?: string | null;
   observedBranch?: string | null;
   /** Authorisation flag, not a production-filesystem observation. */
-  authorisedProductionMutation?: boolean | null;
+  authorisedProductionMutated?: boolean | null | undefined;
+  /**
+   * @deprecated Use {@link authorisedProductionMutated}. Kept so callers
+   * written against the earlier spelling keep compiling.
+   */
+  authorisedProductionMutation?: boolean | null | undefined;
 }): HandoffContradictionV1[] {
   const found: HandoffContradictionV1[] = [];
 
@@ -778,15 +783,18 @@ export function findHandoffContradictions(input: {
     });
   }
 
-  if (
-    typeof input.authorisedProductionMutation === "boolean"
-    && input.authorisedProductionMutation !== input.handoff.productionMutated
-  ) {
+  const authorised = input.authorisedProductionMutated !== undefined
+    ? input.authorisedProductionMutated
+    : input.authorisedProductionMutation;
+  const productionDisagrees = input.handoff.productionMutated === true
+    ? authorised !== true
+    : authorised === true;
+  if (productionDisagrees) {
     found.push({
       field: "productionMutated",
       claimed: String(input.handoff.productionMutated),
-      observed: String(input.authorisedProductionMutation),
-      detail: input.authorisedProductionMutation
+      observed: String(authorised),
+      detail: authorised === true
         ? "the handoff claims production was left alone; mutation was authorised and the claims disagree"
         : "handoff claims production was mutated; that was not authorised",
     });

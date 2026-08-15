@@ -74,7 +74,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function claudeImplementerArgv(): string[] {
   return ["-p", "--permission-mode", "bypassPermissions"];
@@ -219,6 +219,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return { argv: [...argv], status: 128, stdout: "", stderr: "fatal: no upstream configured\n", error: null };
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
@@ -546,7 +552,7 @@ test("1b a pre-existing handoff.json is refused before spawn", async () => {
     fs,
     spawn,
     git: matchingGit(),
-    probe: { observe: () => HOLDER_GONE },
+    probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: memoryLeases(),
     wait: async () => undefined,
@@ -722,7 +728,7 @@ test("2 executeRun with claude + INDEPENDENT_ACCEPTANCE is refused before spawn"
       fs: memoryFs(),
       spawn,
       git: matchingGit(),
-      probe: { observe: () => HOLDER_GONE },
+      probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
       capacity: memoryCapacity(),
       leases: memoryLeases(),
       wait: async () => undefined,
@@ -750,7 +756,7 @@ test("2 executeRun with grok + IMPLEMENT is refused before spawn", async () => {
       fs: memoryFs(),
       spawn,
       git: matchingGit(),
-      probe: { observe: () => HOLDER_GONE },
+      probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
       capacity: memoryCapacity(),
       leases: memoryLeases(),
       wait: async () => undefined,
@@ -774,7 +780,7 @@ test("2 executeRun with each LOCAL role is refused before spawn", async () => {
         fs: memoryFs(),
         spawn,
         git: matchingGit(),
-        probe: { observe: () => HOLDER_GONE },
+        probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
         capacity: memoryCapacity(),
         leases: memoryLeases(),
         wait: async () => undefined,
@@ -836,6 +842,7 @@ test("2 liveness: honest claude IMPLEMENT and grok INDEPENDENT_ACCEPTANCE still 
       status: { outcome: "CLEAN" as const, porcelain: "" as const },
     },
     treeIncludingIgnored: { outcome: "CLEAN" as const, porcelain: "" as const },
+    treeIncludingIgnoredBefore: { outcome: "CLEAN" as const, porcelain: "" as const },
   }));
   assert.equal(review.ok, true, review.failedConjuncts.join(","));
 });
@@ -983,7 +990,7 @@ test("4 executeRun with the real node spawner and a large Claude stdin still wri
         fs,
         spawn: createNodeSpawner(),
         git: matchingGit(),
-        probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
+        probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
         capacity: memoryCapacity(),
         leases,
         wait: createNodeWait(),

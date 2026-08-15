@@ -136,6 +136,10 @@ export async function runDirectorCli(argv, io = console, env = process.env, host
   }
 
   const runRoot = required(values, "run-root");
+  if (!director.isResolvedHostPath(runRoot)) {
+    io.error("runRoot is not an identifiable absolute path");
+    return 2;
+  }
   mkdirSync(runRoot, { recursive: true });
 
   const rawTimeout = values.get("timeout-ms") ?? "30000";

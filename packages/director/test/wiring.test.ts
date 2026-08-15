@@ -625,7 +625,13 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
             if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
               return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
             }
-            throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
+                  if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
+      throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
           },
         },
         probe: {
@@ -791,13 +797,19 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
           if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
             return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
           }
-          throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
+                if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+      }
+      throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
         },
       },
       probe: {
         observe() {
           observeIndex += 1;
-          return observeIndex === 1 ? found : { outcome: "NOT_FOUND", reason: "parent gone" };
+          return observeIndex === 1 ? found : { outcome: "NOT_FOUND", reason: "parent gone", pid: 4812 };
         },
       },
       capacity: {

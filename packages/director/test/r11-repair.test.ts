@@ -66,7 +66,7 @@ const RECORDED: ExecutorProcessIdentityV1 = {
   runNonce: NONCE,
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -206,6 +206,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
@@ -667,7 +673,7 @@ test("B1 adopted NOT_FOUND holder is released on the same re-entry path", async 
   const leases = memoryLeases([crashedWriterLease()]);
   const result = await runWith({
     leases,
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
     scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
@@ -680,7 +686,7 @@ test("B1 adopted UNAVAILABLE holder is retained", async () => {
   const leases = memoryLeases([crashedWriterLease()]);
   const result = await runWith({
     leases,
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access denied", pid }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
   });

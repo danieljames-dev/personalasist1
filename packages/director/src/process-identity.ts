@@ -114,10 +114,12 @@ export type ProcessObservationV1 =
   | {
       readonly outcome: "NOT_FOUND";
       readonly reason: string;
+      readonly pid: number;
     }
   | {
       readonly outcome: "UNAVAILABLE";
       readonly reason: string;
+      readonly pid: number;
     };
 
 /**
@@ -255,7 +257,7 @@ export function captureProcessIdentity(
     return {
       ok: false,
       identity: null,
-      observation: { outcome: "UNAVAILABLE", reason: "probe threw" },
+      observation: { outcome: "UNAVAILABLE", reason: "probe threw", pid: input.pid },
       reason: `probe threw: ${errorMessage(error)}`,
     };
   }
@@ -355,7 +357,8 @@ export function compareProcessIdentity(
 /**
  * Liveness of the *recorded holder*, not of whoever currently occupies the PID slot.
  *
- * `UNAVAILABLE` is `UNKNOWN`. `NOT_FOUND` is `DEAD_CONFIRMED`. A found process that matches is
+ * `UNAVAILABLE` is `UNKNOWN`. `NOT_FOUND` is `DEAD_CONFIRMED` only when the
+ * observation is about the recorded holder. A found process that matches is
  * `ALIVE`. A found process whose creation date disagrees is the slot after reuse — unless the
  * observed nonce still equals the recorded one, in which case the date cannot mint death.
  * Any other disagreement, or a found process that cannot be compared, is `UNKNOWN`.
@@ -364,35 +367,53 @@ export function holderLiveness(
   recorded: ExecutorProcessIdentityV1,
   observation: ProcessObservationV1,
 ): ProcessLivenessV1 {
+  // An answer about another slot is not an answer about the recorded holder.
+  // The subject check is total: every observation carries the pid it was asked about.
+  if (observation.pid !== recorded.pid) return "UNKNOWN";
   if (observation.outcome === "UNAVAILABLE") return "UNKNOWN";
   if (observation.outcome === "NOT_FOUND") return "DEAD_CONFIRMED";
-  // An answer about another slot is not an answer about the recorded holder.
-  if (observation.pid !== recorded.pid) return "UNKNOWN";
 
   const verdict = compareProcessIdentity(recorded, observation);
   if (verdict === "MATCH") return "ALIVE";
   if (verdict === "UNVERIFIABLE") return "UNKNOWN";
 
   // MISMATCH. Same slot, *later* start: the original process is gone — but only when
-  // the nonce does not contradict that certificate and the observed instant is
-  // strictly later than the recorded one. An earlier instant, or one that cannot
-  // be ordered, is UNKNOWN: two timestamps that cannot both be true prove nothing
-  // about the holder. A date-encoding difference that still carries our nonce is
-  // UNKNOWN, not death.
-  if (observation.creationDate !== undefined) {
-    const dates = compareCreationDates(recorded.creationDate, observation.creationDate);
-    if (dates === "DIFFERENT") {
-      const observedNonce = asUsableToken(observation.runNonce);
-      if (observedNonce !== null && observedNonce === recorded.runNonce) {
-        return "UNKNOWN";
-      }
-      if (observedCreationIsStrictlyLater(recorded.creationDate, observation.creationDate)) {
-        return "DEAD_CONFIRMED";
-      }
-      return "UNKNOWN";
-    }
+  // the occupant is proven to be a different process. Same-token occupants are
+  // UNKNOWN, not death. One implementation: {@link occupantIsProvenDifferentProcess}.
+  const observedSlot: { pid: number; creationDate?: string; runNonce?: string | null } = {
+    pid: observation.pid,
+  };
+  if (observation.creationDate !== undefined) observedSlot.creationDate = observation.creationDate;
+  if (observation.runNonce !== undefined) observedSlot.runNonce = observation.runNonce;
+  if (occupantIsProvenDifferentProcess(
+    { pid: recorded.pid, creationDate: recorded.creationDate, runNonce: recorded.runNonce },
+    observedSlot,
+  )) {
+    return "DEAD_CONFIRMED";
   }
   return "UNKNOWN";
+}
+
+/**
+ * Physical question asked by both {@link holderLiveness} and lease reclaim:
+ * is the occupant of this slot proven to be a different process than the
+ * recorded holder? A matching run token is not a different process. Only a
+ * strictly later observed start, after the token guard, is.
+ */
+export function occupantIsProvenDifferentProcess(
+  recorded: { readonly pid: number; readonly creationDate?: string; readonly runNonce?: string },
+  observed: { readonly pid?: number; readonly creationDate?: string; readonly runNonce?: string | null },
+): boolean {
+  if (observed.pid !== recorded.pid) return false;
+  const recordedNonce = asUsableToken(recorded.runNonce);
+  const observedNonce = asUsableToken(observed.runNonce);
+  if (recordedNonce !== null && observedNonce !== null && recordedNonce === observedNonce) {
+    return false;
+  }
+  if (recorded.creationDate !== undefined && observed.creationDate !== undefined) {
+    return observedCreationIsStrictlyLater(recorded.creationDate, observed.creationDate);
+  }
+  return false;
 }
 
 /**
@@ -556,7 +577,7 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
   return {
     observe(pid: number): ProcessObservationV1 {
       if (!isUsablePid(pid)) {
-        return { outcome: "UNAVAILABLE", reason: "pid is not a positive integer" };
+        return { outcome: "UNAVAILABLE", reason: "pid is not a positive integer", pid };
       }
 
       const script = [
@@ -583,7 +604,7 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
           shell: false,
         });
       } catch (error) {
-        return { outcome: "UNAVAILABLE", reason: `probe failed to start: ${errorMessage(error)}` };
+        return { outcome: "UNAVAILABLE", reason: `probe failed to start: ${errorMessage(error)}`, pid };
       }
 
       if (result.error) {
@@ -591,6 +612,7 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
         return {
           outcome: "UNAVAILABLE",
           reason: /timed? ?out/i.test(message) ? "probe timed out" : `probe failed: ${message}`,
+          pid,
         };
       }
 
@@ -598,6 +620,7 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
         status: result.status,
         stdout: stripBom(String(result.stdout ?? "")).trim(),
         stderr: String(result.stderr ?? "").trim(),
+        askedPid: pid,
       });
     },
   };
@@ -614,44 +637,48 @@ export function interpretWindowsProbeOutput(input: {
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
+  /** The pid the probe was asked about. Every answer names this subject. */
+  readonly askedPid: number;
 }): ProcessObservationV1 {
+  const subject = input.askedPid;
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
-    return { outcome: "UNAVAILABLE", reason: "access-denied" };
+    return { outcome: "UNAVAILABLE", reason: "access-denied", pid: subject };
   }
 
   if (input.status !== 0) {
     return {
       outcome: "UNAVAILABLE",
       reason: input.status === null ? "probe exited without a status" : `probe exited ${input.status}`,
+      pid: subject,
     };
   }
 
   if (input.stdout === "") {
-    return { outcome: "UNAVAILABLE", reason: "probe produced no output" };
+    return { outcome: "UNAVAILABLE", reason: "probe produced no output", pid: subject };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(input.stdout);
   } catch {
-    return { outcome: "UNAVAILABLE", reason: "probe output was not parseable" };
+    return { outcome: "UNAVAILABLE", reason: "probe output was not parseable", pid: subject };
   }
   if (!isPlainObject(parsed)) {
-    return { outcome: "UNAVAILABLE", reason: "probe output was not an object" };
+    return { outcome: "UNAVAILABLE", reason: "probe output was not an object", pid: subject };
   }
 
   if (parsed.ok !== true) {
     if (parsed.reason === "not-found") {
-      return { outcome: "NOT_FOUND", reason: "no process occupies this pid" };
+      return { outcome: "NOT_FOUND", reason: "no process occupies this pid", pid: subject };
     }
     const why = typeof parsed.reason === "string" ? parsed.reason : "probe returned a failure envelope";
-    return { outcome: "UNAVAILABLE", reason: why };
+    return { outcome: "UNAVAILABLE", reason: why, pid: subject };
   }
 
   const observedPid = parsed.pid;
   if (!isUsablePid(observedPid)) {
-    return { outcome: "UNAVAILABLE", reason: "probe did not return a pid" };
+    return { outcome: "UNAVAILABLE", reason: "probe did not return a pid", pid: subject };
   }
 
   const creationDate = normalisedCreationDate(parsed.creationDate);
@@ -1374,11 +1401,14 @@ export function createdAtOrAfterFloor(
  * does not establish the claim — UNKNOWN stays UNKNOWN, so this returns false.
  */
 /**
- * Image names of Windows processes that *re-parent* a child they did not
- * CreateProcess, so a genuine descendant of this run can appear with a
- * live parent that is not in the holder chain (COM/WMI → dllhost /
- * WmiPrvSE, Task Scheduler → taskeng, service control → svchost,
- * ShellExecute → explorer).
+ * Image names of Windows processes an executor can *ask to create a
+ * process on its behalf* (COM/WMI → dllhost / WmiPrvSE, Task Scheduler
+ * → taskeng, ShellExecute → explorer). Membership is earned by that
+ * capability, not by "shows up as a parent on Windows."
+ *
+ * `svchost.exe` is not a broker. It is what the SCM uses to host
+ * services, including the WMI provider host this Director's own CIM
+ * scan starts. Listing it tied every in-window service host to the run.
  *
  * Membership claims only: "this basename is a known re-parenting host."
  * It does not claim the child is ours. One list; the PowerShell emit
@@ -1392,7 +1422,6 @@ export function createdAtOrAfterFloor(
 export const BROKER_HOST_PROCESS_NAMES = [
   "WmiPrvSE.exe",
   "dllhost.exe",
-  "svchost.exe",
   "taskeng.exe",
   "explorer.exe",
 ] as const;
@@ -1575,14 +1604,19 @@ export function processRowCouldBelongToThisRun(
   // successful PEB read that found no nonce at all.
   // A process image name is not a negative fact either: the executor
   // chooses the basename. Do not exclude on Name.
-  // Order: positive identity → floor → broker tie → session exclusion →
-  // parentless. A session id is a negative heuristic and must not delete
-  // a positive broker tie. Broker hosts live in session 0; evaluating
-  // the exclude first made that branch unreachable.
+  // Positive ties win. The session heuristic speaks only about a row
+  // tied by nothing but unexplained parentage. A comment that names a
+  // fixed predicate order is how a second broker guard grew behind the
+  // exclusion; state the property, not a list of function names.
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
-  if (rowIsExcludedByInteractiveSession(sighting, ctx)) return false;
-  return parentlessRowTiedToThisRun(sighting, ctx);
+  if (!parentlessRowTiedToThisRun(sighting, ctx)) return false;
+  // The row is tied. A negative heuristic may only delete a tie that
+  // rests on nothing but unexplained parentage.
+  if (isBrokerHostName(sighting.parentName)) return true;
+  if (sighting.parentPid !== undefined && ctx.observedPids.has(sighting.parentPid)) return true;
+  if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
+  return !rowIsExcludedByInteractiveSession(sighting, ctx);
 }
 
 /**

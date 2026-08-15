@@ -94,7 +94,7 @@ const OTHER_IDENTITY: ExecutorProcessIdentityV1 = {
   runNonce: "nonce-other",
 };
 
-const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited" };
+const HOLDER_GONE: ProcessObservationV1 = { outcome: "NOT_FOUND", reason: "exited", pid: 4812 };
 
 function writerProofInput(over: Partial<WriterExitProofInputV1> = {}): WriterExitProofInputV1 {
   return {
@@ -307,6 +307,12 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       }
       if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {
         return gitResult(argv, { status: 0 });
+      }
+            if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
+        return this.run(["rev-parse", "HEAD"]);
+      }
+      if (key === "ls-tree -r -l HEAD") {
+        return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       throw new Error(`unexpected git argv: ${JSON.stringify(argv)}`);
     },
@@ -733,7 +739,7 @@ test("UNKNOWN liveness with a landed production-writer release is not an exit pr
     neverWait: true,
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "UNAVAILABLE", reason: "access-denied" },
+      { outcome: "UNAVAILABLE", reason: "access-denied", pid: 4812 },
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     scanOrphans: () => writerOrphanScanResult([]),
@@ -741,7 +747,7 @@ test("UNKNOWN liveness with a landed production-writer release is not an exit pr
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
     writerReleaseEvidence(proveWriterExit(writerProofInput({
-      observation: { outcome: "UNAVAILABLE", reason: "access-denied" },
+      observation: { outcome: "UNAVAILABLE", reason: "access-denied", pid: 4812 },
     }))),
     false,
   );
@@ -761,13 +767,13 @@ test("a liveness answer about a different identity does not produce an exit proo
     scanOrphans: () => writerOrphanScanResult([]),
     askWriterLiveness: () => ({
       subject: OTHER_IDENTITY,
-      observation: { outcome: "NOT_FOUND", reason: "gone" },
+      observation: { outcome: "NOT_FOUND", reason: "gone", pid: 4812 },
     }),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
     writerReleaseEvidence(proveWriterExit(writerProofInput({
-      observation: { outcome: "NOT_FOUND", reason: "gone" },
+      observation: { outcome: "NOT_FOUND", reason: "gone", pid: 4812 },
       probedPid: OTHER_IDENTITY.pid,
     }))),
     false,
@@ -782,7 +788,7 @@ test("a production-writer lease release is evidence only after a constructed exi
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "exited" },
+      { outcome: "NOT_FOUND", reason: "exited", pid: 4812 },
     ]),
     scanOrphans: () => writerOrphanScanResult([]),
   });
@@ -839,7 +845,7 @@ test("DEAD_CONFIRMED of this run's identity is not writer-release evidence", asy
     neverWait: true,
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "parent gone" },
+      { outcome: "NOT_FOUND", reason: "parent gone", pid: 4812 },
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     leases: {
@@ -866,7 +872,7 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
       neverWait: true,
       probe: sequentialProbe([
         foundObservation(RECORDED),
-        { outcome: "NOT_FOUND", reason: "gone" },
+        { outcome: "NOT_FOUND", reason: "gone", pid: 4812 },
       ]),
       request: { lease },
       scanOrphans: () => writerOrphanScanResult([]),
@@ -931,7 +937,7 @@ test("an unobservable spawn is recorded as attempted, not as never started", asy
     neverWait: true,
     fs,
     spawn,
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access-denied", pid }) },
   });
   assert.equal(spawn.calls, 1, result.reason);
   assert.equal(result.spawned, true, result.reason);
@@ -995,7 +1001,7 @@ test("a clean parent exit with a live nonce-bearing child is not writer-release 
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "parent gone" },
+      { outcome: "NOT_FOUND", reason: "parent gone", pid: 4812 },
     ]),
     scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
   });
@@ -1124,7 +1130,7 @@ test("a padded request nonce still identifies a live grandchild as an orphan", a
     },
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "parent gone" },
+      { outcome: "NOT_FOUND", reason: "parent gone", pid: 4812 },
     ]),
     scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
   });
@@ -1166,7 +1172,7 @@ test("a failed spawn-attempt record after a live spawn kills the child and fails
     neverWait: true,
     fs,
     spawn,
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "killed after failed record" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "killed after failed record", pid }) },
     killTree: (pid) => {
       killed.push(pid);
       hung.forceExit(1);
@@ -1351,7 +1357,7 @@ test("a real node process is spawned with shell false and its exit is collected"
         spawn: wrapped,
         git: matchingGit(),
         probe: {
-          observe: () => ({ outcome: "NOT_FOUND", reason: "exited before probe" }),
+          observe: (pid) => ({ outcome: "NOT_FOUND", reason: "exited before probe", pid }),
         },
         capacity: memoryCapacity(),
         leases: memoryLeases(),
@@ -1382,7 +1388,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
           captureDone = true;
           return hostProbe.observe(pid);
         }
-        return { outcome: "NOT_FOUND", reason: "exited" };
+        return { outcome: "NOT_FOUND", reason: "exited", pid };
       },
     };
     const leases = memoryLeases();
@@ -1521,7 +1527,7 @@ test("a live same-nonce grandchild with parent UNAVAILABLE withholds the writer 
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "UNAVAILABLE", reason: "access-denied" },
+      { outcome: "UNAVAILABLE", reason: "access-denied", pid: 4812 },
     ]),
     scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
     killTree: (pid) => {
@@ -1578,7 +1584,7 @@ test("a throwing orphan scan leaves the writer lease held and still writes a dur
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "exited" },
+      { outcome: "NOT_FOUND", reason: "exited", pid: 4812 },
     ]),
     scanOrphans: () => {
       throw new Error("CIM/WMI error");
@@ -1616,7 +1622,7 @@ test("a dropped lease save is not a released lease and does not mint an exit pro
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "exited" },
+      { outcome: "NOT_FOUND", reason: "exited", pid: 4812 },
     ]),
     scanOrphans: () => writerOrphanScanResult([]),
   });
@@ -1658,7 +1664,7 @@ test("a hanging handle plus a NOT_FOUND probe does not release the production-wr
     killTree: () => undefined,
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "NOT_FOUND", reason: "gone after ladder" },
+      { outcome: "NOT_FOUND", reason: "gone after ladder", pid: 4812 },
     ]),
     scanOrphans: () => writerOrphanScanResult([]),
   });
@@ -2285,7 +2291,7 @@ test("fast-exit before identity capture still releases the production-writer lea
     neverWait: true,
     leases,
     spawn: trackingSpawn(() => alreadyExitedProcess()),
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "already gone", pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-fast" } },
   });
@@ -2327,7 +2333,7 @@ test("a child gone on the host before Node delivers exit still releases the prod
           resolveExit?.({ code: 0, signal: null });
         });
         assert.equal(handle.exited, false, "capture must see the handle before the exit event");
-        return { outcome: "NOT_FOUND", reason: "host slot empty" };
+        return { outcome: "NOT_FOUND", reason: "host slot empty", pid: 4812 };
       },
     },
     scanOrphans: () => writerOrphanScanResult([]),
@@ -2348,7 +2354,7 @@ test("a real instant-exit production writer releases its own lease", async () =>
         files: { [join(dir, "run", "handoff.json")]: JSON.stringify(goodHandoff()) },
       }),
       spawn: realNodeSpawn("process.exit(0)"),
-      probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
+      probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "already gone", pid }) },
       scanOrphans: () => writerOrphanScanResult([]),
       wait: createNodeWait(),
       leases,
@@ -2377,7 +2383,7 @@ test("owned-handle exit with a throwing scanner withholds the lease", async () =
     neverWait: true,
     leases,
     spawn: trackingSpawn(() => alreadyExitedProcess()),
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "already gone", pid }) },
     scanOrphans: () => {
       throw new Error("scanner unavailable");
     },
@@ -2400,7 +2406,7 @@ test("UNAVAILABLE probe while the handle has not exited withholds the lease", as
       timeoutMs: 1,
     },
     wait: async () => undefined,
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "cim down" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "cim down", pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.spawned, true, result.reason);
@@ -3035,7 +3041,7 @@ test("capture FOUND then probe UNAVAILABLE does not report the tree gone", async
     neverWait: true,
     probe: sequentialProbe([
       foundObservation(RECORDED),
-      { outcome: "UNAVAILABLE", reason: "cim down" },
+      { outcome: "UNAVAILABLE", reason: "cim down", pid: 4812 },
     ]),
   });
   assert.equal(result.ok, false, result.reason);
@@ -3049,7 +3055,7 @@ test("without a captured identity the kill sweep still keeps the spawn floor and
   const result = await runWith({
     neverWait: true,
     spawn: trackingSpawn(() => exitingProcess({ pid: childPid })),
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access-denied", pid }) },
     scanOrphans: () => writerOrphanScanResult([
       { pid: 1234, parentPid: childPid, creationDate: "2023-01-01T00:00:00.000Z" },
       { pid: 1238, parentPid: childPid, creationDate: T0, runNonce: "nonce-other-run" },
@@ -3177,7 +3183,7 @@ test("UNAVAILABLE identity capture still records a reclaimable runToken on the l
     neverWait: true,
     leases,
     spawn: trackingSpawn(() => exitingProcess()),
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access denied", pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-token" } },
   });
@@ -3251,7 +3257,7 @@ test("UNAVAILABLE capture does not report the executor tree gone", async () => {
   const result = await runWith({
     neverWait: true,
     spawn: trackingSpawn(() => exitingProcess()),
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access denied", pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(finding(result, "executorTreeIsGone").ok, false);
@@ -3265,7 +3271,7 @@ test("NOT_FOUND capture with a settled owned handle still reports the tree gone"
     neverWait: true,
     leases,
     spawn: trackingSpawn(() => alreadyExitedProcess()),
-    probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
+    probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "already gone", pid }) },
     scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-fast-ok" } },
   });
@@ -3297,7 +3303,7 @@ test("executeRun reclaims an expired writer whose holder is NOT_FOUND", async ()
     leases,
     probe: {
       observe(pid) {
-        if (pid === stalePid) return { outcome: "NOT_FOUND", reason: "gone" };
+        if (pid === stalePid) return { outcome: "NOT_FOUND", reason: "gone", pid: 4812 };
         return foundObservation(RECORDED);
       },
     },
@@ -3338,7 +3344,7 @@ test("executeRun does not reclaim an expired writer when the probe is UNAVAILABL
   const result = await runWith({
     neverWait: true,
     leases,
-    probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
+    probe: { observe: (pid) => ({ outcome: "UNAVAILABLE", reason: "access denied", pid }) },
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-unavail-stale" } },
   });
   assert.equal(result.spawned, false, result.reason);

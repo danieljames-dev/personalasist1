@@ -9,8 +9,8 @@
  * ## Pure decisions, injected facts
  *
  * Reading Git needs a process; deciding whether the reading is acceptable does not. Everything here
- * takes a plain snapshot of facts and returns a verdict, which is why the awkward cases — a
- * detached HEAD, a remote that moved mid-run, an unexpected large artifact — are testable without a
+ * takes a plain snapshot of facts and returns a verdict, which is why the awkward cases â€” a
+ * detached HEAD, a remote that moved mid-run, an unexpected large artifact â€” are testable without a
  * repository at all. The caller owns the spawning; this owns the judgement.
  *
  * ## Absence is never agreement
@@ -25,7 +25,7 @@
  *
  * Some Git operations cannot be made safe by automation, only by a person who understands what they
  * are about to lose. Reset, force-push, rebasing accepted history, blind clean and blind stash are
- * refused by classifying the argv — subcommand first, then its own flags — because the substring
+ * refused by classifying the argv â€” subcommand first, then its own flags â€” because the substring
  * matching this used to do is wrong in both directions: it refused `git stash list`, which only
  * prints, and it allowed `git push origin +main`, which is a force-push written in refspec syntax.
  *
@@ -44,7 +44,7 @@ export const GIT_TRUTH_SCHEMA_V1 = "aion.director.git-truth.v1" as const;
 /** A reading of a repository at one moment. Supplied by the caller; never fetched here. */
 export interface GitSnapshotV1 {
   worktreePath: string;
-  /** Null when HEAD is detached — which is itself a finding, not a detail. */
+  /** Null when HEAD is detached â€” which is itself a finding, not a detail. */
   attachedBranch: string | null;
   head: string;
   localBranchHead: string | null;
@@ -72,7 +72,7 @@ export interface GitExpectationV1 {
    * Demand that HEAD be on a branch without naming which one.
    *
    * Attachment and identity are different questions. A caller that only knows work must land
-   * somewhere pushable — a run about to commit, before its branch has been chosen — still needs the
+   * somewhere pushable â€” a run about to commit, before its branch has been chosen â€” still needs the
    * detached case caught, and previously could only get that by inventing an expected branch name.
    */
   requireAttachedBranch?: boolean;
@@ -250,166 +250,50 @@ export function verifyGitTruth(
   if (isGitObservation(source)) {
     return verifyGitObservation(source, expectation);
   }
-  return verifyGitSnapshot(source, expectation);
+  return verifyGitObservation(observationFromSnapshot(source), expectation);
 }
 
 function isGitObservation(value: GitSnapshotV1 | GitObservationV1): value is GitObservationV1 {
   return "schema" in value && value.schema === GIT_OBSERVATION_SCHEMA_V1;
 }
 
-function verifyGitSnapshot(
-  snapshot: GitSnapshotV1,
-  expectation: GitExpectationV1,
-): GitVerdictV1 {
-  const findings: GitFindingV1[] = [];
-
-  // Asked first because every check below reads the same snapshot: if the observation is stale, so
-  // is each conclusion drawn from it, and an executor can do a great deal in the gap.
-  if (expectation.maxSnapshotAgeMs !== undefined) {
-    const readAt = Date.parse(snapshot.readAt);
-    const now = expectation.now ? Date.parse(expectation.now) : Number.NaN;
-    const ageMs = now - readAt;
-    if (!Number.isFinite(ageMs)) {
-      findings.push({
-        kind: "SNAPSHOT_AGE_UNKNOWN",
-        detail: `freshness was required within ${expectation.maxSnapshotAgeMs}ms but the snapshot's age cannot be established from readAt=${snapshot.readAt} and now=${expectation.now ?? "(absent)"}`,
-        blocking: true,
-      });
-    } else if (ageMs < 0) {
-      findings.push({
-        kind: "SNAPSHOT_AGE_UNKNOWN",
-        detail: `the snapshot was read ${-ageMs}ms after the instant it is being judged at; the clocks disagree and an age cannot be trusted`,
-        blocking: true,
-      });
-    } else if (ageMs > expectation.maxSnapshotAgeMs) {
-      findings.push({
-        kind: "STALE_SNAPSHOT",
-        detail: `the reading is ${ageMs}ms old and freshness within ${expectation.maxSnapshotAgeMs}ms was required; this describes the repository as it was, not as it is`,
-        blocking: true,
-      });
-    }
-  }
-
-  // Attachment is required either because a branch was named or because the caller said so outright.
-  // Tying it to `expectedBranch` alone let a caller who did not yet know the branch name pass with a
-  // detached HEAD.
-  const branchNamed = expectation.expectedBranch !== undefined && expectation.expectedBranch !== null;
-  if ((branchNamed || expectation.requireAttachedBranch === true) && snapshot.attachedBranch === null) {
-    // The detached-HEAD case is called out separately because it has a specific failure story:
-    // a commit made there is reachable by nothing, and a push reports success while updating a
-    // branch that never moved.
-    findings.push({
-      kind: "DETACHED_HEAD",
-      detail: "HEAD is detached; a commit here belongs to no branch and a push would not carry it",
-      blocking: true,
-    });
-  } else if (branchNamed && snapshot.attachedBranch !== expectation.expectedBranch) {
-    findings.push({
-      kind: "BRANCH_MISMATCH",
-      detail: `on ${snapshot.attachedBranch}, expected ${expectation.expectedBranch}`,
-      blocking: true,
-    });
-  }
-
-  // Unconditional, because nobody would think to ask for it. HEAD and the branch ref disagreeing is
-  // not a preference that went unmet, it is a repository in a state a normal command does not
-  // produce — an interrupted checkout, a hand-edited ref, a worktree pointed at another's HEAD — and
-  // every SHA comparison after it is being made against a ref the next command may not use.
-  if (snapshot.localBranchHead !== null && snapshot.head !== snapshot.localBranchHead) {
-    const ref = snapshot.attachedBranch === null ? "the recorded local branch ref" : snapshot.attachedBranch;
-    findings.push({
-      kind: "HEAD_REF_INCONSISTENT",
-      detail: `HEAD is ${snapshot.head} but ${ref} points at ${snapshot.localBranchHead}; the working state and the branch are not the same commit`,
-      blocking: true,
-    });
-  }
-
-  if (expectation.expectedHead && snapshot.head !== expectation.expectedHead) {
-    findings.push({
-      kind: "HEAD_MISMATCH",
-      detail: `HEAD is ${snapshot.head}, expected ${expectation.expectedHead}`,
-      blocking: true,
-    });
-  }
-
-  if (expectation.claimedHead && snapshot.head !== expectation.claimedHead) {
-    findings.push({
-      kind: "CLAIMED_HEAD_MISMATCH",
-      detail: `executor claimed ${expectation.claimedHead}, repository shows ${snapshot.head}`,
-      blocking: true,
-    });
-  }
-
-  if (expectation.mustDescendFrom && expectation.descendsFromExpected === false) {
-    findings.push({
-      kind: "NOT_A_DESCENDANT",
-      detail: `${snapshot.head} does not descend from ${expectation.mustDescendFrom}; this is not a fast-forward`,
-      blocking: true,
-    });
-  }
-
-  if (expectation.requireClean && snapshot.dirtyPaths.length > 0) {
-    findings.push({
-      kind: "DIRTY_WORKTREE",
-      detail: `${snapshot.dirtyPaths.length} uncommitted path(s): ${snapshot.dirtyPaths.slice(0, 4).join(", ")}`,
-      blocking: true,
-    });
-  }
-
-  if (expectation.requireLocalEqualsRemote) {
-    if (snapshot.localBranchHead === null || snapshot.remoteBranchHead === null) {
-      // The false pass this replaces: the old check required both SHAs to be present before it could
-      // fail, so a `ls-remote` that errored, a branch never pushed, or a snapshot assembled without
-      // remote data all read as "local equals remote" and a mission integrated on that basis.
-      const missing = snapshot.remoteBranchHead === null && snapshot.localBranchHead === null
-        ? "neither the local nor the remote branch head is known"
-        : snapshot.remoteBranchHead === null
-          ? "the remote branch head is not known"
-          : "the local branch head is not known";
-      findings.push({
-        kind: "REMOTE_STATE_UNKNOWN",
-        detail: `local was required to equal remote but ${missing}; a missing reading is an unanswered question, not agreement`,
-        blocking: true,
-      });
-    } else if (snapshot.localBranchHead !== snapshot.remoteBranchHead) {
-      findings.push({
-        kind: "LOCAL_REMOTE_DIVERGED",
-        detail: `local ${snapshot.localBranchHead} vs remote ${snapshot.remoteBranchHead}; a push reporting success is not proof`,
-        blocking: true,
-      });
-    }
-  }
-
-  const policy = expectation.largeArtifactPolicy ?? {};
-  const reportAtBytes = policy.reportAtBytes ?? DEFAULT_LARGE_ARTIFACT_POLICY.reportAtBytes;
-  const blockAtBytes = policy.blockAtBytes ?? DEFAULT_LARGE_ARTIFACT_POLICY.blockAtBytes;
-  const blockingClasses = policy.blockingClasses ?? DEFAULT_LARGE_ARTIFACT_POLICY.blockingClasses;
-  const acceptedPaths = (policy.acceptedPaths ?? DEFAULT_LARGE_ARTIFACT_POLICY.acceptedPaths).map(normalizePath);
-
-  for (const file of snapshot.largeTrackedFiles) {
-    if (file.bytes < reportAtBytes) continue;
-    const artifactClass = classifyLargeArtifact(file.path);
-    const accepted = acceptedPaths.includes(normalizePath(file.path));
-    // The finding is made on size, which is observable. Blocking is policy, which is the caller's.
-    const blocking = !accepted
-      && ((blockAtBytes !== null && file.bytes >= blockAtBytes) || blockingClasses.includes(artifactClass));
-    const looksLike = ARTIFACT_CLASS_PROSE[artifactClass];
-    findings.push({
-      kind: "UNEXPECTED_LARGE_ARTIFACT",
-      detail: `${file.path} is ${(file.bytes / 1_048_576).toFixed(1)} MB and tracked${looksLike ? `, and looks like ${looksLike} by name alone` : ""}; generated files do not belong in history`,
-      blocking,
-      path: file.path,
-      artifactClass,
-    });
-  }
-
+function observationFromSnapshot(snapshot: GitSnapshotV1): GitObservationV1 {
+  const emptyCommand = { argv: [] as string[], status: null, stdout: "", stderr: "", error: "snapshot-adapter" };
+  const head = snapshot.head !== ""
+    ? { outcome: "FOUND" as const, sha: snapshot.head }
+    : { outcome: "UNAVAILABLE" as const, reason: "snapshot head is empty", command: emptyCommand };
+  const branch = snapshot.attachedBranch !== null
+    ? { outcome: "ATTACHED" as const, name: snapshot.attachedBranch }
+    : { outcome: "DETACHED" as const };
+  const branchHead = snapshot.localBranchHead !== null
+    ? { outcome: "FOUND" as const, sha: snapshot.localBranchHead }
+    : undefined;
+  const status = snapshot.dirtyPaths.length === 0
+    ? { outcome: "CLEAN" as const, porcelain: "" as const }
+    : { outcome: "DIRTY" as const, porcelain: snapshot.dirtyPaths.join("\n"), dirtyPaths: snapshot.dirtyPaths };
+  const localSha = snapshot.localBranchHead;
+  const remoteSha = snapshot.remoteBranchHead;
+  const upstream = localSha === null || remoteSha === null
+    ? { outcome: "UNAVAILABLE" as const, reason: "snapshot remote/local branch head is missing", command: emptyCommand }
+    : {
+      outcome: "TRACKING" as const,
+      name: "origin",
+      ahead: localSha === remoteSha ? 0 : 1,
+      behind: 0,
+    };
   return {
-    schema: GIT_TRUTH_SCHEMA_V1,
-    ok: findings.every((finding) => !finding.blocking),
-    findings,
-    snapshot,
+    schema: GIT_OBSERVATION_SCHEMA_V1,
+    worktreePath: snapshot.worktreePath,
+    collectedAt: snapshot.readAt,
+    head,
+    branch,
+    upstream,
+    status,
+    ...(branchHead !== undefined ? { branchHead } : {}),
+    largeTrackedFiles: { outcome: "FOUND", files: snapshot.largeTrackedFiles },
   };
 }
+
 
 /**
  * Judge a collector observation. Absence is never agreement: UNAVAILABLE status is not a
@@ -472,6 +356,30 @@ function verifyGitObservation(
       kind: "BRANCH_MISMATCH",
       detail: `on ${observation.branch.name}, expected ${expectation.expectedBranch}`,
       blocking: true,
+    });
+  }
+
+  const branchHead = observation.branchHead;
+  if (observation.head.outcome === "FOUND" && branchHead?.outcome === "FOUND") {
+    if (observation.head.sha !== branchHead.sha) {
+      const ref = observation.branch.outcome === "ATTACHED" ? observation.branch.name : "the recorded local branch ref";
+      findings.push({
+        kind: "HEAD_REF_INCONSISTENT",
+        detail: `HEAD is ${observation.head.sha} but ${ref} points at ${branchHead.sha}; the working state and the branch are not the same commit`,
+        blocking: true,
+      });
+    }
+  } else if (observation.branch.outcome === "ATTACHED" && branchHead?.outcome === "UNAVAILABLE") {
+    findings.push({
+      kind: "HEAD_REF_INCONSISTENT",
+      detail: `UNKNOWN: branch ref could not be read (${branchHead.reason}); HEAD and the branch ref were not both observed`,
+      blocking: false,
+    });
+  } else if (observation.branch.outcome === "DETACHED" && branchHead?.outcome === "NOT_APPLICABLE") {
+    findings.push({
+      kind: "HEAD_REF_INCONSISTENT",
+      detail: "UNKNOWN: HEAD is detached; no branch ref to compare",
+      blocking: false,
     });
   }
 
@@ -555,6 +463,29 @@ function verifyGitObservation(
     }
   }
 
+  if (observation.largeTrackedFiles?.outcome === "FOUND") {
+    const policy = expectation.largeArtifactPolicy ?? {};
+    const reportAtBytes = policy.reportAtBytes ?? DEFAULT_LARGE_ARTIFACT_POLICY.reportAtBytes;
+    const blockAtBytes = policy.blockAtBytes ?? DEFAULT_LARGE_ARTIFACT_POLICY.blockAtBytes;
+    const blockingClasses = policy.blockingClasses ?? DEFAULT_LARGE_ARTIFACT_POLICY.blockingClasses;
+    const acceptedPaths = (policy.acceptedPaths ?? DEFAULT_LARGE_ARTIFACT_POLICY.acceptedPaths).map(normalizePath);
+    for (const file of observation.largeTrackedFiles.files) {
+      if (file.bytes < reportAtBytes) continue;
+      const artifactClass = classifyLargeArtifact(file.path);
+      const accepted = acceptedPaths.includes(normalizePath(file.path));
+      const blocking = !accepted
+        && ((blockAtBytes !== null && file.bytes >= blockAtBytes) || blockingClasses.includes(artifactClass));
+      const looksLike = ARTIFACT_CLASS_PROSE[artifactClass];
+      findings.push({
+        kind: "UNEXPECTED_LARGE_ARTIFACT",
+        detail: `${file.path} is ${(file.bytes / 1_048_576).toFixed(1)} MB and tracked${looksLike ? `, and looks like ${looksLike} by name alone` : ""}; generated files do not belong in history`,
+        blocking,
+        path: file.path,
+        artifactClass,
+      });
+    }
+  }
+
   return {
     schema: GIT_TRUTH_SCHEMA_V1,
     ok: findings.every((finding) => !finding.blocking),
@@ -567,15 +498,19 @@ function snapshotFromObservation(observation: GitObservationV1): GitSnapshotV1 {
   const attachedBranch = observation.branch.outcome === "ATTACHED" ? observation.branch.name : null;
   const head = observation.head.outcome === "FOUND" ? observation.head.sha : "";
   const dirtyPaths = observation.status.outcome === "DIRTY" ? observation.status.dirtyPaths : [];
+  const localBranchHead = observation.branchHead?.outcome === "FOUND" ? observation.branchHead.sha : null;
+  const largeTrackedFiles = observation.largeTrackedFiles?.outcome === "FOUND"
+    ? observation.largeTrackedFiles.files
+    : [];
   return {
     worktreePath: observation.worktreePath,
     attachedBranch,
     head,
-    localBranchHead: attachedBranch !== null && head !== "" ? head : null,
+    localBranchHead,
     remoteBranchHead: null,
     originMainHead: null,
     dirtyPaths,
-    largeTrackedFiles: [],
+    largeTrackedFiles,
     readAt: observation.collectedAt,
   };
 }
@@ -586,7 +521,7 @@ function snapshotFromObservation(observation: GitObservationV1): GitSnapshotV1 {
  * A readable inventory of what `isForbiddenGitOperation` refuses, and the label each refusal
  * reports. It is not the matcher: matching on these strings is what produced both a refused
  * `git stash list` and an allowed `git push origin +main`. Every entry here, run as `git <entry>`,
- * is refused by the classifier — that correspondence is asserted in the tests, so the list cannot
+ * is refused by the classifier â€” that correspondence is asserted in the tests, so the list cannot
  * drift into decoration.
  */
 export const FORBIDDEN_GIT_OPERATIONS: readonly string[] = [
@@ -648,7 +583,7 @@ function hasShortFlag(args: readonly string[], letter: string): boolean {
   return args.some((arg) => /^-[A-Za-z]+$/.test(arg) && arg.slice(1).includes(letter));
 }
 
-/** The first argument that is not an option — a subcommand's own verb, where it has one. */
+/** The first argument that is not an option â€” a subcommand's own verb, where it has one. */
 function firstPositional(args: readonly string[]): string | null {
   for (const arg of args) {
     if (!arg.startsWith("-")) return arg;
@@ -706,8 +641,8 @@ export function isForbiddenGitOperation(
       }
 
       case "stash": {
-        // `list` and `show` only read. Everything else — including a bare `git stash`, which is an
-        // implicit `push` — takes the worktree away and leaves the executor building nothing.
+        // `list` and `show` only read. Everything else â€” including a bare `git stash`, which is an
+        // implicit `push` â€” takes the worktree away and leaves the executor building nothing.
         const verb = firstPositional(args);
         return verb === "list" || verb === "show" ? null : "stash";
       }
@@ -744,7 +679,7 @@ export function describeVerdict(verdict: GitVerdictV1): string {
  *
  * {@link verifyGitTruth} judges a snapshot it is handed. That snapshot has to come from
  * somewhere, and it must not come from the executor: `headAfter` on a handoff is testimony.
- * This collector is the corroboration — the Director runs Git and records the answers.
+ * This collector is the corroboration â€” the Director runs Git and records the answers.
  *
  * ## Argv arrays, never a shell string
  *
@@ -818,6 +753,15 @@ export type GitStatusObservationV1 =
   | { readonly outcome: "DIRTY"; readonly porcelain: string; readonly dirtyPaths: readonly string[] }
   | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
 
+export type GitBranchHeadObservationV1 =
+  | { readonly outcome: "FOUND"; readonly sha: string }
+  | { readonly outcome: "NOT_APPLICABLE"; readonly reason: "DETACHED_HEAD" }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command?: GitCommandResultV1 };
+
+export type GitLargeTrackedFilesObservationV1 =
+  | { readonly outcome: "FOUND"; readonly files: ReadonlyArray<{ readonly path: string; readonly bytes: number }> }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command?: GitCommandResultV1 };
+
 export interface GitObservationV1 {
   readonly schema: typeof GIT_OBSERVATION_SCHEMA_V1;
   readonly worktreePath: string;
@@ -826,6 +770,8 @@ export interface GitObservationV1 {
   readonly branch: GitBranchObservationV1;
   readonly upstream: GitUpstreamObservationV1;
   readonly status: GitStatusObservationV1;
+  readonly branchHead?: GitBranchHeadObservationV1;
+  readonly largeTrackedFiles?: GitLargeTrackedFilesObservationV1;
 }
 
 export type GitCollectResultV1 =
@@ -847,9 +793,10 @@ export interface CollectGitTruthInputV1 {
  * plausible empty success.
  */
 /**
- * `git status --porcelain --ignored`. The review conjunct named
- * "left the tree unchanged" reads this, not HEAD-sha equality: ignored
- * files (`!! path`) are changes the reviewer made.
+ * `git status --porcelain --ignored`. `--ignored` reports *state*, not
+ * delta: `!! path` means the path is ignored and present, not that this
+ * run created it. A claim about what this run changed requires two
+ * readings compared as sets of lines.
  */
 export function collectGitStatusIncludingIgnored(runner: GitRunner): GitStatusObservationV1 {
   return observeStatus(invokeGit(runner, ["status", "--porcelain", "--ignored"]));
@@ -870,6 +817,10 @@ export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResult
 
   const upstream = observeUpstream(runner, branch);
 
+  const branchHead = observeBranchHead(runner, branch);
+  const largeTrackedCmd = invokeGit(runner, ["ls-tree", "-r", "-l", "HEAD"]);
+  const largeTrackedFiles = observeLargeTrackedFiles(largeTrackedCmd);
+
   // The record names the directory Git was actually run against. The caller-supplied
   // worktreePath is a label and is not copied: a runner that inspected somewhere else
   // (or nowhere) must not produce a record claiming C:/claimed.
@@ -883,6 +834,8 @@ export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResult
     branch,
     upstream,
     status,
+    branchHead,
+    largeTrackedFiles,
   };
 
   if (head.outcome === "UNAVAILABLE") {
@@ -1034,7 +987,7 @@ function observeBranch(result: GitCommandResultV1): GitBranchObservationV1 {
     return { outcome: "ATTACHED", name };
   }
   // `symbolic-ref -q` exits 1 with no output when HEAD is detached. Any other non-zero is a
-  // real failure — including "not a git repository" (128) — and must not look detached.
+  // real failure â€” including "not a git repository" (128) â€” and must not look detached.
   if (result.status === 1 && result.stdout.trim() === "") {
     return { outcome: "DETACHED" };
   }
@@ -1115,4 +1068,48 @@ function observeUpstream(runner: GitRunner, branch: GitBranchObservationV1): Git
     ahead: Number(match[1]),
     behind: Number(match[2]),
   };
+}
+
+function observeBranchHead(
+  runner: GitRunner,
+  branch: GitBranchObservationV1,
+): GitBranchHeadObservationV1 {
+  if (branch.outcome === "DETACHED") {
+    return { outcome: "NOT_APPLICABLE", reason: "DETACHED_HEAD" };
+  }
+  if (branch.outcome === "UNAVAILABLE") {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: "branch ref was not asked because the branch observation failed",
+    };
+  }
+  const result = invokeGit(runner, ["rev-parse", `refs/heads/${branch.name}`]);
+  if (commandFailed(result)) {
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(result), command: result };
+  }
+  const sha = result.stdout.trim();
+  if (!GIT_SHA.test(sha)) {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: `git rev-parse refs/heads/${branch.name} returned ${sha === "" ? "an empty string" : JSON.stringify(sha)}, which is not a SHA`,
+      command: result,
+    };
+  }
+  return { outcome: "FOUND", sha };
+}
+
+function observeLargeTrackedFiles(result: GitCommandResultV1): GitLargeTrackedFilesObservationV1 {
+  if (commandFailed(result)) {
+    return { outcome: "UNAVAILABLE", reason: describeCommandFailure(result), command: result };
+  }
+  const files: Array<{ path: string; bytes: number }> = [];
+  const lines = result.stdout.split(/\r?\n/).filter((line) => line.length > 0);
+  for (const line of lines) {
+    const match = /^(\S+)\s+blob\s+\S+\s+(\d+)\t(.+)$/.exec(line);
+    if (match === null || match[2] === undefined || match[3] === undefined) continue;
+    const bytes = Number(match[2]);
+    if (!Number.isFinite(bytes) || bytes < LARGE_TRACKED_FILE_BYTES) continue;
+    files.push({ path: match[3], bytes });
+  }
+  return { outcome: "FOUND", files };
 }

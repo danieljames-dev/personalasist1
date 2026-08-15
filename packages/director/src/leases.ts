@@ -50,7 +50,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // store's idea of which directory a path names, and that alias collision comes back as a lease held
 // under one spelling and a lock file created under another.
 import { CONTROL_BYTES } from "./control-bytes.js";
-import { compareCreationDates, observedCreationIsStrictlyLater, placeableInstantMs } from "./process-identity.js";
+import { compareCreationDates, occupantIsProvenDifferentProcess, placeableInstantMs } from "./process-identity.js";
 import { canonicalResource, resourceIsIdentifiable, type LeaseKindV1 } from "./resource-identity.js";
 
 export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
@@ -539,11 +539,11 @@ function isRecordedHolderPid(pid: number | null): pid is number {
  * Same-slot `MISMATCH` is PID reuse. A different observed pid, or no strong recorded identity,
  * cannot distinguish reuse from the holder still running.
  *
- * A startedAt disagreement uses {@link observedCreationIsStrictlyLater} — the same
- * ordering rule as {@link holderLiveness}. An earlier or unorderable instant is
- * not proof the holder died. A differing runToken is not a different-process
- * proof: only a strictly later observed instant is. A missing instant on
- * either side is UNKNOWN and grants nothing.
+ * A startedAt disagreement uses {@link occupantIsProvenDifferentProcess} — the
+ * same identity rule as {@link holderLiveness}. An earlier or unorderable
+ * instant is not proof the holder died. A matching run token is not a
+ * different process. A missing instant on either side is UNKNOWN and grants
+ * nothing.
  */
 function occupantIsNotRecordedHolder(
   recorded: ProcessIdentityV1 | undefined,
@@ -553,22 +553,19 @@ function occupantIsNotRecordedHolder(
   if (!hasStrongIdentity(recorded) || observed === undefined) return false;
   if (observed.pid !== recordedPid) return false;
   if (recorded.pid !== null && recorded.pid !== recordedPid) return false;
-  if (
-    recorded.runToken !== undefined
-    && observed.runToken !== undefined
-    && recorded.runToken !== observed.runToken
-  ) {
-    // A differing token is not different-process proof. Only a strictly
-    // later observed instant is. A missing instant on either side is
-    // UNKNOWN, not a second writer.
-    return recorded.startedAt !== undefined
-      && observed.startedAt !== undefined
-      && observedCreationIsStrictlyLater(recorded.startedAt, observed.startedAt);
-  }
-  if (recorded.startedAt !== undefined && observed.startedAt !== undefined) {
-    return observedCreationIsStrictlyLater(recorded.startedAt, observed.startedAt);
-  }
-  return processIdentityMatches(recorded, observed) === "MISMATCH";
+  const recordedPidForRule = recorded.pid !== null ? recorded.pid : recordedPid;
+  return occupantIsProvenDifferentProcess(
+    {
+      pid: recordedPidForRule,
+      ...(recorded.startedAt !== undefined ? { creationDate: recorded.startedAt } : {}),
+      ...(recorded.runToken !== undefined ? { runNonce: recorded.runToken } : {}),
+    },
+    {
+      pid: observed.pid ?? undefined,
+      ...(observed.startedAt !== undefined ? { creationDate: observed.startedAt } : {}),
+      ...(observed.runToken !== undefined ? { runNonce: observed.runToken } : {}),
+    },
+  );
 }
 
 /**
@@ -586,4 +583,70 @@ export function conflicts(a: { kind: LeaseKindV1; resource: string }, b: { kind:
   // a claim the text does not support. The safe error is to schedule them one after the other.
   if (!resourceIsIdentifiable(a.kind, a.resource) || !resourceIsIdentifiable(b.kind, b.resource)) return true;
   return canonicalResource(a.kind, a.resource) === canonicalResource(b.kind, b.resource);
+}
+
+const MINTED_DIRECTOR_PERMITS = new WeakMap<object, { readonly store: { list(): readonly LeaseV1[] } }>();
+
+export type DirectorMintedPermitV1 = {
+  readonly leaseId: string;
+};
+
+/**
+ * Mint an unforgeable write permit bound to a live lease store.
+ * Presence of a `leaseId` field is not a permit. Membership in the
+ * WeakMap is.
+ */
+export function mintDirectorWritePermit(input: {
+  readonly leaseId: string;
+  readonly store: { list(): readonly LeaseV1[] };
+}): DirectorMintedPermitV1 {
+  const permit = Object.freeze({ leaseId: input.leaseId });
+  MINTED_DIRECTOR_PERMITS.set(permit, { store: input.store });
+  return permit;
+}
+
+export function isDirectorMintedPermit(value: unknown): value is DirectorMintedPermitV1 {
+  return typeof value === "object" && value !== null && MINTED_DIRECTOR_PERMITS.has(value);
+}
+
+/**
+ * Physical fact: a live Director WORKTREE lease is held on this
+ * repository root right now. A field's presence does not prove that.
+ */
+export function directorPermitAuthorizesWrite(input: {
+  readonly permit: unknown;
+  readonly repositoryRoot: string;
+  readonly now: string;
+}): { readonly ok: true } | { readonly ok: false; readonly reason: string } {
+  if (!isDirectorMintedPermit(input.permit)) {
+    return { ok: false, reason: "write argv on a path holding no Director-minted permit" };
+  }
+  const bound = MINTED_DIRECTOR_PERMITS.get(input.permit);
+  if (bound === undefined) {
+    return { ok: false, reason: "write argv on a path holding no Director-minted permit" };
+  }
+  const leaseId = (input.permit as { leaseId?: unknown }).leaseId;
+  if (typeof leaseId !== "string" || leaseId.trim() === "") {
+    return { ok: false, reason: "Director-minted permit leaseId is empty" };
+  }
+  let rows: readonly LeaseV1[];
+  try {
+    rows = bound.store.list();
+  } catch {
+    return { ok: false, reason: "lease store is unreadable; permit cannot be verified" };
+  }
+  const held = rows.find((row) => row.leaseId === leaseId);
+  if (held === undefined) {
+    return { ok: false, reason: "Director-minted permit names no held lease" };
+  }
+  if (held.kind !== "WORKTREE") {
+    return { ok: false, reason: "Director-minted permit is not a WORKTREE lease" };
+  }
+  if (canonicalResource("WORKTREE", held.resource) !== canonicalResource("WORKTREE", input.repositoryRoot)) {
+    return { ok: false, reason: "Director-minted permit is not held on this repository root" };
+  }
+  if (leaseHasExpired(held, input.now)) {
+    return { ok: false, reason: "Director-minted permit names an expired lease" };
+  }
+  return { ok: true };
 }
