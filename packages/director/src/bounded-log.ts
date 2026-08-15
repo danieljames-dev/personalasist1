@@ -111,7 +111,7 @@ export interface LogWriteResultV1 {
 export interface BoundedLogV1 {
   write(stream: LogStreamV1, chunk: string | Uint8Array): LogWriteResultV1;
   flush(): void;
-  markDrainIncomplete(): void;
+  markDrainIncomplete(stream?: LogStreamV1): void;
   liveTail(stream: LogStreamV1): Buffer;
   fileImage(stream: LogStreamV1): Buffer;
   report(): BoundedLogReportV1;
@@ -302,16 +302,32 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
       // Flush must not ship the held body as plaintext just because the
       // block never terminated. Drop when there is neither a BEGIN nor
       // an END line left to emit.
-      if (
-        state.pemOverflow
-        && !PRIVATE_KEY_BEGIN_LINE.test(state.pending)
-        && !/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(state.pending)
-      ) {
-        const dropped = Buffer.byteLength(state.pending, "utf8");
-        state.pending = "";
-        state.pemOverflow = false;
-        accountHoldbackDrop(stream, state, dropped);
-        return;
+      if (state.pemOverflow && !PRIVATE_KEY_BEGIN_LINE.test(state.pending)) {
+        // pemOverflow means the retained bytes are known private-key body.
+        // The module's one terminator spelling requires the trailing
+        // newline. An END without it is still open: drop the body.
+        // A closed block still must not ship the retained body — emit
+        // only from the END line, same as the split-time overflow tail.
+        if (!privateKeyBlockIsClosed(state.pending)) {
+          const dropped = Buffer.byteLength(state.pending, "utf8");
+          state.pending = "";
+          state.pemOverflow = false;
+          accountHoldbackDrop(stream, state, dropped);
+          return;
+        }
+        const endFinder = new RegExp(PRIVATE_KEY_END_LINE.source);
+        const endMatch = endFinder.exec(state.pending);
+        if (endMatch !== null && endMatch.index !== undefined) {
+          const discarded = state.pending.slice(0, endMatch.index);
+          const emit = state.pending.slice(endMatch.index);
+          state.pending = "";
+          state.pemOverflow = false;
+          accountHoldbackDrop(stream, state, Buffer.byteLength(discarded, "utf8"));
+          if (emit.length > 0) {
+            ingestRedacted(stream, Buffer.from(redactLogText(emit), "utf8"));
+          }
+          return;
+        }
       }
       const redacted = redactOpenPrivateKey(state.pending);
       state.pending = "";
@@ -376,12 +392,15 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   return {
     write,
     flush,
-    markDrainIncomplete() {
+    markDrainIncomplete(stream?: LogStreamV1) {
       lastWriteAt = deps.clock.now();
-      ingestRedacted(
-        "stdout",
-        Buffer.from("\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n", "utf8"),
-      );
+      const marker = Buffer.from("\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n", "utf8");
+      const names: readonly LogStreamV1[] = stream === "stderr" || stream === "stdout"
+        ? [stream]
+        : ["stdout", "stderr"];
+      for (const name of names) {
+        ingestRedacted(name, marker);
+      }
     },
     liveTail(stream) {
       const name = asLogStream(stream);
@@ -469,6 +488,23 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
   const begin = firstUnterminatedPemBegin(pending);
   if (begin >= 0) {
     const held = pending.slice(begin);
+    if (state.pemOverflow) {
+      // A second BEGIN arrived while the overflow tail still held the
+      // first key's body. Those retained bytes are known private-key
+      // material: drop them. Do not emit pending.slice(0, begin).
+      const droppedPrefix = pending.slice(0, begin);
+      const droppedBytes = Buffer.byteLength(droppedPrefix, "utf8");
+      if (held.length > MAX_PEM_HOLD) {
+        const tailStart = Math.max(0, held.length - SECRET_TAIL_BYTES);
+        return {
+          emit: "",
+          hold: held.slice(tailStart),
+          droppedBytes: droppedBytes + Buffer.byteLength(held.slice(0, tailStart), "utf8"),
+        };
+      }
+      state.pemOverflow = false;
+      return { emit: "", hold: held, droppedBytes };
+    }
     if (held.length > MAX_PEM_HOLD) {
       state.pemOverflow = true;
       const tailStart = Math.max(begin, pending.length - SECRET_TAIL_BYTES);
@@ -531,13 +567,18 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
   return { emit, hold, droppedBytes: 0 };
 }
 
-const SECRET_STARTERS = ["ghp_", "github_pat_", "sk-", "AKIA", "Bearer ", "Authorization:", "-----BEGIN "] as const;
+// Holdback anchors, lower-cased. Must cover every redactor match of
+// `((?:Proxy-)?Authorization"?[^\S\r\n]*:)` — including `authorization:`,
+// `Authorization :`, `Authorization":`, and `proxy-authorization:`.
+// `authorization` is the shared stem; both sides of the scan are folded.
+const SECRET_STARTERS = ["ghp_", "github_pat_", "sk-", "akia", "bearer ", "authorization", "-----begin "] as const;
 const SECRET_STARTER_MAX = Math.max(...SECRET_STARTERS.map((item) => item.length));
 
 function longestSecretStarterPrefixSuffix(hold: string): number {
-  const limit = Math.min(SECRET_STARTER_MAX, hold.length);
+  const folded = hold.toLowerCase();
+  const limit = Math.min(SECRET_STARTER_MAX, folded.length);
   for (let n = limit; n >= 1; n -= 1) {
-    const suffix = hold.slice(hold.length - n);
+    const suffix = folded.slice(folded.length - n);
     if (SECRET_STARTERS.some((starter) => starter.startsWith(suffix) && suffix.length < starter.length)) {
       return hold.length - n;
     }
@@ -548,9 +589,10 @@ function longestSecretStarterPrefixSuffix(hold: string): number {
 function secretHoldStart(hold: string): number {
   const windowStart = Math.max(0, hold.length - SECRET_TAIL_BYTES - 32);
   const window = hold.slice(windowStart);
+  const folded = window.toLowerCase();
   let earliest = -1;
   for (const starter of SECRET_STARTERS) {
-    const at = window.lastIndexOf(starter);
+    const at = folded.lastIndexOf(starter);
     if (at < 0) continue;
     const abs = windowStart + at;
     if (earliest < 0 || abs < earliest) earliest = abs;

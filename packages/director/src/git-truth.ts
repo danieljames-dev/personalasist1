@@ -846,6 +846,15 @@ export interface CollectGitTruthInputV1 {
  * Any other failure is recorded as `UNAVAILABLE` on that field, never rewritten into a
  * plausible empty success.
  */
+/**
+ * `git status --porcelain --ignored`. The review conjunct named
+ * "left the tree unchanged" reads this, not HEAD-sha equality: ignored
+ * files (`!! path`) are changes the reviewer made.
+ */
+export function collectGitStatusIncludingIgnored(runner: GitRunner): GitStatusObservationV1 {
+  return observeStatus(invokeGit(runner, ["status", "--porcelain", "--ignored"]));
+}
+
 export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResultV1 {
   const collectedAt = input.now;
   const runner = input.runner;

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
-import { createFixedClock, RUN_LOG_BYTES } from "../src/bounded-log.js";
+import { createFixedClock, createMemoryLogSink, RUN_LOG_BYTES } from "../src/bounded-log.js";
 import { buildExecutorLaunch, GROK_MAX_TURNS } from "../src/executor-adapters.js";
 import type { GitCommandResultV1, GitRunner } from "../src/git-truth.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
@@ -283,7 +283,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
+      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -424,6 +424,7 @@ async function runWith(
     resolveArtifactPath?: RunManagerDepsV1["resolveArtifactPath"];
     handoff?: Record<string, unknown> | null;
     neverWait?: boolean;
+    logSinks?: RunManagerDepsV1["logSinks"];
   } = {},
 ) {
   const fs = over.fs ?? memoryFs({
@@ -446,6 +447,7 @@ async function runWith(
     scanOrphans: over.scanOrphans ?? (() => []),
     resolveArtifactPath: over.resolveArtifactPath ?? ((absolutePath) => absolutePath),
     ...matchingDiscovery(),
+    ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
   };
   return executeRun(request(over.request), deps);
 }
@@ -2550,7 +2552,7 @@ test("exit 0 with a throwing scanner fails executorTreeIsGone", async () => {
 test("a clean run passes all ten success conjuncts", async () => {
   const result = await runWith({ neverWait: true });
   assert.equal(result.ok, true, result.reason);
-  assert.equal(result.conjunction.findings.length, 12);
+  assert.equal(result.conjunction.findings.length, 13);
   assert.deepEqual(result.conjunction.failedConjuncts, []);
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
@@ -2806,7 +2808,8 @@ test("launchRun without a role uses the implementer permission list", async () =
       },
     );
     assert.equal(result.spawned, true, result.reason);
-    assert.deepEqual(spawnedArgv, ["-p", promptPath]);
+    assert.deepEqual(spawnedArgv, ["-p", "--permission-mode", "bypassPermissions"]);
+    assert.equal(spawnedArgv.includes(promptPath), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -3030,11 +3033,16 @@ test("a stdout stream error before settleStreams still returns a RunResultV1", a
     }
   });
   const leases = memoryLeases();
+  const stdoutSink = createMemoryLogSink();
+  const stderrSink = createMemoryLogSink();
   try {
     const result = await runWith({
       spawn: trackingSpawn(() => handle),
       leases,
-      wait: async () => undefined,
+      wait: (ms) => new Promise((resolve) => {
+        setTimeout(resolve, Math.min(ms, 30));
+      }),
+      logSinks: { stdout: stdoutSink, stderr: stderrSink },
       request: {
         timeoutMs: 30_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-epipe" },
@@ -3043,6 +3051,11 @@ test("a stdout stream error before settleStreams still returns a RunResultV1", a
     assert.equal(typeof result.ok, "boolean");
     assert.equal(result.spawned, true);
     assert.equal(typeof result.productionWriterLeaseReleasedByThisRun, "boolean");
+    const stdoutText = stdoutSink.contents().toString("utf8");
+    const stderrText = stderrSink.contents().toString("utf8");
+    assert.match(stdoutText, /\[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout\]/);
+    assert.equal(stderrText.includes("stream-drain-timeout"), false);
+    assert.ok(result.log !== null && (result.log.stdout.fileTruncated || result.log.stdout.droppedFileBytes > 0 || stdoutText.includes("AION_LOG_TRUNCATED")));
   } finally {
     stdout.destroy();
   }

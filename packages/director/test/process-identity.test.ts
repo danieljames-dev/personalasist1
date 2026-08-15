@@ -824,7 +824,7 @@ test("a parentless readable row that is not a descendant is machine noise, not a
   assert.match(script, /\$isBroker/);
   assert.match(
     script,
-    /if \(\$n -eq \$target -or \$isDesc -or \(-not \$n -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
+    /if \(\$n -eq \$target -or \$isDesc -or \(\(\$n -ne \$target -or -not \$nonceReadable\) -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
   );
 });
 

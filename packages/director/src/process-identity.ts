@@ -30,9 +30,55 @@
  * scan is `UNAVAILABLE`, never "no orphans".
  */
 import { spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import { CONTROL_BYTES } from "./control-bytes.js";
 import type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
 import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
+
+/**
+ * Host binaries that answer "is this process still alive?" and that perform
+ * the kill. Resolved from `%SystemRoot%` and `statSync`-verified. A PATH
+ * search is not this fact: the supervised executor shares this account
+ * and can create the first PATH entry.
+ */
+const WINDOWS_SYSTEM_EXECUTABLES = {
+  "powershell.exe": ["System32", "WindowsPowerShell", "v1.0", "powershell.exe"],
+  "taskkill.exe": ["System32", "taskkill.exe"],
+} as const;
+
+export type WindowsSystemExecutableV1 = keyof typeof WINDOWS_SYSTEM_EXECUTABLES;
+
+export function windowsSystemRoot(): string | null {
+  const raw = process.env.SystemRoot ?? process.env.WINDIR;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed === "" || CONTROL_BYTES.test(trimmed)) return null;
+  if (!isResolvedHostPath(trimmed)) return null;
+  return trimmed;
+}
+
+/**
+ * Absolute `%SystemRoot%`-anchored path for a system binary. Refuses a
+ * bare basename: the caller must spawn this return value, never the
+ * lookup key.
+ */
+export function resolveWindowsSystemExecutable(basename: WindowsSystemExecutableV1): string {
+  const root = windowsSystemRoot();
+  if (root === null) {
+    throw new Error(`SystemRoot is unset or not an identifiable absolute path; refusing to spawn bare ${basename}`);
+  }
+  const resolved = join(root, ...WINDOWS_SYSTEM_EXECUTABLES[basename]);
+  try {
+    if (!statSync(resolved).isFile()) {
+      throw new Error(`system executable is not a file: ${resolved}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`system executable missing or unreadable (${basename}): ${message}`);
+  }
+  return resolved;
+}
 
 /**
  * Who was spawned, in more than a PID.
@@ -478,7 +524,8 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
 
       let result: WindowsProbeSpawnResultV1;
       try {
-        result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        const powershell = resolveWindowsSystemExecutable("powershell.exe");
+        result = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
           encoding: "utf8",
           timeout: 15_000,
           windowsHide: true,
@@ -758,7 +805,8 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       | { readonly ok: false; readonly reason: string } => {
       let result: WindowsProbeSpawnResultV1;
       try {
-        result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        const powershell = resolveWindowsSystemExecutable("powershell.exe");
+        result = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
           encoding: "utf8",
           timeout: 30_000,
           windowsHide: true,
@@ -948,7 +996,7 @@ export function createWindowsAncestrySampler(host?: WindowsProbeHostV1): (query:
   return (_query) => {
     let result: WindowsProbeSpawnResultV1;
     try {
-      result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      result = spawn(resolveWindowsSystemExecutable("powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", script], {
         encoding: "utf8",
         timeout: 15_000,
         windowsHide: true,
@@ -1211,13 +1259,19 @@ export function rowHasPositiveRunIdentity(
  * One answer to "could this row belong to this run?".
  *
  * A row is plausible when its nonce matches, it is in the holder's pid chain,
- * it was created in [floor, holder exit] with no nonce and a broker parent,
- * or it is parentless (dead parent) with no nonce and either a previously
- * observed parent pid or a creation instant in the closed [floor, holder
- * exit] window. A readable PEB that does not carry this run's nonce is
- * not evidence of absence — see {@link parentlessRowTiedToThisRun}. A
- * broker image name may only exclude a row that has already failed every
- * positive test. Everything else is host noise.
+ * it was created in [floor, holder exit] with a broker parent, or it is
+ * parentless (dead parent) with either a previously observed parent pid or
+ * a creation instant in the closed [floor, holder exit] window.
+ *
+ * A nonce may exclude a row only when it is a fact about the process —
+ * `nonceReadable === true` and the token identifies a different run — and
+ * even then only after the floor and parentage tests have had their say.
+ * A rewritten `AION_RUN_NONCE`, a CommandLine scrape, or a missing nonce
+ * are the same UNKNOWN: the environment block does not contain *this*
+ * run's nonce. That is not proof the process is not ours. See
+ * {@link parentlessRowTiedToThisRun}. A broker image name may only
+ * exclude a row that has already failed every positive test. Everything
+ * else is host noise.
  */
 export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -1226,8 +1280,10 @@ export function processRowCouldBelongToThisRun(
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
   // Name is a tiebreaker for rows with nothing else tying them to the run.
   if (isBrokerHostName(sighting.name)) return false;
-  const noNonce = asUsableToken(sighting.runNonce) === null;
-  if (!noNonce) return false;
+  // Do not return early on a foreign or unprovenanced nonce. A PEB that
+  // contains AION_RUN_NONCE=not-ours, or a CommandLine scrape of one,
+  // does not contain this run's nonce. That is the same UNKNOWN as a
+  // successful PEB read that found no nonce at all.
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
   return parentlessRowTiedToThisRun(sighting, ctx);
@@ -1502,6 +1558,9 @@ function parseDmtfDatetime(value: string): number | null {
     Math.floor(micro / 1000),
   );
   if (asUtc === null) return null;
+  // DMTF/WMI UTC offset is minutes, documented maximum ±720 (14 hours).
+  // A value outside that range is not a placeable instant.
+  if (offsetMinutes > 720) return null;
   const offsetMs = offsetMinutes * 60 * 1000;
   return sign === "+" ? asUtc - offsetMs : asUtc + offsetMs;
 }
@@ -1745,7 +1804,7 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedF
     "  $isSelfBroker = $false;",
     "  if ($name) { foreach ($b in $brokerNames) { if ($name -ieq $b) { $isSelfBroker = $true } } };",
     "  if ($isSelfBroker -and $n -ne $target -and -not $isDesc) { continue };",
-    "  if ($n -eq $target -or $isDesc -or (-not $n -and $atOrAfterFloor -and ((-not $parentPresent) -or $isBroker))) {",
+    "  if ($n -eq $target -or $isDesc -or (($n -ne $target -or -not $nonceReadable) -and $atOrAfterFloor -and ((-not $parentPresent) -or $isBroker))) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "    [void]$hits.Add([ordered]@{ pid = $id; name = $name; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent; parentName = $parentName });",
     "  }",

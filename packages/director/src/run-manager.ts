@@ -66,10 +66,12 @@ import {
   type ExecutorRoleV1,
 } from "./executors.js";
 import {
+  collectGitStatusIncludingIgnored,
   collectGitTruth,
   verifyGitTruth,
   type GitObservationV1,
   type GitRunner,
+  type GitStatusObservationV1,
   type GitVerdictV1,
 } from "./git-truth.js";
 import {
@@ -112,6 +114,7 @@ import {
   nextUndecidablePersistenceDecision,
   parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
+  resolveWindowsSystemExecutable,
   rememberSampledDescendantPids,
   rowHasPositiveRunIdentity,
   undecidableRowsOf,
@@ -158,7 +161,8 @@ export type SuccessConjunctNameV1 =
   | "runCompletedWithinBudget"
   | "logStayedWithinBudget"
   | "reviewLeftTreeUnchanged"
-  | "writeMovedHead";
+  | "writeMovedHead"
+  | "writeRoleWasGrantedWritePermission";
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -184,6 +188,11 @@ export interface SpawnOptionsV1 {
   readonly env: Readonly<Record<string, string>>;
   readonly shell: false;
   readonly windowsHide: true;
+  /**
+   * Bytes written to the child's stdin and then ended. Used so a Claude
+   * prompt file reaches the process without appearing on argv.
+   */
+  readonly stdin?: string;
 }
 
 export interface SpawnExitV1 {
@@ -323,7 +332,6 @@ export interface ExecuteRunRequestV1 {
     readonly leaseId: string;
   };
   readonly authorisedProductionMutated: boolean;
-  readonly knownSuccessExitCodes?: readonly number[];
   readonly childEnv?: Readonly<Record<string, string>>;
   readonly role?: ExecutorRoleV1;
 }
@@ -438,6 +446,12 @@ export interface WriterExitProofInputV1 {
    * safe default.
    */
   readonly ownedHandleExit?: OwnedHandleExitV1 | null;
+  /**
+   * This run's nonce. Required on the identity-absent sighting loop so
+   * that branch can apply the same membership rule as identity-present.
+   * Omitted is "no nonce to judge by": any leftover sighting then denies.
+   */
+  readonly runNonce?: string | null;
 }
 
 /**
@@ -481,18 +495,36 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
     if (input.liveSightings.length > 0) return null;
 
     if (input.recordedIdentity === null) {
-      // Two reasons identity can be absent. Only the first may mint:
+      // Two allowlisted routes when identity is absent:
       // 1. Capture saw NOT_FOUND for the recorded pid, and the handle this
-      //    run owns has since settled as exited. The owned handle is
-      //    stronger than a CIM sighting of a process that is gone.
-      // 2. Any other reason (probe UNAVAILABLE, or NOT_FOUND while the
-      //    handle has not settled) must keep denying.
+      //    run owns has since settled as exited.
+      // 2. Adopted crash-window lease `{pid, runToken}` with no startedAt:
+      //    a NOT_FOUND observation of that pid, scan performed and clean.
+      //    Do not invent a creationDate. UNAVAILABLE and FOUND still deny.
       const owned = input.ownedHandleExit;
-      if (owned === null || owned === undefined) return null;
-      if (owned.spawnOccurred !== true) return null;
-      if (owned.handleExited !== true) return null;
-      if (owned.exitSettledWithCode !== true) return null;
-      if (owned.identityAbsentBecauseAlreadyExited !== true) return null;
+      const ownedSettled =
+        owned !== null
+        && owned !== undefined
+        && owned.spawnOccurred === true
+        && owned.handleExited === true
+        && owned.exitSettledWithCode === true
+        && owned.identityAbsentBecauseAlreadyExited === true;
+      const adoptedSlotGone =
+        input.observation !== null
+        && input.observation.outcome === "NOT_FOUND"
+        && input.probedPid !== null
+        && isUsablePid(input.probedPid);
+      if (!ownedSettled && !adoptedSlotGone) return null;
+      const nonce = normaliseRunNonce(input.runNonce ?? "");
+      if (nonce !== null && sightingsDenyWriterExit(
+        input.orphanSightings,
+        nonce,
+        null,
+        input.probedPid,
+        "DEAD_CONFIRMED",
+      )) {
+        return null;
+      }
       return makeWriterExitProof();
     }
 
@@ -507,18 +539,14 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
     const liveness = holderLiveness(input.recordedIdentity, input.observation);
     if (liveness !== "DEAD_CONFIRMED") return null;
 
-    for (const sighting of input.orphanSightings) {
-      const inTree = writerSightingNotProvenAbsent(sighting, input.recordedIdentity.runNonce, {
-        holderPid: input.recordedIdentity.pid,
-        rows: input.orphanSightings,
-      });
-      if (!inTree) continue;
-      const verdict: OrphanVerdictV1 = detectOrphan({
-        recorded: input.recordedIdentity,
-        observed: observationFromSighting(sighting),
-        parentLiveness: liveness,
-      });
-      if (verdict.orphan) return null;
+    if (sightingsDenyWriterExit(
+      input.orphanSightings,
+      input.recordedIdentity.runNonce,
+      input.recordedIdentity,
+      input.recordedIdentity.pid,
+      liveness,
+    )) {
+      return null;
     }
 
     return makeWriterExitProof();
@@ -532,6 +560,39 @@ function makeWriterExitProof(): WriterExitProofV1 {
   const proof = Object.freeze({ [WRITER_EXIT_PROOF]: true as const });
   MINTED_EXIT_PROOFS.add(proof);
   return proof;
+}
+
+/**
+ * One sighting loop for both identity branches. A leftover that is not
+ * proven absent from this run denies the proof. When identity is present
+ * the per-sighting {@link detectOrphan} verdict is read; when it is
+ * absent any in-tree sighting denies — there is no recorded holder to
+ * compare, and inventing one would be a fabricated identity.
+ */
+function sightingsDenyWriterExit(
+  sightings: readonly OrphanSightingV1[] | null,
+  runNonce: string | null,
+  recorded: ExecutorProcessIdentityV1 | null,
+  holderPid: number | null,
+  parentLiveness: "DEAD_CONFIRMED",
+): boolean {
+  if (sightings === null) return false;
+  if (runNonce === null) return sightings.length > 0;
+  for (const sighting of sightings) {
+    const inTree = writerSightingNotProvenAbsent(sighting, runNonce, {
+      holderPid,
+      rows: sightings,
+    });
+    if (!inTree) continue;
+    if (recorded === null) return true;
+    const verdict: OrphanVerdictV1 = detectOrphan({
+      recorded,
+      observed: observationFromSighting(sighting),
+      parentLiveness,
+    });
+    if (verdict.orphan) return true;
+  }
+  return false;
 }
 
 function observationIsAboutRecorded(
@@ -550,7 +611,6 @@ function observationIsAboutRecorded(
 export function evaluateSuccessConjunction(input: {
   readonly exitCode: number | null;
   readonly stillRunning: boolean;
-  readonly knownSuccessExitCodes?: readonly number[];
   readonly executor: ExecutorNameV1;
   readonly output: string;
   readonly parsed: HandoffParseV1;
@@ -586,8 +646,14 @@ export function evaluateSuccessConjunction(input: {
    * write-permission tokens. A missing role label cannot turn this off.
    */
   readonly argvGrantedWrite?: boolean;
+  /**
+   * `git status --porcelain --ignored` collected for a review role.
+   * Omitted or UNAVAILABLE is UNKNOWN and does not license "left the
+   * tree unchanged".
+   */
+  readonly treeIncludingIgnored?: GitStatusObservationV1 | null;
 }): SuccessConjunctionV1 {
-  const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
+  const known = KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
     ? null
     : classifyExecutorExit(input.executor, input.exitCode, input.output);
@@ -755,7 +821,19 @@ export function evaluateSuccessConjunction(input: {
       reviewOk = false;
       reviewReason = `${role} moved HEAD; a reviewer that writes is not a review`;
     } else {
-      reviewReason = `${role} left HEAD unchanged`;
+      const ignored = input.treeIncludingIgnored;
+      if (ignored === undefined || ignored === null) {
+        reviewOk = false;
+        reviewReason = `${role} ignored-inclusive worktree status was not collected; UNKNOWN does not license a review verdict`;
+      } else if (ignored.outcome === "UNAVAILABLE") {
+        reviewOk = false;
+        reviewReason = `${role} ignored-inclusive worktree status is UNAVAILABLE; UNKNOWN does not license a review verdict`;
+      } else if (ignored.outcome === "DIRTY") {
+        reviewOk = false;
+        reviewReason = `${role} left the worktree dirty (including ignored files)`;
+      } else {
+        reviewReason = `${role} left the tree unchanged`;
+      }
     }
   }
 
@@ -770,6 +848,17 @@ export function evaluateSuccessConjunction(input: {
       writeMovedReason = "write role exited having left HEAD unchanged";
     } else {
       writeMovedReason = "write role advanced HEAD";
+    }
+  }
+
+  let writeGrantOk = true;
+  let writeGrantReason = "role is not a write role that must be granted write permission";
+  if (processWasCreated && isWriteRole) {
+    if (!argvGrantedWrite) {
+      writeGrantOk = false;
+      writeGrantReason = "write role argv does not grant write permission";
+    } else {
+      writeGrantReason = "write role argv grants write permission";
     }
   }
 
@@ -809,6 +898,7 @@ export function evaluateSuccessConjunction(input: {
     },
     { name: "reviewLeftTreeUnchanged", ok: reviewOk, reason: reviewReason },
     { name: "writeMovedHead", ok: writeMovedOk, reason: writeMovedReason },
+    { name: "writeRoleWasGrantedWritePermission", ok: writeGrantOk, reason: writeGrantReason },
   ];
 
   const failedConjuncts = findings.filter((finding) => !finding.ok).map((finding) => finding.name);
@@ -972,9 +1062,6 @@ function refusedBeforeSpawn(
     logStayedWithinBudget: true,
     processWasCreated: false,
     ...(refusedRole !== undefined ? { role: refusedRole } : {}),
-    ...(request.knownSuccessExitCodes !== undefined
-      ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
-      : {}),
   });
   const resultPath = join(request.runRoot, "result.json");
   const result: RunResultV1 = {
@@ -1041,9 +1128,6 @@ export async function executeRun(
     processWasCreated: false,
     ...(role !== undefined ? { role } : {}),
     argvGrantedWrite,
-    ...(request.knownSuccessExitCodes !== undefined
-      ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
-      : {}),
   });
 
   const leaseStore = deps.leases ?? createNodeLeaseStore(sandboxDirectorStoreRoot());
@@ -1106,9 +1190,6 @@ export async function executeRun(
       logStayedWithinBudget: true,
       ...(role !== undefined && isExecutorRole(role) ? { role } : {}),
       argvGrantedWrite,
-      ...(request.knownSuccessExitCodes !== undefined
-        ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
-        : {}),
     });
 
   const releaseHeld = (): void => {
@@ -1558,6 +1639,9 @@ export async function executeRun(
     }
 
     // 3. Persist the intent. The only value that permits a spawn is returned after write-and-read-back.
+    // Build the child environment once. childEnvKeys is derived from this
+    // object — the durable record of what the child is actually handed.
+    const childEnv = deliveredChildEnv(request.childEnv, runNonce);
     const intentStore = intentStoreFromFs(deps.fs);
     const persistInput = {
       intentPath,
@@ -1573,12 +1657,7 @@ export async function executeRun(
       now: deps.clock.now(),
       ...(request.promptPath !== undefined ? { promptPath: request.promptPath } : {}),
       role,
-      childEnvKeys: Object.freeze([
-        ...new Set([
-          ...Object.keys(request.childEnv ?? {}),
-          "AION_RUN_NONCE",
-        ]),
-      ].sort()),
+      childEnvKeys: Object.freeze(Object.keys(childEnv).sort()),
     };
     let permit: SpawnPermitV1 | null = null;
     let child: SpawnHandleV1;
@@ -1592,17 +1671,16 @@ export async function executeRun(
             cwd: request.cwd,
           });
           spawnedAtFloor = deps.clock.now();
+          const promptStdin = readClaudePromptStdin(request, deps.fs);
           return deps.spawn(
             request.executablePath,
             request.argv,
             {
               cwd: request.cwd,
-              env: {
-                ...(request.childEnv ?? {}),
-                AION_RUN_NONCE: runNonce,
-              },
+              env: childEnv,
               shell: false,
               windowsHide: true,
+              ...(promptStdin !== undefined ? { stdin: promptStdin } : {}),
             },
             permit,
           );
@@ -1730,8 +1808,14 @@ export async function executeRun(
         sinkFailed = true;
       }
     };
-    const stdoutDone = pumpStream(child.stdout, writeAndWatch("stdout")).catch(() => undefined);
-    const stderrDone = pumpStream(child.stderr, writeAndWatch("stderr")).catch(() => undefined);
+    let stdoutDrainAborted = false;
+    let stderrDrainAborted = false;
+    const stdoutDone = pumpStream(child.stdout, writeAndWatch("stdout"), () => {
+      stdoutDrainAborted = true;
+    }).catch(() => undefined);
+    const stderrDone = pumpStream(child.stderr, writeAndWatch("stderr"), () => {
+      stderrDrainAborted = true;
+    }).catch(() => undefined);
 
     // Stamp the holder onto the lease before the durable spawn record so a
     // crash cannot leave intent.spawnPid set while the lease still says
@@ -1796,7 +1880,12 @@ export async function executeRun(
         holderExitedAt: attemptCeiling,
       });
       const streamsSettledAttempt = await settleStreams(stdoutDone, stderrDone, deps.wait);
-      if (!streamsSettledAttempt || sinkFailed) log.markDrainIncomplete();
+      markLogDrain(log, {
+        settled: streamsSettledAttempt,
+        sinkFailed,
+        stdoutAborted: stdoutDrainAborted,
+        stderrAborted: stderrDrainAborted,
+      });
       log.flush();
       const reason = confirmedStopped
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
@@ -1849,11 +1938,11 @@ export async function executeRun(
         || (captured.observation.outcome === "FOUND" && captured.observation.pid === childPid)
       )
     ) {
+      // Capture failed. Do not stamp the occupant's startedAt plus our
+      // nonce — that is a durable record of a holder that was never
+      // identified. Pid + run token is the crash-window shape.
       heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, {
         pid: childPid,
-        ...(captured.observation.outcome === "FOUND" && captured.observation.creationDate !== undefined
-          ? { creationDate: captured.observation.creationDate }
-          : {}),
         runNonce,
       }, runNonce);
     } else {
@@ -1908,7 +1997,12 @@ export async function executeRun(
     }
 
     const streamsSettledEarly = await settleStreams(stdoutDone, stderrDone, deps.wait);
-    if (!streamsSettledEarly || sinkFailed || log.report().sinkFailed) log.markDrainIncomplete();
+    markLogDrain(log, {
+      settled: streamsSettledEarly,
+      sinkFailed: sinkFailed || log.report().sinkFailed,
+      stdoutAborted: stdoutDrainAborted,
+      stderrAborted: stderrDrainAborted,
+    });
     log.flush();
     if (log.report().mustHalt && cancelStages.length === 0) {
       const cancelled = await cancelLadder(
@@ -2029,6 +2123,11 @@ export async function executeRun(
       resolve: deps.resolveArtifactPath ?? defaultResolveArtifactPath,
     });
 
+    const isReviewRole = isExecutorRole(role) && NON_WRITING_ROLES.has(role);
+    const treeIncludingIgnored: GitStatusObservationV1 | null = isReviewRole && !argvGrantedWrite
+      ? collectGitStatusIncludingIgnored(deps.git)
+      : null;
+
     // 9. The conjunction. Each finding is kept so a failure names the conjunct.
     const conjunction = evaluateSuccessConjunction({
       exitCode,
@@ -2054,9 +2153,7 @@ export async function executeRun(
       role,
       argvGrantedWrite,
       spawnedAtFloor,
-      ...(request.knownSuccessExitCodes !== undefined
-        ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
-        : {}),
+      ...(treeIncludingIgnored !== undefined ? { treeIncludingIgnored } : {}),
     });
 
     exitProof = proveWriterExit({
@@ -2070,6 +2167,7 @@ export async function executeRun(
       orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
       liveSightings: orphanScan.liveSightings,
       ownedHandleExit,
+      runNonce,
     });
     const proofBeforeRelease = exitProof;
     releaseHeld();
@@ -2501,10 +2599,16 @@ export function writerSightingNotProvenAbsent(
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
   if (isBrokerHostName(sighting.name)) return false;
   if (parentlessRowTiedToThisRun(sighting, ctx)) return true;
+  // Same exclusion rule as processRowCouldBelongToThisRun: a nonce may
+  // exclude only when it was read from the PEB. Unreadable, missing, or
+  // a CommandLine scrape stay UNKNOWN (not proven absent). A parentless
+  // row with a foreign token is the same UNKNOWN as a missing nonce.
   if (sighting.nonceReadable === false) return true;
   const nonce = normaliseRunNonce(sighting.runNonce);
   if (nonce === null) return true;
-  return nonce === runNonce;
+  if (nonce === runNonce) return true;
+  if (sighting.parentPresent === false) return true;
+  return false;
 }
 
 interface LeftoverSweepV1 {
@@ -2560,7 +2664,12 @@ function killNonceBearingLeftovers(input: {
       rows: leftovers,
     };
     if (!rowHasPositiveRunIdentity(leftover, leftoverCtx)) continue;
-    input.killTree(leftover.pid);
+    try {
+      input.killTree(leftover.pid);
+    } catch {
+      // A failed kill is not a confirmed stop. The re-scan below is
+      // the physical leftover fact.
+    }
     killed = true;
   }
   let remaining: readonly OrphanSightingV1[];
@@ -2687,7 +2796,11 @@ async function cancelLadder(
   return { stillRunning: stillAfterHard, exitCode: null };
 }
 
-function pumpStream(stream: Readable | null, write: (chunk: Uint8Array) => void): Promise<void> {
+function pumpStream(
+  stream: Readable | null,
+  write: (chunk: Uint8Array) => void,
+  onAborted?: () => void,
+): Promise<void> {
   if (stream === null) return Promise.resolve();
   return new Promise((resolve) => {
     stream.on("data", (chunk: unknown) => {
@@ -2702,9 +2815,28 @@ function pumpStream(stream: Readable | null, write: (chunk: Uint8Array) => void)
       }
     });
     stream.on("end", () => resolve());
-    stream.on("error", () => resolve());
+    stream.on("error", () => {
+      onAborted?.();
+      resolve();
+    });
     stream.resume();
   });
+}
+
+function markLogDrain(
+  log: BoundedLogV1,
+  input: {
+    readonly settled: boolean;
+    readonly sinkFailed: boolean;
+    readonly stdoutAborted: boolean;
+    readonly stderrAborted: boolean;
+  },
+): void {
+  if (input.stdoutAborted) log.markDrainIncomplete("stdout");
+  if (input.stderrAborted) log.markDrainIncomplete("stderr");
+  if ((input.settled && !input.sinkFailed) || input.stdoutAborted || input.stderrAborted) return;
+  log.markDrainIncomplete("stdout");
+  log.markDrainIncomplete("stderr");
 }
 
 async function settleStreams(
@@ -2907,6 +3039,7 @@ async function proveAdoptedWriterExit(input: {
     orphanScanPerformed: orphanScan.performed,
     orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
     liveSightings: orphanScan.performed ? orphanScan.liveSightings : null,
+    runNonce: input.runNonce,
   });
 }
 
@@ -2914,6 +3047,41 @@ function errorCode(error: unknown): string | null {
   if (error === null || typeof error !== "object" || !("code" in error)) return null;
   const code = (error as { code?: unknown }).code;
   return typeof code === "string" ? code : null;
+}
+
+function deliveredChildEnv(
+  requestEnv: Readonly<Record<string, string>> | undefined,
+  runNonce: string,
+): Record<string, string> {
+  const delivered: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") delivered[key] = value;
+  }
+  if (requestEnv !== undefined) {
+    for (const [key, value] of Object.entries(requestEnv)) {
+      delivered[key] = value;
+    }
+  }
+  delivered.AION_RUN_NONCE = runNonce;
+  return delivered;
+}
+
+function readClaudePromptStdin(
+  request: ExecuteRunRequestV1,
+  fs: RunFileSystemV1,
+): string | undefined {
+  if (request.executor !== "claude") return undefined;
+  const promptPath = request.promptPath;
+  if (promptPath === undefined) return undefined;
+  try {
+    return fs.readUtf8(promptPath);
+  } catch {
+    try {
+      return readFileSync(promptPath, "utf8");
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 function existingCompletionOn(
@@ -3056,13 +3224,17 @@ export function createNodeSpawner(): SpawnFnV1 {
       spendSpawnPermit(bound, launch);
     }
     NODE_SPAWNER_USED.add(bound);
+    const stdinPayload = options.stdin;
     const child = spawn(executable, argv.slice(), {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      env: { ...options.env },
       windowsHide: true,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdinPayload !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
+    if (stdinPayload !== undefined && child.stdin !== null) {
+      child.stdin.end(stdinPayload);
+    }
     return wrapChildProcess(child);
   };
 }
@@ -3122,10 +3294,40 @@ export function createNodeWait(): (ms: number) => Promise<void> {
  * parentless predicates cannot close the same gap. Do not treat a green
  * suite as proof that the D2 CHILD_TREE requirement is met in production.
  */
+/**
+ * Whether a taskkill spawnSync result confirmed the tree stopped.
+ * A discarded return value used to treat access-denied as success.
+ */
+export function taskkillConfirmedStopped(result: {
+  readonly status: number | null;
+  readonly error?: Error | null;
+  readonly stdout?: string | Buffer | null;
+  readonly stderr?: string | Buffer | null;
+}): boolean {
+  if (result.error !== undefined && result.error !== null) return false;
+  if (result.status === 0) return true;
+  const text = `${String(result.stdout ?? "")}\n${String(result.stderr ?? "")}`;
+  // "The process ... not found" is the slot empty — the process is gone.
+  return /not found/i.test(text);
+}
+
 export function killProcessTreeStandIn(pid: number): void {
-  spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+  const taskkill = resolveWindowsSystemExecutable("taskkill.exe");
+  const result = spawnSync(taskkill, ["/PID", String(pid), "/T", "/F"], {
     windowsHide: true,
     shell: false,
     timeout: 10_000,
+    encoding: "utf8",
   });
+  if (!taskkillConfirmedStopped({
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.error !== undefined && result.error !== null ? { error: result.error } : {}),
+  })) {
+    const detail = result.error !== undefined && result.error !== null
+      ? result.error.message
+      : `exit ${String(result.status)}`;
+    throw new Error(`taskkill not confirmed stopped: ${detail}`);
+  }
 }

@@ -217,7 +217,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
+      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -754,6 +754,33 @@ test("F3c >64 KiB PEM overflow still hides the key body and accounts the drop", 
   assert.equal(text.includes("secretkeymaterial"), false);
   assert.match(text, /-----END RSA PRIVATE KEY-----/);
   assert.match(text, /\[REDACTED\]/);
+  assert.ok(log.report().stdout.droppedLiveBytes > 0);
+});
+
+test("F3c overflowing PEM terminated by END with no trailing newline drops the body", () => {
+  const { log, stdout } = logger();
+  const body = `MIIEowIBAAKCAQEAsecretkeymaterial${"K".repeat(MAX_TOKEN_HOLD)}`;
+  log.write("stdout", `-----BEGIN RSA PRIVATE KEY-----\n${body}`);
+  log.write("stdout", "-----END RSA PRIVATE KEY-----");
+  log.flush();
+  const tail = log.liveTail("stdout").toString("utf8");
+  const file = stdout.contents().toString("utf8");
+  assert.equal(tail.includes("secretkeymaterial"), false);
+  assert.equal(file.includes("secretkeymaterial"), false);
+  assert.ok(log.report().stdout.droppedLiveBytes > 0);
+  assert.match(tail, /\[AION_LOG_TRUNCATED dropped=/);
+});
+
+test("F3c overflowing PEM followed by a second BEGIN drops the first key body", () => {
+  const { log, stdout } = logger();
+  const body = `MIIEowIBAAKCAQEAsecretkeymaterial${"K".repeat(MAX_TOKEN_HOLD)}`;
+  log.write("stdout", `-----BEGIN RSA PRIVATE KEY-----\n${body}`);
+  log.write("stdout", "-----BEGIN EC PRIVATE KEY-----\nmore-secret-body\n-----END EC PRIVATE KEY-----\n");
+  log.flush();
+  const tail = log.liveTail("stdout").toString("utf8");
+  const file = stdout.contents().toString("utf8");
+  assert.equal(tail.includes("secretkeymaterial"), false);
+  assert.equal(file.includes("secretkeymaterial"), false);
   assert.ok(log.report().stdout.droppedLiveBytes > 0);
 });
 

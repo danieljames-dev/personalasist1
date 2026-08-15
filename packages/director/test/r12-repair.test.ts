@@ -208,7 +208,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
+      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -380,7 +380,10 @@ test("C1 strictly-later startedAt still reclaims, and runToken mismatch does not
     observedIdentity: { pid: 100, startedAt: "2026-08-13T09:00:00.000Z", runToken: "run-other" },
     now: NOW,
   });
-  assert.equal(tokenOnly.ok, true, "a differing runToken is a different process regardless of instants");
+  // F2: an earlier instant plus a different token is not different-process
+  // proof. The previous assertion encoded that defect.
+  assert.equal(tokenOnly.ok, false, "a differing runToken is not a different process without a later instant");
+  assert.equal(tokenOnly.refusal, "IDENTITY_UNVERIFIABLE");
 });
 
 test("C1 observedCreationIsStrictlyLater is the one ordering rule", () => {

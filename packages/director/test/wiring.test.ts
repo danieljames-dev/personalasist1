@@ -377,7 +377,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
             if (key === "symbolic-ref -q --short HEAD") {
               return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
             }
-            if (key === "status --porcelain") {
+            if (key === "status --porcelain" || key === "status --porcelain --ignored") {
               return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
             }
             if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -549,7 +549,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
           if (key === "symbolic-ref -q --short HEAD") {
             return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
           }
-          if (key === "status --porcelain") return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+          if (key === "status --porcelain" || key === "status --porcelain --ignored") return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
           if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
             return { argv: [...argv], status: 128, stdout: "", stderr: "fatal: no upstream configured\n", error: null };
           }

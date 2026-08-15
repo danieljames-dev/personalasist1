@@ -197,7 +197,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
+      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -740,7 +740,7 @@ test("D1 the generated scan script emit predicate includes the floor-bounded par
   assert.match(script, /\$isBroker/);
   assert.match(
     script,
-    /if \(\$n -eq \$target -or \$isDesc -or \(-not \$n -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
+    /if \(\$n -eq \$target -or \$isDesc -or \(\(\$n -ne \$target -or -not \$nonceReadable\) -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
   );
 });
 
@@ -854,7 +854,7 @@ test("E1 a write role that commits nothing is not success", async () => {
       role: "IMPLEMENT",
       executor: "claude",
       executablePath: "C:\\Tools\\claude.exe",
-      argv: ["-p", `${CWD}\\PROMPT.md`],
+      argv: ["-p", "--permission-mode", "bypassPermissions"],
       promptPath: `${CWD}\\PROMPT.md`,
     },
     git: matchingGit(HEAD_AFTER),

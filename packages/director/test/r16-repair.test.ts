@@ -23,6 +23,7 @@ import { acquireLease, reclaimStaleLease, type LeaseV1 } from "../src/leases.js"
 import {
   holderLiveness,
   normalisedCreationDate,
+  processRowCouldBelongToThisRun,
   processRowMakesScanUndecidable,
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
@@ -206,7 +207,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
+      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -570,7 +571,15 @@ test("F5 holderLiveness on a recorded Feb 31 start is UNKNOWN, not DEAD_CONFIRME
 // ---------------------------------------------------------------------------
 
 test("F6 a readable parentless in-window row makes the scan undecidable and withholds the writer lease", async () => {
-  const row = {
+  const ctx = {
+    runNonce: NONCE,
+    createdNotBefore: T0,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: new Set([4812]),
+    rows: [{ pid: 4812 }, { pid: 88912, parentPid: 1 }],
+  };
+  const emptyNonce = {
     pid: 88912,
     name: "cmd.exe",
     parentPid: 1,
@@ -578,19 +587,16 @@ test("F6 a readable parentless in-window row makes the scan undecidable and with
     nonceReadable: true,
     creationDate: AFTER,
   };
-  assert.equal(processRowMakesScanUndecidable(row, {
-    runNonce: NONCE,
-    createdNotBefore: T0,
-    holderPid: 4812,
-    holderExitedAt: HOLDER_EXIT,
-    observedPids: new Set([4812]),
-    rows: [{ pid: 4812 }, { pid: 88912, parentPid: 1 }],
-  }), true);
+  const foreignNonce = { ...emptyNonce, runNonce: "not-your-nonce" };
+  assert.equal(processRowCouldBelongToThisRun(emptyNonce, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(emptyNonce, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(foreignNonce, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(foreignNonce, ctx), true);
 
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [row],
+    scanOrphans: () => [emptyNonce],
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-f6" } },
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);

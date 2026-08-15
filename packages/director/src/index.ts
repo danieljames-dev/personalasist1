@@ -37,6 +37,7 @@ export {
   wrapChildProcess,
   createNodeWait,
   killProcessTreeStandIn,
+  taskkillConfirmedStopped,
 } from "./run-manager.js";
 export type {
   SuccessConjunctNameV1,

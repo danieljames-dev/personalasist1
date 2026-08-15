@@ -6,7 +6,7 @@
  * whatever was lifted off a photograph must not become part of argv, because argv is what a
  * process listing — and a shell, if one were ever reintroduced — would see.
  *
- * The flag lists below were measured on this host against Grok 1.0.3 and Claude 2.1.231. They are
+ * The flag lists below were measured on this host against Grok 1.0.3 and Claude 2.1.232. They are
  * not a guess at a common subset, and they are not negotiable against a later `--help` dump that
  * looks similar.
  *
@@ -125,7 +125,25 @@ export function executorArgvFor(
   input: Pick<AdapterInputV1, "promptPath" | "cwd" | "role">,
 ): readonly string[] | null {
   if (name === "local") return null;
-  if (name === "claude") return ["-p", input.promptPath];
+  if (name === "claude") {
+    // Claude 2.1.232 (Claude Code), measured 2026-08-15 against
+    // C:\Users\User\.vscode\extensions\anthropic.claude-code-2.1.232-win32-x64\resources\native-binary\claude.exe
+    // `--version` → `2.1.232 (Claude Code)`.
+    // `--help` (verbatim facts):
+    //   Usage: claude [options] [command] [prompt]
+    //   -p, --print  Print response and exit (useful for pipes). Boolean; does
+    //     not consume the following token.
+    //   prompt  (Arguments) Your prompt. A positional, not a file path.
+    //   --permission-mode <mode>  choices: acceptEdits|auto|bypassPermissions|manual|dontAsk|plan
+    // There is no `--prompt-file`. `claude -p C:\wt\PROMPT.md` therefore
+    // hands Claude the literal path string as its entire prompt.
+    // The user prompt is delivered on stdin (stdio pipe). Write roles
+    // carry an explicit `--permission-mode bypassPermissions`; review
+    // roles carry `dontAsk`. The prompt path is not an argv element.
+    const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
+    const permissionMode = reviewOnly ? "dontAsk" : GROK_WRITE_PERMISSION_MODE;
+    return ["-p", "--permission-mode", permissionMode];
+  }
   const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
   const permissionMode = reviewOnly ? "dontAsk" : GROK_WRITE_PERMISSION_MODE;
   return [
@@ -239,9 +257,8 @@ function buildGrokLaunch(input: ValidatedInput): AdapterLaunchV1 {
 }
 
 function buildClaudeLaunch(input: ValidatedInput): AdapterLaunchV1 {
-  // Claude 2.1.231, measured: -p/--print, then the prompt file path. Working directory is the
-  // spawn cwd, not a flag — Claude has no --cwd, and a missing one is a spawn ENOENT on Windows,
-  // which reads as an executable problem. That is why cwd is validated before this is returned.
+  // See executorArgvFor("claude"): measured 2.1.232. -p is boolean; the
+  // prompt file is not an argv element. cwd is the spawn cwd, not a flag.
   const argv = executorArgvFor("claude", input);
   if (argv === null) return launchOf(input, []);
   return launchOf(input, argv);

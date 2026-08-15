@@ -69,12 +69,13 @@ test("a reviewer Grok launch uses the permission mode that cannot write", () => 
   });
 });
 
-test("Claude 2.1.231 argv is -p and the prompt file path", () => {
+test("Claude 2.1.232 argv is -p and an explicit permission-mode, not a prompt path", () => {
   withFixture((input) => {
     const result = adapterNamed("claude").build(input);
     assert.equal(result.ok, true, result.ok ? "" : result.reason);
     assert.ok(result.launch);
-    assert.deepEqual(result.launch.argv, ["-p", input.promptPath]);
+    assert.deepEqual(result.launch.argv, ["-p", "--permission-mode", "bypassPermissions"]);
+    assert.equal(result.launch.argv.includes(input.promptPath), false);
     assert.equal(result.launch.cwd, input.cwd);
     assert.equal(result.launch.shell, false);
   });
