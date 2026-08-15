@@ -638,7 +638,7 @@ test("D1 a parentless post-floor row whose dead parent is the holder is in the h
   assert.equal(interpreted.outcome, "SCANNED");
 });
 
-test("D1 a parentless post-floor row whose dead parent was never observed is host noise", () => {
+test("D1 a parentless post-floor row whose dead parent was never observed is UNKNOWN", () => {
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({
@@ -658,7 +658,9 @@ test("D1 a parentless post-floor row whose dead parent was never observed is hos
     runNonce: NONCE,
     holderPid: 4812,
   });
-  assert.equal(interpreted.outcome, "SCANNED");
+  // An absent parent is no explanation. The previous SCANNED verdict
+  // spent that UNKNOWN as "proven absent".
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
 test("D1 the real Windows orphan scanner with a 5-minute floor and unused nonce does not throw", () => {

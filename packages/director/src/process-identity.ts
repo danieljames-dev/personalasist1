@@ -175,6 +175,11 @@ export interface NonceBearingProcessV1 {
    * not be used as a negative membership test.
    */
   readonly executablePath?: string;
+  /**
+   * Win32_Process.SessionId. Used only to *exclude* a session-0 row when
+   * the Director is in an interactive session. Never used to include.
+   */
+  readonly sessionId?: number;
 }
 
 export type OrphanScanInterpretationV1 =
@@ -651,6 +656,11 @@ export function interpretWindowsOrphanScanOutput(input: {
    * unplaceable means a broker-parented row has no lifetime tie to this run.
    */
   readonly holderExitedAt?: string;
+  /**
+   * Director process session. The envelope may also carry this; either
+   * source is used only to exclude session-0 rows.
+   */
+  readonly directorSessionId?: number;
 }): OrphanScanInterpretationV1 {
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
@@ -721,6 +731,7 @@ export function interpretWindowsOrphanScanOutput(input: {
     const name = asUsableToken(row.name) ?? undefined;
     const parentCreationDate = normalisedCreationDate(row.parentCreationDate);
     const executablePath = asUsableToken(row.executablePath) ?? undefined;
+    const sessionId = asSessionId(row.sessionId);
     sightings.push({
       pid: row.pid,
       ...(name !== undefined ? { name } : {}),
@@ -732,6 +743,7 @@ export function interpretWindowsOrphanScanOutput(input: {
       ...(parentName !== undefined ? { parentName } : {}),
       ...(parentCreationDate !== null ? { parentCreationDate } : {}),
       ...(executablePath !== undefined ? { executablePath } : {}),
+      ...(sessionId !== undefined ? { sessionId } : {}),
     });
   }
 
@@ -741,11 +753,13 @@ export function interpretWindowsOrphanScanOutput(input: {
     if (isUsablePid(pid)) observedPids.add(pid);
   }
   const holderExitedAt = asUsableToken(input.holderExitedAt) ?? undefined;
+  const directorSessionId = asSessionId(parsed.directorSessionId) ?? asSessionId(input.directorSessionId);
   const plausibility = {
     runNonce: input.runNonce ?? "",
     createdNotBefore: input.createdNotBefore ?? "",
     ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
     ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+    ...(directorSessionId !== undefined ? { directorSessionId } : {}),
     observedPids,
     rows: sightings,
   };
@@ -811,6 +825,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(query.observedPids ?? []),
     ];
 
+    let directorSessionId: number | undefined;
     const interpretInput = (result: WindowsProbeSpawnResultV1) => interpretWindowsOrphanScanOutput({
       status: result.status,
       stdout: stripBom(String(result.stdout ?? "")).trim(),
@@ -820,6 +835,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(holderPid > 0 ? { holderPid } : {}),
       ...(observedPids.length > 0 ? { observedPids } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+      ...(directorSessionId !== undefined ? { directorSessionId } : {}),
     });
 
     const snapshot = ():
@@ -848,6 +864,15 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
         };
       }
 
+      try {
+        const envelope = JSON.parse(stripBom(String(result.stdout ?? "")).trim()) as {
+          directorSessionId?: unknown;
+        };
+        const sid = asSessionId(envelope.directorSessionId);
+        if (sid !== undefined) directorSessionId = sid;
+      } catch {
+        // Envelope parse belongs to interpretInput; a missing session is UNKNOWN.
+      }
       const interpreted = interpretInput(result);
       if (interpreted.outcome === "SCANNED") {
         return { ok: true, rows: interpreted.sightings };
@@ -868,6 +893,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       createdNotBefore: query.createdNotBefore,
       ...(holderPid > 0 ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+      ...(directorSessionId !== undefined ? { directorSessionId } : {}),
       observedPids: new Set(observedPids.filter((pid) => isUsablePid(pid))),
       rows,
     });
@@ -1268,15 +1294,27 @@ export function createdAtOrAfterFloor(
  * does not establish the claim — UNKNOWN stays UNKNOWN, so this returns false.
  */
 /**
- * Broker hosts that mint a fresh environment and a live parent, so neither
- * nonce inheritance nor a live ParentProcessId chain can see the child.
- * One list; the PowerShell emit predicate interpolates the same names.
+ * Image names of Windows processes that *re-parent* a child they did not
+ * CreateProcess, so a genuine descendant of this run can appear with a
+ * live parent that is not in the holder chain (COM/WMI → dllhost /
+ * WmiPrvSE, Task Scheduler → taskeng, service control → svchost,
+ * ShellExecute → explorer).
+ *
+ * Membership claims only: "this basename is a known re-parenting host."
+ * It does not claim the child is ours. One list; the PowerShell emit
+ * predicate interpolates the same names.
+ *
+ * This is an enumerated set (class (a)). A re-parenting host that is
+ * not on the list is a known hole: that child is treated as host noise
+ * on the present-parent branch of {@link parentlessRowTiedToThisRun}.
+ * Do not treat this list as closed.
  */
 export const BROKER_HOST_PROCESS_NAMES = [
   "WmiPrvSE.exe",
   "dllhost.exe",
   "svchost.exe",
   "taskeng.exe",
+  "explorer.exe",
 ] as const;
 
 export type ProcessRowPlausibilityV1 = {
@@ -1291,6 +1329,8 @@ export type ProcessRowPlausibilityV1 = {
   readonly creationDate?: string;
   /** True only when the PEB environment block was actually read. */
   readonly nonceReadable?: boolean;
+  /** Win32_Process.SessionId. Missing is UNKNOWN — do not exclude. */
+  readonly sessionId?: number;
 };
 
 /**
@@ -1335,6 +1375,12 @@ export type ProcessRowPlausibilityContextV1 = {
     readonly parentPid?: number;
     readonly creationDate?: string;
   }[];
+  /**
+   * Session of the Director process. Used only to exclude session-0 rows
+   * when this value is a positive interactive session. Missing or 0
+   * never includes a row.
+   */
+  readonly directorSessionId?: number;
 };
 
 export function isBrokerHostName(name: string | undefined | null): boolean {
@@ -1380,9 +1426,11 @@ export function rowHasPositiveRunIdentity(
  * One answer to "could this row belong to this run?".
  *
  * A row is plausible when its nonce matches, it is in the holder's pid chain,
- * it was created in [floor, holder exit] with a broker parent, or it is
- * parentless (dead parent) with either a previously observed parent pid or
- * a creation instant in the closed [floor, holder exit] window.
+ * it was created in [floor, holder exit] with a broker parent, or
+ * {@link parentlessRowTiedToThisRun} ties it. That last predicate is
+ * *not* the closed [floor, holderExitedAt] interval: an absent parent
+ * is no explanation, so the holder-exit ceiling does not bound the
+ * child's birth.
  *
  * A nonce may exclude a row only when it is a fact about the process —
  * `nonceReadable === true` and the token identifies a different run — and
@@ -1405,37 +1453,61 @@ export function processRowCouldBelongToThisRun(
   // successful PEB read that found no nonce at all.
   // A process image name is not a negative fact either: the executor
   // chooses the basename. Do not exclude on Name.
+  // Session 0 is a physical boundary: a child inherits its parent's
+  // session, and crossing into session 0 requires CreateProcessAsUser
+  // with SeTcbPrivilege. Exclude only. A matching session is not a tie.
+  if (rowIsExcludedByInteractiveSession(sighting, ctx)) return false;
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
   return parentlessRowTiedToThisRun(sighting, ctx);
 }
 
 /**
- * Parentless membership. Observed-parent widening is unchanged: a parent
- * pid this Director actually recorded (holder, nonce match, live chain,
- * or an ancestry sample while the holder was alive) ties the row to this
- * run regardless of the child's image name or environment block.
+ * Physical fact: a session-0 process cannot be a descendant of an
+ * executor launched in the Director's interactive session. Missing
+ * session ids are UNKNOWN and do not exclude. Director session 0
+ * (a service) cannot use this discriminator.
+ */
+function rowIsExcludedByInteractiveSession(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (ctx.directorSessionId === undefined || ctx.directorSessionId <= 0) return false;
+  if (sighting.sessionId === undefined) return false;
+  return sighting.sessionId === 0;
+}
+
+/**
+ * Parentage-visible membership. The physical fact this answers is:
+ * *given only what is still in this snapshot, can a live process account
+ * for this row's parentage, or is the parent gone so we cannot tell
+ * whether this run minted it?*
  *
- * The closed-interval half fires for any parentless in-window row whose
- * parent was never sampled. A successful PEB read that found no
- * `AION_RUN_NONCE` proves only that this process's environment block
- * does not contain the nonce. It does not prove the process is not
- * ours: `CreateProcess` takes `lpEnvironment`, and a caller that
- * supplies one (`ProcessStartInfo.EnvironmentVariables.Remove`, or
- * `spawn(..., { env })`) mints a readable block without the nonce.
- * That bit is executor-controllable. A readable block without the nonce
- * is the same UNKNOWN as an unreadable one: the row stays tied when it
- * sits in `[floor, holderExitedAt]`, and
- * {@link processRowMakesScanUndecidable} turns that into UNAVAILABLE.
+ * That is not "the child was born in [floor, holderExitedAt]". A
+ * holder's descendant can outlive the holder and keep spawning, so a
+ * grandchild's creation instant can sit *above* the observed holder-exit
+ * ceiling. The ceiling therefore proves nothing once the intermediate
+ * has left the snapshot.
  *
- * An intermediate that is born and dies entirely between two ancestry
- * samples is never added to `observedPids`, so this function still
- * cannot see that grandchild except through the closed interval. Closing
- * that gap requires a Windows Job Object on the holder (kill-on-close,
- * breakaway denied, membership queried with
- * `JOBOBJECT_BASIC_PROCESS_ID_LIST`). No image name, environment block,
- * or dead intermediate can evade that. That primitive is an Owner
- * decision and is not in scope this round.
+ * - `parentPresent === false` (or unknown): no live explanation. Nothing
+ *   in the snapshot says when the parent died. The floor is applied by
+ *   {@link processRowCouldBelongToThisRun}; this function does not
+ *   consult `holderExitedAt`. The row is tied → UNKNOWN, never "proven
+ *   absent".
+ * - `parentPresent === true` and the occupant is proven created at or
+ *   before the row, and is not in this run's chain / `observedPids`:
+ *   that occupant *is* a live explanation. Host noise. Do not tie on
+ *   the bare interval.
+ * - Positive ties that survive on the present-parent branch:
+ *   `observedPids` (this Director walked that parent) and
+ *   {@link parentOccupantIsInHolderChain}. Broker/shell re-parents are
+ *   decided by {@link brokerParentedRowTiedToThisRun}, not here.
+ *
+ * A successful PEB read that found no `AION_RUN_NONCE` still does not
+ * exclude the row: `CreateProcess` takes `lpEnvironment`. Closing the
+ * remaining gap (an intermediate born and dead between ancestry
+ * samples) requires a Windows Job Object on the holder. That is an
+ * Owner decision and is not in scope this round.
  */
 export function parentlessRowTiedToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -1447,7 +1519,27 @@ export function parentlessRowTiedToThisRun(
   // slots recycle and ShellExecute re-parents onto explorer.
   if (parentIsProvenCapableCreator(sighting, ctx)) return false;
   if (ctx.observedPids.has(sighting.parentPid)) return true;
-  return provenCreatedAtOrBeforeCeiling(sighting.creationDate, ctx.holderExitedAt);
+
+  if (sighting.parentPresent === true) {
+    if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
+    // Live occupant proven created at or before this row, and not in
+    // this run's chain: a complete explanation that is not this run.
+    // Missing or later parentCreationDate is a recycled slot — UNKNOWN.
+    if (provenCreatedAtOrBeforeCeiling(sighting.parentCreationDate, sighting.creationDate)) {
+      return false;
+    }
+    return true;
+  }
+
+  if (sighting.parentPresent === false) {
+    // Parent is gone from this snapshot. No live explanation.
+    // The holder-exit ceiling is not a bound on this child's birth.
+    return true;
+  }
+
+  // parentPresent was not recorded. That is not "parent gone" and not
+  // a live explanation. Do not invent a tie from the interval.
+  return false;
 }
 
 /**
@@ -1771,6 +1863,13 @@ export function isUsablePid(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= Number.MAX_SAFE_INTEGER;
 }
 
+/** Win32 session id, including session 0. Missing or non-integer is UNKNOWN. */
+function asSessionId(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : undefined;
+}
+
 /**
  * The single spelling of a run nonce: trimmed, no control bytes.
  *
@@ -2005,7 +2104,8 @@ function windowsOrphanScanScript(
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "    $exe = if ($p.ExecutablePath) { [string]$p.ExecutablePath } else { $null };",
     "    $cmd = if ($p.CommandLine) { [string]$p.CommandLine } else { '' };",
-    "    [void]$candidates.Add([ordered]@{ pid = $id; name = $name; creationDate = $cd; parentPid = $ppid; parentPresent = [bool]$parentPresent; parentName = $parentName; parentCreationDate = $parentCreationDate; executablePath = $exe; isDesc = [bool]$isDesc; commandLine = $cmd });",
+    "    $sessionId = $null; try { $sessionId = [int]$p.SessionId } catch { $sessionId = $null };",
+    "    [void]$candidates.Add([ordered]@{ pid = $id; name = $name; creationDate = $cd; parentPid = $ppid; parentPresent = [bool]$parentPresent; parentName = $parentName; parentCreationDate = $parentCreationDate; executablePath = $exe; isDesc = [bool]$isDesc; commandLine = $cmd; sessionId = $sessionId });",
     "  }",
     "}",
     `$pebCap = ${ORPHAN_SCAN_PEB_READ_CAP};`,
@@ -2029,10 +2129,11 @@ function windowsOrphanScanScript(
     "    }",
     "  };",
     "  if ($c.isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
-    "  [void]$hits.Add([ordered]@{ pid = $c.pid; name = $c.name; creationDate = $c.creationDate; runNonce = $n; parentPid = $c.parentPid; nonceReadable = [bool]$nonceReadable; parentPresent = $c.parentPresent; parentName = $c.parentName; parentCreationDate = $c.parentCreationDate; executablePath = $c.executablePath });",
+    "  [void]$hits.Add([ordered]@{ pid = $c.pid; name = $c.name; creationDate = $c.creationDate; runNonce = $n; parentPid = $c.parentPid; nonceReadable = [bool]$nonceReadable; parentPresent = $c.parentPresent; parentName = $c.parentName; parentCreationDate = $c.parentCreationDate; executablePath = $c.executablePath; sessionId = $c.sessionId });",
     "}",
     "if ($pebCapped) { $unreadable = [Math]::Max($unreadable, 1) };",
-    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable } | ConvertTo-Json -Compress -Depth 5;",
+    "$directorSessionId = $null; try { $directorSessionId = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId } catch { $directorSessionId = $null };",
+    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable; directorSessionId = $directorSessionId } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",
     "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",

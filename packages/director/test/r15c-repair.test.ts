@@ -402,15 +402,15 @@ test("C1 parentless nonce-less in-window row with a sampled parent is couldBelon
   );
 });
 
-test("C1 the same row created after holderExitedAt stays SCANNED when the parent was never sampled", () => {
+test("C1 the same row created after holderExitedAt is UNKNOWN when the parent was never sampled", () => {
   const row = { ...SCRUBBED_GRANDCHILD, creationDate: "2026-08-13T12:00:20.000Z" };
   const ctx = plausibility({
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: GRANDCHILD_PID, parentPid: LAUNCHER_PID }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
-  assert.equal(interpretRows([row]).outcome, "SCANNED");
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  assert.equal(interpretRows([row]).outcome, "UNAVAILABLE");
 });
 
 test("C1 the same row created before the floor stays SCANNED when the parent was never sampled", () => {
@@ -434,7 +434,7 @@ test("C1 the same row with a live parent stays SCANNED", () => {
   assert.equal(interpretRows([row]).outcome, "UNAVAILABLE");
 });
 
-test("C1 cancel-time scans with no holderExitedAt stay SCANNED for an unsampled parent", () => {
+test("C1 cancel-time scans with no holderExitedAt stay UNKNOWN for an unsampled parent", () => {
   const ctx: ProcessRowPlausibilityContextV1 = {
     runNonce: NONCE,
     createdNotBefore: FLOOR,
@@ -442,7 +442,8 @@ test("C1 cancel-time scans with no holderExitedAt stay SCANNED for an unsampled 
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: GRANDCHILD_PID, parentPid: LAUNCHER_PID }],
   };
-  assert.equal(processRowCouldBelongToThisRun(SCRUBBED_GRANDCHILD, ctx), false);
+  // A missing ceiling is not a proof of absence. The floor still holds.
+  assert.equal(processRowCouldBelongToThisRun(SCRUBBED_GRANDCHILD, ctx), true);
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: cimOk([SCRUBBED_GRANDCHILD]),
@@ -452,7 +453,7 @@ test("C1 cancel-time scans with no holderExitedAt stay SCANNED for an unsampled 
     holderPid: 4812,
     observedPids: [4812],
   });
-  assert.equal(interpreted.outcome, "SCANNED");
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
 test("C1 a readable parentless in-window row whose parent was never a descendant is UNAVAILABLE", () => {

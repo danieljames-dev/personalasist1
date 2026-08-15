@@ -502,7 +502,7 @@ test("F1 the orphan-scan script emits a foreign-nonce parentless in-window row",
   assert.equal(script.includes("(-not $n -and $atOrAfterFloor"), false);
 });
 
-test("F1 liveness: foreign-nonce rows before the floor, after exit, with a live parent, or a broker name stay SCANNED", () => {
+test("F1 liveness: foreign-nonce rows before the floor stay SCANNED; after-exit parentless is UNKNOWN", () => {
   const beforeFloor = parentlessInWindow({
     nonceReadable: true,
     runNonce: "not-your-nonce",
@@ -524,7 +524,8 @@ test("F1 liveness: foreign-nonce rows before the floor, after exit, with a live 
     name: "svchost.exe",
   });
   assert.equal(processRowMakesScanUndecidable(beforeFloor, PARENTLESS_CTX), false);
-  assert.equal(processRowMakesScanUndecidable(afterExit, PARENTLESS_CTX), false);
+  // An absent parent after the observed holder exit is not proven absent.
+  assert.equal(processRowMakesScanUndecidable(afterExit, PARENTLESS_CTX), true);
   // A live non-capable parent and a broker self-name are not negative facts.
   assert.equal(processRowMakesScanUndecidable(liveParent, PARENTLESS_CTX), true);
   assert.equal(processRowMakesScanUndecidable(brokerNamed, PARENTLESS_CTX), true);

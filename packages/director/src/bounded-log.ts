@@ -647,6 +647,15 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
   const lineStart = lastNl + 1;
   let emit = pending.slice(0, lineStart);
   let hold = pending.slice(lineStart);
+  // redactLogText's Bearer rule is `Bearer\s+\S+`. A newline is `\s`.
+  // The last-newline split would otherwise emit a `Bearer\n` prefix and
+  // leave the token on the next write — the same secret the redactor
+  // would have caught had the bytes arrived together.
+  const bearerTail = BEARER_WHITESPACE_TAIL.exec(pending);
+  if (bearerTail !== null && bearerTail.index < lineStart) {
+    emit = pending.slice(0, bearerTail.index);
+    hold = pending.slice(bearerTail.index);
+  }
   if (hold.length > MAX_TOKEN_HOLD) {
     const keepFrom = secretHoldStart(hold);
     if (keepFrom >= 0) {
@@ -668,6 +677,14 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
 // `((?:Proxy-)?Authorization"?[^\S\r\n]*:)` — including `authorization:`,
 // `Authorization :`, `Authorization":`, and `proxy-authorization:`.
 // `authorization` is the shared stem; both sides of the scan are folded.
+//
+// `bearer ` (one U+0020) is the literal starter. It is *not* the full
+// redactor twin: `redactLogText` uses `Bearer\s+\S+`. Every other
+// member of `\s` is a class-(a) hole unless {@link BEARER_WHITESPACE_TAIL}
+// also holds. `authorization` does not have that hole: its redactor twin
+// stops at `[^\S\r\n]*:` (horizontal whitespace then a colon), which
+// cannot span a newline, and the stem `authorization` is already a
+// substring of any such header.
 const SECRET_STARTERS = [
   "ghp_",
   "github_pat_",
@@ -679,6 +696,14 @@ const SECRET_STARTERS = [
   "-----begin ",
 ] as const;
 const SECRET_STARTER_MAX = Math.max(...SECRET_STARTERS.map((item) => item.length));
+
+/**
+ * The redactor's Bearer rule, as a holdback. Proves: "these pending
+ * bytes are a prefix of a `Bearer\s+\S+` match" — the same fact
+ * `redactLogText` uses, not a second spelling of SECRET_STARTERS.
+ * `\s*` must consume CR/LF so `Bearer\n` + token is one hold.
+ */
+const BEARER_WHITESPACE_TAIL = /(?<![A-Za-z-])bearer\s*$/i;
 
 function longestSecretStarterPrefixSuffix(hold: string): number {
   const folded = hold.toLowerCase();
@@ -701,6 +726,11 @@ function secretHoldStart(hold: string): number {
     const at = folded.lastIndexOf(starter);
     if (at < 0) continue;
     const abs = windowStart + at;
+    if (earliest < 0 || abs < earliest) earliest = abs;
+  }
+  const bearerTail = BEARER_WHITESPACE_TAIL.exec(hold);
+  if (bearerTail !== null) {
+    const abs = bearerTail.index;
     if (earliest < 0 || abs < earliest) earliest = abs;
   }
   if (earliest >= 0) return earliest;

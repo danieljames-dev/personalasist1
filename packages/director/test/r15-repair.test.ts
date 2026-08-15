@@ -470,6 +470,9 @@ test("F1 every broker-host name with a foreign nonce, off-chain, before the floo
     assert.equal(writerSightingNotProvenAbsent(row, NONCE, {
       holderPid: 4812,
       rows: ctx.rows,
+      createdNotBefore: FLOOR,
+      holderExitedAt: HOLDER_EXIT,
+      observedPids: ctx.observedPids,
     }), false, name);
   }
 });
@@ -539,15 +542,17 @@ test("F2 detached grandchild in the closed window is couldBelong, undecidable, U
   assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
-test("F2 the same row created after holderExitedAt stays SCANNED", () => {
+test("F2 the same row created after holderExitedAt is UNKNOWN, not proven absent", () => {
   const row = { ...DETACHED_GRANDCHILD, creationDate: "2026-08-13T12:00:20.000Z" };
   const ctx = plausibility({
     observedPids: new Set([4812]),
     holderExitedAt: HOLDER_EXIT,
     rows: [{ pid: 4812 }, { pid: 7777, parentPid: 6666 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
+  // A descendant can outlive the holder and keep spawning. The exit
+  // ceiling does not bound this child's birth once the parent is gone.
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({ ok: true, unreadable: 0, processes: [row] }),
@@ -558,7 +563,7 @@ test("F2 the same row created after holderExitedAt stays SCANNED", () => {
     observedPids: [4812],
     holderExitedAt: HOLDER_EXIT,
   });
-  assert.equal(interpreted.outcome, "SCANNED");
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
 test("F2 the same row with a live parent stays SCANNED", () => {

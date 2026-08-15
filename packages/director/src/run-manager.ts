@@ -1092,7 +1092,13 @@ export async function recoverAbandonedRun(
   const parsed = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
   const answers = answersAfterReboot(parsed.ok ? parsed.intent : null);
   const runId = parsed.ok ? parsed.intent.runId : "";
-  const finish = (reason: string, spawned: boolean): RunResultV1 => {
+  // `answers.started` is a fact about a *previous* invocation. It belongs
+  // in the result body. It must not be the ownership flag
+  // writeResultIfPermitted uses to suppress the existing-record guard —
+  // that substitution overwrote a completed result.json on every
+  // --recover sweep, including when the probe merely threw.
+  const finish = (reason: string): RunResultV1 => {
+    const spawned = parsed.ok ? answers.started : false;
     const result: RunResultV1 = {
       schema: RUN_RESULT_SCHEMA_V1,
       resultPath,
@@ -1112,37 +1118,56 @@ export async function recoverAbandonedRun(
       cancel: { timedOut: false, stages: [] },
       log: null,
     };
-    const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, result, spawned);
+    const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, result, false);
     return write === "failed" ? { ...result, resultPath: null } : result;
   };
   if (!parsed.ok) {
-    return finish("recover refused: intent is unreadable or absent", false);
+    return finish("recover refused: intent is unreadable or absent");
   }
   if (!answers.started) {
-    return finish("recover: no recorded spawn; nothing to recover", false);
+    return finish("recover: no recorded spawn; nothing to recover");
   }
-  const holderPid = answers.spawnPid;
-  if (isUsablePid(holderPid)) {
+  const recorded = parsed.intent.processIdentity;
+  const spawnPid = answers.spawnPid;
+  const probePid = isUsablePid(spawnPid)
+    ? spawnPid
+    : (recorded !== null && isUsablePid(recorded.pid) ? recorded.pid : null);
+  if (probePid !== null) {
     let observation: ProcessObservationV1;
     try {
-      observation = deps.probe.observe(holderPid);
+      observation = deps.probe.observe(probePid);
     } catch {
-      return finish(`recover refused: holder pid ${holderPid} liveness is UNKNOWN`, true);
+      return finish(`recover refused: holder pid ${probePid} liveness is UNKNOWN`);
     }
+    if (recorded !== null) {
+      // The physical fact is whether the *recorded holder* is still
+      // running, not whether the pid slot is occupied. After a reboot
+      // the slot is routinely recycled.
+      const liveness = holderLiveness(recorded, observation);
+      if (liveness === "ALIVE") {
+        return finish(`recover refused: holder pid ${probePid} is still present`);
+      }
+      if (liveness === "UNKNOWN") {
+        return finish(`recover refused: holder pid ${probePid} liveness is UNKNOWN`);
+      }
+      return finish(
+        `recover recorded a terminal result; holder pid ${probePid} is DEAD_CONFIRMED. D2 CHILD_TREE remains unmet.`,
+      );
+    }
+    // No recorded identity: pid occupancy is all we have. Keep the
+    // pid-only path only in that case.
     if (observation.outcome === "FOUND") {
-      return finish(`recover refused: holder pid ${holderPid} is still present`, true);
+      return finish(`recover refused: holder pid ${probePid} is still present`);
     }
     if (observation.outcome === "UNAVAILABLE") {
-      return finish(`recover refused: holder pid ${holderPid} liveness is UNKNOWN`, true);
+      return finish(`recover refused: holder pid ${probePid} liveness is UNKNOWN`);
     }
     return finish(
-      `recover recorded a terminal result; holder pid ${holderPid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
-      true,
+      `recover recorded a terminal result; holder pid ${probePid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
     );
   }
   return finish(
     "recover recorded a terminal result; no usable holder pid was recorded. D2 CHILD_TREE remains unmet.",
-    true,
   );
 }
 
@@ -2311,6 +2336,19 @@ export async function executeRun(
 
     const exitWon = child.exited;
     if (exitWon) {
+      // The child has already settled. Still take one synchronous
+      // ancestry sample so a short-lived intermediate can land in
+      // observedPids. A failed sample is ignored, same as the live
+      // branch. Skipping this used to leave observedPids as only the
+      // holder and (maybe) the already-exited child.
+      if (deps.sampleAncestry !== undefined || deps.scanOrphans === undefined) {
+        try {
+          const rows = resolveAncestrySampler(deps)({ holderPid: childPid });
+          rememberSampledDescendantPids(seenInTreePids, childPid, rows);
+        } catch {
+          // A failed sample is not a scan.
+        }
+      }
       const ended = await child.exit;
       exitCode = ended.code;
       holderExitedAt = deps.clock.now();
@@ -2649,13 +2687,14 @@ function persistLeaseHolder(
  *
  * Proven when the scan is SCANNED: no process carrying this run's nonce
  * remains; no descendant of the recorded holder in the CIM ParentProcessId
- * chain remains. A nonce-less parentless row makes the scan UNAVAILABLE only
- * when it sits in the closed window [createdNotBefore, holderExitedAt] or
- * its dead parent pid was previously observed in this run. A parentless row
- * born after holderExitedAt, before the floor, or with a live parent is host
- * noise and stays SCANNED. holderExitedAt is absent at cancel-time scans, so
- * the closed-interval tie does not fire there. The recorded holder is
- * DEAD_CONFIRMED or the owned handle settled after a capture-time NOT_FOUND.
+ * chain remains. A parentless (absent-parent) row born after the spawn
+ * floor makes the scan UNAVAILABLE: an absent parent is no explanation,
+ * so the holder-exit ceiling does not bound the child's birth. A row
+ * whose parent is still in the snapshot and proven created at or before
+ * the row, and is not in this run's chain, is host noise. Broker-host
+ * re-parents stay tied through the broker predicate. The recorded holder
+ * is DEAD_CONFIRMED or the owned handle settled after a capture-time
+ * NOT_FOUND.
  *
  * An unplaceable floor makes the scan UNAVAILABLE rather than falling back
  * to a narrower emit predicate.
@@ -3474,6 +3513,18 @@ async function proveAdoptedWriterExit(input: {
 }): Promise<WriterExitProofV1 | null> {
   const identity = recordedIdentityFromHeldLease(input.lease, input.intentIdentity);
   const holderPid = input.lease.pid ?? identity?.pid;
+  // One spelling of "this run's nonce". The lease records the token the
+  // adopted holder was launched with. The caller may supply a different
+  // invocation nonce. Scanning with the invocation nonce while leftovers
+  // carry the lease token is a second, drifting predicate: a live process
+  // with the recorded token is then "not ours".
+  const leaseToken = identity?.runNonce
+    ?? normaliseRunNonce(input.lease.processIdentity?.runToken ?? "");
+  const callerToken = normaliseRunNonce(input.runNonce);
+  if (leaseToken !== null && callerToken !== null && leaseToken !== callerToken) {
+    return null;
+  }
+  const scanNonce = leaseToken ?? callerToken ?? input.runNonce;
   // The scan floor is a Director-owned instant. An executor-written
   // creationDate in intent.json must not move the emit predicate.
   const floor = input.lease.processIdentity?.startedAt !== undefined
@@ -3495,7 +3546,7 @@ async function proveAdoptedWriterExit(input: {
   const orphanScan = await collectWriterOrphans({
     scanOrphans: input.scanOrphans,
     recorded: identity,
-    runNonce: input.runNonce,
+    runNonce: scanNonce,
     createdNotBefore: floor,
     observedPids: input.observedPids,
     ...(input.wait !== undefined ? { wait: input.wait } : {}),
@@ -3512,7 +3563,7 @@ async function proveAdoptedWriterExit(input: {
     orphanScanPerformed: orphanScan.performed,
     orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
     liveSightings: orphanScan.performed ? orphanScan.liveSightings : null,
-    runNonce: input.runNonce,
+    runNonce: scanNonce,
   });
 }
 

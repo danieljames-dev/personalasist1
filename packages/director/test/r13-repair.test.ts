@@ -22,6 +22,7 @@ const hostNoiseBrokerRow = {
   parentPid: 36320,
   parentPresent: true,
   parentName: "WmiPrvSE.exe",
+  parentCreationDate: "2026-01-01T00:00:00.000Z",
   nonceReadable: true,
   runNonce: null,
   creationDate: AFTER_FLOOR,
