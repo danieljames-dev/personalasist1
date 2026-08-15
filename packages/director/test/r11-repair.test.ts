@@ -1140,8 +1140,12 @@ test("H director-cli launches at USD 0 against a local stub and returns ok:true"
       reason: string;
       spawned?: boolean;
       spendUsd?: number;
+      conjunction?: {
+        findings?: ReadonlyArray<{ name: string; ok: boolean; reason: string }>;
+      };
     };
-    assert.equal(result.ok, true, result.reason);
+    const tree = result.conjunction?.findings?.find((item) => item.name === "executorTreeIsGone");
+    assert.equal(result.ok, true, `${result.reason}${tree !== undefined ? ` tree=${tree.reason}` : ""}`);
     assert.equal(result.spawned, true, result.reason);
     assert.equal(result.spendUsd === undefined || result.spendUsd === 0, true, String(result.spendUsd));
     assert.equal(launched.status, 0, `${launched.stdout}\n${launched.stderr}`);

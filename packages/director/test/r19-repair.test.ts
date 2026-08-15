@@ -1107,11 +1107,12 @@ test("C10 every registry bridge refuses while PRODUCTION_WRITER is held, and run
   );
   const repositoryRoot = resolve(process.cwd());
   const stub = process.execPath;
-  const arb = mkdtempSync(join(tmpdir(), "aion-r19b-c10-arb-"));
+  const heldArb = mkdtempSync(join(tmpdir(), "aion-r19b-c10-held-arb-"));
+  const freeArb = mkdtempSync(join(tmpdir(), "aion-r19b-c10-free-arb-"));
   const heldRoot = mkdtempSync(join(tmpdir(), "aion-r19b-c10-held-"));
   const freeRoot = mkdtempSync(join(tmpdir(), "aion-r19b-c10-free-"));
   try {
-    const held = createNodeLeaseStore(heldRoot, { hostArbitrationRoot: arb });
+    const held = createNodeLeaseStore(heldRoot, { hostArbitrationRoot: heldArb });
     const writer = acquireLease({
       existing: [],
       leaseId: "lease-pw-c10",
@@ -1155,7 +1156,7 @@ test("C10 every registry bridge refuses while PRODUCTION_WRITER is held, and run
       );
     }
 
-    const free = createNodeLeaseStore(freeRoot, { hostArbitrationRoot: arb });
+    const free = createNodeLeaseStore(freeRoot, { hostArbitrationRoot: freeArb });
     const live = await resolveDeveloperAgentBridges(repositoryRoot, process.env, {
       claudeCandidates: [stub],
       codexCandidates: [stub],
@@ -1170,7 +1171,8 @@ test("C10 every registry bridge refuses while PRODUCTION_WRITER is held, and run
     );
     assert.equal(typeof ran.exitCode, "number", "the bridge ran; a lease refusal would have thrown");
   } finally {
-    rmSync(arb, { recursive: true, force: true });
+    rmSync(heldArb, { recursive: true, force: true });
+    rmSync(freeArb, { recursive: true, force: true });
     rmSync(heldRoot, { recursive: true, force: true });
     rmSync(freeRoot, { recursive: true, force: true });
   }

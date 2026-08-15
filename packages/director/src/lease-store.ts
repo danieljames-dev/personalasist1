@@ -96,19 +96,52 @@ export function isHostWideLeaseKind(kind: string): boolean {
   return HOST_WIDE_KINDS.has(kind as LeaseKindV1);
 }
 
-/** Whether a PRODUCTION_WRITER lock file exists under the host-fixed root. */
-export function hostProductionWriterHeld(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-  arbitrationRoot: string = hostArbitrationRoot(env),
-): boolean {
+export type HostWriterLockStateV1 =
+  | { readonly state: "FREE" }
+  | { readonly state: "HELD"; readonly reason: string }
+  | { readonly state: "UNKNOWN"; readonly reason: string };
+
+/**
+ * One answer to "is the host PRODUCTION_WRITER held?". Uses the same
+ * exclusive-create/reclaim facts as {@link openExclusiveLock}: existence
+ * is not the fact, DEAD_CONFIRMED is reclaimed, UNKNOWN never becomes
+ * free. An unlistable locks directory is UNKNOWN, not "no writer".
+ */
+export function inspectHostProductionWriterLock(input: {
+  readonly arbitrationRoot?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly probe?: HostProcessProbe;
+} = {}): HostWriterLockStateV1 {
+  const arbitrationRoot = input.arbitrationRoot ?? hostArbitrationRoot(input.env);
+  const probe = input.probe ?? createWindowsProcessProbe();
   const dir = join(arbitrationRoot, DIRECTOR_STORE_LAYOUT_V1.locksDir);
+  let names: string[];
   try {
-    return readdirSync(dir).some((name) =>
-      name.startsWith("production-writer-") && name.endsWith(".lock"),
-    );
-  } catch {
-    return false;
+    names = readdirSync(dir);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return { state: "FREE" };
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      state: "UNKNOWN",
+      reason: `host locks directory is unlistable: ${dir}: ${message}`,
+    };
   }
+  const locks = names.filter((name) =>
+    name.startsWith("production-writer-") && name.endsWith(".lock"),
+  );
+  let unknown: string | null = null;
+  for (const name of locks) {
+    const lockPath = join(dir, name);
+    const reclaim = reclaimStaleHostLockFile(lockPath, probe);
+    if (reclaim.ok) continue;
+    if (/UNKNOWN/i.test(reclaim.reason)) {
+      unknown = reclaim.reason;
+      continue;
+    }
+    return { state: "HELD", reason: reclaim.reason };
+  }
+  if (unknown !== null) return { state: "UNKNOWN", reason: unknown };
+  return { state: "FREE" };
 }
 
 /**
@@ -434,11 +467,21 @@ export function acquireDeveloperAgentWorktreeLease(input: {
   readonly missionId?: string;
   readonly runId?: string;
   readonly store?: NodeLeaseStoreV1;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly probe?: HostProcessProbe;
 }): { ok: true; store: NodeLeaseStoreV1; lease: LeaseV1 } | { ok: false; reason: string } {
-  if (hostProductionWriterHeld()) {
-    return { ok: false, reason: "a PRODUCTION_WRITER lease is held on this host" };
+  const store = input.store ?? createNodeLeaseStore(sandboxDirectorStoreRoot(input.env));
+  const host = inspectHostProductionWriterLock({
+    arbitrationRoot: store.hostArbitrationRoot,
+    ...(input.env !== undefined ? { env: input.env } : {}),
+    ...(input.probe !== undefined ? { probe: input.probe } : {}),
+  });
+  if (host.state === "UNKNOWN") {
+    return { ok: false, reason: `PRODUCTION_WRITER host lock is UNKNOWN: ${host.reason}` };
   }
-  const store = input.store ?? createNodeLeaseStore(sandboxDirectorStoreRoot());
+  if (host.state === "HELD") {
+    return { ok: false, reason: `a PRODUCTION_WRITER lease is held on this host: ${host.reason}` };
+  }
   const existing = store.list();
   if (existing.some((row) => row.kind === "PRODUCTION_WRITER")) {
     return { ok: false, reason: "a PRODUCTION_WRITER lease is held in this store" };

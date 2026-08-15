@@ -1239,6 +1239,74 @@ test("C9 the developer-agent lease refuses while PRODUCTION_WRITER is held", () 
   }
 });
 
+test("C12 a stale host writer lock whose holder is DEAD_CONFIRMED lets the developer-agent proceed", () => {
+  const arb = mkdtempSync(join(tmpdir(), "aion-r19b-c12-stale-"));
+  const root = mkdtempSync(join(tmpdir(), "aion-r19b-c12-stale-s-"));
+  try {
+    plantHostWriterLock(arb, {
+      leaseId: "stale-dead",
+      kind: "PRODUCTION_WRITER",
+      resource: "default",
+      resourceKey: canonicalResource("PRODUCTION_WRITER", "default"),
+      missionId: "mission-stale",
+      runId: "run-stale",
+      pid: 424242,
+      acquiredAt: NOW,
+      heartbeatAt: NOW,
+      expiresAt: "2026-08-13T12:10:00.000Z",
+    });
+    const store = createNodeLeaseStore(root, { hostArbitrationRoot: arb });
+    const attempt = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot: CWD,
+      now: NOW,
+      store,
+      probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid" }) },
+    });
+    assert.equal(attempt.ok, true, !attempt.ok ? attempt.reason : "");
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("C12 an unlistable host locks directory refuses the developer-agent", () => {
+  const arb = mkdtempSync(join(tmpdir(), "aion-r19b-c12-unlist-"));
+  const root = mkdtempSync(join(tmpdir(), "aion-r19b-c12-unlist-s-"));
+  try {
+    writeFileSync(join(arb, DIRECTOR_STORE_LAYOUT_V1.locksDir), "not-a-directory\n");
+    const store = createNodeLeaseStore(root, { hostArbitrationRoot: arb });
+    const attempt = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot: CWD,
+      now: NOW,
+      store,
+      probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "must not be consulted" }) },
+    });
+    assert.equal(attempt.ok, false);
+    if (!attempt.ok) assert.match(attempt.reason, /UNKNOWN|unlistable/i);
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("C12 an empty host locks directory lets the developer-agent proceed", () => {
+  const arb = mkdtempSync(join(tmpdir(), "aion-r19b-c12-empty-"));
+  const root = mkdtempSync(join(tmpdir(), "aion-r19b-c12-empty-s-"));
+  try {
+    mkdirSync(join(arb, DIRECTOR_STORE_LAYOUT_V1.locksDir), { recursive: true });
+    const store = createNodeLeaseStore(root, { hostArbitrationRoot: arb });
+    const attempt = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot: CWD,
+      now: NOW,
+      store,
+    });
+    assert.equal(attempt.ok, true, !attempt.ok ? attempt.reason : "");
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // CLASS 10 — malformed requests refuse, they do not reject
 // ---------------------------------------------------------------------------
