@@ -76,13 +76,18 @@ export async function resolveDeveloperAgentBridges(repositoryRoot, env = process
     ? await firstInstalled(options.claudeCandidates)
     : resolveClaudeCodeExecutable(env, options.claudeProbe);
   if (claude) {
-    bridges.push(guardClaudeBridgeWithDirectorLease(
+    bridges.push(guardBridgeWithDirectorLease(
       new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude),
       repositoryRoot,
     ));
   }
   const codex = await firstInstalled(options.codexCandidates ?? developerAgentCandidates(env));
-  if (codex) bridges.push(new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex));
+  if (codex) {
+    bridges.push(guardBridgeWithDirectorLease(
+      new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex),
+      repositoryRoot,
+    ));
+  }
 
   const confirmed = [];
   for (const bridge of bridges) if ((await bridge.status()).available) confirmed.push(bridge);
@@ -105,7 +110,7 @@ export async function resolveDeveloperAgentBridge(repositoryRoot, env = process.
  * from the Director store (and refuse while PRODUCTION_WRITER is held)
  * before the bridge's own argv builder reaches spawn.
  */
-export function guardClaudeBridgeWithDirectorLease(bridge, repositoryRoot) {
+export function guardBridgeWithDirectorLease(bridge, repositoryRoot) {
   const originalRun = bridge.run.bind(bridge);
   bridge.run = async function runWithDirectorLease(task, signal) {
     const acquired = acquireDeveloperAgentWorktreeLease({
@@ -123,3 +128,6 @@ export function guardClaudeBridgeWithDirectorLease(bridge, repositoryRoot) {
   };
   return bridge;
 }
+
+/** @deprecated Use {@link guardBridgeWithDirectorLease}. Kept so existing imports keep working. */
+export const guardClaudeBridgeWithDirectorLease = guardBridgeWithDirectorLease;

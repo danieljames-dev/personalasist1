@@ -338,7 +338,8 @@ test("every importer of the discovery ladder reaches spawn only through launchRu
   for (const item of importers) {
     const reachesLaunch = /\blaunchRun\b/.test(item.source);
     const reachesLease = /\bacquireDeveloperAgentWorktreeLease\b/.test(item.source)
-      || /\bacquireLease\b/.test(item.source);
+      || /\bacquireLease\b/.test(item.source)
+      || /\bguardBridgeWithDirectorLease\b/.test(item.source);
     const isDiscoveryModule = item.file.endsWith("packages/director/src/executor-discovery.ts");
     const isIndexReexport = item.file.endsWith("packages/director/src/index.ts");
     assert.ok(

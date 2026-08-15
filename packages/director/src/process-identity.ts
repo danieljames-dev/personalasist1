@@ -910,7 +910,10 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
         }
         const decision = nextUndecidablePersistenceDecision(undecidable, next.rows, ctxFor(next.rows));
         if (decision.action === "unavailable") {
-          throw new Error("orphan scan unavailable: undecidable process-tree membership");
+          throw new OrphanScanUnavailableError(
+            undecidableRowsOf(next.rows, ctxFor(next.rows)),
+            next.rows,
+          );
         }
         if (decision.action === "scan-clean") {
           clean = next.rows;
@@ -920,30 +923,78 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
         rows = next.rows;
       }
       if (clean === null) {
-        throw new Error("orphan scan unavailable: undecidable process-tree membership");
+        throw new OrphanScanUnavailableError(undecidable, rows);
       }
       rows = clean;
     }
 
-    // Kill-list only: nonce match or a live ParentProcessId chain. A parentless
-    // unreadable in-window row that persisted is undecidable, so we already
-    // threw and this filter never runs. Do not widen this into a kill of
-    // a row we cannot attribute.
-    return rows.filter((sighting) => {
-      const nonce = asUsableToken(sighting.runNonce);
-      const nonceMatch = nonce === runNonce;
-      const descendant = holderPid > 0
-        && sighting.pid !== holderPid
-        && isInHolderTree(
-          sighting,
-          holderPid,
-          rows,
-          holderChainBounds(query.createdNotBefore, holderExitedAt),
-        );
-      if (!nonceMatch && !descendant) return false;
-      return sightingCreatedNotBefore(sighting, query.createdNotBefore);
+    // Return the snapshot that was interpreted, plus the killable subset
+    // as an own property. Spreading or iterating the array still yields
+    // only the kill list (nonce match or live holder chain) so existing
+    // callers do not start killing UNKNOWN rows.
+    const killable = rows.filter((sighting) => orphanRowIsKillable(
+      sighting,
+      runNonce,
+      holderPid,
+      rows,
+      query.createdNotBefore,
+      holderExitedAt,
+    ));
+    // Own properties are non-enumerable so deepEqual(hits, []) still
+    // holds for an empty kill list. The snapshot is the emit set.
+    Object.defineProperties(killable, {
+      snapshot: { value: rows, enumerable: false },
+      killable: { value: killable, enumerable: false },
+      undecidable: { value: [] as readonly NonceBearingProcessV1[], enumerable: false },
     });
+    return killable;
   };
+}
+
+/**
+ * The kill list. Physical fact: this row carries this run's nonce, or a
+ * live ParentProcessId walk reaches the holder. UNKNOWN never authorises
+ * a kill. Widening the scanner return shape must not widen this.
+ */
+export function orphanRowIsKillable(
+  sighting: NonceBearingProcessV1,
+  runNonce: string,
+  holderPid: number,
+  rows: readonly NonceBearingProcessV1[],
+  createdNotBefore?: string,
+  holderExitedAt?: string,
+): boolean {
+  const nonce = asUsableToken(sighting.runNonce);
+  const nonceMatch = nonce === runNonce;
+  const descendant = holderPid > 0
+    && sighting.pid !== holderPid
+    && isInHolderTree(
+      sighting,
+      holderPid,
+      rows,
+      holderChainBounds(createdNotBefore, holderExitedAt),
+    );
+  if (!nonceMatch && !descendant) return false;
+  if (createdNotBefore === undefined) return true;
+  return sightingCreatedNotBefore(sighting, createdNotBefore);
+}
+
+/**
+ * A persisted undecidable membership is not an empty scan. The rows are
+ * attached so a blocked operator can see which pid blocked them.
+ */
+export class OrphanScanUnavailableError extends Error {
+  readonly undecidable: readonly ProcessRowPlausibilityV1[];
+  readonly sightings: readonly ProcessRowPlausibilityV1[];
+  constructor(
+    undecidable: readonly ProcessRowPlausibilityV1[],
+    sightings: readonly ProcessRowPlausibilityV1[],
+  ) {
+    super("orphan scan unavailable: undecidable process-tree membership");
+    this.name = "OrphanScanUnavailableError";
+    this.undecidable = undecidable;
+    this.sightings = sightings;
+  }
 }
 
 function sleepSync(ms: number): void {
@@ -2049,7 +2100,8 @@ function windowsOrphanScanScript(
     "        $id = [int]$ch.ProcessId;",
     "        $chUtc = $null;",
     "        if ($ch.CreationDate) { try { $chUtc = ([datetime]$ch.CreationDate).ToUniversalTime() } catch { $chUtc = $null } };",
-    "        if ($cur -eq $holderPid -and $exitUtc -ne $null -and $chUtc -ne $null -and $chUtc -gt $exitUtc) { continue };",
+    "        $ceilingUsable = ($exitUtc -ne $null -and $exitUtc -gt $floorUtc);",
+    "        if ($cur -eq $holderPid -and $ceilingUsable -and $chUtc -ne $null -and $chUtc -gt $exitUtc) { continue };",
     "        if ($byPid.ContainsKey($cur) -and $byPid[$cur].CreationDate -and $chUtc -ne $null) {",
     "          try {",
     "            $parUtc = ([datetime]$byPid[$cur].CreationDate).ToUniversalTime();",

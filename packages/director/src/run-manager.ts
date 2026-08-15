@@ -114,6 +114,7 @@ import {
   normaliseRunNonce,
   normalisedCreationDate,
   nextUndecidablePersistenceDecision,
+  OrphanScanUnavailableError,
   parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
   resolveWindowsSystemExecutable,
@@ -3017,9 +3018,19 @@ async function collectWriterOrphans(input: {
       && writerSightingNotProvenAbsent(sighting, input.runNonce, membershipTree),
     );
     return { performed: true, sightings, liveSightings, undecidable: [] };
-  } catch {
+  } catch (error) {
     // A throwing CIM/WMI scan is not a completed scan. Escaping executeRun
     // used to release the writer lease from `finally` with no result.json.
+    // Persisted undecidable membership carries the blocking rows so
+    // describeExecutorTree can name the pid.
+    if (error instanceof OrphanScanUnavailableError) {
+      return {
+        performed: false,
+        sightings: sightingsAsOrphans(error.sightings),
+        liveSightings: [],
+        undecidable: sightingsAsOrphans(error.undecidable),
+      };
+    }
     return { performed: false, sightings: [], liveSightings: [], undecidable: [] };
   }
 }
@@ -3106,7 +3117,16 @@ function killNonceBearingLeftovers(input: {
   let leftovers: readonly OrphanSightingV1[];
   try {
     leftovers = resolveOrphanScanner(input.scanOrphans)(query);
-  } catch {
+  } catch (error) {
+    // UNKNOWN never authorises a kill. Surface the blocking rows so
+    // leftoverRemaining can see what the kill list deleted.
+    if (error instanceof OrphanScanUnavailableError) {
+      return {
+        confirmed: false,
+        remaining: sightingsAsOrphans(error.undecidable),
+        killed: false,
+      };
+    }
     return { confirmed: false, remaining: [], killed: false };
   }
   rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined, input.holderExitedAt, createdNotBefore);

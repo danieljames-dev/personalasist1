@@ -4,7 +4,9 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import test from "node:test";
 import {
@@ -23,6 +25,8 @@ import {
   BROKER_HOST_PROCESS_NAMES,
   createWindowsOrphanScanner,
   interpretWindowsOrphanScanOutput,
+  orphanRowIsKillable,
+  OrphanScanUnavailableError,
   processRowCouldBelongToThisRun,
   processRowMakesScanUndecidable,
   type ExecutorProcessIdentityV1,
@@ -937,6 +941,97 @@ test("C9 recover with FOUND / UNAVAILABLE / throwing probe leaves result.json by
     });
     const after = fs.readUtf8(join(RUN_ROOT, "result.json"));
     assert.equal(after, before, item.label);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CLASS 3 + 4 — one scanner contract; named undecidable pids
+// ---------------------------------------------------------------------------
+
+test("C3/C4 production scanner keeps an unattributable row visible and does not make it killable", async () => {
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: () => ({
+      status: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        unreadable: 0,
+        processes: [CLASS1_ROW],
+        directorSessionId: 1,
+      }),
+      stderr: "",
+    }),
+    waitSync: () => undefined,
+  });
+  let thrown: unknown;
+  try {
+    scanner({
+      runNonce: NONCE,
+      createdNotBefore: FLOOR,
+      holderPid: 4812,
+      holderExitedAt: HOLDER_EXIT,
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof OrphanScanUnavailableError, String(thrown));
+  assert.ok(
+    thrown.undecidable.some((row) => row.pid === 9911),
+    JSON.stringify(thrown.undecidable),
+  );
+  assert.equal(
+    orphanRowIsKillable(CLASS1_ROW as never, NONCE, 4812, [CLASS1_ROW as never], FLOOR, HOLDER_EXIT),
+    false,
+  );
+
+  const leases = memoryLeases();
+  const result = await runWith({
+    leases,
+    scanOrphans: scanner,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-c34" } },
+  });
+  const tree = result.conjunction.findings.find((item) => item.name === "executorTreeIsGone");
+  assert.equal(tree?.ok, false, tree?.reason);
+  // Base HEAD: "the process-tree scan was not performed" with no pid.
+  assert.match(String(tree?.reason), /9911/);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-c34"), true);
+});
+
+test("C5 degenerate holderExitedAt equals floor does not drop the holder-edge in PowerShell", () => {
+  let script = "";
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: (_cmd, args) => {
+      script = String(args[3] ?? "");
+      return { status: 0, stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}", stderr: "" };
+    },
+  });
+  scanner({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: FLOOR,
+  });
+  assert.match(script, /\$ceilingUsable/);
+  assert.match(script, /\$ceilingUsable -and \$chUtc/);
+  assert.equal(
+    script.includes("$cur -eq $holderPid -and $exitUtc -ne $null -and $chUtc -ne $null -and $chUtc -gt $exitUtc"),
+    false,
+  );
+});
+
+test("C10 every DeveloperAgentBridgeV1 construction pushed into the registry is lease-guarded", () => {
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const src = readFileSync(join(here, "..", "..", "..", "..", "apps", "aion", "developer-agent.mjs"), "utf8");
+  const constructions = [...src.matchAll(/new (?!Unavailable)\w+DeveloperAgentBridgeV1\s*\(/g)];
+  assert.ok(constructions.length >= 2, `expected Claude and Codex constructions, got ${constructions.length}`);
+  for (const match of constructions) {
+    const at = match.index ?? 0;
+    const before = src.slice(Math.max(0, at - 48), at);
+    assert.match(
+      before,
+      /guardBridgeWithDirectorLease\s*\(\s*$/,
+      `unguarded construction: ${match[0]} after ${JSON.stringify(before)}`,
+    );
   }
 });
 
