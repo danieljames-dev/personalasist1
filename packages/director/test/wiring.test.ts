@@ -115,30 +115,32 @@ test("every exported src function reachable from the run path has a non-test cal
 
   const productionSources = [...files.values(), ...appSources];
   const exceptions = new Map<string, string>([
-    ["modulesReachableFrom", "test-only import-graph helper"],
-    ["createFixedClock", "test/injected clock constructor; production uses Date"],
-    ["allExecutorAdapters", "registry enumerator for adapter tests"],
-    ["adapterNamed", "registry lookup; launch path calls buildExecutorLaunch"],
-    ["resolveGate", "Owner-answer API; this run only opens a gate"],
-    ["describeGate", "Owner-facing formatter; not on the spawn path"],
-    ["openGates", "dashboard listing; not on the spawn path"],
-    ["describeVerdict", "human formatter for Git verdicts"],
-    ["createNewMission", "mission-creation entry; D2 spawn path starts from an existing mission"],
-    ["missionRecordFrom", "mission parse helper; not invoked by executeRun"],
-    ["unclassifiedMissionStates", "table-completeness check"],
-    ["declaredTarget", "transition-table helper"],
-    ["legalEventsFrom", "transition-table helper"],
-    ["awaitsOwner", "mission-state classifier; work-items uses it via import of the module"],
-    ["needsEngineer", "mission-state classifier"],
-    ["livenessGrants", "lease-layer helper; holderLiveness is what executeRun reads"],
-    ["killProcessTreeStandIn", "wired as deps.killTree in apps/director-cli.mjs; r18 drives it"],
-    ["isSafePathSegment", "store-contract primitive used via validatePathSegment"],
-    ["validateMissionId", "store-contract alias of validatePathSegment"],
-    ["validateRunId", "store-contract alias of validatePathSegment"],
-    ["schedule", "work-item planner; not invoked by executeRun"],
-    ["selectRunnable", "work-item planner; not invoked by executeRun"],
-    ["describeBoard", "work-item dashboard; not invoked by executeRun"],
-    ["unblockedByGate", "work-item gate helper; openGate is the new run-path caller"],
+    ["modulesReachableFrom", "cannot have a production caller: test-only import-graph helper"],
+    ["createFixedClock", "cannot have a production caller: test/injected clock; production uses Date"],
+    ["allExecutorAdapters", "cannot have a production caller: adapter-test registry enumerator"],
+    ["adapterNamed", "cannot have a production caller: launch path calls buildExecutorLaunch"],
+    ["describeGate", "cannot have a production caller yet: Owner-facing formatter, not on spawn"],
+    ["openGates", "cannot have a production caller yet: dashboard listing, not on spawn"],
+    ["describeVerdict", "cannot have a production caller yet: human formatter for Git verdicts"],
+    ["missionRecordFrom", "cannot have a production caller yet: reader for a persisted mission file"],
+    ["unclassifiedMissionStates", "cannot have a production caller: table-completeness check"],
+    ["declaredTarget", "cannot have a production caller: transition-table helper"],
+    ["legalEventsFrom", "cannot have a production caller yet: dashboard enumerator of advance"],
+    ["awaitsOwner", "cannot have a production caller yet: mission-state classifier"],
+    ["needsEngineer", "cannot have a production caller yet: mission-state classifier"],
+    ["livenessGrants", "cannot have a production caller: holderLiveness is what executeRun reads"],
+    ["killProcessTreeStandIn", "cannot have a call-site: wired as a function value on deps.killTree"],
+    ["isSafePathSegment", "cannot have a production caller: used via validatePathSegment"],
+    ["validateMissionId", "cannot have a production caller: alias of validatePathSegment"],
+    ["validateRunId", "cannot have a production caller: alias of validatePathSegment"],
+    ["schedule", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
+    ["selectRunnable", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
+    ["describeBoard", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
+    ["unblockedByGate", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
+  ]);
+  const ownerDecisionDeadModules = new Map<string, string>([
+    ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
+    ["src-reachability.ts", "OWNER_DECISION_TEST_HELPER: modulesReachableFrom is a test-only import-graph helper that lives in src/"],
   ]);
 
   const orphans: string[] = [];
@@ -179,6 +181,50 @@ test("every exported src function reachable from the run path has a non-test cal
     orphans,
     [],
     `exported functions with no non-test call site: ${orphans.join(", ")}`,
+  );
+
+  const emptyReasons = [...exceptions.entries()].filter(([, reason]) => reason.trim() === "").map(([name]) => name);
+  assert.deepEqual(emptyReasons, [], `exception allowlist entries must name why the symbol cannot yet have a caller: ${emptyReasons.join(", ")}`);
+
+  const moduleHasExternalCaller = new Map<string, boolean>();
+  for (const [file, names] of exported) {
+    let external = false;
+    for (const name of names) {
+      for (const [otherFile, source] of files) {
+        if (otherFile === file) continue;
+        if (calledIn(source, name)) {
+          external = true;
+          break;
+        }
+      }
+      if (external) break;
+      for (const app of appSources) {
+        if (new RegExp(String.raw`\b${name}\s*\(`).test(app)) {
+          external = true;
+          break;
+        }
+      }
+      if (external) break;
+    }
+    moduleHasExternalCaller.set(file, external);
+  }
+
+  const laundered: string[] = [];
+  for (const [file, names] of exported) {
+    const exceptedHere = names.filter((name) => exceptions.has(name) || exceptions.has(`${file}:${name}`));
+    if (exceptedHere.length === 0) continue;
+    if (moduleHasExternalCaller.get(file) === true) continue;
+    const decision = ownerDecisionDeadModules.get(file);
+    if (decision !== undefined) {
+      assert.match(decision, /^OWNER_DECISION/, `${file} dead-module entry must be a named Owner decision`);
+      continue;
+    }
+    laundered.push(`${file} (${exceptedHere.join(", ")})`);
+  }
+  assert.deepEqual(
+    laundered,
+    [],
+    `excepted symbols live in a module with zero external production callers: ${laundered.join("; ")}`,
   );
   void productionSources;
 });

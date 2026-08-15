@@ -142,6 +142,32 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
     return 2;
   }
 
+  // Mint is documentation of the mission object under the run root.
+  // It must not change the CLI exit-code contract: a refused id, a
+  // write failure, or an advance refusal still proceeds to launchRun.
+  const missionId = values.get("mission-id");
+  if (typeof missionId === "string" && missionId.trim() !== "") {
+    try {
+      const minted = director.createNewMission({
+        missionId,
+        now: nowIso(),
+      });
+      if (minted.ok) {
+        const authorized = director.advance(minted.record.state, "MISSION_AUTHORIZED");
+        try {
+          writeFileSync(join(runRoot, "mission.json"), `${JSON.stringify({
+            record: minted.record,
+            authorized: { ok: authorized.ok, to: authorized.to, reason: authorized.reason },
+          }, null, 2)}\n`);
+        } catch {
+          // The mission object was still minted; a write failure is not a CLI failure.
+        }
+      }
+    } catch {
+      // Minting must not fail an otherwise-good run.
+    }
+  }
+
   const storeRoot = director.sandboxDirectorStoreRoot(env);
   const leaseKind = required(values, "lease-kind");
   const arbitrationRoot = director.derivedHostArbitrationRoot(env);
