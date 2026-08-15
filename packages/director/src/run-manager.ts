@@ -91,7 +91,10 @@ import {
   type ProcessIdentityV1,
 } from "./leases.js";
 import {
+  ANCESTRY_SAMPLE_INTERVAL_MS,
+  ANCESTRY_SAMPLE_MAX_PER_RUN,
   captureProcessIdentity,
+  createWindowsAncestrySampler,
   createWindowsOrphanScanner,
   createdBeforeFloor,
   descendantPidsOf,
@@ -103,11 +106,13 @@ import {
   nextUndecidablePersistenceDecision,
   parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
+  rememberSampledDescendantPids,
   rowHasPositiveRunIdentity,
   undecidableRowsOf,
   UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS,
   UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS,
   placeableInstantMs,
+  type AncestrySampleRowV1,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type OrphanVerdictV1,
@@ -259,6 +264,14 @@ export interface RunManagerDepsV1 {
     holderExitedAt?: string;
     observedPids?: readonly number[];
   }) => readonly OrphanSightingV1[];
+  /**
+   * Optional test hook. When omitted and `scanOrphans` is also omitted,
+   * production uses {@link createWindowsAncestrySampler}. A failed sample
+   * is ignored: it is not a scan and is never "no descendants".
+   */
+  readonly sampleAncestry?: (query: {
+    readonly holderPid: number;
+  }) => readonly AncestrySampleRowV1[];
   readonly logSinks?: { readonly stdout: LogSinkV1; readonly stderr: LogSinkV1 };
   /**
    * Re-check each parsed artifact after resolving junctions. Default is
@@ -1790,6 +1803,15 @@ export async function executeRun(
       exitCode = ended.code;
       holderExitedAt = deps.clock.now();
     } else {
+      // First sample is synchronous so a short-lived launcher can still
+      // land in observedPids before the exit race. Failures are ignored.
+      void sampleAncestryWhileChildAlive({
+        child,
+        holderPid: childPid,
+        observedPids: seenInTreePids,
+        wait: deps.wait,
+        sampleAncestry: resolveAncestrySampler(deps),
+      });
       const raced = await Promise.race([
         raceExit(child, request.timeoutMs, deps.wait, () => {
           if (heldLease === null) return;
@@ -2239,6 +2261,50 @@ function resolveOrphanScanner(
   return scanOrphans ?? createWindowsOrphanScanner();
 }
 
+function resolveAncestrySampler(
+  deps: Pick<RunManagerDepsV1, "sampleAncestry" | "scanOrphans">,
+): NonNullable<RunManagerDepsV1["sampleAncestry"]> {
+  if (deps.sampleAncestry !== undefined) return deps.sampleAncestry;
+  // Tests that inject scanOrphans are not on the production host. A no-op
+  // wait plus a hanging child would otherwise launch hundreds of CIM listings.
+  if (deps.scanOrphans !== undefined) return () => [];
+  return createWindowsAncestrySampler();
+}
+
+/**
+ * Ancestry-only samples while the spawned child is alive. Never kills,
+ * never mints a proof, never marks a scan UNAVAILABLE. A failed sample
+ * is ignored.
+ *
+ * Limit: an intermediate that is born and dies entirely between two
+ * samples is missed. That is the Job Object Owner decision, not a
+ * predicate this loop can close.
+ */
+async function sampleAncestryWhileChildAlive(input: {
+  readonly child: SpawnHandleV1;
+  readonly holderPid: number;
+  readonly observedPids: Set<number>;
+  readonly wait: (ms: number) => Promise<void>;
+  readonly sampleAncestry: NonNullable<RunManagerDepsV1["sampleAncestry"]>;
+}): Promise<void> {
+  let samples = 0;
+  while (!input.child.exited && samples < ANCESTRY_SAMPLE_MAX_PER_RUN) {
+    try {
+      const rows = input.sampleAncestry({ holderPid: input.holderPid });
+      rememberSampledDescendantPids(input.observedPids, input.holderPid, rows);
+    } catch {
+      // A failed sample is not a scan. Do not treat it as "no descendants".
+    }
+    samples += 1;
+    if (input.child.exited) break;
+    try {
+      await input.wait(ANCESTRY_SAMPLE_INTERVAL_MS);
+    } catch {
+      // A rejecting wait must not become a scan or stop the run.
+    }
+  }
+}
+
 async function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
@@ -2304,13 +2370,16 @@ async function collectWriterOrphans(input: {
       plausibility = ctxFor(sightings);
     }
     rememberInTreePids(observedPids, sightings, input.runNonce, holderPid);
+    const membershipTree = {
+      holderPid: holderPid ?? null,
+      rows: sightings,
+      createdNotBefore,
+      ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+      observedPids,
+    };
     const liveSightings = sightings.filter((sighting) =>
       processRowCouldBelongToThisRun(sighting, plausibility)
-      && writerSightingNotProvenAbsent(
-        sighting,
-        input.runNonce,
-        { holderPid: holderPid ?? null, rows: sightings },
-      ),
+      && writerSightingNotProvenAbsent(sighting, input.runNonce, membershipTree),
     );
     return { performed: true, sightings, liveSightings };
   } catch {
@@ -2321,10 +2390,12 @@ async function collectWriterOrphans(input: {
 }
 
 /**
- * "Not proven absent" for this run. Name/ancestry/nonce ordering is the
- * same exported helpers {@link processRowCouldBelongToThisRun} uses: a
- * broker image name may only exclude a row that failed every positive test.
- * A foreign process with a different nonce and no ancestry is not ours.
+ * "Not proven absent" for this run. When the caller supplies the same
+ * membership context {@link processRowCouldBelongToThisRun} uses
+ * (`createdNotBefore` and `observedPids`), this is that function — the
+ * two cannot disagree by construction. The leftover-remaining shape
+ * (those fields omitted) keeps the older null-nonce / unreadable catch-alls
+ * used by kill-sweep callers that do not carry a scan context.
  */
 export function writerSightingNotProvenAbsent(
   sighting: OrphanSightingV1,
@@ -2348,9 +2419,12 @@ export function writerSightingNotProvenAbsent(
     observedPids: tree.observedPids ?? new Set<number>(),
     rows: tree.rows,
   };
-  // Same exported helpers processRowCouldBelongToThisRun uses. A name
-  // may only exclude a row that failed those. The parentless closed
-  // interval is the same F10-gated function so the two cannot drift.
+  if (tree.createdNotBefore !== undefined && tree.observedPids !== undefined) {
+    return processRowCouldBelongToThisRun(sighting, ctx);
+  }
+  // Incomplete leftover-remaining shape. A name may only exclude a row
+  // that failed the positive tests. The parentless closed interval is
+  // the same F10-gated function so that half cannot drift.
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
   if (isBrokerHostName(sighting.name)) return false;
   if (parentlessRowTiedToThisRun(sighting, ctx)) return true;
@@ -2942,8 +3016,14 @@ export function createNodeWait(): (ms: number) => Promise<void> {
  * AssignProcessToJobObject are not exposed by libuv or child_process. This module is
  * forbidden from adding a native dependency. `child.kill()` is TerminateProcess on the
  * root PID only and does not reach grandchildren. `taskkill /PID <pid> /T /F` is the
- * stand-in. It is not a Job Object. Do not treat a green suite as proof that the D2
- * CHILD_TREE requirement is met in production.
+ * stand-in. It is not a Job Object.
+ *
+ * The complete closure — not in scope this round; an Owner decision — is a
+ * Job Object on the holder: kill-on-close, breakaway denied, membership
+ * queried with `JOBOBJECT_BASIC_PROCESS_ID_LIST`. No image name, environment
+ * block, or dead intermediate can evade that. Ancestry sampling plus the
+ * parentless predicates cannot close the same gap. Do not treat a green
+ * suite as proof that the D2 CHILD_TREE requirement is met in production.
  */
 export function killProcessTreeStandIn(pid: number): void {
   spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {

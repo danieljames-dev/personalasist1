@@ -396,13 +396,23 @@ function scanQuery() {
 // ---------------------------------------------------------------------------
 
 test("F10 readable parentless in-window row is not ours, not undecidable, SCANNED", () => {
-  const ctx = plausibility({
+  // Liveness: parent 1 was never a descendant of this run.
+  const hostNoise = plausibility({
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: 88912, parentPid: 1 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(READABLE_PARENTLESS_CMD, ctx), false);
-  assert.equal(processRowMakesScanUndecidable(READABLE_PARENTLESS_CMD, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(READABLE_PARENTLESS_CMD, hostNoise), false);
+  assert.equal(processRowMakesScanUndecidable(READABLE_PARENTLESS_CMD, hostNoise), false);
   assert.equal(interpretRows([READABLE_PARENTLESS_CMD]).outcome, "SCANNED");
+
+  // Corrected rule: the same readable row whose parentPid was sampled.
+  const sampled = plausibility({
+    observedPids: new Set([4812, 1]),
+    rows: [{ pid: 4812 }, { pid: 88912, parentPid: 1 }],
+  });
+  assert.equal(READABLE_PARENTLESS_CMD.nonceReadable, true);
+  assert.equal(processRowCouldBelongToThisRun(READABLE_PARENTLESS_CMD, sampled), true);
+  assert.equal(processRowMakesScanUndecidable(READABLE_PARENTLESS_CMD, sampled), true);
 });
 
 test("F10 the R14 F2 unreadable parentless row stays couldBelong, undecidable, UNAVAILABLE", () => {
@@ -416,27 +426,114 @@ test("F10 the R14 F2 unreadable parentless row stays couldBelong, undecidable, U
 });
 
 test("F10 writerSighting does not treat a readable parentless fact as this run", () => {
-  const ctx = plausibility({
-    observedPids: new Set([4812]),
-    rows: [{ pid: 4812 }, { pid: 88912, parentPid: 1 }],
-  });
-  const sighting = {
-    pid: READABLE_PARENTLESS_CMD.pid,
-    name: READABLE_PARENTLESS_CMD.name,
-    creationDate: READABLE_PARENTLESS_CMD.creationDate,
-    parentPid: READABLE_PARENTLESS_CMD.parentPid,
-    nonceReadable: READABLE_PARENTLESS_CMD.nonceReadable,
-    parentPresent: READABLE_PARENTLESS_CMD.parentPresent,
+  type AgreementRow = {
+    readonly pid: number;
+    readonly name?: string;
+    readonly creationDate?: string;
+    readonly parentPid?: number;
+    readonly nonceReadable?: boolean;
+    readonly runNonce?: string | null;
+    readonly parentPresent?: boolean;
+    readonly parentName?: string | null;
   };
-  const could = processRowCouldBelongToThisRun(READABLE_PARENTLESS_CMD, ctx);
-  const notAbsent = writerSightingNotProvenAbsent(sighting, NONCE, {
-    holderPid: 4812,
-    rows: ctx.rows,
-    createdNotBefore: FLOOR,
-    holderExitedAt: HOLDER_EXIT,
-    observedPids: ctx.observedPids,
-  });
-  assert.equal(could && !notAbsent, false);
+  const table: ReadonlyArray<{
+    readonly label: string;
+    readonly row: AgreementRow;
+    readonly observedPids: ReadonlySet<number>;
+    readonly extraRows?: ReadonlyArray<{ readonly pid: number; readonly parentPid?: number }>;
+    readonly holderExitedAt?: string;
+    readonly omitHolderExitedAt?: boolean;
+  }> = [
+    {
+      label: "readable-parentless-unsampled",
+      row: READABLE_PARENTLESS_CMD,
+      observedPids: new Set([4812]),
+    },
+    {
+      label: "readable-parentless-sampled-parent",
+      row: READABLE_PARENTLESS_CMD,
+      observedPids: new Set([4812, 1]),
+    },
+    {
+      label: "unreadable-f2",
+      row: DETACHED_GRANDCHILD,
+      observedPids: new Set([4812]),
+    },
+    {
+      label: "readable-after-exit",
+      row: { ...READABLE_PARENTLESS_CMD, creationDate: "2026-08-13T12:00:20.000Z" },
+      observedPids: new Set([4812]),
+    },
+    {
+      label: "readable-before-floor",
+      row: { ...READABLE_PARENTLESS_CMD, creationDate: "2026-01-01T00:00:00.000Z" },
+      observedPids: new Set([4812]),
+    },
+    {
+      label: "readable-live-parent",
+      row: { ...READABLE_PARENTLESS_CMD, parentPresent: true },
+      observedPids: new Set([4812]),
+    },
+    {
+      label: "readable-cancel-time-no-ceiling",
+      row: READABLE_PARENTLESS_CMD,
+      observedPids: new Set([4812]),
+      omitHolderExitedAt: true,
+    },
+  ];
+
+  for (const item of table) {
+    const extra = item.extraRows ?? (
+      item.row.parentPid === undefined
+        ? [{ pid: item.row.pid }]
+        : [{ pid: item.row.pid, parentPid: item.row.parentPid }]
+    );
+    const ctxForRow: ProcessRowPlausibilityContextV1 = item.omitHolderExitedAt === true
+      ? {
+        runNonce: NONCE,
+        createdNotBefore: FLOOR,
+        holderPid: 4812,
+        observedPids: item.observedPids,
+        rows: [{ pid: 4812 }, ...extra],
+      }
+      : plausibility({
+        observedPids: item.observedPids,
+        rows: [{ pid: 4812 }, ...extra],
+        ...(item.holderExitedAt !== undefined ? { holderExitedAt: item.holderExitedAt } : {}),
+      });
+    const could = processRowCouldBelongToThisRun(item.row, ctxForRow);
+    const sighting = {
+      pid: item.row.pid,
+      ...(item.row.name !== undefined ? { name: item.row.name } : {}),
+      ...(item.row.creationDate !== undefined ? { creationDate: item.row.creationDate } : {}),
+      ...(item.row.parentPid !== undefined ? { parentPid: item.row.parentPid } : {}),
+      ...(item.row.nonceReadable !== undefined ? { nonceReadable: item.row.nonceReadable } : {}),
+      ...(item.row.parentPresent !== undefined ? { parentPresent: item.row.parentPresent } : {}),
+      ...(item.row.parentName !== undefined && item.row.parentName !== null
+        ? { parentName: item.row.parentName }
+        : {}),
+      ...(item.row.runNonce !== undefined && item.row.runNonce !== null
+        ? { runNonce: item.row.runNonce }
+        : {}),
+    };
+    const notAbsent = writerSightingNotProvenAbsent(sighting, NONCE, {
+      holderPid: 4812,
+      rows: ctxForRow.rows,
+      createdNotBefore: FLOOR,
+      ...(ctxForRow.holderExitedAt !== undefined ? { holderExitedAt: ctxForRow.holderExitedAt } : {}),
+      observedPids: ctxForRow.observedPids,
+    });
+    assert.equal(
+      could && !notAbsent,
+      false,
+      `${item.label}: couldBelong=${could} notProvenAbsent=${notAbsent}`,
+    );
+    assert.equal(
+      !could && notAbsent,
+      false,
+      `${item.label}: couldBelong=${could} notProvenAbsent=${notAbsent}`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -882,6 +882,162 @@ export function descendantPidsOf(
   return out;
 }
 
+/**
+ * Interval floor for ancestry-only samples while the holder is alive.
+ * Shorter than this would turn a cheap CIM listing into a host load.
+ */
+export const ANCESTRY_SAMPLE_INTERVAL_MS = 500;
+
+/**
+ * Hard cap on ancestry samples per run. An intermediate that is born and
+ * dies entirely between two samples is still missed; raising the rate
+ * cannot close that gap. The complete closure is a Windows Job Object
+ * on the holder (kill-on-close, breakaway denied, membership queried
+ * with `JOBOBJECT_BASIC_PROCESS_ID_LIST`). That is an Owner decision
+ * and is not this sampler.
+ */
+export const ANCESTRY_SAMPLE_MAX_PER_RUN = 240;
+
+export type AncestrySampleRowV1 = {
+  readonly pid: number;
+  readonly parentPid?: number;
+  readonly creationDate?: string;
+};
+
+/**
+ * Record pids this Director actually walked as descendants of `holderPid`
+ * on an ancestry-only sample. A failed sample must not call this with an
+ * invented empty listing and must not be treated as "no descendants".
+ *
+ * Limit: an intermediate that is born and dies entirely between two
+ * samples is never added. Closing that gap is the Job Object named
+ * above, not another predicate on image name or environment block.
+ */
+export function rememberSampledDescendantPids(
+  seen: Set<number>,
+  holderPid: number,
+  rows: readonly { readonly pid: number; readonly parentPid?: number }[],
+): void {
+  if (!isUsablePid(holderPid)) return;
+  seen.add(holderPid);
+  for (const pid of descendantPidsOf(holderPid, rows)) {
+    seen.add(pid);
+  }
+}
+
+/**
+ * Cheap ancestry-only listing: `Win32_Process` projected to ProcessId,
+ * ParentProcessId, CreationDate. No PEB read — that is what makes the
+ * orphan scan cost seconds.
+ *
+ * A failed sample throws. The caller must ignore the throw: a failed
+ * sample is not a scan and must never be read as "no descendants".
+ *
+ * Limit: an intermediate that is born and dies entirely between two
+ * samples is missed. The complete closure is a Windows Job Object on
+ * the holder (kill-on-close, breakaway denied,
+ * `JOBOBJECT_BASIC_PROCESS_ID_LIST`), which no image name, environment
+ * block, or dead intermediate can evade. That primitive is an Owner
+ * decision and is not in scope this round.
+ */
+export function createWindowsAncestrySampler(host?: WindowsProbeHostV1): (query: {
+  readonly holderPid: number;
+}) => readonly AncestrySampleRowV1[] {
+  const spawn = host?.spawnSync ?? spawnSync;
+  const script = windowsAncestrySampleScript();
+  return (_query) => {
+    let result: WindowsProbeSpawnResultV1;
+    try {
+      result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        encoding: "utf8",
+        timeout: 15_000,
+        windowsHide: true,
+        shell: false,
+      });
+    } catch (error) {
+      throw new Error(`ancestry sample unavailable: probe failed to start: ${errorMessage(error)}`);
+    }
+    if (result.error) {
+      const message = errorMessage(result.error);
+      throw new Error(
+        /timed? ?out/i.test(message)
+          ? "ancestry sample unavailable: probe timed out"
+          : `ancestry sample unavailable: probe failed: ${message}`,
+      );
+    }
+    return interpretWindowsAncestrySampleOutput({
+      status: result.status,
+      stdout: stripBom(String(result.stdout ?? "")).trim(),
+      stderr: String(result.stderr ?? "").trim(),
+    });
+  };
+}
+
+/**
+ * Map a PowerShell ancestry-sample spawn result to pid/parent/creation
+ * rows. Empty, unparseable, or non-zero-exit output throws — the caller
+ * ignores the throw. A throw is not an empty descendant set.
+ */
+export function interpretWindowsAncestrySampleOutput(input: {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}): readonly AncestrySampleRowV1[] {
+  const combined = `${input.stdout}\n${input.stderr}`;
+  if (/access is denied/i.test(combined)) {
+    throw new Error("ancestry sample unavailable: access-denied");
+  }
+
+  let parsed: unknown = null;
+  if (input.stdout !== "") {
+    try {
+      parsed = JSON.parse(input.stdout);
+    } catch {
+      parsed = null;
+    }
+  }
+  if (input.status !== 0) {
+    if (isPlainObject(parsed) && typeof parsed.reason === "string" && parsed.reason.trim() !== "") {
+      throw new Error(`ancestry sample unavailable: ${parsed.reason}`);
+    }
+    throw new Error(
+      input.status === null
+        ? "ancestry sample unavailable: sample exited without a status"
+        : `ancestry sample unavailable: sample exited ${input.status}`,
+    );
+  }
+  if (input.stdout === "") {
+    throw new Error("ancestry sample unavailable: sample produced no output");
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error("ancestry sample unavailable: sample output was not parseable");
+  }
+  if (parsed.ok !== true) {
+    const why = typeof parsed.reason === "string" ? parsed.reason : "sample returned a failure envelope";
+    throw new Error(`ancestry sample unavailable: ${why}`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(parsed, "processes") || parsed.processes === null) {
+    throw new Error("ancestry sample unavailable: sample did not return a process list");
+  }
+  const rows = asObjectArray(parsed.processes);
+  if (rows === null) {
+    throw new Error("ancestry sample unavailable: sample did not return a process list");
+  }
+
+  const sightings: AncestrySampleRowV1[] = [];
+  for (const row of rows) {
+    if (!isUsablePid(row.pid)) continue;
+    const creationDate = normalisedCreationDate(row.creationDate);
+    const parentPid = isUsablePid(row.parentPid) ? row.parentPid : undefined;
+    sightings.push({
+      pid: row.pid,
+      ...(parentPid !== undefined ? { parentPid } : {}),
+      ...(creationDate !== null ? { creationDate } : {}),
+    });
+  }
+  return sightings;
+}
+
 function asFoundObservation(
   observed: ExecutorProcessIdentityV1 | ProcessObservationV1,
 ): {
@@ -1059,9 +1215,10 @@ export function rowHasPositiveRunIdentity(
  * or it is parentless (dead parent) with no nonce and either a previously
  * observed parent pid or an *unreadable* creation instant in the closed
  * [floor, holder exit] window. A readable PEB that does not carry this
- * run's nonce is a fact, not UNKNOWN — see {@link parentlessRowTiedToThisRun}.
- * A broker image name may only exclude a row that has already failed
- * every positive test. Everything else is host noise.
+ * run's nonce proves only that the environment block lacks the nonce —
+ * see {@link parentlessRowTiedToThisRun}. A broker image name may only
+ * exclude a row that has already failed every positive test. Everything
+ * else is host noise.
  */
 export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -1078,13 +1235,28 @@ export function processRowCouldBelongToThisRun(
 }
 
 /**
- * Parentless membership. Observed-parent widening is unchanged. The
- * closed-interval half is gated on the nonce being unreadable: a
- * successful PEB read that found no `AION_RUN_NONCE` is a positive
- * physical observation (the environment is inherited at creation), not
- * UNKNOWN. A deliberate scrub is the Job Object limit named by
- * `killProcessTreeStandIn`, not something a creation-time window can
- * recover. UNKNOWN (`nonceReadable === false`) stays UNKNOWN.
+ * Parentless membership. Observed-parent widening is unchanged: a parent
+ * pid this Director actually recorded (holder, nonce match, live chain,
+ * or an ancestry sample while the holder was alive) ties the row to this
+ * run regardless of the child's image name or environment block.
+ *
+ * The closed-interval half stays gated on an *unreadable* PEB
+ * (`nonceReadable === false`). A successful PEB read that found no
+ * `AION_RUN_NONCE` proves only that this process's environment block
+ * does not contain the nonce. It does not prove the process is not
+ * ours: `CreateProcess` takes `lpEnvironment`, and a caller that
+ * supplies one (`ProcessStartInfo.EnvironmentVariables.Remove`, or
+ * `spawn(..., { env })`) mints a readable block without the nonce.
+ * That bit is executor-controllable. UNKNOWN (`nonceReadable === false`)
+ * stays UNKNOWN.
+ *
+ * An intermediate that is born and dies entirely between two ancestry
+ * samples is never added to `observedPids`, so this function still
+ * cannot see that grandchild. Closing that gap requires a Windows Job
+ * Object on the holder (kill-on-close, breakaway denied, membership
+ * queried with `JOBOBJECT_BASIC_PROCESS_ID_LIST`). No image name,
+ * environment block, or dead intermediate can evade that. That
+ * primitive is an Owner decision and is not in scope this round.
  */
 export function parentlessRowTiedToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -1413,6 +1585,25 @@ function sightingCreatedNotBefore(
   createdNotBefore: string,
 ): boolean {
   return createdAtOrAfterFloor(sighting.creationDate, createdNotBefore);
+}
+
+function windowsAncestrySampleScript(): string {
+  return [
+    "$ProgressPreference = 'SilentlyContinue';",
+    "try {",
+    "$rows = Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop;",
+    "$hits = New-Object System.Collections.Generic.List[object];",
+    "foreach ($p in $rows) {",
+    "  $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
+    "  [void]$hits.Add([ordered]@{ pid = [int]$p.ProcessId; parentPid = [int]$p.ParentProcessId; creationDate = $cd });",
+    "}",
+    "[ordered]@{ ok = $true; processes = $hits } | ConvertTo-Json -Compress -Depth 5;",
+    "exit 0",
+    "} catch {",
+    "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",
+    "exit 1",
+    "}",
+  ].join("\n");
 }
 
 function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedFloorIso: string): string {

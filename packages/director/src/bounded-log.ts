@@ -262,7 +262,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     }
   }
 
-  function accountHoldbackDrop(state: StreamState, droppedBytes: number): void {
+  function accountHoldbackDrop(stream: LogStreamV1, state: StreamState, droppedBytes: number): void {
     if (droppedBytes <= 0) return;
     const instant = lastWriteAt ?? deps.clock.now();
     state.droppedLiveBytes += droppedBytes;
@@ -270,6 +270,10 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     state.liveTruncated = true;
     state.fileTruncated = true;
     state.truncatedAt ??= instant;
+    // The report already counted these bytes. Re-image so the on-disk
+    // artifact carries `[AION_LOG_TRUNCATED dropped=N]`. Do not add the
+    // marker length to droppedFileBytes.
+    deps.sinks[stream].replace(fileImageOf(state));
   }
 
   function emitPending(stream: LogStreamV1, force: boolean): void {
@@ -282,14 +286,14 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     if (force) {
       const redacted = redactOpenPrivateKey(state.pending);
       state.pending = "";
-      accountHoldbackDrop(state, redacted.droppedBytes);
+      accountHoldbackDrop(stream, state, redacted.droppedBytes);
       if (redacted.text.length === 0) return;
       ingestRedacted(stream, Buffer.from(redactLogText(redacted.text), "utf8"));
       return;
     }
     const split = splitHoldback(state);
     state.pending = split.hold;
-    accountHoldbackDrop(state, split.droppedBytes);
+    accountHoldbackDrop(stream, state, split.droppedBytes);
     if (split.emit.length === 0) return;
     ingestRedacted(stream, Buffer.from(redactLogText(split.emit), "utf8"));
   }
