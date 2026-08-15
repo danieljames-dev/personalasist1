@@ -912,7 +912,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
           sighting,
           holderPid,
           rows,
-          holderExitedAt !== undefined ? { holderExitedAt } : undefined,
+          holderChainBounds(query.createdNotBefore, holderExitedAt),
         );
       if (!nonceMatch && !descendant) return false;
       return sightingCreatedNotBefore(sighting, query.createdNotBefore);
@@ -935,7 +935,28 @@ function isInHolderTree(
 
 export type HolderChainBoundsV1 = {
   readonly holderExitedAt?: string;
+  /** Spawn floor. The exit ceiling is applied only when it is strictly after this instant. */
+  readonly createdNotBefore?: string;
 };
+
+function holderChainBounds(
+  createdNotBefore?: string,
+  holderExitedAt?: string,
+): HolderChainBoundsV1 | undefined {
+  if (createdNotBefore === undefined && holderExitedAt === undefined) return undefined;
+  return {
+    ...(createdNotBefore !== undefined ? { createdNotBefore } : {}),
+    ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+  };
+}
+
+/**
+ * The exit ceiling is a proof test. A degenerate ceiling (missing, or not
+ * strictly after the spawn floor) proves nothing, so the edge stays ours.
+ */
+function holderExitedAtCeilingIsUsable(bounds?: HolderChainBoundsV1): boolean {
+  return provenCreatedStrictlyAfter(bounds?.holderExitedAt, bounds?.createdNotBefore);
+}
 
 type ChainRowV1 = {
   readonly pid: number;
@@ -981,8 +1002,10 @@ export function descendantPidsOf(
  * holder exited stays in the chain because its edge is from the still-
  * live intermediate, not from the holder.
  *
- * - Edge out of `holderPid`: drop only when the child is *proven*
- *   created strictly after `holderExitedAt`.
+ * - Edge out of `holderPid`: drop only when the exit ceiling is
+ *   strictly after the spawn floor *and* the child is *proven*
+ *   created strictly after `holderExitedAt`. A degenerate ceiling
+ *   (equal to the floor, missing, or unplaceable) proves nothing.
  * - Edge out of a snapshot parent: drop only when the child is *proven*
  *   created strictly before that parent's `creationDate`.
  * Missing or unplaceable dates keep the edge.
@@ -996,6 +1019,7 @@ function holderChainEdgeIsPossible(
 ): boolean {
   if (
     parentPid === holderPid
+    && holderExitedAtCeilingIsUsable(bounds)
     && provenCreatedStrictlyAfter(child.creationDate, bounds?.holderExitedAt)
   ) {
     return false;
@@ -1337,7 +1361,7 @@ export function rowIsInHolderChain(
   return descendantPidsOf(
     ctx.holderPid,
     ctx.rows,
-    ctx.holderExitedAt !== undefined ? { holderExitedAt: ctx.holderExitedAt } : undefined,
+    holderChainBounds(ctx.createdNotBefore, ctx.holderExitedAt),
   ).has(sighting.pid);
 }
 
@@ -1456,7 +1480,7 @@ function parentOccupantIsInHolderChain(
   return descendantPidsOf(
     ctx.holderPid,
     ctx.rows,
-    ctx.holderExitedAt !== undefined ? { holderExitedAt: ctx.holderExitedAt } : undefined,
+    holderChainBounds(ctx.createdNotBefore, ctx.holderExitedAt),
   ).has(sighting.parentPid);
 }
 

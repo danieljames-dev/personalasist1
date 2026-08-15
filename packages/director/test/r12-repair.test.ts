@@ -4,7 +4,7 @@
  * matching class fix is in.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -20,10 +20,15 @@ import { GROK_MAX_TURNS } from "../src/executor-adapters.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
   acquireLease,
+  canonicalResource,
   reclaimStaleLease,
   type LeaseV1,
 } from "../src/leases.js";
-import { createNodeLeaseStore } from "../src/lease-store.js";
+import { createNodeLeaseStore, hostArbitrationRoot } from "../src/lease-store.js";
+import {
+  DIRECTOR_STORE_LAYOUT_V1,
+  hostLockFileName,
+} from "../src/store-contract.js";
 import {
   createWindowsOrphanScanner,
   interpretWindowsOrphanScanOutput,
@@ -770,13 +775,15 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
   const previousRoot = process.env.AION_DIRECTOR_ROOT;
   delete process.env.AION_DIRECTOR_STORE;
   process.env.AION_DIRECTOR_ROOT = join(dir, "host-store");
+  let first: ReturnType<typeof launchRun> | undefined;
+  let hanging: SpawnHandleV1 | undefined;
   try {
     const promptPath = join(dir, "PROMPT.md");
     writeFileSync(promptPath, "accept\n");
     let firstSpawned = false;
     let hangingExited = false;
     let resolveHang: ((value: { code: number | null; signal: string | null }) => void) | null = null;
-    const hanging: SpawnHandleV1 = {
+    hanging = {
       pid: 4812,
       stdout: Readable.from([""]),
       stderr: Readable.from([""]),
@@ -792,7 +799,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         return hangingExited;
       },
     };
-    const first = launchRun(
+    first = launchRun(
       {
         runId: "run-a",
         missionId: "mission-1",
@@ -815,7 +822,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         spawn: (_exe, _argv, _options, permit) => {
           requireSpawnPermit(permit);
           firstSpawned = true;
-          return hanging;
+          return hanging!;
         },
         git: matchingGit(HEAD_AFTER, { advance: true }),
         probe: sequentialProbe([foundObservation(RECORDED)]),
@@ -828,13 +835,25 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
       },
     );
 
-    await new Promise<void>((resolve) => {
-      const tick = () => {
-        if (firstSpawned) resolve();
-        else setImmediate(tick);
-      };
-      tick();
-    });
+    // first settles without spawning when the host lock cannot be taken.
+    // An unbounded setImmediate poll then hangs the file (and the glob).
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        const started = Date.now();
+        const tick = () => {
+          if (firstSpawned) resolve();
+          else if (Date.now() - started > 10_000) {
+            reject(new Error("first writer did not spawn within 10s"));
+          } else setImmediate(tick);
+        };
+        tick();
+      }),
+      first.then((result) => {
+        if (!firstSpawned) {
+          throw new Error(`first writer settled without spawning: ${result.reason}`);
+        }
+      }),
+    ]);
 
     const second = await launchRun(
       {
@@ -869,9 +888,22 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
     );
     assert.equal(second.spawned, false, second.reason);
     assert.match(second.reason, /another run holds this|lease refused/);
-    hanging.kill();
-    await first.catch(() => undefined);
   } finally {
+    hanging?.kill();
+    await first?.catch(() => undefined);
+    // B4 withholds the writer (no exit proof). The host lock must not
+    // survive the test or the next PRODUCTION_WRITER on this machine wedges.
+    const named = hostLockFileName({
+      kind: "PRODUCTION_WRITER",
+      resourceKey: canonicalResource("PRODUCTION_WRITER", "default"),
+    });
+    if (named.ok && named.fileName !== null) {
+      try {
+        unlinkSync(join(hostArbitrationRoot(), DIRECTOR_STORE_LAYOUT_V1.locksDir, named.fileName));
+      } catch {
+        // Missing lock is the desired end state.
+      }
+    }
     if (previousStore === undefined) delete process.env.AION_DIRECTOR_STORE;
     else process.env.AION_DIRECTOR_STORE = previousStore;
     if (previousRoot === undefined) delete process.env.AION_DIRECTOR_ROOT;

@@ -2965,7 +2965,7 @@ async function collectWriterOrphans(input: {
       sightings = [...clean];
       plausibility = ctxFor(sightings);
     }
-    rememberInTreePids(observedPids, sightings, input.runNonce, holderPid, holderExitedAt);
+    rememberInTreePids(observedPids, sightings, input.runNonce, holderPid, holderExitedAt, createdNotBefore);
     const membershipTree = {
       holderPid: holderPid ?? null,
       rows: sightings,
@@ -3070,7 +3070,7 @@ function killNonceBearingLeftovers(input: {
   } catch {
     return { confirmed: false, remaining: [], killed: false };
   }
-  rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined, input.holderExitedAt);
+  rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined, input.holderExitedAt, createdNotBefore);
   const tree = { holderPid, rows: leftovers };
   let killed = false;
   for (const leftover of leftovers) {
@@ -3424,9 +3424,14 @@ function rememberInTreePids(
   runNonce: string,
   holderPid: number | undefined,
   holderExitedAt?: string,
+  createdNotBefore?: string,
 ): void {
   if (isUsablePid(holderPid)) seen.add(holderPid);
-  const bounds = holderExitedAt !== undefined ? { holderExitedAt } : undefined;
+  const bounds = {
+    ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+    ...(createdNotBefore !== undefined ? { createdNotBefore } : {}),
+  };
+  const ceilingUsable = provenCreatedStrictlyAfter(holderExitedAt, createdNotBefore);
   for (const sighting of sightings) {
     const nonce = normaliseRunNonce(sighting.runNonce);
     if (nonce !== null && nonce === runNonce) seen.add(sighting.pid);
@@ -3438,7 +3443,11 @@ function rememberInTreePids(
     }
     if (sighting.parentPid !== undefined && seen.has(sighting.parentPid)) {
       const parentIsHolder = isUsablePid(holderPid) && sighting.parentPid === holderPid;
-      if (parentIsHolder && provenCreatedStrictlyAfter(sighting.creationDate, holderExitedAt)) {
+      if (
+        parentIsHolder
+        && ceilingUsable
+        && provenCreatedStrictlyAfter(sighting.creationDate, holderExitedAt)
+      ) {
         continue;
       }
       const parentRow = sightings.find((row) => row.pid === sighting.parentPid);

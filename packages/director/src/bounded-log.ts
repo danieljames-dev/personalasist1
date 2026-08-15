@@ -235,9 +235,16 @@ export function redactLogText(text: string): string {
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
   out = out.replace(
-    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)(?:(Bearer|Basic|Digest|Negotiate|NTLM|Token|ApiKey)([^\S\r\n]+))?[^\s\r\n]+/gi,
-    (_m, head: string, scheme: string | undefined, space: string | undefined) =>
-      `${head}${scheme ?? ""}${space ?? ""}${REDACTED}`,
+    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)("?)(?:(Bearer|Basic|Digest|Negotiate|NTLM|Token|ApiKey)([^\S\r\n]+))?([^\s\r\n"]*)("?)/gi,
+    (
+      _m,
+      head: string,
+      openQuote: string | undefined,
+      scheme: string | undefined,
+      space: string | undefined,
+      _value: string | undefined,
+      closeQuote: string | undefined,
+    ) => `${head}${openQuote ?? ""}${scheme ?? ""}${space ?? ""}${REDACTED}${closeQuote ?? ""}`,
   );
   out = out.replace(/(?<![A-Za-z-])Bearer\s+\S+/g, `Bearer ${REDACTED}`);
   out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{8,}/g, REDACTED);
@@ -315,6 +322,26 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     writeSink(() => deps.sinks[stream].replace(fileImageOf(state)));
   }
 
+  function noteActualHoldbackRemoval(stream: LogStreamV1, state: StreamState, removedBytes: number): void {
+    if (removedBytes <= 0) return;
+    const covered = Math.min(removedBytes, state.holdbackAccountedBytes);
+    state.holdbackAccountedBytes -= covered;
+    accountHoldbackDrop(stream, state, removedBytes - covered);
+  }
+
+  function noteWithheldHoldback(stream: LogStreamV1, state: StreamState): void {
+    const withheld = redactOpenPrivateKey(state.pending).droppedBytes;
+    if (withheld > state.holdbackAccountedBytes) {
+      accountHoldbackDrop(stream, state, withheld - state.holdbackAccountedBytes);
+    }
+    state.holdbackAccountedBytes = withheld;
+  }
+
+  function noteForceHoldbackDrop(stream: LogStreamV1, state: StreamState, droppedBytes: number): void {
+    noteActualHoldbackRemoval(stream, state, droppedBytes);
+    state.holdbackAccountedBytes = 0;
+  }
+
   function emitPending(stream: LogStreamV1, force: boolean): void {
     const state = streams[stream];
     if (force) {
@@ -337,7 +364,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
           const dropped = Buffer.byteLength(state.pending, "utf8");
           state.pending = "";
           state.pemOverflow = true;
-          accountHoldbackDrop(stream, state, dropped);
+          noteForceHoldbackDrop(stream, state, dropped);
           return;
         }
         const endFinder = new RegExp(PRIVATE_KEY_END_LINE.source);
@@ -347,7 +374,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
           const emit = state.pending.slice(endMatch.index);
           state.pending = "";
           state.pemOverflow = false;
-          accountHoldbackDrop(stream, state, Buffer.byteLength(discarded, "utf8"));
+          noteForceHoldbackDrop(stream, state, Buffer.byteLength(discarded, "utf8"));
           if (emit.length > 0) {
             ingestRedacted(stream, Buffer.from(redactLogText(emit), "utf8"));
           }
@@ -359,7 +386,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
       const stillOpen = hadOpenBegin && !privateKeyBlockIsClosed(redacted.text);
       state.pending = "";
       state.pemOverflow = stillOpen;
-      accountHoldbackDrop(stream, state, redacted.droppedBytes);
+      noteForceHoldbackDrop(stream, state, redacted.droppedBytes);
       if (redacted.text.length === 0) return;
       ingestRedacted(stream, Buffer.from(redactLogText(redacted.text), "utf8"));
       return;
@@ -424,7 +451,8 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
       const split = splitHoldback(state);
       state.pending = split.hold;
       if (openPem) state.pemOverflow = true;
-      accountHoldbackDrop(stream, state, split.droppedBytes);
+      noteActualHoldbackRemoval(stream, state, split.droppedBytes);
+      noteWithheldHoldback(stream, state);
       if (split.emit.length > 0) {
         ingestRedacted(stream, Buffer.from(redactLogText(split.emit), "utf8"));
       }
@@ -432,7 +460,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     }
     const redacted = redactOpenPrivateKey(state.pending);
     state.pending = "";
-    accountHoldbackDrop(stream, state, redacted.droppedBytes);
+    noteForceHoldbackDrop(stream, state, redacted.droppedBytes);
     if (redacted.text.length === 0) return;
     ingestRedacted(stream, Buffer.from(redactLogText(redacted.text), "utf8"));
   }
@@ -509,6 +537,8 @@ interface StreamState {
    * force-dropped. Not "ever overflowed".
    */
   pemOverflow: boolean;
+  /** Held secret-body bytes already counted as dropped so flush+seal do not double-count. */
+  holdbackAccountedBytes: number;
 }
 
 function emptyStream(): StreamState {
@@ -523,6 +553,7 @@ function emptyStream(): StreamState {
     droppedFileBytes: 0,
     truncatedAt: null,
     pemOverflow: false,
+    holdbackAccountedBytes: 0,
   };
 }
 

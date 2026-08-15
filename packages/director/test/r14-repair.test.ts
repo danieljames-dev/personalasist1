@@ -748,7 +748,7 @@ const wmiSelfRow = {
   creationDate: "2026-08-14T21:32:15.336Z",
 };
 
-test("D a WmiPrvSE.exe row born inside the run window is SCANNED host noise", () => {
+test("D a WmiPrvSE.exe row born inside the run window is UNAVAILABLE, not SCANNED host noise", () => {
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({ ok: true, unreadable: 0, processes: [wmiSelfRow] }),
@@ -758,7 +758,10 @@ test("D a WmiPrvSE.exe row born inside the run window is SCANNED host noise", ()
     holderPid: 4812,
     holderExitedAt: "2026-08-14T21:32:16.000Z",
   });
-  assert.equal(interpreted.outcome, "SCANNED", JSON.stringify(interpreted));
+  // Class 1a: basename is not a negative fact. The same in-window
+  // parentless/broker-parented shape named evil.exe is UNAVAILABLE;
+  // WmiPrvSE.exe must share that verdict.
+  assert.equal(interpreted.outcome, "UNAVAILABLE", JSON.stringify(interpreted));
 });
 
 test("D the same row named node.exe is still UNAVAILABLE", () => {
@@ -778,16 +781,18 @@ test("D the same row named node.exe is still UNAVAILABLE", () => {
   assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
-test("D executeRun with a self-minted WmiPrvSE.exe row still succeeds and releases", async () => {
+test("D executeRun with a self-minted WmiPrvSE.exe row does not succeed or release", async () => {
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [wmiSelfRow],
+    scanOrphans: () => [{ ...wmiSelfRow, creationDate: NOW }],
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-d" } },
   });
-  assert.equal(result.ok, true, result.reason);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-d"), false);
+  // Class 1a: a self-minted WmiPrvSE.exe leftover is UNDECIDABLE, so the
+  // writer lease must stay held. The old fail-open released it.
+  assert.equal(result.ok, false, result.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-d"), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -946,12 +951,25 @@ test("G2 a bare-colon Authorization value is redacted", () => {
 });
 
 test("G2 a JSON authorization field is redacted", () => {
-  const { log, stdout } = logger();
-  log.write("stdout", '{"authorization":"Basic dXNlcjpwdw=="}\n');
-  log.flush();
-  const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}`;
-  assert.equal(text.includes("dXNlcjpwdw=="), false, text);
-  assert.match(text, /\[REDACTED\]/);
+  const schemes = ["Bearer", "Basic", "Digest", "Negotiate", "NTLM", "Token", "ApiKey"] as const;
+  const cases: ReadonlyArray<{ input: string; leaked: string }> = [
+    { input: '{"authorization":"Basic dXNlcjpwdw=="}', leaked: "dXNlcjpwdw==" },
+    { input: "Authorization: Basic dXNlcjpwdw==", leaked: "dXNlcjpwdw==" },
+    { input: '{"authorization":"abc123secret"}', leaked: "abc123secret" },
+    { input: "Authorization:hunter2prodcredential", leaked: "hunter2prodcredential" },
+    ...schemes.map((scheme) => ({
+      input: `{"authorization":"${scheme} schemeSecret${scheme}Value"}`,
+      leaked: `schemeSecret${scheme}Value`,
+    })),
+  ];
+  for (const item of cases) {
+    const { log, stdout } = logger();
+    log.write("stdout", `${item.input}\n`);
+    log.flush();
+    const text = `${log.liveTail("stdout").toString("utf8")}\n${stdout.contents().toString("utf8")}\n${redactLogText(item.input)}`;
+    assert.equal(text.includes(item.leaked), false, `${item.input} => ${text}`);
+    assert.match(text, /\[REDACTED\]/);
+  }
 });
 
 test("G3 a PEM hold overflow emits a redacted open block, not the key body", () => {

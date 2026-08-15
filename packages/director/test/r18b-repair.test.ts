@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -30,6 +31,7 @@ import type { GitRunner } from "../src/git-truth.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
   acquireLease,
+  canonicalResource,
   leaseHasExpired,
   reclaimStaleLease,
   type LeaseV1,
@@ -39,6 +41,10 @@ import {
   createNodeLeaseStore,
   hostArbitrationRoot,
 } from "../src/lease-store.js";
+import {
+  DIRECTOR_STORE_LAYOUT_V1,
+  hostLockFileName,
+} from "../src/store-contract.js";
 import {
   createWindowsOrphanScanner,
   identityFromObservation,
@@ -491,14 +497,49 @@ test("C2 reused holder slot after exit is not in the chain and is not killed", a
   assert.equal(rowIsInHolderChain(row, ctx), false);
   assert.equal(rowHasPositiveRunIdentity(row, ctx), false);
   const killed: number[] = [];
+  // A single fixed clock makes spawn floor and holderExitedAt the same
+  // instant, which is not a usable ceiling. The row is 20s after exit
+  // only when the clock actually advances past spawn.
+  let spawned = false;
+  const clock = {
+    now() {
+      return spawned ? HOLDER_EXIT : T0;
+    },
+  };
+  const inner = trackingSpawn(() => exitingProcess());
   await runWith({
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-c2" } },
+    clock,
+    spawn: (exe, argv, options, permit) => {
+      const handle = inner(exe, argv, options, permit);
+      spawned = true;
+      return handle;
+    },
     scanOrphans: () => [row],
     killTree: (pid) => {
       killed.push(pid);
     },
   });
   assert.equal(killed.includes(5000), false, `killTree called with ${killed.join(",")}`);
+});
+
+test("C2 a degenerate holderExitedAt on the spawn floor keeps the in-window child", () => {
+  const child = { pid: 1238, parentPid: 4812, creationDate: T0 };
+  const reused = { pid: 5000, parentPid: 4812, creationDate: "2026-08-13T12:00:30.000Z" };
+  const degenerate = plausibility({
+    createdNotBefore: FLOOR,
+    holderExitedAt: FLOOR,
+    rows: [child, reused],
+  });
+  assert.equal(rowIsInHolderChain(child, degenerate), true);
+  assert.equal(rowIsInHolderChain(reused, degenerate), true, "without a usable ceiling the later row stays UNKNOWN-ours");
+  const usable = plausibility({
+    createdNotBefore: FLOOR,
+    holderExitedAt: HOLDER_EXIT,
+    rows: [child, reused],
+  });
+  assert.equal(rowIsInHolderChain(child, usable), true);
+  assert.equal(rowIsInHolderChain(reused, usable), false);
 });
 
 test("C2 the same row created before holderExitedAt stays in the chain and is killed", async () => {
@@ -997,6 +1038,136 @@ test("C8 hostArbitrationRoot ignores TEMP, TMP and AION_DIRECTOR_ROOT", () => {
   assert.equal(root, join("C:\\ProgramData", "AION", "director-d2-host-locks"));
   assert.equal(root.includes("tmp-a"), false);
   assert.equal(root.includes("moved-store"), false);
+});
+
+function plantHostWriterLock(
+  arb: string,
+  record: string | Record<string, unknown>,
+): string {
+  const resourceKey = canonicalResource("PRODUCTION_WRITER", "default");
+  const named = hostLockFileName({ kind: "PRODUCTION_WRITER", resourceKey });
+  assert.equal(named.ok, true);
+  const lockDir = join(arb, DIRECTOR_STORE_LAYOUT_V1.locksDir);
+  mkdirSync(lockDir, { recursive: true });
+  const lockPath = join(lockDir, named.fileName!);
+  writeFileSync(
+    lockPath,
+    typeof record === "string" ? record : `${JSON.stringify(record, null, 2)}\n`,
+    "utf8",
+  );
+  return lockPath;
+}
+
+function acquireAndSaveWriter(
+  storeRoot: string,
+  arb: string,
+  probe: { observe: (pid: number) => ProcessObservationV1 },
+  leaseId: string,
+): void {
+  const store = createNodeLeaseStore(storeRoot, {
+    hostArbitrationRoot: arb,
+    probe,
+  });
+  const attempt = acquireLease({
+    existing: store.list(),
+    leaseId,
+    kind: "PRODUCTION_WRITER",
+    resource: "default",
+    missionId: "mission-1",
+    runId: `run-${leaseId}`,
+    now: NOW,
+  });
+  assert.equal(attempt.ok, true, attempt.reason);
+  store.save([attempt.lease!]);
+}
+
+test("C8 a host lock whose recorded holder is NOT_FOUND is reclaimed", () => {
+  const arb = mkdtempSync(join(tmpdir(), "aion-r18b-reclaim-"));
+  const root = mkdtempSync(join(tmpdir(), "aion-r18b-reclaim-s-"));
+  try {
+    const lockPath = plantHostWriterLock(arb, {
+      leaseId: "stale-dead",
+      kind: "PRODUCTION_WRITER",
+      resource: "default",
+      resourceKey: canonicalResource("PRODUCTION_WRITER", "default"),
+      missionId: "mission-stale",
+      runId: "run-stale",
+      pid: 424242,
+      acquiredAt: NOW,
+      heartbeatAt: NOW,
+      expiresAt: "2026-08-13T12:10:00.000Z",
+    });
+    assert.equal(existsSync(lockPath), true);
+    acquireAndSaveWriter(root, arb, {
+      observe: () => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid" }),
+    }, "lease-pw-reclaim");
+    assert.equal(existsSync(lockPath), true, "the next holder must replace the lock, not leave the slot empty");
+    const raw = readFileSync(lockPath, "utf8");
+    assert.match(raw, /lease-pw-reclaim/);
+    assert.doesNotMatch(raw, /stale-dead/);
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("C8 a host lock whose holder probe is UNAVAILABLE is refused and names the path", () => {
+  const arb = mkdtempSync(join(tmpdir(), "aion-r18b-unk-"));
+  const root = mkdtempSync(join(tmpdir(), "aion-r18b-unk-s-"));
+  try {
+    const lockPath = plantHostWriterLock(arb, {
+      leaseId: "stale-unknown",
+      kind: "PRODUCTION_WRITER",
+      resource: "default",
+      resourceKey: canonicalResource("PRODUCTION_WRITER", "default"),
+      missionId: "mission-stale",
+      runId: "run-stale",
+      pid: 424243,
+      acquiredAt: NOW,
+      heartbeatAt: NOW,
+      expiresAt: "2026-08-13T12:10:00.000Z",
+    });
+    let message = "";
+    try {
+      acquireAndSaveWriter(root, arb, {
+        observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }),
+      }, "lease-pw-unk");
+      assert.fail("expected save to refuse");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assert.match(message, /UNKNOWN|unproven|could not|unanswered|UNAVAILABLE/i);
+    assert.equal(message.includes(lockPath), true, message);
+    assert.equal(existsSync(lockPath), true, "UNKNOWN must not delete the lock");
+    assert.match(readFileSync(lockPath, "utf8"), /stale-unknown/);
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("C8 an unparseable host lock is refused, names the path, and is not deleted", () => {
+  const arb = mkdtempSync(join(tmpdir(), "aion-r18b-bad-"));
+  const root = mkdtempSync(join(tmpdir(), "aion-r18b-bad-s-"));
+  try {
+    const lockPath = plantHostWriterLock(arb, "{not-json");
+    let message = "";
+    try {
+      acquireAndSaveWriter(root, arb, {
+        observe: () => ({ outcome: "NOT_FOUND", reason: "must not be consulted for garbage" }),
+      }, "lease-pw-bad");
+      assert.fail("expected save to refuse");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assert.match(message, /UNKNOWN|unreadable|unparseable/i);
+    assert.equal(message.includes(lockPath), true, message);
+    assert.equal(existsSync(lockPath), true, "an unparseable lock must not be silently deleted");
+    assert.equal(readFileSync(lockPath, "utf8"), "{not-json");
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("C8 liveness: two WORKTREE resources still both persist", () => {
