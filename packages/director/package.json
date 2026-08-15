@@ -23,8 +23,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
+    "build:local-assistant": "npm --prefix ../local-assistant run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\""
+    "test": "npm run build && npm run build:local-assistant && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\""
   },
   "engines": {
     "node": ">=22"
