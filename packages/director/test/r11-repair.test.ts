@@ -1140,16 +1140,10 @@ test("H director-cli launches at USD 0 against a local stub and returns ok:true"
       spawned?: boolean;
       spendUsd?: number;
     };
+    assert.equal(result.ok, true, result.reason);
     assert.equal(result.spawned, true, result.reason);
     assert.equal(result.spendUsd === undefined || result.spendUsd === 0, true, String(result.spendUsd));
-    // CLASS 1: a parentless in-window host row (Git sleep.exe on this
-    // machine) is UNKNOWN, not proven absent. The stub still ran at
-    // USD 0. ok:true is the clean-window outcome; executorTreeIsGone
-    // is the CLASS 1 outcome. Other failures are still a defect.
-    if (result.ok !== true) {
-      assert.match(result.reason, /executorTreeIsGone|process-tree/);
-    }
-    assert.ok(launched.status === 0 || launched.status === 1, `${launched.stdout}\n${launched.stderr}`);
+    assert.equal(launched.status, 0, `${launched.stdout}\n${launched.stderr}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(stubDir, { recursive: true, force: true });
