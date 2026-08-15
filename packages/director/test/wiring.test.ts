@@ -608,6 +608,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
         fs: hostFs,
         spawn,
         git: {
+          inspectedWorktree: dir,
           run(argv) {
             const key = argv.join(" ");
             if (key === "rev-parse HEAD") {
@@ -698,7 +699,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
     reason: "injected",
     pid: recorded.pid,
     creationDate: recorded.creationDate,
-    executablePath: recorded.executablePath,
+    ...(recorded.executablePath !== undefined ? { executablePath: recorded.executablePath } : {}),
     runNonce: recorded.runNonce,
   };
   let observeIndex = 0;
@@ -784,6 +785,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
         return child;
       },
       git: {
+        inspectedWorktree: cwd,
         run(argv) {
           const key = argv.join(" ");
           if (key === "rev-parse HEAD") return { argv: [...argv], status: 0, stdout: `${headAfter}\n`, stderr: "", error: null };

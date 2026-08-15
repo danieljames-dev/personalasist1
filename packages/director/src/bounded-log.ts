@@ -701,7 +701,7 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
 function secretAnchorKeepLength(hold: string): number {
   const auth = /^(?:proxy-)?authorization"?[^\S\r\n]*:/i.exec(hold);
   if (auth !== null) return Math.min(auth[0].length, 64);
-  const bearer = /^(?:.*?)((?<![A-Za-z-])bearer)/i.exec(hold);
+  const bearer = /^(?:.*?)((?<![A-Za-z-])bearer\s*)/i.exec(hold);
   if (bearer !== null && bearer[1] !== undefined) {
     return Math.min((bearer.index ?? 0) + bearer[1].length, 64);
   }

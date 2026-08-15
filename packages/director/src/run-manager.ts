@@ -85,6 +85,7 @@ import {
 import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
 import {
   createNodeLeaseStore,
+  isHostWideLeaseKind,
   sandboxDirectorStoreRoot,
 } from "./lease-store.js";
 import {
@@ -93,6 +94,7 @@ import {
   conflicts,
   heartbeat,
   LEASE_TTL_MS,
+  livenessFromHolderObservation,
   reclaimStaleLease,
   releaseLease,
   type LeaseKindV1,
@@ -109,6 +111,7 @@ import {
   descendantPidsOf,
   detectOrphan,
   holderLiveness,
+  hostWideTreeEvidenceFromScan,
   identityFromObservation,
   isUsablePid,
   normaliseRunNonce,
@@ -739,26 +742,42 @@ export function evaluateSuccessConjunction(input: {
    * `finishedAt` after this ceiling is not this invocation's report.
    */
   readonly observedCompletedAt?: string | null;
+  /**
+   * Directory the child was given. Git observations must name this
+   * place. Omitted keeps the previous callers' behaviour.
+   */
+  readonly expectedWorktree?: string;
+  /**
+   * libuv signal name when the child died of a signal. A signalled
+   * exit is not a clean completion, even with code 0.
+   */
+  readonly exitSignal?: string | null;
 }): SuccessConjunctionV1 {
   const known = KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
     ? null
     : classifyExecutorExit(input.executor, input.exitCode, input.output);
+  const signalled = input.exitSignal !== null
+    && input.exitSignal !== undefined
+    && input.exitSignal !== "";
 
   const exitOk = !input.stillRunning
     && input.exitCode !== null
+    && !signalled
     && known.includes(input.exitCode)
     && (classified === null || classified.kind === "COMPLETED");
 
   const exitReason = input.stillRunning
     ? "the process is still running"
-    : input.exitCode === null
-      ? "the process did not produce an exit code"
-      : !known.includes(input.exitCode)
-        ? `exit code ${input.exitCode} is not a known-success code`
-        : classified !== null && classified.kind !== "COMPLETED"
-          ? `exit ${input.exitCode} classified as ${classified.kind}, not a completed run`
-          : "process exited with a known-success code";
+    : signalled
+      ? `process exited on signal ${input.exitSignal}; a signalled exit is not a clean completion`
+      : input.exitCode === null
+        ? "the process did not produce an exit code"
+        : !known.includes(input.exitCode)
+          ? `exit code ${input.exitCode} is not a known-success code`
+          : classified !== null && classified.kind !== "COMPLETED"
+            ? `exit ${input.exitCode} classified as ${classified.kind}, not a completed run`
+            : "process exited with a known-success code";
 
   const parsed = input.parsed;
   const handoff = parsed.ok ? parsed.handoff : null;
@@ -875,6 +894,18 @@ export function evaluateSuccessConjunction(input: {
   } else {
     gitOk = true;
     gitReason = "Director Git observation agrees with the handoff";
+  }
+  if (input.expectedWorktree !== undefined) {
+    const expected = canonicalizeHostPath(input.expectedWorktree);
+    const afterPlace = input.gitAfter === null ? "" : canonicalizeHostPath(input.gitAfter.worktreePath);
+    const beforeObs = input.gitBefore;
+    const beforePlace = beforeObs === null || beforeObs === undefined
+      ? ""
+      : canonicalizeHostPath(beforeObs.worktreePath);
+    if (expected === "" || afterPlace === "" || afterPlace !== expected || beforePlace === "" || beforePlace !== expected) {
+      gitOk = false;
+      gitReason = "Git observation does not name the directory the child will run in; a record that names nowhere is not a record";
+    }
   }
 
   const spendContradiction = contradictions.find((item) => item.field === "spendUsd");
@@ -1722,32 +1753,36 @@ export async function executeRun(
       });
     }
 
+    const cwdPlace = canonicalizeHostPath(request.cwd);
+    const worktreePlace = canonicalizeHostPath(request.worktree);
+    // Every Git conjunct observes the directory the child was given.
+    // Binding this for one kind and not the others left the boundary open.
+    if (cwdPlace === "" || worktreePlace === "" || worktreePlace !== cwdPlace) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: request.lease.kind === "WORKTREE"
+          ? "WORKTREE worktree is not the directory the child will run in"
+          : "worktree is not the directory the child will run in",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
     if (request.lease.kind === "WORKTREE") {
       const leasePlace = canonicalResource("WORKTREE", request.lease.resource);
-      const cwdPlace = canonicalizeHostPath(request.cwd);
-      const worktreePlace = canonicalizeHostPath(request.worktree);
-      if (leasePlace === "" || cwdPlace === "" || leasePlace !== cwdPlace) {
+      if (leasePlace === "" || leasePlace !== cwdPlace) {
         return finish({
           ok: false,
           spawned: false,
           reason: "WORKTREE lease resource is not the directory the child will run in",
-          conjunction: emptyConjunction,
-          exitCode: null,
-          processIdentity: null,
-          intent: null,
-          handoff: null,
-          gitAfter: null,
-          lease: null,
-          productionWriterLeaseReleasedByThisRun: false,
-          cancel: emptyCancel,
-          log: null,
-        });
-      }
-      if (worktreePlace === "" || worktreePlace !== cwdPlace) {
-        return finish({
-          ok: false,
-          spawned: false,
-          reason: "WORKTREE worktree is not the directory the child will run in",
           conjunction: emptyConjunction,
           exitCode: null,
           processIdentity: null,
@@ -2034,13 +2069,15 @@ export async function executeRun(
     // reclaim rule; do not invent a second one. Retry acquire once.
     if (!leaseAttempt.ok && leaseAttempt.requiresStalenessCheck === true) {
       try {
-        const reclaimed = reclaimExpiredHolder({
+        const reclaimed = await reclaimExpiredHolder({
           store: leaseStore,
           kind: request.lease.kind,
           resource: request.lease.resource,
           heldBy: leaseAttempt.heldBy,
           probe: deps.probe,
           now: deps.clock.now(),
+          scanOrphans: deps.scanOrphans,
+          wait: deps.wait,
         });
         if (reclaimed.ok) {
           leaseAttempt = acquireLease({
@@ -2052,6 +2089,8 @@ export async function executeRun(
             runId: request.runId,
             now: deps.clock.now(),
           });
+        } else if (reclaimed.reason !== undefined) {
+          leaseAttempt = { ...leaseAttempt, reason: reclaimed.reason };
         }
       } catch {
         // A throwing reclaim is not a granted reclaim. The original refusal stands.
@@ -2176,6 +2215,23 @@ export async function executeRun(
       deps.fs.writeDurable(gitBeforePathLocal, `${JSON.stringify(gitBefore, null, 2)}\n`);
     } catch {
       gitBefore = gitBefore ?? null;
+    }
+    if (!gitObservationNamesGivenWorktree(gitBefore, request.worktree)) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "Git observation does not name the directory the child will run in; a record that names nowhere is not a record",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
     }
 
     const collectIgnoredDelta = isExecutorRole(role) && NON_WRITING_ROLES.has(role) && !argvGrantedWrite;
@@ -2414,7 +2470,6 @@ export async function executeRun(
           childPid,
           recorded: null,
           runNonce,
-          parentExited: confirmedStopped,
           holderPid: childPid,
           createdNotBefore: spawnedAtFloor ?? "",
           observedPids: seenInTreePids,
@@ -2513,6 +2568,7 @@ export async function executeRun(
 
     // 6. Timeout / cancel ladder. mustHalt resolves the race immediately.
     let exitCode: number | null = null;
+    let exitSignal: string | null = null;
 
     const exitWon = child.exited;
     if (exitWon) {
@@ -2531,6 +2587,7 @@ export async function executeRun(
       }
       const ended = await child.exit;
       exitCode = ended.code;
+      exitSignal = ended.signal;
       holderExitedAt = deps.clock.now();
     } else {
       // First sample is synchronous so a short-lived launcher can still
@@ -2557,6 +2614,7 @@ export async function executeRun(
       ]);
       if (raced.tag === "exit") {
         exitCode = raced.exit.code;
+        exitSignal = raced.exit.signal;
         holderExitedAt = deps.clock.now();
       } else {
         if (raced.tag === "timeout") timedOut = true;
@@ -2572,6 +2630,7 @@ export async function executeRun(
         );
         stillRunning = cancelled.stillRunning;
         exitCode = cancelled.exitCode;
+        if (cancelled.exitSignal !== undefined) exitSignal = cancelled.exitSignal;
         if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
       }
     }
@@ -2597,6 +2656,7 @@ export async function executeRun(
       );
       stillRunning = cancelled.stillRunning;
       if (cancelled.exitCode !== null) exitCode = cancelled.exitCode;
+      if (cancelled.exitSignal !== undefined) exitSignal = cancelled.exitSignal;
       if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
     }
 
@@ -2616,7 +2676,6 @@ export async function executeRun(
         childPid,
         recorded: processIdentity,
         runNonce,
-        parentExited: child.exited,
         holderPid: processIdentity?.pid ?? childPid,
         createdNotBefore: spawnedAtFloor ?? "",
         observedPids: seenInTreePids,
@@ -2735,6 +2794,8 @@ export async function executeRun(
       spawnedAtFloor,
       expectedRunNonce: runNonce,
       observedCompletedAt: holderExitedAt ?? deps.clock.now(),
+      expectedWorktree: request.worktree,
+      exitSignal,
       ...(treeIncludingIgnored !== undefined ? { treeIncludingIgnored } : {}),
       ...(treeIncludingIgnoredBefore !== undefined ? { treeIncludingIgnoredBefore } : {}),
     });
@@ -3296,7 +3357,6 @@ function killNonceBearingLeftovers(input: {
   readonly childPid: number;
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
-  readonly parentExited: boolean;
   readonly holderPid?: number;
   readonly createdNotBefore: string;
   readonly holderExitedAt?: string;
@@ -3459,7 +3519,7 @@ async function cancelLadder(
   createdNotBefore: string,
   holderExitedAt?: string | null,
   observedPids?: Set<number>,
-): Promise<{ stillRunning: boolean; exitCode: number | null }> {
+): Promise<{ stillRunning: boolean; exitCode: number | null; exitSignal?: string | null }> {
   // SOFT: terminate the tracked root only. child.kill() is TerminateProcess on this PID.
   try {
     child.kill();
@@ -3470,7 +3530,7 @@ async function cancelLadder(
   await deps.wait(CANCEL_SOFT_MS);
   if (child.exited) {
     const ended = await child.exit;
-    return { stillRunning: false, exitCode: ended.code };
+    return { stillRunning: false, exitCode: ended.code, exitSignal: ended.signal };
   }
 
   // HARD: record the attempt before the call that may throw.
@@ -3495,7 +3555,6 @@ async function cancelLadder(
       childPid: child.pid,
       recorded,
       runNonce,
-      parentExited: child.exited,
       holderPid: recorded?.pid ?? child.pid,
       createdNotBefore,
       ...(observedPids !== undefined ? { observedPids } : {}),
@@ -3508,9 +3567,9 @@ async function cancelLadder(
 
   if (child.exited) {
     const ended = await child.exit;
-    return { stillRunning: false, exitCode: ended.code };
+    return { stillRunning: false, exitCode: ended.code, exitSignal: ended.signal };
   }
-  return { stillRunning: stillAfterHard, exitCode: null };
+  return { stillRunning: stillAfterHard, exitCode: null, exitSignal: null };
 }
 
 function pumpStream(
@@ -3700,7 +3759,6 @@ function recordedIdentityFromHeldLease(
   return {
     pid: id.pid,
     creationDate,
-    executablePath: "C:\\adopted-holder",
     runNonce: rowToken,
   };
 }
@@ -3932,7 +3990,10 @@ function mayPromoteRecoverRecord(
   return false;
 }
 
-function reclaimExpiredHolder(input: {
+const HOST_WIDE_TREE_NOT_CLEAR =
+  "the previous holder's process tree could not be shown clear; an empty pid slot is not a dead run";
+
+async function reclaimExpiredHolder(input: {
   readonly store: LeaseStoreV1;
   readonly kind: LeaseKindV1;
   readonly resource: string;
@@ -3942,11 +4003,47 @@ function reclaimExpiredHolder(input: {
   } | null;
   readonly probe: HostProcessProbe;
   readonly now: string;
-}): { ok: boolean } {
+  readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
+  readonly wait?: (ms: number) => Promise<void>;
+}): Promise<{ ok: boolean; reason?: string }> {
   const recordedPid = input.heldBy?.pid ?? null;
   if (!isUsablePid(recordedPid)) {
     return { ok: false };
   }
+
+  // For a host-wide kind, "the previous holder's run is gone" is a
+  // completed process-tree scan of that run with zero live sightings.
+  // The holder pid slot being empty is a correlate, not the fact.
+  if (isHostWideLeaseKind(input.kind)) {
+    const held = input.store.list().find((lease) => conflicts(lease, {
+      kind: input.kind,
+      resource: input.resource,
+    }));
+    if (held !== undefined) {
+      const runToken = normaliseRunNonce(held.processIdentity?.runToken ?? "");
+      if (runToken === null) {
+        return { ok: false, reason: HOST_WIDE_TREE_NOT_CLEAR };
+      }
+      let scan;
+      try {
+        scan = await collectWriterOrphans({
+          scanOrphans: input.scanOrphans,
+          recorded: null,
+          runNonce: runToken,
+          holderPid: isUsablePid(held.pid) ? held.pid : recordedPid,
+          createdNotBefore: held.processIdentity?.startedAt ?? held.acquiredAt,
+          holderExitedAt: input.now,
+          ...(input.wait !== undefined ? { wait: input.wait } : {}),
+        });
+      } catch {
+        return { ok: false, reason: HOST_WIDE_TREE_NOT_CLEAR };
+      }
+      if (hostWideTreeEvidenceFromScan(scan) !== "CLEAR") {
+        return { ok: false, reason: HOST_WIDE_TREE_NOT_CLEAR };
+      }
+    }
+  }
+
   let observation: ProcessObservationV1;
   try {
     observation = input.probe.observe(recordedPid);
@@ -3954,9 +4051,7 @@ function reclaimExpiredHolder(input: {
     observation = { outcome: "UNAVAILABLE", reason: "probe threw", pid: recordedPid };
   }
 
-  // Same mapping holderLiveness uses for these outcomes. FOUND is not death:
-  // reclaimStaleLease's FOUND branch decides via occupant identity.
-  const liveness = observation.outcome === "UNAVAILABLE" ? "UNKNOWN" : "DEAD_CONFIRMED";
+  const liveness = livenessFromHolderObservation(observation);
 
   const observedIdentity = leaseIdentityFromProbe(observation);
   const result = reclaimStaleLease({
@@ -3970,6 +4065,16 @@ function reclaimExpiredHolder(input: {
   });
   if (result.ok) input.store.save(result.remaining);
   return { ok: result.ok };
+}
+
+function gitObservationNamesGivenWorktree(
+  observation: GitObservationV1 | null | undefined,
+  worktree: string,
+): boolean {
+  if (observation === null || observation === undefined) return false;
+  const observed = canonicalizeHostPath(observation.worktreePath);
+  const expected = canonicalizeHostPath(worktree);
+  return observed !== "" && expected !== "" && observed === expected;
 }
 
 /**

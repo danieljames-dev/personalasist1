@@ -203,9 +203,10 @@ function gitResult(argv: readonly string[], over: { status?: number; stdout?: st
   };
 }
 
-function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; readonly inspectedWorktree?: string } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: opts.inspectedWorktree ?? CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -238,7 +239,7 @@ function foundObservation(identity: ExecutorProcessIdentityV1): ProcessObservati
     reason: "injected",
     pid: identity.pid,
     creationDate: identity.creationDate,
-    executablePath: identity.executablePath,
+    ...(identity.executablePath !== undefined ? { executablePath: identity.executablePath } : {}),
     runNonce: identity.runNonce,
   };
 }
@@ -381,7 +382,7 @@ async function runWith(
       }
       return (over.spawn ?? trackingSpawn(() => exitingProcess()))(executable, argv, options, permit);
     },
-    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: over.request?.worktree ?? CWD }),
     probe: over.probe ?? sequentialProbe([
       foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\claude.exe" }),
       HOLDER_GONE,
@@ -529,7 +530,7 @@ test("F3 a real child that prints and exits during a blocking probe keeps its st
             windowsHide: true,
           }));
         },
-        git: matchingGit(HEAD_AFTER, { advance: true }),
+        git: matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: dir }),
         probe: {
           observe() {
             const end = Date.now() + 200;

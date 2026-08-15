@@ -192,6 +192,7 @@ function memoryLeases(initial: readonly LeaseV1[] = []): LeaseStoreV1 {
 function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -464,8 +465,8 @@ test("P1a incomplete writer context fails closed rather than releasing over host
   const incomplete = { holderPid: 4812, rows: [row] };
   assert.equal(processRowCouldBelongToThisRun(row, plausibility({
     rows: [{ pid: 4812 }, { pid: row.pid, parentPid: row.parentPid }],
-  })), false);
-  assert.equal(writerSightingNotProvenAbsent(row, NONCE, complete), false);
+  })), true);
+  assert.equal(writerSightingNotProvenAbsent(row, NONCE, complete), true);
   // Missing fields that change the answer must not mint "proven absent".
   assert.equal(writerSightingNotProvenAbsent(row, NONCE, incomplete), true);
 });

@@ -290,9 +290,10 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
   };
 }
 
-function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; readonly inspectedWorktree?: string } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: opts.inspectedWorktree ?? CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -325,7 +326,7 @@ function foundObservation(identity: ExecutorProcessIdentityV1): ProcessObservati
     reason: "injected",
     pid: identity.pid,
     creationDate: identity.creationDate,
-    executablePath: identity.executablePath,
+    ...(identity.executablePath !== undefined ? { executablePath: identity.executablePath } : {}),
     runNonce: identity.runNonce,
   };
 }
@@ -487,7 +488,7 @@ async function runWith(
     clock: createFixedClock(NOW),
     fs,
     spawn,
-    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: over.request?.worktree ?? CWD }),
     probe: over.probe ?? sequentialProbe([
       foundObservation({ ...RECORDED, executablePath: CLAUDE_EXE }),
       HOLDER_GONE,
@@ -822,7 +823,7 @@ test("a production-writer lease release is evidence only after a constructed exi
         reason: "injected",
         pid: RECORDED.pid,
         creationDate: "2026-08-13T12:00:01.000Z",
-        executablePath: RECORDED.executablePath,
+        ...(RECORDED.executablePath !== undefined ? { executablePath: RECORDED.executablePath } : {}),
         runNonce: RECORDED.runNonce,
       },
     })),
@@ -911,7 +912,7 @@ test("a probe that returns a different pid does not set the writer-release fact"
         reason: "reused-slot",
         pid: OTHER_IDENTITY.pid,
         creationDate: OTHER_IDENTITY.creationDate,
-        executablePath: OTHER_IDENTITY.executablePath,
+        ...(OTHER_IDENTITY.executablePath !== undefined ? { executablePath: OTHER_IDENTITY.executablePath } : {}),
         runNonce: OTHER_IDENTITY.runNonce,
       },
     ]),
@@ -1065,7 +1066,7 @@ test("a mismatched runNonce does not produce an exit proof", async () => {
         reason: "injected",
         pid: RECORDED.pid,
         creationDate: RECORDED.creationDate,
-        executablePath: RECORDED.executablePath,
+        ...(RECORDED.executablePath !== undefined ? { executablePath: RECORDED.executablePath } : {}),
         runNonce: "a-totally-different-run",
       },
     ]),
@@ -1080,7 +1081,7 @@ test("a mismatched runNonce does not produce an exit proof", async () => {
         reason: "injected",
         pid: RECORDED.pid,
         creationDate: RECORDED.creationDate,
-        executablePath: RECORDED.executablePath,
+        ...(RECORDED.executablePath !== undefined ? { executablePath: RECORDED.executablePath } : {}),
         runNonce: "a-totally-different-run",
       },
     }))),
@@ -1355,7 +1356,7 @@ test("a real node process is spawned with shell false and its exit is collected"
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
         spawn: wrapped,
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: {
           observe: (pid) => ({ outcome: "NOT_FOUND", reason: "exited before probe", pid }),
         },
@@ -1409,7 +1410,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
         spawn: realNodeSpawn("setTimeout(() => process.exit(0), 8000)"),
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe,
         capacity: memoryCapacity(),
         leases,
@@ -1776,7 +1777,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         clock: { now: () => new Date().toISOString() },
         fs: createNodeRunFileSystem(),
         spawn: realNodeSpawn("setTimeout(() => process.exit(0), 2000)"),
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: createWindowsProcessProbe(),
         capacity: memoryCapacity(),
         leases,
@@ -1813,7 +1814,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         clock: { now: () => new Date().toISOString() },
         fs: createNodeRunFileSystem(),
         spawn: realNodeSpawn("process.exit(0)"),
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: createWindowsProcessProbe(),
         capacity: memoryCapacity(),
         leases,
@@ -2530,7 +2531,7 @@ test("a zone-less occupant of a zoned record does not mint an exit proof", () =>
     reason: "injected",
     pid: recorded.pid,
     creationDate: "2026-08-13T12:00:01.0000000",
-    executablePath: recorded.executablePath,
+    ...(recorded.executablePath !== undefined ? { executablePath: recorded.executablePath } : {}),
   };
   assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
   assert.equal(writerReleaseEvidence(proveWriterExit(writerProofInput({
@@ -2812,7 +2813,7 @@ test("launchRun ADVERSARIAL_REVIEW argv cannot write", async () => {
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
         spawn,
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: sequentialProbe([
           foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\grok.exe" }),
           HOLDER_GONE,
@@ -2868,7 +2869,7 @@ test("launchRun without a role uses the implementer permission list", async () =
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
         spawn,
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: sequentialProbe([
           foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\claude.exe" }),
           HOLDER_GONE,
@@ -3290,6 +3291,7 @@ function expiredProductionWriter(pid: number): LeaseV1 {
     runId: "run-old",
     pid,
     now: "2026-08-13T10:00:00.000Z",
+    processIdentity: { pid, startedAt: "2026-08-13T10:00:00.000Z", runToken: "nonce-old" },
   });
   if (!attempt.ok || attempt.lease === null) throw new Error(attempt.reason);
   return attempt.lease;
@@ -3513,7 +3515,7 @@ test("launchRun refuses a reviewer role on the implementer executor", async () =
           spawns += 1;
           return alreadyExitedProcess();
         },
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
         capacity: memoryCapacity(),
         leases: memoryLeases(),
@@ -3579,7 +3581,7 @@ test("a spawned run persists the resolved role on the intent", async () => {
           requireSpawnPermit(permit);
           return alreadyExitedProcess();
         },
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: sequentialProbe([
           foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\grok.exe" }),
           HOLDER_GONE,

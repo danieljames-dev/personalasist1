@@ -216,6 +216,7 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
 function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -248,7 +249,7 @@ function foundObservation(identity: ExecutorProcessIdentityV1): ProcessObservati
     reason: "injected",
     pid: identity.pid,
     creationDate: identity.creationDate,
-    executablePath: identity.executablePath,
+    ...(identity.executablePath !== undefined ? { executablePath: identity.executablePath } : {}),
     runNonce: identity.runNonce,
   };
 }

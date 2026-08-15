@@ -35,16 +35,25 @@ import { canonicalizeHostPath, isResolvedHostPath, namesReservedDevice, pathIsIn
 import {
   acquireLease,
   LEASE_SCHEMA_V1,
+  livenessFromHolderObservation,
+  reclaimStaleLease,
   releaseLease,
   type LeaseV1,
 } from "./leases.js";
 import {
+  createWindowsOrphanScanner,
   createWindowsProcessProbe,
   holderLiveness,
+  hostWideTreeEvidenceFromScan,
   isUsablePid,
   livenessGrants,
+  normaliseRunNonce,
   placeableInstantMs,
+  processRowCouldBelongToThisRun,
+  processRowPlausibilityContext,
+  undecidableRowsOf,
   type HostProcessProbe,
+  type HostWideTreeEvidenceV1,
   type ProcessObservationV1,
 } from "./process-identity.js";
 import { canonicalResource, type LeaseKindV1 } from "./resource-identity.js";
@@ -77,6 +86,17 @@ export interface NodeLeaseStoreOptionsV1 {
    * UNAVAILABLE / NOT_FOUND so reclamation is deterministic.
    */
   readonly probe?: HostProcessProbe;
+  /**
+   * Host-wide lock reclaim consults this after the holder-pid
+   * DEAD_CONFIRMED gate. One rule with the expired-lease reclaim:
+   * {@link hostWideTreeEvidenceFromScan}. Production omits this and
+   * uses {@link defaultHostLockTreeEvidence} (the production scanner).
+   */
+  readonly hostLockTreeEvidence?: (holder: {
+    readonly pid: number;
+    readonly startedAt?: string;
+    readonly runToken?: string;
+  }) => HostWideTreeEvidenceV1;
 }
 
 /**
@@ -183,9 +203,11 @@ export function inspectHostProductionWriterLock(input: {
   readonly arbitrationRoot?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly probe?: HostProcessProbe;
+  readonly hostLockTreeEvidence?: NodeLeaseStoreOptionsV1["hostLockTreeEvidence"];
 } = {}): HostWriterLockStateV1 {
   const arbitrationRoot = input.arbitrationRoot ?? hostArbitrationRoot(input.env);
   const probe = input.probe ?? createWindowsProcessProbe();
+  const treeEvidence = input.hostLockTreeEvidence ?? defaultHostLockTreeEvidence;
   const dir = join(arbitrationRoot, DIRECTOR_STORE_LAYOUT_V1.locksDir);
   let names: string[];
   try {
@@ -204,7 +226,7 @@ export function inspectHostProductionWriterLock(input: {
   let unknown: string | null = null;
   for (const name of locks) {
     const lockPath = join(dir, name);
-    const reclaim = reclaimStaleHostLockFile(lockPath, probe);
+    const reclaim = reclaimStaleHostLockFile(lockPath, probe, treeEvidence, "PRODUCTION_WRITER");
     if (reclaim.ok) continue;
     if (reclaim.holderState === "UNKNOWN") {
       unknown = reclaim.reason;
@@ -237,6 +259,7 @@ export function createNodeLeaseStore(root: string, options?: NodeLeaseStoreOptio
   const locksDir = join(resolved, DIRECTOR_STORE_LAYOUT_V1.locksDir);
   const arbitrationRoot = options?.hostArbitrationRoot ?? hostArbitrationRoot();
   const probe = options?.probe ?? createWindowsProcessProbe();
+  const treeEvidence = options?.hostLockTreeEvidence ?? defaultHostLockTreeEvidence;
   const leasesPath = join(resolved, "leases.json");
 
   const list = (): LeaseV1[] => {
@@ -296,7 +319,7 @@ export function createNodeLeaseStore(root: string, options?: NodeLeaseStoreOptio
       }
       let fd: number;
       try {
-        fd = openExclusiveLock(lockPath, lease.kind, probe);
+        fd = openExclusiveLock(lockPath, lease.kind, probe, treeEvidence);
       } catch (error) {
         throw hostArbitrationError(lease.kind, lockPath, error);
       }
@@ -363,12 +386,17 @@ function isErrno(error: unknown, code: string): boolean {
  * an unreadable record or an UNAVAILABLE probe — leaves the file and
  * names the path.
  */
-function openExclusiveLock(lockPath: string, kind: LeaseKindV1, probe: HostProcessProbe): number {
+function openExclusiveLock(
+  lockPath: string,
+  kind: LeaseKindV1,
+  probe: HostProcessProbe,
+  treeEvidence: NonNullable<NodeLeaseStoreOptionsV1["hostLockTreeEvidence"]>,
+): number {
   try {
     return openSync(lockPath, "wx");
   } catch (error) {
     if (!isErrno(error, "EEXIST")) throw error;
-    const reclaim = reclaimStaleHostLockFile(lockPath, probe);
+    const reclaim = reclaimStaleHostLockFile(lockPath, probe, treeEvidence, kind);
     if (!reclaim.ok) {
       const wrapped = new Error(reclaim.reason);
       (wrapped as NodeJS.ErrnoException).code = "EEXIST";
@@ -398,7 +426,12 @@ type LockReclaimV1 =
  * DEAD_CONFIRMED: NOT_FOUND, or a same-slot occupant with a strictly
  * later start and a non-matching nonce. UNKNOWN never deletes.
  */
-function reclaimStaleHostLockFile(lockPath: string, probe: HostProcessProbe): LockReclaimV1 {
+function reclaimStaleHostLockFile(
+  lockPath: string,
+  probe: HostProcessProbe,
+  treeEvidence: NonNullable<NodeLeaseStoreOptionsV1["hostLockTreeEvidence"]>,
+  kind: LeaseKindV1,
+): LockReclaimV1 {
   let raw: string;
   try {
     raw = readFileSync(lockPath, "utf8");
@@ -446,6 +479,27 @@ function reclaimStaleHostLockFile(lockPath: string, probe: HostProcessProbe): Lo
       holderState: liveness === "ALIVE" ? "HELD" : "UNKNOWN",
       reason: `host-wide lock is already held (holder liveness ${liveness}): ${lockPath}`,
     };
+  }
+
+  if (HOST_WIDE_KINDS.has(kind)) {
+    const token = normaliseRunNonce(parsed.runToken ?? "");
+    const treeRefused = {
+      ok: false as const,
+      holderState: "UNKNOWN" as const,
+      reason: `host-wide ${kind} lock is held by a run whose process tree is not proven clear`,
+    };
+    if (token === null) return treeRefused;
+    let verdict: HostWideTreeEvidenceV1;
+    try {
+      verdict = treeEvidence({
+        pid: parsed.pid,
+        ...(parsed.startedAt !== undefined ? { startedAt: parsed.startedAt } : {}),
+        ...(parsed.runToken !== undefined ? { runToken: parsed.runToken } : {}),
+      });
+    } catch {
+      verdict = "UNKNOWN";
+    }
+    if (verdict !== "CLEAR") return treeRefused;
   }
 
   try {
@@ -512,8 +566,50 @@ function livenessOfLockHolder(
   }, observation);
 }
 
+/**
+ * Production default for {@link NodeLeaseStoreOptionsV1.hostLockTreeEvidence}.
+ * A missing runToken is UNKNOWN — nothing to scan by. A throw or an
+ * incomplete scan is UNKNOWN. Live sightings are LIVE. Only a completed
+ * scan with zero live sightings is CLEAR.
+ */
+function defaultHostLockTreeEvidence(holder: {
+  readonly pid: number;
+  readonly startedAt?: string;
+  readonly runToken?: string;
+}): HostWideTreeEvidenceV1 {
+  const token = normaliseRunNonce(holder.runToken ?? "");
+  if (token === null) return "UNKNOWN";
+  try {
+    const scanned = createWindowsOrphanScanner()({
+      runNonce: token,
+      createdNotBefore: holder.startedAt ?? "",
+      holderPid: holder.pid,
+    });
+    const ctx = processRowPlausibilityContext({
+      runNonce: token,
+      createdNotBefore: holder.startedAt ?? "",
+      holderPid: holder.pid,
+      observedPids: [holder.pid],
+      rows: scanned.snapshot,
+    });
+    if (undecidableRowsOf(scanned.snapshot, ctx).length > 0) {
+      return hostWideTreeEvidenceFromScan({ performed: false, liveSightings: [] });
+    }
+    const live = scanned.snapshot.filter((row) => processRowCouldBelongToThisRun(row, ctx));
+    return hostWideTreeEvidenceFromScan({ performed: true, liveSightings: live });
+  } catch {
+    return "UNKNOWN";
+  }
+}
+
 function lockPathFor(locksDir: string, lease: LeaseV1): string {
-  const resourceKey = lease.resourceKey ?? canonicalResource(lease.kind, lease.resource);
+  // The lock file name must use the same key conflicts() compares on.
+  // If conflicts() ignores the resource for a kind, the file name ignores
+  // it too. PREVIEW is SINGLETON but conflicts() compares its token, so
+  // it keeps per-token naming.
+  const resourceKey = HOST_WIDE_KINDS.has(lease.kind)
+    ? lease.kind
+    : (lease.resourceKey ?? canonicalResource(lease.kind, lease.resource));
   const named = hostLockFileName({ kind: lease.kind, resourceKey });
   if (!named.ok || named.fileName === null) {
     const error = new Error(`host lock REJECTED: ${named.reason}`);
@@ -579,12 +675,15 @@ export function acquireDeveloperAgentWorktreeLease(input: {
   readonly store?: NodeLeaseStoreV1;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly probe?: HostProcessProbe;
+  readonly hostLockTreeEvidence?: NodeLeaseStoreOptionsV1["hostLockTreeEvidence"];
 }): { ok: true; store: NodeLeaseStoreV1; lease: LeaseV1 } | { ok: false; reason: string } {
   const store = input.store ?? createNodeLeaseStore(sandboxDirectorStoreRoot(input.env));
+  const probe = input.probe ?? createWindowsProcessProbe();
   const host = inspectHostProductionWriterLock({
     arbitrationRoot: store.hostArbitrationRoot,
     ...(input.env !== undefined ? { env: input.env } : {}),
-    ...(input.probe !== undefined ? { probe: input.probe } : {}),
+    probe,
+    ...(input.hostLockTreeEvidence !== undefined ? { hostLockTreeEvidence: input.hostLockTreeEvidence } : {}),
   });
   if (host.state === "UNKNOWN") {
     return { ok: false, reason: `PRODUCTION_WRITER host lock is UNKNOWN: ${host.reason}` };
@@ -603,17 +702,38 @@ export function acquireDeveloperAgentWorktreeLease(input: {
     return { ok: false, reason: "a PRODUCTION_WRITER lease is held in this store" };
   }
   const invocation = nextDeveloperAgentInvocationId();
-  const attempt = acquireLease({
-    existing,
+  const processIdentity = developerAgentHolderIdentity(probe, process.pid);
+  const mint = (rows: readonly LeaseV1[]) => acquireLease({
+    existing: rows,
     leaseId: invocation,
     kind: "WORKTREE",
     resource: input.repositoryRoot,
     missionId: input.missionId ?? "dev-agent",
     runId: invocation,
     pid: process.pid,
-    processIdentity: { pid: process.pid, startedAt: input.now },
+    processIdentity,
     now: input.now,
   });
+  let attempt = mint(existing);
+  if ((!attempt.ok || attempt.lease === null) && attempt.requiresStalenessCheck === true) {
+    const reclaimed = reclaimDeveloperAgentStaleHolder({
+      existing,
+      resource: input.repositoryRoot,
+      heldBy: attempt.heldBy,
+      probe,
+      now: input.now,
+    });
+    if (reclaimed.ok) {
+      try {
+        store.save(reclaimed.remaining);
+        existing = store.list();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { ok: false, reason: `lease persist failed: ${message}` };
+      }
+      attempt = mint(existing);
+    }
+  }
   if (!attempt.ok || attempt.lease === null) {
     return { ok: false, reason: attempt.reason };
   }
@@ -627,6 +747,59 @@ export function acquireDeveloperAgentWorktreeLease(input: {
     return { ok: false, reason: `lease persist failed: ${message}` };
   }
   return { ok: true, store, lease: attempt.lease };
+}
+
+function developerAgentHolderIdentity(
+  probe: HostProcessProbe,
+  pid: number,
+): { pid: number; startedAt?: string } {
+  try {
+    const observation = probe.observe(pid);
+    if (observation.outcome === "FOUND" && typeof observation.creationDate === "string" && observation.creationDate !== "") {
+      return { pid, startedAt: observation.creationDate };
+    }
+  } catch {
+    // A failed probe is not a clock reading. Omit startedAt.
+  }
+  return { pid };
+}
+
+function reclaimDeveloperAgentStaleHolder(input: {
+  readonly existing: readonly LeaseV1[];
+  readonly resource: string;
+  readonly heldBy: {
+    readonly pid: number | null;
+    readonly processIdentity: LeaseV1["processIdentity"] | null;
+  } | null;
+  readonly probe: HostProcessProbe;
+  readonly now: string;
+}): { ok: boolean; remaining: readonly LeaseV1[] } {
+  const recordedPid = input.heldBy?.pid ?? null;
+  if (!isUsablePid(recordedPid)) return { ok: false, remaining: input.existing };
+  let observation: ProcessObservationV1;
+  try {
+    observation = input.probe.observe(recordedPid);
+  } catch {
+    observation = { outcome: "UNAVAILABLE", reason: "probe threw", pid: recordedPid };
+  }
+  const result = reclaimStaleLease({
+    existing: input.existing,
+    kind: "WORKTREE",
+    resource: input.resource,
+    holderLiveness: livenessFromHolderObservation(observation),
+    now: input.now,
+    holderObservation: { outcome: observation.outcome, pid: recordedPid },
+    ...(observation.outcome === "FOUND"
+      ? {
+        observedIdentity: {
+          pid: observation.pid,
+          ...(observation.creationDate !== undefined ? { startedAt: observation.creationDate } : {}),
+          ...(typeof observation.runNonce === "string" ? { runToken: observation.runNonce } : {}),
+        },
+      }
+      : {}),
+  });
+  return { ok: result.ok, remaining: result.remaining };
 }
 
 export function releaseDeveloperAgentWorktreeLease(

@@ -201,6 +201,7 @@ function memoryLeases(initial: readonly LeaseV1[] = []): LeaseStoreV1 {
 
 function matchingGit(head = HEAD_AFTER): GitRunner {
   return {
+    inspectedWorktree: CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {

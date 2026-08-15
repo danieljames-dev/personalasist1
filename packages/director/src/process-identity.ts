@@ -91,7 +91,11 @@ export interface ExecutorProcessIdentityV1 {
   readonly pid: number;
   /** Process start instant. A reused PID belongs to a process that started later. */
   readonly creationDate: string;
-  readonly executablePath: string;
+  /**
+   * OS-reported image path. Omitted when the Director never observed one.
+   * A fabricated path is not a recorded fact.
+   */
+  readonly executablePath?: string;
   /** The token the run wrote at launch. Survives PID reuse outright. */
   readonly runNonce: string;
 }
@@ -209,6 +213,24 @@ export interface WriterOrphanScanResultV1 {
   readonly killable: readonly NonceBearingProcessV1[];
   /** Session of the Director process that produced this snapshot, when known. */
   readonly directorSessionId?: number;
+}
+
+/**
+ * One mapping from a completed tree scan to the host-wide reclaim
+ * verdict. `performed && liveSightings.length === 0` is CLEAR. A live
+ * sighting is LIVE. An incomplete scan is UNKNOWN. Both reclaim doors
+ * (expired lease row, host lock file) must call this. Do not spell the
+ * conjunction in two files.
+ */
+export type HostWideTreeEvidenceV1 = "CLEAR" | "LIVE" | "UNKNOWN";
+
+export function hostWideTreeEvidenceFromScan(scan: {
+  readonly performed: boolean;
+  readonly liveSightings: readonly unknown[];
+}): HostWideTreeEvidenceV1 {
+  if (!scan.performed) return "UNKNOWN";
+  if (scan.liveSightings.length > 0) return "LIVE";
+  return "CLEAR";
 }
 
 /** Test doubles and empty production fallbacks share this constructor. */
@@ -342,8 +364,10 @@ export function compareProcessIdentity(
   if (dates === "UNCOMPARABLE") return "UNVERIFIABLE";
   if (dates === "DIFFERENT") return "MISMATCH";
 
-  if (sighting.executablePath === undefined) return "UNVERIFIABLE";
-  if (!sameExecutable(recorded.executablePath, sighting.executablePath)) return "MISMATCH";
+  if (recorded.executablePath !== undefined) {
+    if (sighting.executablePath === undefined) return "UNVERIFIABLE";
+    if (!sameExecutable(recorded.executablePath, sighting.executablePath)) return "MISMATCH";
+  }
 
   if (sighting.runNonce !== undefined && sighting.runNonce !== null) {
     const observedNonce = normaliseRunNonce(sighting.runNonce);
@@ -486,7 +510,8 @@ export function detectOrphan(input: {
       };
     }
     if (
-      observed.executablePath !== undefined
+      recorded.executablePath !== undefined
+      && observed.executablePath !== undefined
       && !sameExecutable(recorded.executablePath, observed.executablePath)
     ) {
       return {
@@ -1355,6 +1380,7 @@ const ISO_INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):?(\d{2}))?$/;
 
 function timestampHasExplicitZone(value: string): boolean {
+  if (typeof value !== "string") return false;
   const trimmed = value.trim();
   if (trimmed === "") return false;
   if (DMTF_DATETIME.test(trimmed)) return true;
@@ -1608,7 +1634,7 @@ export function processRowCouldBelongToThisRun(
   // tied by nothing but unexplained parentage. A comment that names a
   // fixed predicate order is how a second broker guard grew behind the
   // exclusion; state the property, not a list of function names.
-  if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
+  if (createdBeforeFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
   if (!parentlessRowTiedToThisRun(sighting, ctx)) return false;
   // The row is tied. A negative heuristic may only delete a tie that
@@ -1679,17 +1705,9 @@ export function parentlessRowTiedToThisRun(
 
   if (sighting.parentPresent === true) {
     if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
-    // Live occupant proven created at or before this row, and not in
-    // this run's chain: a complete explanation that is not this run.
-    // A re-parenting broker is not provenance — the same question
-    // parentIsProvenCapableCreator asks (occupant in the holder chain).
-    // Missing or later parentCreationDate is a recycled slot — UNKNOWN.
-    if (
-      !isBrokerHostName(sighting.parentName)
-      && provenCreatedAtOrBeforeCeiling(sighting.parentCreationDate, sighting.creationDate)
-    ) {
-      return false;
-    }
+    // A live parent may exclude this row only via
+    // parentIsProvenCapableCreator (already applied above). An image
+    // basename is not a negative fact.
     return true;
   }
 
@@ -1866,6 +1884,7 @@ export function createdBeforeFloor(
   candidate: string | undefined,
   floor: string | undefined,
 ): boolean {
+  if (provenCreatedAtOrAfterFloor(candidate, floor)) return false;
   return provenCreatedStrictlyBefore(candidate, floor);
 }
 
@@ -2141,6 +2160,14 @@ function windowsAncestrySampleScript(): string {
   ].join("\n");
 }
 
+/**
+ * Production CIM emit predicate. A dateless non-descendant is emitted
+ * (`-not $provenBeforeFloor`) so membership can call it UNKNOWN instead
+ * of dropping it as host noise. Tests assert this string.
+ */
+export const windowsOrphanScanEmitPredicate =
+  "$emit = $isDesc -or ((-not $provenBeforeFloor) -and -not $parentProvenCapable);";
+
 function windowsOrphanScanScript(
   quotedNonce: string,
   holderPid: number,
@@ -2232,13 +2259,13 @@ function windowsOrphanScanScript(
     "  $isDesc = $desc.Contains($id);",
     "  $ppid = [int]$p.ParentProcessId;",
     "  $parentPresent = $pidSet.Contains($ppid);",
-    "  $atOrAfterFloor = $false;",
+    "  $provenBeforeFloor = $false;",
     "  $childUtc = $null;",
-    "  if ($p.CreationDate) {",
+    "  if ($null -ne $p.CreationDate) {",
     "    try {",
     "      $childUtc = ([datetime]$p.CreationDate).ToUniversalTime();",
-    "      $atOrAfterFloor = $childUtc -ge $floorUtc;",
-    "    } catch { $atOrAfterFloor = $false; $childUtc = $null }",
+    "      $provenBeforeFloor = $childUtc -lt $floorUtc;",
+    "    } catch { $provenBeforeFloor = $false; $childUtc = $null }",
     "  };",
     "  $parentName = $null;",
     "  $parentCreationDate = $null;",
@@ -2262,7 +2289,7 @@ function windowsOrphanScanScript(
     "  $parentBeforeChild = $false;",
     "  if ($parentUtc -ne $null -and $childUtc -ne $null -and $parentUtc -le $childUtc) { $parentBeforeChild = $true };",
     "  $parentProvenCapable = [bool]($parentPresent -and $parentInChain -and $parentBeforeChild);",
-    "  $emit = $isDesc -or ($atOrAfterFloor -and -not $parentProvenCapable);",
+    `  ${windowsOrphanScanEmitPredicate}`,
     "  if ($emit) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "    $exe = if ($p.ExecutablePath) { [string]$p.ExecutablePath } else { $null };",

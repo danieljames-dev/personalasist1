@@ -194,6 +194,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           fs,
           spawn,
           git: {
+            inspectedWorktree: wt,
             run(argv) {
               const key = argv.join(" ");
               if (key === "rev-parse HEAD") {

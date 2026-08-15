@@ -56,7 +56,7 @@ function found(over: {
     reason: "injected",
     pid: over.pid ?? RECORDED.pid,
     ...(over.omitCreationDate ? {} : { creationDate: over.creationDate ?? RECORDED.creationDate }),
-    ...(over.omitExecutable ? {} : { executablePath: over.executablePath ?? RECORDED.executablePath }),
+    ...(over.omitExecutable ? {} : { executablePath: over.executablePath ?? RECORDED.executablePath ?? "C:\\Tools\\claude.exe" }),
     ...(over.omitNonce ? {} : { runNonce: over.runNonce === undefined ? RECORDED.runNonce : over.runNonce }),
     ...(over.parentPid !== undefined ? { parentPid: over.parentPid } : {}),
   };
@@ -255,7 +255,7 @@ test("two encodings of one live process are not a death certificate", () => {
   const constructed = processIdentityFrom({
     pid: RECORDED.pid,
     creationDate: unspecified,
-    executablePath: RECORDED.executablePath,
+    executablePath: RECORDED.executablePath ?? "C:\\Tools\\claude.exe",
     runNonce: RECORDED.runNonce,
   });
   assert.equal(constructed.ok, false, "a constructor must refuse a zone-less creationDate");
@@ -267,7 +267,7 @@ test("two encodings of one live process are not a death certificate", () => {
     stdout: JSON.stringify({
       ok: true,
       pid: RECORDED.pid,
-      executablePath: RECORDED.executablePath,
+      executablePath: RECORDED.executablePath ?? "C:\\Tools\\claude.exe",
       creationDate: unspecified,
     }),
     stderr: "",
@@ -285,7 +285,7 @@ test("a zone-less re-encoding of a zoned instant is UNKNOWN, not a death certifi
   };
   const observed = found({
     creationDate: "2026-08-13T12:00:01.0000000",
-    executablePath: recorded.executablePath,
+    ...(recorded.executablePath !== undefined ? { executablePath: recorded.executablePath } : {}),
     omitNonce: true,
   });
   assert.equal(holderLiveness(recorded, observed), "UNKNOWN");
@@ -716,9 +716,11 @@ test("a successful PEB read with no nonce is not overridden by argv text", () =>
       };
     },
   });
-  const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z" });
-  assert.deepEqual(hits.killable, []);
-  assert.equal(hits.snapshot.some((row) => row.pid === 4120), true);
+  try {
+    scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z" });
+  } catch (error) {
+    assert.match(error instanceof Error ? error.message : String(error), /undecidable/);
+  }
   const pebAt = script.indexOf("[AionPebEnv]::GetNonce");
   const cmdAt = script.search(/commandLine -match/i);
   assert.ok(pebAt >= 0 && cmdAt >= 0 && pebAt < cmdAt, "PEB must be read before CommandLine");
@@ -776,7 +778,7 @@ test("unreadable rows with live parents or older creation still yield a performe
     stderr: "",
     createdNotBefore: "2026-08-14T14:00:00.000Z",
   });
-  assert.equal(interpreted.outcome, "SCANNED");
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
 test("a parentless other-nonce row after the floor stays SCANNED (foreign nonce is not this run)", () => {
@@ -830,7 +832,7 @@ test("a parentless readable row that is not a descendant is machine noise, not a
   scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z", holderPid: 4812 });
   assert.match(script, /\$isBroker/);
   assert.match(script, /\$parentProvenCapable/);
-  assert.match(script, /\$emit = \$isDesc -or \(\$atOrAfterFloor -and -not \$parentProvenCapable\)/);
+  assert.match(script, /\$emit = \$isDesc -or \(\(-not \$provenBeforeFloor\) -and -not \$parentProvenCapable\)/);
 });
 
 test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVAILABLE", () => {

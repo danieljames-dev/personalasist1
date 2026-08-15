@@ -199,9 +199,10 @@ function memoryLeases(initial: readonly LeaseV1[] = []): LeaseStoreV1 {
   };
 }
 
-function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; readonly inspectedWorktree?: string } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: opts.inspectedWorktree ?? CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -989,7 +990,7 @@ test("4 executeRun with the real node spawner and a large Claude stdin still wri
         clock: { now: () => new Date().toISOString() },
         fs,
         spawn: createNodeSpawner(),
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { inspectedWorktree: dir }),
         probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "gone", pid }) },
         capacity: memoryCapacity(),
         leases,

@@ -218,9 +218,10 @@ function memoryLeases(initial: readonly LeaseV1[] = []): LeaseStoreV1 {
   };
 }
 
-function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; readonly inspectedWorktree?: string } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: opts.inspectedWorktree ?? CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -370,7 +371,7 @@ async function runWith(over: {
     clock: over.clock ?? createFixedClock(HOLDER_EXIT),
     fs,
     spawn,
-    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: over.request?.worktree ?? CWD }),
     probe: over.probe ?? { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -469,7 +470,7 @@ test("C1 generated orphan-scan script no longer continues on $isSelfBroker", () 
   assert.match(script, /parentCreationDate/);
   assert.match(script, /holderExitedAt|exitUtc|exitQuoted/);
   assert.match(script, /\$parentProvenCapable/);
-  assert.match(script, /\$emit = \$isDesc -or \(\$atOrAfterFloor -and -not \$parentProvenCapable\)/);
+  assert.match(script, /\$emit = \$isDesc -or \(\(-not \$provenBeforeFloor\) -and -not \$parentProvenCapable\)/);
   assert.match(script, /\$needsPeb = -not \[bool\]\$c\.isDesc/);
   assert.doesNotMatch(script, /if \(\$pebCapped\) \{ \$unreadable = \[Math\]::Max/);
 });
@@ -979,7 +980,7 @@ test("C7 liveness: a review-role stand-in still writes handoff.json", async () =
         assert.equal(ran.status, 0, `${ran.stdout}\n${ran.stderr}`);
         return exitingProcess();
       },
-      git: matchingGit(HEAD_BEFORE),
+      git: matchingGit(HEAD_BEFORE, { inspectedWorktree: dir }),
       probe: { observe: (pid) => ({ ...HOLDER_GONE, pid }) },
       capacity: memoryCapacity(),
       leases: memoryLeases(),
@@ -1145,8 +1146,7 @@ function plantHostWriterLock(
   arb: string,
   record: string | Record<string, unknown>,
 ): string {
-  const resourceKey = canonicalResource("PRODUCTION_WRITER", "default");
-  const named = hostLockFileName({ kind: "PRODUCTION_WRITER", resourceKey });
+  const named = hostLockFileName({ kind: "PRODUCTION_WRITER", resourceKey: "PRODUCTION_WRITER" });
   assert.equal(named.ok, true);
   const lockDir = join(arb, DIRECTOR_STORE_LAYOUT_V1.locksDir);
   mkdirSync(lockDir, { recursive: true });
@@ -1164,10 +1164,12 @@ function acquireAndSaveWriter(
   arb: string,
   probe: { observe: (pid: number) => ProcessObservationV1 },
   leaseId: string,
+  treeEvidence?: () => "CLEAR" | "LIVE" | "UNKNOWN",
 ): void {
   const store = createNodeLeaseStore(storeRoot, {
     hostArbitrationRoot: arb,
     probe,
+    ...(treeEvidence !== undefined ? { hostLockTreeEvidence: treeEvidence } : {}),
   });
   const attempt = acquireLease({
     existing: store.list(),
@@ -1194,6 +1196,7 @@ test("C8 a host lock whose recorded holder is NOT_FOUND is reclaimed", () => {
       missionId: "mission-stale",
       runId: "run-stale",
       pid: 424242,
+      identity: { pid: 424242, startedAt: NOW, runToken: "nonce-stale" },
       acquiredAt: NOW,
       heartbeatAt: NOW,
       expiresAt: "2026-08-13T12:10:00.000Z",
@@ -1201,7 +1204,7 @@ test("C8 a host lock whose recorded holder is NOT_FOUND is reclaimed", () => {
     assert.equal(existsSync(lockPath), true);
     acquireAndSaveWriter(root, arb, {
       observe: (pid) => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid", pid }),
-    }, "lease-pw-reclaim");
+    }, "lease-pw-reclaim", () => "CLEAR");
     assert.equal(existsSync(lockPath), true, "the next holder must replace the lock, not leave the slot empty");
     const raw = readFileSync(lockPath, "utf8");
     assert.match(raw, /lease-pw-reclaim/);
@@ -1351,6 +1354,7 @@ test("C12 a stale host writer lock whose holder is DEAD_CONFIRMED lets the devel
       missionId: "mission-stale",
       runId: "run-stale",
       pid: 424242,
+      identity: { pid: 424242, startedAt: NOW, runToken: "nonce-stale" },
       acquiredAt: NOW,
       heartbeatAt: NOW,
       expiresAt: "2026-08-13T12:10:00.000Z",
@@ -1361,6 +1365,7 @@ test("C12 a stale host writer lock whose holder is DEAD_CONFIRMED lets the devel
       now: NOW,
       store,
       probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "no process occupies this pid", pid }) },
+      hostLockTreeEvidence: () => "CLEAR",
     });
     assert.equal(attempt.ok, true, !attempt.ok ? attempt.reason : "");
   } finally {

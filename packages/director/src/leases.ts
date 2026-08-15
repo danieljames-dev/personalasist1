@@ -72,6 +72,18 @@ export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
 export type ProcessLivenessV1 = "ALIVE" | "DEAD_CONFIRMED" | "UNKNOWN";
 
 /**
+ * One mapping from a holder-pid probe outcome to reclaim liveness.
+ * `UNAVAILABLE` is UNKNOWN. Every other examined outcome is handed to
+ * {@link reclaimStaleLease}, whose FOUND branch decides via occupant
+ * identity. Do not copy this ternary at a second call site.
+ */
+export function livenessFromHolderObservation(
+  observation: { readonly outcome: string },
+): ProcessLivenessV1 {
+  return observation.outcome === "UNAVAILABLE" ? "UNKNOWN" : "DEAD_CONFIRMED";
+}
+
+/**
  * Who is holding, in more than a PID.
  *
  * Every field beyond `pid` is optional because the host may not offer it, but any field that *is*

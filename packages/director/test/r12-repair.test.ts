@@ -206,9 +206,10 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
   };
 }
 
-function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; readonly inspectedWorktree?: string } = {}): GitRunner {
   let revParses = 0;
   return {
+    inspectedWorktree: opts.inspectedWorktree ?? CWD,
     run(argv) {
       const key = argv.join(" ");
       if (key === "rev-parse HEAD") {
@@ -241,7 +242,7 @@ function foundObservation(identity: ExecutorProcessIdentityV1): ProcessObservati
     reason: "injected",
     pid: identity.pid,
     creationDate: identity.creationDate,
-    executablePath: identity.executablePath,
+    ...(identity.executablePath !== undefined ? { executablePath: identity.executablePath } : {}),
     runNonce: identity.runNonce,
   };
 }
@@ -571,7 +572,7 @@ test("B1 crash window with pid-null lease and recorded spawnPid keeps the lock f
         clock: createFixedClock(NOW),
         fs: hostFs,
         spawn: trackingSpawn(() => exitingProcess()),
-        git: matchingGit(HEAD_AFTER, { advance: true }),
+        git: matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: worktree }),
         probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
         capacity: memoryCapacity(),
         leases: store,
@@ -816,6 +817,16 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
   const previousRoot = process.env.AION_DIRECTOR_ROOT;
   delete process.env.AION_DIRECTOR_STORE;
   process.env.AION_DIRECTOR_ROOT = join(dir, "host-store");
+  for (const resourceKey of ["PRODUCTION_WRITER", canonicalResource("PRODUCTION_WRITER", "default")]) {
+    const named = hostLockFileName({ kind: "PRODUCTION_WRITER", resourceKey });
+    if (named.ok && named.fileName !== null) {
+      try {
+        unlinkSync(join(hostArbitrationRoot(), DIRECTOR_STORE_LAYOUT_V1.locksDir, named.fileName));
+      } catch {
+        // A leftover lock from an earlier file must not wedge this host-store test.
+      }
+    }
+  }
   let first: ReturnType<typeof launchRun> | undefined;
   let hanging: SpawnHandleV1 | undefined;
   try {
@@ -865,7 +876,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
           firstSpawned = true;
           return hanging!;
         },
-        git: matchingGit(HEAD_AFTER, { advance: true }),
+        git: matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: dir }),
         probe: sequentialProbe([foundObservation(RECORDED)]),
         capacity: memoryCapacity(),
         wait: () => new Promise(() => {}),
@@ -917,7 +928,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
         spawn: trackingSpawn(() => exitingProcess({ pid: 9999 })),
-        git: matchingGit(HEAD_AFTER, { advance: true }),
+        git: matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: dir }),
         probe: sequentialProbe([foundObservation({ ...RECORDED, pid: 9999 }), HOLDER_GONE]),
         capacity: memoryCapacity(),
         wait: async () => undefined,
@@ -934,15 +945,17 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
     await first?.catch(() => undefined);
     // B4 withholds the writer (no exit proof). The host lock must not
     // survive the test or the next PRODUCTION_WRITER on this machine wedges.
-    const named = hostLockFileName({
-      kind: "PRODUCTION_WRITER",
-      resourceKey: canonicalResource("PRODUCTION_WRITER", "default"),
-    });
-    if (named.ok && named.fileName !== null) {
-      try {
-        unlinkSync(join(hostArbitrationRoot(), DIRECTOR_STORE_LAYOUT_V1.locksDir, named.fileName));
-      } catch {
-        // Missing lock is the desired end state.
+    for (const resourceKey of ["PRODUCTION_WRITER", canonicalResource("PRODUCTION_WRITER", "default")]) {
+      const named = hostLockFileName({
+        kind: "PRODUCTION_WRITER",
+        resourceKey,
+      });
+      if (named.ok && named.fileName !== null) {
+        try {
+          unlinkSync(join(hostArbitrationRoot(), DIRECTOR_STORE_LAYOUT_V1.locksDir, named.fileName));
+        } catch {
+          // Missing lock is the desired end state.
+        }
       }
     }
     if (previousStore === undefined) delete process.env.AION_DIRECTOR_STORE;

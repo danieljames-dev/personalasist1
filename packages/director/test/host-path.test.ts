@@ -304,6 +304,17 @@ test("a singleton role is a role, and a path-shaped role token is refused", () =
     existing: [writer.lease!], leaseId: "l2", kind: "PRODUCTION_WRITER", resource: "PRODUCTION",
     missionId: "m1", runId: "r2", pid: 2, now: NOW,
   }).ok, false, "one production writer, whatever the case");
+  // conflicts() ignores the resource for this kind. Two genuinely different
+  // tokens are still one writer. The lock-file name must agree (see r23 R3).
+  const writerA = acquireLease({
+    existing: [], leaseId: "l-a", kind: "PRODUCTION_WRITER", resource: "writer-a",
+    missionId: "m1", runId: "r-a", pid: 1, now: NOW,
+  });
+  assert.equal(writerA.ok, true);
+  assert.equal(acquireLease({
+    existing: [writerA.lease!], leaseId: "l-b", kind: "PRODUCTION_WRITER", resource: "writer-b",
+    missionId: "m1", runId: "r-b", pid: 2, now: NOW,
+  }).ok, false, "one production writer, whatever token the caller typed");
 });
 
 test("a branch is a ref, not a path, and is never path-canonicalised", () => {
