@@ -413,7 +413,11 @@ function parentlessInWindow(over: {
     parentPresent: over.parentPresent ?? false,
     nonceReadable: over.nonceReadable ?? true,
     ...(over.runNonce !== undefined ? { runNonce: over.runNonce } : {}),
-    creationDate: over.creationDate ?? AFTER,
+    // executeRun's default clock is frozen at HOLDER_EXIT, so that instant
+    // is the production spawn floor. AFTER (12:00:05) sits before it and
+    // cannot be placed by membership — leftover remaining used to keep
+    // those rows via the incomplete catch-alls.
+    creationDate: over.creationDate ?? HOLDER_EXIT,
     ...(over.parentName !== undefined ? { parentName: over.parentName } : {}),
   };
 }

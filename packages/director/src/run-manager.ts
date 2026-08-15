@@ -3046,9 +3046,11 @@ async function collectWriterOrphans(input: {
  * "Not proven absent" for this run. When the caller supplies the same
  * membership context {@link processRowCouldBelongToThisRun} uses
  * (`createdNotBefore` and `observedPids`), this is that function — the
- * two cannot disagree by construction. The leftover-remaining shape
- * (those fields omitted) keeps the older null-nonce / unreadable catch-alls
- * used by kill-sweep callers that do not carry a scan context.
+ * two cannot disagree by construction. leftover remaining always
+ * supplies that context (same fields as {@link collectWriterOrphans}
+ * liveSightings). The incomplete shape (those fields omitted) keeps the
+ * older null-nonce / unreadable catch-alls for callers that do not
+ * carry a scan context.
  */
 export function writerSightingNotProvenAbsent(
   sighting: OrphanSightingV1,
@@ -3176,10 +3178,22 @@ function killNonceBearingLeftovers(input: {
       ...query,
       observedPids: [...observedPids],
     });
+    // Same question, same rows, same context as liveSightings.
+    // "Is this a leftover of this run?" is processRowCouldBelongToThisRun.
+    // The incomplete leftover shape (floor / observedPids omitted) is
+    // the pre-filtered-kill-list catch-all and must not see the host
+    // snapshot. killable is nonceMatch || descendant and is not this
+    // filter — UNKNOWN stays visible and never authorises a kill.
     remaining = after.snapshot.filter((sighting) => writerSightingNotProvenAbsent(
       sighting,
       input.runNonce,
-      { holderPid, rows: after.snapshot },
+      {
+        holderPid,
+        rows: after.snapshot,
+        createdNotBefore,
+        observedPids,
+        ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+      },
     ));
   } catch {
     return { confirmed: false, remaining: [], killed };

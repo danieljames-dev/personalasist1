@@ -1003,6 +1003,40 @@ test("C3/C4 production scanner keeps an unattributable row visible and does not 
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-c34"), true);
 });
 
+test("C3 leftover remaining over the host snapshot uses membership, not the leftover catch-alls", async () => {
+  // leftover remaining is only consulted when the later collectWriterOrphans
+  // scan is SCANNED with no live sightings. The leftover after-scan still
+  // holds the mixed snapshot. Membership must keep CLASS 1 (parentless
+  // post-floor) and drop host noise (live capable parent outside the chain).
+  // The incomplete leftover shape would keep both (null nonce / parentPresent
+  // false). Judging only killable would keep neither (CLASS 3).
+  const hostNoise = {
+    pid: 104604,
+    name: "sppsvc.exe",
+    parentPid: 1420,
+    parentPresent: true,
+    parentName: "services.exe",
+    parentCreationDate: BOOT,
+    creationDate: "2026-08-13T12:00:15.000Z",
+    runNonce: null,
+    nonceReadable: true,
+  };
+  const mixed = [hostNoise, CLASS1_ROW];
+  let scans = 0;
+  const result = await runWith({
+    scanOrphans: () => {
+      scans += 1;
+      if (scans <= 2) return writerOrphanScanResult(mixed as never, []);
+      return writerOrphanScanResult([]);
+    },
+  });
+  const tree = result.conjunction.findings.find((item) => item.name === "executorTreeIsGone");
+  assert.equal(tree?.ok, false, tree?.reason);
+  assert.match(String(tree?.reason), /leftover processes remain after kill/);
+  assert.match(String(tree?.reason), /9911/);
+  assert.equal(String(tree?.reason).includes("104604"), false, tree?.reason);
+});
+
 test("C3 production scanner snapshot includes a non-killable row the predicate sees", async () => {
   const noise = {
     pid: 104604,

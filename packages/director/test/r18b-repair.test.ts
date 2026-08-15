@@ -289,7 +289,10 @@ function leftoverRow(over: Record<string, unknown> = {}) {
     name: "evil.exe",
     parentPid: 4999,
     parentPresent: false,
-    creationDate: "2026-08-13T12:00:05.000Z",
+    // executeRun's default clock is frozen at HOLDER_EXIT, which is the
+    // production spawn floor. 12:00:05 sits before it; membership cannot
+    // place that row. leftover remaining used to keep it via catch-alls.
+    creationDate: HOLDER_EXIT,
     nonceReadable: true,
     ...over,
   };
