@@ -50,7 +50,7 @@ PRODUCTION_WRITER / INTEGRATION locks live under the host-fixed
 ProgramData arbitration root, not %TEMP% or AION_DIRECTOR_ROOT.
 `;
 
-export async function runDirectorCli(argv, io = console) {
+export async function runDirectorCli(argv, io = console, env = process.env) {
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
     io.log(HELP);
     return 0;
@@ -85,11 +85,15 @@ export async function runDirectorCli(argv, io = console) {
     return 2;
   }
 
-  const storeRoot = director.sandboxDirectorStoreRoot();
+  const storeRoot = director.sandboxDirectorStoreRoot(env);
   const leaseKind = required(values, "lease-kind");
-  const arbitrationRoot = director.hostArbitrationRoot();
+  const arbitrationRoot = director.derivedHostArbitrationRoot(env);
   if (director.isHostWideLeaseKind(leaseKind)) {
-    if (arbitrationRoot !== director.hostArbitrationRoot()) {
+    if (!director.hostProgramDataIsHostFixed(env)) {
+      io.error("PRODUCTION_WRITER refused: ProgramData is not the host-fixed SystemDrive\\ProgramData directory");
+      return 2;
+    }
+    if (director.hostArbitrationRoot(env) !== arbitrationRoot) {
       io.error("PRODUCTION_WRITER refused: arbitration root is not the host-fixed directory");
       return 2;
     }

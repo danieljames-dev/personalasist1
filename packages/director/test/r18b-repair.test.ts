@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createBoundedLog,
   createFixedClock,
@@ -39,7 +39,9 @@ import {
 import {
   acquireDeveloperAgentWorktreeLease,
   createNodeLeaseStore,
+  derivedHostArbitrationRoot,
   hostArbitrationRoot,
+  hostProgramDataIsHostFixed,
 } from "../src/lease-store.js";
 import {
   DIRECTOR_STORE_LAYOUT_V1,
@@ -1035,10 +1037,58 @@ test("C8 hostArbitrationRoot ignores TEMP, TMP and AION_DIRECTOR_ROOT", () => {
     TMP: "C:\\tmp-b",
     AION_DIRECTOR_ROOT: "C:\\moved-store",
     ProgramData: "C:\\ProgramData",
+    SystemDrive: "C:",
   });
   assert.equal(root, join("C:\\ProgramData", "AION", "director-d2-host-locks"));
   assert.equal(root.includes("tmp-a"), false);
   assert.equal(root.includes("moved-store"), false);
+});
+
+test("C11 a redirected ProgramData is ignored; two ProgramData values share one derived root", () => {
+  const derived = derivedHostArbitrationRoot({ SystemDrive: "C:" });
+  const pdA = "C:\\scratch\\pdA-r19b";
+  const pdB = "C:\\scratch\\pdB-r19b";
+  const fromA = hostArbitrationRoot({ SystemDrive: "C:", ProgramData: pdA });
+  const fromB = hostArbitrationRoot({ SystemDrive: "C:", ProgramData: pdB });
+  assert.equal(fromA, derived);
+  assert.equal(fromB, derived);
+  assert.equal(fromA.includes("pdA-r19b"), false);
+  assert.equal(fromB.includes("pdB-r19b"), false);
+  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:", ProgramData: pdA }), false);
+  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:", ProgramData: pdB }), false);
+  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:", ProgramData: "C:\\ProgramData" }), true);
+  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:" }), true);
+});
+
+test("C11 the CLI guard refuses a redirected ProgramData on a host-wide lease", async () => {
+  const { runDirectorCli } = await import(
+    pathToFileURL(fileURLToPath(new URL("../../../../apps/director-cli.mjs", import.meta.url))).href
+  );
+  const errors: string[] = [];
+  const code = await runDirectorCli([
+    "--run-id", "run-c11",
+    "--mission-id", "mission-1",
+    "--work-item-id", "work-1",
+    "--executor", "grok",
+    "--role", "INDEPENDENT_ACCEPTANCE",
+    "--worktree", "C:\\wt",
+    "--cwd", "C:\\wt",
+    "--run-root", join(tmpdir(), "aion-r19b-c11-run"),
+    "--prompt-path", "C:\\wt\\PROMPT.md",
+    "--lease-kind", "PRODUCTION_WRITER",
+    "--lease-resource", "default",
+    "--lease-id", "lease-c11",
+    "--run-nonce", "nonce-c11",
+  ], {
+    log() { /* unused */ },
+    error(message: string) { errors.push(String(message)); },
+  }, {
+    ...process.env,
+    ProgramData: join(tmpdir(), "aion-r19b-c11-pd"),
+    SystemDrive: "C:",
+  });
+  assert.equal(code, 2);
+  assert.match(errors.join("\n"), /ProgramData|host-fixed/i);
 });
 
 function plantHostWriterLock(

@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { writeAtomic } from "./atomic-write.js";
 import { DIRECTOR_ROOT_ENV } from "./contracts.js";
 import { CONTROL_BYTES } from "./control-bytes.js";
+import { canonicalizeHostPath } from "./host-path.js";
 import {
   acquireLease,
   LEASE_SCHEMA_V1,
@@ -77,19 +78,42 @@ export interface NodeLeaseStoreOptionsV1 {
 }
 
 /**
- * Machine-scoped lock directory. Ignores `AION_DIRECTOR_ROOT`, `TEMP`,
- * and `TMP`. Never `C:\AION\`.
+ * Machine-scoped lock directory derived only from a validated
+ * `SystemDrive`. Ignores `AION_DIRECTOR_ROOT`, `TEMP`, `TMP`, and a
+ * redirected `ProgramData` that does not canonicalise to this path.
+ * Never `C:\AION\`.
+ */
+export function derivedHostArbitrationRoot(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const driveRaw = typeof env.SystemDrive === "string" ? env.SystemDrive.trim() : "";
+  const drive = /^[A-Za-z]:$/.test(driveRaw) ? driveRaw : "C:";
+  return join(`${drive}\\ProgramData`, "AION", "director-d2-host-locks");
+}
+
+/**
+ * True when `ProgramData` is unset or names the same directory as
+ * {@link derivedHostArbitrationRoot}. A redirected `ProgramData` is not
+ * the host-fixed root.
+ */
+export function hostProgramDataIsHostFixed(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const programData = typeof env.ProgramData === "string" ? env.ProgramData.trim() : "";
+  if (programData === "" || CONTROL_BYTES.test(programData)) return true;
+  const offered = join(programData, "AION", "director-d2-host-locks");
+  return canonicalizeHostPath(offered) === canonicalizeHostPath(derivedHostArbitrationRoot(env));
+}
+
+/**
+ * Machine-scoped lock directory. `ProgramData` is accepted only when it
+ * canonicalises equal to the SystemDrive derivation; otherwise it is
+ * ignored. Tests pass an explicit `env`; production reads `process.env`.
  */
 export function hostArbitrationRoot(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
-  const programData = typeof env.ProgramData === "string" ? env.ProgramData.trim() : "";
-  if (programData !== "" && !CONTROL_BYTES.test(programData)) {
-    return join(programData, "AION", "director-d2-host-locks");
-  }
-  const driveRaw = typeof env.SystemDrive === "string" ? env.SystemDrive.trim() : "";
-  const drive = /^[A-Za-z]:$/.test(driveRaw) ? driveRaw : "C:";
-  return join(`${drive}\\ProgramData`, "AION", "director-d2-host-locks");
+  return derivedHostArbitrationRoot(env);
 }
 
 export function isHostWideLeaseKind(kind: string): boolean {
