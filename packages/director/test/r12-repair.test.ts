@@ -654,14 +654,15 @@ test("B2/D1 processRowMakesScanUndecidable is the one plausibility gate", () => 
     }, ctx),
     true,
   );
-  // Parent 1 was never observed. Before the closed-interval parentless
-  // union this was host noise (false). A parentless in-window row is now
-  // undecidable even when the scanner missed the launcher.
+  // Parent 1 was never observed. The F2 occupant is an *unreadable*
+  // parentless in-window row. F10: a missing or readable PEB is not this
+  // closed-interval UNKNOWN, so the row must carry nonceReadable:false.
   assert.equal(
     processRowMakesScanUndecidable({
       pid: 9,
       parentPresent: false,
       parentPid: 1,
+      nonceReadable: false,
       creationDate: "2026-08-14T14:00:05.000Z",
     }, ctx),
     true,

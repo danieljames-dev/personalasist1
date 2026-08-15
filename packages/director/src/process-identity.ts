@@ -122,7 +122,16 @@ export interface NonceBearingProcessV1 {
 
 export type OrphanScanInterpretationV1 =
   | { readonly outcome: "SCANNED"; readonly sightings: readonly NonceBearingProcessV1[]; readonly reason: string }
-  | { readonly outcome: "UNAVAILABLE"; readonly reason: string };
+  | {
+      readonly outcome: "UNAVAILABLE";
+      readonly reason: string;
+      /**
+       * Present only when `reason` is undecidable membership, so a later
+       * snapshot can ask whether those rows are still alive. Other failures
+       * have no row list to persist.
+       */
+      readonly sightings?: readonly NonceBearingProcessV1[];
+    };
 
 export type OrphanKindV1 = "NONCE_MISMATCH" | "EXECUTABLE_MISMATCH" | "DEAD_PARENT_LIVE_CHILD";
 
@@ -428,6 +437,13 @@ export interface WindowsProbeHostV1 {
     args: readonly string[],
     options: { encoding: "utf8"; timeout: number; windowsHide: boolean; shell: false },
   ) => WindowsProbeSpawnResultV1;
+  /**
+   * Bounded sleep used by undecidable-row persistence. Tests inject a
+   * no-op so the loop stays deterministic. Production uses a process-local
+   * Atomics.wait. The delay is {@link UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS},
+   * never a value the executor can set.
+   */
+  readonly waitSync?: (ms: number) => void;
 }
 
 /**
@@ -672,10 +688,15 @@ export function interpretWindowsOrphanScanOutput(input: {
     rows: sightings,
   };
   // A row whose membership cannot be decided is UNKNOWN, not absent.
-  for (const sighting of sightings) {
-    if (processRowMakesScanUndecidable(sighting, plausibility)) {
-      return { outcome: "UNAVAILABLE", reason: "undecidable process-tree membership" };
-    }
+  // Collect the full snapshot so persistence can ask whether those
+  // occupants are still alive; do not fail on the first hit and drop
+  // the rest of the list.
+  if (undecidableRowsOf(sightings, plausibility).length > 0) {
+    return {
+      outcome: "UNAVAILABLE",
+      reason: "undecidable process-tree membership",
+      sightings,
+    };
   }
 
   return { outcome: "SCANNED", sightings, reason: "cim" };
@@ -701,6 +722,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly observedPids?: readonly number[];
 }) => readonly NonceBearingProcessV1[] {
   const spawn = host?.spawnSync ?? spawnSync;
+  const waitSync = host?.waitSync ?? sleepSync;
   return (query) => {
     const runNonce = asUsableToken(query.runNonce);
     if (runNonce === null) {
@@ -714,33 +736,13 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     }
     const floorIso = new Date(floorMs).toISOString();
     const script = windowsOrphanScanScript(psSingleQuoted(runNonce), holderPid, psSingleQuoted(floorIso));
-    let result: WindowsProbeSpawnResultV1;
-    try {
-      result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-        encoding: "utf8",
-        timeout: 30_000,
-        windowsHide: true,
-        shell: false,
-      });
-    } catch (error) {
-      throw new Error(`orphan scan unavailable: probe failed to start: ${errorMessage(error)}`);
-    }
-
-    if (result.error) {
-      const message = errorMessage(result.error);
-      throw new Error(
-        /timed? ?out/i.test(message)
-          ? "orphan scan unavailable: probe timed out"
-          : `orphan scan unavailable: probe failed: ${message}`,
-      );
-    }
-
     const holderExitedAt = asUsableToken(query.holderExitedAt) ?? undefined;
     const observedPids = [
       ...(holderPid > 0 ? [holderPid] : []),
       ...(query.observedPids ?? []),
     ];
-    const interpreted = interpretWindowsOrphanScanOutput({
+
+    const interpretInput = (result: WindowsProbeSpawnResultV1) => interpretWindowsOrphanScanOutput({
       status: result.status,
       stdout: stripBom(String(result.stdout ?? "")).trim(),
       stderr: String(result.stderr ?? "").trim(),
@@ -750,24 +752,101 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(observedPids.length > 0 ? { observedPids } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     });
-    if (interpreted.outcome === "UNAVAILABLE") {
-      throw new Error(`orphan scan unavailable: ${interpreted.reason}`);
+
+    const snapshot = ():
+      | { readonly ok: true; readonly rows: readonly NonceBearingProcessV1[] }
+      | { readonly ok: false; readonly reason: string } => {
+      let result: WindowsProbeSpawnResultV1;
+      try {
+        result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+          encoding: "utf8",
+          timeout: 30_000,
+          windowsHide: true,
+          shell: false,
+        });
+      } catch (error) {
+        return { ok: false, reason: `probe failed to start: ${errorMessage(error)}` };
+      }
+
+      if (result.error) {
+        const message = errorMessage(result.error);
+        return {
+          ok: false,
+          reason: /timed? ?out/i.test(message)
+            ? "probe timed out"
+            : `probe failed: ${message}`,
+        };
+      }
+
+      const interpreted = interpretInput(result);
+      if (interpreted.outcome === "SCANNED") {
+        return { ok: true, rows: interpreted.sightings };
+      }
+      if (interpreted.reason === "undecidable process-tree membership") {
+        return { ok: true, rows: interpreted.sightings ?? [] };
+      }
+      return { ok: false, reason: interpreted.reason };
+    };
+
+    const first = snapshot();
+    if (!first.ok) {
+      throw new Error(`orphan scan unavailable: ${first.reason}`);
+    }
+
+    const ctxFor = (rows: readonly NonceBearingProcessV1[]): ProcessRowPlausibilityContextV1 => ({
+      runNonce,
+      createdNotBefore: query.createdNotBefore,
+      ...(holderPid > 0 ? { holderPid } : {}),
+      ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+      observedPids: new Set(observedPids.filter((pid) => isUsablePid(pid))),
+      rows,
+    });
+
+    let rows = first.rows;
+    let undecidable = undecidableRowsOf(rows, ctxFor(rows));
+    if (undecidable.length > 0) {
+      let clean: readonly NonceBearingProcessV1[] | null = null;
+      for (let attempt = 1; attempt < UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS; attempt++) {
+        waitSync(UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
+        const next = snapshot();
+        if (!next.ok) {
+          throw new Error(`orphan scan unavailable: ${next.reason}`);
+        }
+        const decision = nextUndecidablePersistenceDecision(undecidable, next.rows, ctxFor(next.rows));
+        if (decision.action === "unavailable") {
+          throw new Error("orphan scan unavailable: undecidable process-tree membership");
+        }
+        if (decision.action === "scan-clean") {
+          clean = next.rows;
+          break;
+        }
+        undecidable = decision.undecidable;
+        rows = next.rows;
+      }
+      if (clean === null) {
+        throw new Error("orphan scan unavailable: undecidable process-tree membership");
+      }
+      rows = clean;
     }
 
     // Kill-list only: nonce match or a live ParentProcessId chain. A parentless
-    // unreadable in-window row is undecidable, so interpret already returned
-    // UNAVAILABLE and this filter never runs. Do not widen this into a kill of
+    // unreadable in-window row that persisted is undecidable, so we already
+    // threw and this filter never runs. Do not widen this into a kill of
     // a row we cannot attribute.
-    return interpreted.sightings.filter((sighting) => {
+    return rows.filter((sighting) => {
       const nonce = asUsableToken(sighting.runNonce);
       const nonceMatch = nonce === runNonce;
       const descendant = holderPid > 0
         && sighting.pid !== holderPid
-        && isInHolderTree(sighting, holderPid, interpreted.sightings);
+        && isInHolderTree(sighting, holderPid, rows);
       if (!nonceMatch && !descendant) return false;
       return sightingCreatedNotBefore(sighting, query.createdNotBefore);
     });
   };
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function isInHolderTree(
@@ -901,7 +980,26 @@ export type ProcessRowPlausibilityV1 = {
   readonly parentName?: string | null;
   readonly runNonce?: string | null;
   readonly creationDate?: string;
+  /** True only when the PEB environment block was actually read. */
+  readonly nonceReadable?: boolean;
 };
+
+/**
+ * Three CIM snapshots, two delays of 300 ms = 600 ms of injected wait.
+ * Console-host and `start /b ping` processes live well under that; a
+ * writer leftover that is still in the tree is still there. Total wall
+ * time with CIM stays around one second.
+ *
+ * Persistence is continued existence of the same occupant: pid AND
+ * creationDate (PIDs recycle; {@link compareCreationDates} is the
+ * equality). A leftover that exits and respawns under a new pid is a
+ * *new* row. That new row is undecidable on the later snapshot, so the
+ * snapshot is not clean and the scan stays UNAVAILABLE. The delay is
+ * this constant, not an executor-supplied value, so the executor cannot
+ * stretch the window.
+ */
+export const UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS = 3;
+export const UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS = 300;
 
 export type ProcessRowPlausibilityContextV1 = {
   readonly runNonce: string;
@@ -959,8 +1057,10 @@ export function rowHasPositiveRunIdentity(
  * A row is plausible when its nonce matches, it is in the holder's pid chain,
  * it was created in [floor, holder exit] with no nonce and a broker parent,
  * or it is parentless (dead parent) with no nonce and either a previously
- * observed parent pid or a creation instant in the closed [floor, holder exit]
- * window. A broker image name may only exclude a row that has already failed
+ * observed parent pid or an *unreadable* creation instant in the closed
+ * [floor, holder exit] window. A readable PEB that does not carry this
+ * run's nonce is a fact, not UNKNOWN — see {@link parentlessRowTiedToThisRun}.
+ * A broker image name may only exclude a row that has already failed
  * every positive test. Everything else is host noise.
  */
 export function processRowCouldBelongToThisRun(
@@ -974,10 +1074,87 @@ export function processRowCouldBelongToThisRun(
   if (!noNonce) return false;
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
+  return parentlessRowTiedToThisRun(sighting, ctx);
+}
+
+/**
+ * Parentless membership. Observed-parent widening is unchanged. The
+ * closed-interval half is gated on the nonce being unreadable: a
+ * successful PEB read that found no `AION_RUN_NONCE` is a positive
+ * physical observation (the environment is inherited at creation), not
+ * UNKNOWN. A deliberate scrub is the Job Object limit named by
+ * `killProcessTreeStandIn`, not something a creation-time window can
+ * recover. UNKNOWN (`nonceReadable === false`) stays UNKNOWN.
+ */
+export function parentlessRowTiedToThisRun(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
   const parentless = sighting.parentPresent === false && sighting.parentPid !== undefined;
   if (!parentless) return false;
   if (ctx.observedPids.has(sighting.parentPid!)) return true;
+  if (sighting.nonceReadable !== false) return false;
   return provenCreatedAtOrBeforeCeiling(sighting.creationDate, ctx.holderExitedAt);
+}
+
+/**
+ * Same occupant across two CIM snapshots. Pid alone is reusable;
+ * {@link compareCreationDates} must report SAME. Missing or uncomparable
+ * dates cannot prove identity, so they do not count as persistence.
+ */
+export function processRowIdentityEquals(
+  left: ProcessRowPlausibilityV1,
+  right: ProcessRowPlausibilityV1,
+): boolean {
+  if (!isUsablePid(left.pid) || left.pid !== right.pid) return false;
+  if (left.creationDate === undefined || right.creationDate === undefined) return false;
+  return compareCreationDates(left.creationDate, right.creationDate) === "SAME";
+}
+
+export function undecidableRowsOf(
+  rows: readonly ProcessRowPlausibilityV1[],
+  ctx: ProcessRowPlausibilityContextV1,
+): readonly ProcessRowPlausibilityV1[] {
+  return rows.filter((row) => processRowMakesScanUndecidable(row, ctx));
+}
+
+/**
+ * Whether any previous undecidable occupant is still in `next`.
+ * Positive-identity rows never appear here: {@link processRowMakesScanUndecidable}
+ * excludes them, so they stay on the leftover sweep.
+ */
+export function undecidableRowsStillPresent(
+  previous: readonly ProcessRowPlausibilityV1[],
+  next: readonly ProcessRowPlausibilityV1[],
+): boolean {
+  return previous.some((row) => next.some((other) => processRowIdentityEquals(row, other)));
+}
+
+export type UndecidablePersistenceDecisionV1 =
+  | { readonly action: "unavailable" }
+  | { readonly action: "scan-clean"; readonly rows: readonly ProcessRowPlausibilityV1[] }
+  | { readonly action: "continue"; readonly undecidable: readonly ProcessRowPlausibilityV1[] };
+
+/**
+ * One re-scan step. A persisted occupant (same pid and creationDate) or
+ * a hard failure is UNAVAILABLE. A later snapshot with no undecidable
+ * rows is SCANNED. New undecidable rows (a respawn under a new pid) are
+ * not a clean snapshot: the caller keeps confirming until the budget
+ * expires, then stays UNAVAILABLE.
+ */
+export function nextUndecidablePersistenceDecision(
+  previousUndecidable: readonly ProcessRowPlausibilityV1[],
+  nextRows: readonly ProcessRowPlausibilityV1[],
+  nextCtx: ProcessRowPlausibilityContextV1,
+): UndecidablePersistenceDecisionV1 {
+  const nextUndecidable = undecidableRowsOf(nextRows, nextCtx);
+  if (undecidableRowsStillPresent(previousUndecidable, nextUndecidable)) {
+    return { action: "unavailable" };
+  }
+  if (nextUndecidable.length === 0) {
+    return { action: "scan-clean", rows: nextRows };
+  }
+  return { action: "continue", undecidable: nextUndecidable };
 }
 
 /**

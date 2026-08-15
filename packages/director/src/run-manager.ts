@@ -100,9 +100,13 @@ import {
   isUsablePid,
   normaliseRunNonce,
   isBrokerHostName,
+  nextUndecidablePersistenceDecision,
+  parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
-  processRowMakesScanUndecidable,
   rowHasPositiveRunIdentity,
+  undecidableRowsOf,
+  UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS,
+  UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS,
   placeableInstantMs,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -1442,13 +1446,14 @@ export async function executeRun(
     if (intentState !== "none") {
       const prior = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
       const intentIdentity = prior.ok ? prior.intent.processIdentity : null;
-      exitProof = proveAdoptedWriterExit({
+      exitProof = await proveAdoptedWriterExit({
         lease: heldLease,
         probe: deps.probe,
         scanOrphans: deps.scanOrphans,
         runNonce,
         intentIdentity,
         observedPids: seenInTreePids,
+        wait: deps.wait,
       });
       releaseHeld();
       const adoptedWriterFact = writerReleaseEvidence(exitProof)
@@ -1680,13 +1685,14 @@ export async function executeRun(
       } catch {
         // A failed leftover kill is not a confirmed absence.
       }
-      orphanScan = collectWriterOrphans({
+      orphanScan = await collectWriterOrphans({
         scanOrphans: deps.scanOrphans,
         recorded: null,
         runNonce,
         holderPid: childPid,
         createdNotBefore: spawnedAtFloor ?? "",
         observedPids: seenInTreePids,
+        wait: deps.wait,
         ...(holderExitedAt !== null ? { holderExitedAt } : {}),
       });
       const reason = confirmedStopped
@@ -1897,13 +1903,14 @@ export async function executeRun(
 
     // Writer-release and the eighth conjunct share one observation and one scan.
     const observation = observeRecordedHolder(deps.probe, processIdentity);
-    orphanScan = collectWriterOrphans({
+    orphanScan = await collectWriterOrphans({
       scanOrphans: deps.scanOrphans,
       recorded: processIdentity,
       runNonce,
       holderPid: processIdentity?.pid ?? childPid,
       createdNotBefore: spawnedAtFloor ?? "",
       observedPids: seenInTreePids,
+      wait: deps.wait,
       ...(holderExitedAt !== null ? { holderExitedAt } : {}),
     });
 
@@ -2232,7 +2239,7 @@ function resolveOrphanScanner(
   return scanOrphans ?? createWindowsOrphanScanner();
 }
 
-function collectWriterOrphans(input: {
+async function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
   readonly runNonce: string;
@@ -2240,32 +2247,61 @@ function collectWriterOrphans(input: {
   readonly createdNotBefore: string;
   readonly holderExitedAt?: string;
   readonly observedPids?: Set<number>;
-}): WriterOrphanScanV1 {
+  readonly wait?: (ms: number) => Promise<void>;
+}): Promise<WriterOrphanScanV1> {
   try {
     const createdNotBefore = input.createdNotBefore;
     const holderPid = input.holderPid ?? input.recorded?.pid;
     const holderExitedAt = input.holderExitedAt;
     const observedPids = input.observedPids ?? new Set<number>();
     if (isUsablePid(holderPid)) observedPids.add(holderPid);
-    const sightings = [...resolveOrphanScanner(input.scanOrphans)({
+    const query = {
       runNonce: input.runNonce,
       createdNotBefore,
       ...(holderPid !== undefined ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids: [...observedPids],
-    })];
-    const plausibility = {
+    };
+    const scanOnce = (): OrphanSightingV1[] => [...resolveOrphanScanner(input.scanOrphans)(query)];
+    const ctxFor = (rows: readonly OrphanSightingV1[]) => ({
       runNonce: input.runNonce,
       createdNotBefore,
       ...(isUsablePid(holderPid) ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids,
-      rows: sightings,
-    };
-    for (const sighting of sightings) {
-      if (processRowMakesScanUndecidable(sighting, plausibility)) {
+      rows,
+    });
+    let sightings = scanOnce();
+    let plausibility = ctxFor(sightings);
+    let undecidable = undecidableRowsOf(sightings, plausibility);
+    if (undecidable.length > 0) {
+      const wait = input.wait ?? (async () => undefined);
+      let clean: readonly OrphanSightingV1[] | null = null;
+      for (let attempt = 1; attempt < UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS; attempt++) {
+        await wait(UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
+        let next: OrphanSightingV1[];
+        try {
+          next = scanOnce();
+        } catch {
+          return { performed: false, sightings: [], liveSightings: [] };
+        }
+        const decision = nextUndecidablePersistenceDecision(undecidable, next, ctxFor(next));
+        if (decision.action === "unavailable") {
+          return { performed: false, sightings: [], liveSightings: [] };
+        }
+        if (decision.action === "scan-clean") {
+          clean = next;
+          break;
+        }
+        undecidable = decision.undecidable;
+        sightings = next;
+        plausibility = ctxFor(next);
+      }
+      if (clean === null) {
         return { performed: false, sightings: [], liveSightings: [] };
       }
+      sightings = [...clean];
+      plausibility = ctxFor(sightings);
     }
     rememberInTreePids(observedPids, sightings, input.runNonce, holderPid);
     const liveSightings = sightings.filter((sighting) =>
@@ -2312,10 +2348,12 @@ export function writerSightingNotProvenAbsent(
     observedPids: tree.observedPids ?? new Set<number>(),
     rows: tree.rows,
   };
-  // Same exported helper processRowCouldBelongToThisRun uses for the
-  // positive facts. A name may only exclude a row that failed those.
+  // Same exported helpers processRowCouldBelongToThisRun uses. A name
+  // may only exclude a row that failed those. The parentless closed
+  // interval is the same F10-gated function so the two cannot drift.
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
   if (isBrokerHostName(sighting.name)) return false;
+  if (parentlessRowTiedToThisRun(sighting, ctx)) return true;
   if (sighting.nonceReadable === false) return true;
   const nonce = normaliseRunNonce(sighting.runNonce);
   if (nonce === null) return true;
@@ -2656,14 +2694,15 @@ function rememberInTreePids(
   }
 }
 
-function proveAdoptedWriterExit(input: {
+async function proveAdoptedWriterExit(input: {
   readonly lease: LeaseV1;
   readonly probe: HostProcessProbe;
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly runNonce: string;
   readonly intentIdentity: ExecutorProcessIdentityV1 | null;
   readonly observedPids: Set<number>;
-}): WriterExitProofV1 | null {
+  readonly wait?: (ms: number) => Promise<void>;
+}): Promise<WriterExitProofV1 | null> {
   const identity = recordedIdentityFromHeldLease(input.lease, input.intentIdentity);
   const holderPid = input.lease.pid ?? identity?.pid;
   const floor = identity?.creationDate
@@ -2678,12 +2717,13 @@ function proveAdoptedWriterExit(input: {
       observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
     }
   }
-  const orphanScan = collectWriterOrphans({
+  const orphanScan = await collectWriterOrphans({
     scanOrphans: input.scanOrphans,
     recorded: identity,
     runNonce: input.runNonce,
     createdNotBefore: floor,
     observedPids: input.observedPids,
+    ...(input.wait !== undefined ? { wait: input.wait } : {}),
     ...(isUsablePid(holderPid) ? { holderPid } : {}),
   });
   return proveWriterExit({
