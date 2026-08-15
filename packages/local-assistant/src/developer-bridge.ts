@@ -1,6 +1,18 @@
 import { spawn } from "node:child_process";
 import { basename, isAbsolute, resolve } from "node:path";
+import {
+  adapterPermissionModeForRole,
+  argvGrantsWritePermission,
+} from "@aion/director/executor-adapters";
 import type { DeveloperAgentBridgeV1, DeveloperAgentModeV1, DeveloperAgentStatusV1 } from "./contracts.js";
+
+type DeveloperAgentRunTaskV1 = {
+  repositoryRoot: string;
+  instruction: string;
+  mode: DeveloperAgentModeV1;
+  /** Director-minted lease identity. Write spawn is refused without one. */
+  directorMintedPermit?: { readonly leaseId: string };
+};
 
 const OUTPUT_LIMIT = 1024 * 1024;
 const SUMMARY_LIMIT = 20_000;
@@ -62,6 +74,14 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
   /** The complete argument vector for one bounded task. The instruction is never one of them. */
   protected abstract taskArgs(mode: DeveloperAgentModeV1): readonly string[];
 
+  /**
+   * The argv this bridge would spawn. Public so the Director predicate can
+   * be applied to the bridge's own builder rather than a reconstructed literal.
+   */
+  argvForMode(mode: DeveloperAgentModeV1): readonly string[] {
+    return this.taskArgs(mode);
+  }
+
   async status(options: { includeAccount?: boolean } = {}): Promise<DeveloperAgentStatusV1> {
     const includeAccount = options.includeAccount === true;
     const cached = this.cached;
@@ -102,13 +122,21 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
     return { executable: this.executableName, args: this.taskArgs(mode).map((arg) => arg === this.approvedRepositoryRoot ? "[approved repository root]" : arg) };
   }
 
-  async run(task: { repositoryRoot: string; instruction: string; mode: DeveloperAgentModeV1 }, signal: AbortSignal): Promise<{ exitCode: number; summary: string }> {
+  async run(task: DeveloperAgentRunTaskV1, signal: AbortSignal): Promise<{ exitCode: number; summary: string }> {
     if (resolve(task.repositoryRoot) !== this.approvedRepositoryRoot) throw new Error("Developer-agent task is outside the approved repository root.");
     if (!this.modes.includes(task.mode)) throw new Error("Developer-agent task mode is not supported by this bridge.");
     const instruction = task.instruction;
     if (!instruction.trim() || instruction.length > MAX_INSTRUCTION) throw new Error("Developer-agent instruction is invalid.");
     if (CONTROL_CHARACTERS.test(instruction)) throw new Error("Developer-agent instruction contains control characters.");
-    const result = await this.invoke(this.taskArgs(task.mode), { input: `${instruction}\n`, signal, timeoutMs: TASK_TIMEOUT_MS });
+    const argv = this.taskArgs(task.mode);
+    const grantsWrite = argvGrantsWritePermission(argv);
+    if (task.mode === "read-only" && grantsWrite) {
+      throw new Error("read-only argv grants write");
+    }
+    if ((task.mode === "workspace-write" || grantsWrite) && task.directorMintedPermit === undefined) {
+      throw new Error("write argv on a path holding no Director-minted permit");
+    }
+    const result = await this.invoke(argv, { input: `${instruction}\n`, signal, timeoutMs: TASK_TIMEOUT_MS });
     if (result.timedOut) throw new Error("Developer-agent task exceeded its timeout and was stopped.");
     return { exitCode: result.exitCode, summary: (result.stdout || result.stderr || `${this.displayName} returned no output.`).slice(-SUMMARY_LIMIT) };
   }
@@ -180,12 +208,17 @@ export class ClaudeCodeCliDeveloperAgentBridgeV1 extends LocalCliDeveloperAgentB
   }
   protected taskArgs(mode: DeveloperAgentModeV1): readonly string[] {
     const shared = ["-p", "--output-format", "text", "--strict-mcp-config", "--no-session-persistence"];
-    // Write authority is the Director's closed allowlist: only `plan` is
-    // read-only. Workspace-write uses the same write token the Director
-    // adapter emits (`bypassPermissions`). A vendor mode that is not
-    // `plan` grants write; this path must not invent a third token.
+    // Permission-mode is the Director adapter's token. Claude has no
+    // non-writing role (those route to grok); the read-only token is
+    // the adapter's review-role mode. Workspace-write takes the
+    // adapter's implementer mode. This file does not write either
+    // spelling. Extra --tools flags confine the vendor tool set; they
+    // are not a second write-authority vocabulary.
+    const permissionMode = adapterPermissionModeForRole(
+      mode === "read-only" ? "ADVERSARIAL_REVIEW" : "IMPLEMENT",
+    );
     return mode === "read-only"
-      ? [...shared, "--permission-mode", "plan", "--tools", "Read,Glob,Grep", "--disallowed-tools", "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"]
-      : [...shared, "--permission-mode", "bypassPermissions", "--tools", "Read,Glob,Grep,Edit,Write,Bash", "--disallowed-tools", "WebFetch,WebSearch"];
+      ? [...shared, "--permission-mode", permissionMode, "--tools", "Read,Glob,Grep", "--disallowed-tools", "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"]
+      : [...shared, "--permission-mode", permissionMode, "--tools", "Read,Glob,Grep,Edit,Write,Bash", "--disallowed-tools", "WebFetch,WebSearch"];
   }
 }

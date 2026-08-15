@@ -570,6 +570,11 @@ export function acquireDeveloperAgentWorktreeLease(input: {
   readonly repositoryRoot: string;
   readonly now: string;
   readonly missionId?: string;
+  /**
+   * Correlation label only. Never the identity {@link acquireLease}
+   * compares: two callers passing the same string are still two
+   * invocations. The minted `dev-agent-${pid}-${seq}` is the runId.
+   */
   readonly runId?: string;
   readonly store?: NodeLeaseStoreV1;
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -604,7 +609,7 @@ export function acquireDeveloperAgentWorktreeLease(input: {
     kind: "WORKTREE",
     resource: input.repositoryRoot,
     missionId: input.missionId ?? "dev-agent",
-    runId: input.runId ?? invocation,
+    runId: invocation,
     pid: process.pid,
     processIdentity: { pid: process.pid, startedAt: input.now },
     now: input.now,

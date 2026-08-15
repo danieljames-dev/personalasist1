@@ -15,14 +15,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createBoundedLog,
   createFixedClock,
   createMemoryLogSink,
   redactLogText,
 } from "../src/bounded-log.js";
-import { argvGrantsWritePermission } from "../src/executor-adapters.js";
+import { argvGrantsWritePermission, executorArgvFor } from "../src/executor-adapters.js";
 import {
   ownerGateFromExecutorRefusal,
   resolveGate,
@@ -741,19 +741,33 @@ test("P4b executeRun two-chunk Bearer\\n token does not land on the sink", async
 // PROPERTY 4c — local-assistant write authority uses the Director predicate
 // ---------------------------------------------------------------------------
 
-test("P4c developer-bridge does not invent a write permission mode the Director does not own", () => {
+test("P4c developer-bridge does not invent a write permission mode the Director does not own", async () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const bridge = readFileSync(
-    join(here, "..", "..", "..", "local-assistant", "src", "developer-bridge.ts"),
-    "utf8",
-  );
-  assert.equal(bridge.includes("acceptEdits"), false, "acceptEdits is a second permission vocabulary");
-  const readOnly = [
-    "-p", "--output-format", "text", "--strict-mcp-config", "--no-session-persistence",
-    "--permission-mode", "plan", "--tools", "Read,Glob,Grep",
-    "--disallowed-tools", "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch",
-  ];
-  assert.equal(argvGrantsWritePermission(readOnly), false);
+  const url = pathToFileURL(join(here, "..", "..", "..", "local-assistant", "dist", "developer-bridge.js")).href;
+  const { ClaudeCodeCliDeveloperAgentBridgeV1 } = await import(url) as {
+    ClaudeCodeCliDeveloperAgentBridgeV1: new (root: string, exe?: string) => {
+      argvForMode(mode: "read-only" | "workspace-write"): readonly string[];
+    };
+  };
+  const root = mkdtempSync(join(tmpdir(), "aion-r21-p4c-"));
+  try {
+    const bridge = new ClaudeCodeCliDeveloperAgentBridgeV1(root, join(root, "claude.exe"));
+    const readOnly = bridge.argvForMode("read-only");
+    const write = bridge.argvForMode("workspace-write");
+    assert.equal(argvGrantsWritePermission(readOnly), false);
+    const adapterWrite = executorArgvFor("claude", {
+      promptPath: join(root, "PROMPT.md"),
+      cwd: root,
+      role: "IMPLEMENT",
+    });
+    assert.ok(adapterWrite !== null);
+    assert.equal(
+      write[write.indexOf("--permission-mode") + 1],
+      adapterWrite[adapterWrite.indexOf("--permission-mode") + 1],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

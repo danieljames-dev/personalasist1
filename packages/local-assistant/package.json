@@ -28,6 +28,7 @@
   },
   "license": "UNLICENSED",
   "dependencies": {
+    "@aion/director": "0.1.0",
     "jpeg-js": "^0.4.4"
   }
 }

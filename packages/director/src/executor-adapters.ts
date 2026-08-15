@@ -142,6 +142,20 @@ export function argvGrantsWritePermission(argv: readonly string[]): boolean {
   return false;
 }
 
+/**
+ * The permission-mode token {@link executorArgvFor} emits for a role.
+ * Non-writing roles take {@link READ_ONLY_PERMISSION_MODE}; every other
+ * enumerated role takes {@link GROK_WRITE_PERMISSION_MODE}. Callers that
+ * need the token — including the developer-agent bridge — must take it
+ * from here rather than write a second spelling.
+ */
+export function adapterPermissionModeForRole(
+  role?: ExecutorRoleV1,
+): typeof READ_ONLY_PERMISSION_MODE | typeof GROK_WRITE_PERMISSION_MODE {
+  const reviewOnly = role !== undefined && NON_WRITING_ROLES.has(role);
+  return reviewOnly ? READ_ONLY_PERMISSION_MODE : GROK_WRITE_PERMISSION_MODE;
+}
+
 export function executorArgvFor(
   name: ExecutorNameV1,
   input: Pick<AdapterInputV1, "promptPath" | "cwd" | "role">,
@@ -169,12 +183,11 @@ export function executorArgvFor(
     // carry an explicit `--permission-mode bypassPermissions`; review
     // roles carry `plan`, the only mode measured as read-only. `dontAsk`
     // is not a non-writing launch: its pre-approval set is unobserved.
-    const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
-    const permissionMode = reviewOnly ? READ_ONLY_PERMISSION_MODE : GROK_WRITE_PERMISSION_MODE;
+    const permissionMode = adapterPermissionModeForRole(input.role);
     return ["-p", "--permission-mode", permissionMode];
   }
   const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
-  const permissionMode = reviewOnly ? READ_ONLY_PERMISSION_MODE : GROK_WRITE_PERMISSION_MODE;
+  const permissionMode = adapterPermissionModeForRole(input.role);
   // `--no-plan` is "Disable plan mode" (grok --help). It cannot sit on
   // the same argv as `--permission-mode plan`: one asks for plan, the
   // other turns it off. Review roles take plan and nothing that undoes

@@ -15,8 +15,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createFixedClock } from "../src/bounded-log.js";
+import {
+  argvGrantsWritePermission,
+  executorArgvFor,
+} from "../src/executor-adapters.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import type { LeaseV1 } from "../src/leases.js";
 import { writerOrphanScanResult, type ExecutorProcessIdentityV1, type ProcessObservationV1 } from "../src/process-identity.js";
@@ -338,7 +342,7 @@ test("index.ts does not export a launch path that bypasses the adapter", async (
   assert.equal(typeof director.launchRun, "function");
 });
 
-test("there is exactly one argv builder: the adapter, reached through launchRun", () => {
+test("there is exactly one argv builder: the adapter, reached through launchRun", async () => {
   const files = sourceFiles();
   const executors = files.get("executors.ts") ?? "";
 
@@ -353,21 +357,31 @@ test("there is exactly one argv builder: the adapter, reached through launchRun"
   );
   assert.doesNotMatch(executors, /argv\.push/);
 
-  const assistantDir = join(here, "..", "..", "..", "local-assistant", "src");
-  const assistantBridge = readFileSync(join(assistantDir, "developer-bridge.ts"), "utf8");
-  assert.doesNotMatch(
-    assistantBridge,
-    /acceptEdits/,
-    "packages/local-assistant must not invent a write permission mode the Director adapter does not emit",
-  );
-  assert.match(
-    assistantBridge,
-    /--permission-mode["',\s]+plan/,
-  );
-  assert.match(
-    assistantBridge,
-    /--permission-mode["',\s]+bypassPermissions/,
-  );
+  const assistantUrl = pathToFileURL(join(here, "..", "..", "..", "local-assistant", "dist", "developer-bridge.js")).href;
+  const { ClaudeCodeCliDeveloperAgentBridgeV1 } = await import(assistantUrl) as {
+    ClaudeCodeCliDeveloperAgentBridgeV1: new (root: string, exe?: string) => {
+      argvForMode(mode: "read-only" | "workspace-write"): readonly string[];
+    };
+  };
+  const root = mkdtempSync(join(tmpdir(), "aion-wiring-bridge-"));
+  try {
+    const bridge = new ClaudeCodeCliDeveloperAgentBridgeV1(root, join(root, "claude.exe"));
+    const readOnly = bridge.argvForMode("read-only");
+    const write = bridge.argvForMode("workspace-write");
+    assert.equal(argvGrantsWritePermission(readOnly), false);
+    const adapterWrite = executorArgvFor("claude", {
+      promptPath: join(root, "PROMPT.md"),
+      cwd: root,
+      role: "IMPLEMENT",
+    });
+    assert.ok(adapterWrite !== null);
+    assert.equal(
+      write[write.indexOf("--permission-mode") + 1],
+      adapterWrite[adapterWrite.indexOf("--permission-mode") + 1],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("deleted discovery and launch-plan names are not on the public surface of index.ts", async () => {

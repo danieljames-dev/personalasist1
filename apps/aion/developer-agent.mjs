@@ -135,7 +135,10 @@ export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {
       throw new Error(`developer-agent refused: ${acquired.reason}`);
     }
     try {
-      return await originalRun(task, signal);
+      return await originalRun({
+        ...task,
+        directorMintedPermit: { leaseId: acquired.lease.leaseId },
+      }, signal);
     } finally {
       releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease);
     }
