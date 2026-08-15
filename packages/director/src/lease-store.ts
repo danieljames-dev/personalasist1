@@ -47,6 +47,7 @@ import {
   hostWideTreeEvidenceFromScan,
   isUsablePid,
   livenessGrants,
+  measurementApparatusPidsOfThisProcess,
   normaliseRunNonce,
   placeableInstantMs,
   processRowCouldBelongToThisRun,
@@ -584,12 +585,14 @@ function defaultHostLockTreeEvidence(holder: {
       runNonce: token,
       createdNotBefore: holder.startedAt ?? "",
       holderPid: holder.pid,
+      apparatusPids: [...measurementApparatusPidsOfThisProcess()],
     });
     const ctx = processRowPlausibilityContext({
       runNonce: token,
       createdNotBefore: holder.startedAt ?? "",
       holderPid: holder.pid,
       observedPids: [holder.pid],
+      apparatusPids: measurementApparatusPidsOfThisProcess(),
       rows: scanned.snapshot,
     });
     if (undecidableRowsOf(scanned.snapshot, ctx).length > 0) {

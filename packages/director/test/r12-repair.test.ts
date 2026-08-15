@@ -4,7 +4,7 @@
  * matching class fix is in.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -20,15 +20,10 @@ import { GROK_MAX_TURNS } from "../src/executor-adapters.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import {
   acquireLease,
-  canonicalResource,
   reclaimStaleLease,
   type LeaseV1,
 } from "../src/leases.js";
-import { createNodeLeaseStore, hostArbitrationRoot } from "../src/lease-store.js";
-import {
-  DIRECTOR_STORE_LAYOUT_V1,
-  hostLockFileName,
-} from "../src/store-contract.js";
+import { createNodeLeaseStore } from "../src/lease-store.js";
 import {
   createWindowsOrphanScanner,
   interpretWindowsOrphanScanOutput,
@@ -813,20 +808,25 @@ test("A3 CLI refuses a non-integer --timeout-ms with a distinct non-zero exit", 
 
 test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host store", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aion-r12-b4-"));
+  const arbitration = mkdtempSync(join(tmpdir(), "aion-r12-b4-arb-"));
   const previousStore = process.env.AION_DIRECTOR_STORE;
   const previousRoot = process.env.AION_DIRECTOR_ROOT;
   delete process.env.AION_DIRECTOR_STORE;
   process.env.AION_DIRECTOR_ROOT = join(dir, "host-store");
-  for (const resourceKey of ["PRODUCTION_WRITER", canonicalResource("PRODUCTION_WRITER", "default")]) {
-    const named = hostLockFileName({ kind: "PRODUCTION_WRITER", resourceKey });
-    if (named.ok && named.fileName !== null) {
-      try {
-        unlinkSync(join(hostArbitrationRoot(), DIRECTOR_STORE_LAYOUT_V1.locksDir, named.fileName));
-      } catch {
-        // A leftover lock from an earlier file must not wedge this host-store test.
-      }
-    }
-  }
+  const liveProbe = {
+    observe: (pid: number) => ({
+      outcome: "FOUND" as const,
+      reason: "test-live",
+      pid,
+      creationDate: NOW,
+      executablePath: EXE,
+    }),
+  };
+  const sharedStore = createNodeLeaseStore(join(dir, "host-store"), {
+    hostArbitrationRoot: arbitration,
+    probe: liveProbe,
+    hostLockTreeEvidence: () => "LIVE" as const,
+  });
   let first: ReturnType<typeof launchRun> | undefined;
   let hanging: SpawnHandleV1 | undefined;
   try {
@@ -879,6 +879,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         git: matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: dir }),
         probe: sequentialProbe([foundObservation(RECORDED)]),
         capacity: memoryCapacity(),
+        leases: sharedStore,
         wait: () => new Promise(() => {}),
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
@@ -931,6 +932,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         git: matchingGit(HEAD_AFTER, { advance: true, inspectedWorktree: dir }),
         probe: sequentialProbe([foundObservation({ ...RECORDED, pid: 9999 }), HOLDER_GONE]),
         capacity: memoryCapacity(),
+        leases: sharedStore,
         wait: async () => undefined,
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
@@ -943,26 +945,12 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
   } finally {
     hanging?.kill();
     await first?.catch(() => undefined);
-    // B4 withholds the writer (no exit proof). The host lock must not
-    // survive the test or the next PRODUCTION_WRITER on this machine wedges.
-    for (const resourceKey of ["PRODUCTION_WRITER", canonicalResource("PRODUCTION_WRITER", "default")]) {
-      const named = hostLockFileName({
-        kind: "PRODUCTION_WRITER",
-        resourceKey,
-      });
-      if (named.ok && named.fileName !== null) {
-        try {
-          unlinkSync(join(hostArbitrationRoot(), DIRECTOR_STORE_LAYOUT_V1.locksDir, named.fileName));
-        } catch {
-          // Missing lock is the desired end state.
-        }
-      }
-    }
     if (previousStore === undefined) delete process.env.AION_DIRECTOR_STORE;
     else process.env.AION_DIRECTOR_STORE = previousStore;
     if (previousRoot === undefined) delete process.env.AION_DIRECTOR_ROOT;
     else process.env.AION_DIRECTOR_ROOT = previousRoot;
     rmSync(dir, { recursive: true, force: true });
+    rmSync(arbitration, { recursive: true, force: true });
   }
 });
 

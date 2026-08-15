@@ -572,6 +572,11 @@ export interface WindowsProbeSpawnResultV1 {
   readonly stdout?: string | Buffer | null;
   readonly stderr?: string | Buffer | null;
   readonly error?: Error | null;
+  /**
+   * OS pid of the measurement process this spawn created. Present on a
+   * real `spawnSync` result. Tests that do not spawn may omit it.
+   */
+  readonly pid?: number;
 }
 
 export interface WindowsProbeHostV1 {
@@ -587,6 +592,58 @@ export interface WindowsProbeHostV1 {
    * never a value the executor can set.
    */
   readonly waitSync?: (ms: number) => void;
+}
+
+/**
+ * Pids this Director process created as measurement apparatus: every
+ * probe, orphan-scan, and ancestry-sample PowerShell obtained from
+ * `spawnSync`. The Director's own pid is *not* stored here.
+ *
+ * Opposite polarity of `observedPids`: those are pids this run walked
+ * as in-tree. These are pids this process minted for measurement.
+ * A pid comes from creation (`spawnSync.pid`), not from a name or a
+ * parent-image correlate. `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+ * cannot put a leftover onto one of these slots because the Director
+ * already occupies them.
+ */
+const measurementApparatusPids = new Set<number>();
+
+export function rememberMeasurementApparatusPid(pid: unknown): void {
+  if (isUsablePid(pid)) measurementApparatusPids.add(pid);
+}
+
+export function measurementApparatusPidsOfThisProcess(): ReadonlySet<number> {
+  return measurementApparatusPids;
+}
+
+function recordSpawnResultPid(result: { readonly pid?: number } | null | undefined): void {
+  rememberMeasurementApparatusPid(result?.pid);
+}
+
+/**
+ * The pid `spawnSync` returns on this host is not always the PowerShell
+ * `$PID` that ran the script (a wrapper or console-host pid). The script
+ * we minted already knows `$PID`; the envelope carries that creation fact.
+ */
+function recordEnvelopeScannerPid(stdout: string | Buffer | null | undefined): void {
+  const text = stripBom(String(stdout ?? "")).trim();
+  if (text === "") return;
+  try {
+    const parsed = JSON.parse(text) as { scannerPid?: unknown };
+    rememberMeasurementApparatusPid(parsed.scannerPid);
+  } catch {
+    // Envelope parse belongs to the caller; a missing scanner pid is not a pid.
+  }
+}
+
+function collectApparatusPids(extra?: Iterable<number>): number[] {
+  const collected = new Set<number>(measurementApparatusPids);
+  if (extra !== undefined) {
+    for (const pid of extra) {
+      if (isUsablePid(pid)) collected.add(pid);
+    }
+  }
+  return [...collected];
 }
 
 /**
@@ -610,7 +667,7 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
         "try {",
         `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop;`,
         "if (-not $p) { Write-Output '{\"ok\":false,\"reason\":\"not-found\"}'; exit 0 };",
-        "$o = [ordered]@{ ok = $true; pid = [int]$p.ProcessId; name = $p.Name; executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; creationDate = $p.CreationDate.ToString('o'); parentPid = [int]$p.ParentProcessId };",
+        "$o = [ordered]@{ ok = $true; pid = [int]$p.ProcessId; name = $p.Name; executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; creationDate = $p.CreationDate.ToString('o'); parentPid = [int]$p.ParentProcessId; scannerPid = [int]$PID };",
         "$o | ConvertTo-Json -Compress;",
         "exit 0",
         "} catch {",
@@ -628,6 +685,8 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
           windowsHide: true,
           shell: false,
         });
+        recordSpawnResultPid(result);
+        recordEnvelopeScannerPid(result.stdout);
       } catch (error) {
         return { outcome: "UNAVAILABLE", reason: `probe failed to start: ${errorMessage(error)}`, pid };
       }
@@ -748,6 +807,16 @@ export function interpretWindowsOrphanScanOutput(input: {
    * source is used only to exclude session-0 rows.
    */
   readonly directorSessionId?: number;
+  /**
+   * Measurement pids this Director created. Opposite polarity of
+   * `observedPids`. The Director's own pid is not a member.
+   */
+  readonly apparatusPids?: readonly number[];
+  /**
+   * Director process id. Used only to skip the Director row itself.
+   * A leftover parented by this pid is the R7 spoof and is not skipped.
+   */
+  readonly directorPid?: number;
 }): OrphanScanInterpretationV1 {
   const combined = `${input.stdout}\n${input.stderr}`;
   if (/access is denied/i.test(combined)) {
@@ -848,7 +917,9 @@ export function interpretWindowsOrphanScanOutput(input: {
     ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
     ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+    ...(isUsablePid(input.directorPid) ? { directorPid: input.directorPid } : {}),
     observedPids,
+    ...(input.apparatusPids !== undefined ? { apparatusPids: input.apparatusPids } : {}),
     rows: sightings,
   });
   // A row whose membership cannot be decided is UNKNOWN, not absent.
@@ -884,6 +955,12 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly holderExitedAt?: string;
   /** Pids earlier scans of this run already judged in-tree. */
   readonly observedPids?: readonly number[];
+  /**
+   * Measurement pids this Director created (`spawnSync.pid` of a probe
+   * or scanner). Merged with {@link measurementApparatusPidsOfThisProcess}.
+   * The Director's own pid is not a member.
+   */
+  readonly apparatusPids?: readonly number[];
 }) => WriterOrphanScanResultV1 {
   const spawn = host?.spawnSync ?? spawnSync;
   const waitSync = host?.waitSync ?? sleepSync;
@@ -902,12 +979,8 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     const holderExitedAt = asUsableToken(query.holderExitedAt) ?? undefined;
     const exitMs = holderExitedAt !== undefined ? placeableInstantMs(holderExitedAt) : null;
     const quotedExit = exitMs !== null ? psSingleQuoted(new Date(exitMs).toISOString()) : "''";
-    const script = windowsOrphanScanScript(
-      psSingleQuoted(runNonce),
-      holderPid,
-      psSingleQuoted(floorIso),
-      quotedExit,
-    );
+    const apparatusPids = new Set<number>(collectApparatusPids(query.apparatusPids));
+    const directorPid = isUsablePid(process.pid) ? process.pid : 0;
     const observedPids = [
       ...(holderPid > 0 ? [holderPid] : []),
       ...(query.observedPids ?? []),
@@ -924,11 +997,21 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(observedPids.length > 0 ? { observedPids } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+      apparatusPids: [...apparatusPids],
+      ...(directorPid > 0 ? { directorPid } : {}),
     });
 
     const snapshot = ():
       | { readonly ok: true; readonly rows: readonly NonceBearingProcessV1[] }
       | { readonly ok: false; readonly reason: string } => {
+      const script = windowsOrphanScanScript(
+        psSingleQuoted(runNonce),
+        holderPid,
+        psSingleQuoted(floorIso),
+        quotedExit,
+        [...apparatusPids],
+        directorPid,
+      );
       let result: WindowsProbeSpawnResultV1;
       try {
         const powershell = resolveWindowsSystemExecutable("powershell.exe");
@@ -938,6 +1021,8 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
           windowsHide: true,
           shell: false,
         });
+        recordSpawnResultPid(result);
+        if (isUsablePid(result.pid)) apparatusPids.add(result.pid);
       } catch (error) {
         return { ok: false, reason: `probe failed to start: ${errorMessage(error)}` };
       }
@@ -955,9 +1040,14 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       try {
         const envelope = JSON.parse(stripBom(String(result.stdout ?? "")).trim()) as {
           directorSessionId?: unknown;
+          scannerPid?: unknown;
         };
         const sid = asSessionId(envelope.directorSessionId);
         if (sid !== undefined) directorSessionId = sid;
+        if (isUsablePid(envelope.scannerPid)) {
+          rememberMeasurementApparatusPid(envelope.scannerPid);
+          apparatusPids.add(envelope.scannerPid);
+        }
       } catch {
         // Envelope parse belongs to interpretInput; a missing session is UNKNOWN.
       }
@@ -982,7 +1072,9 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(holderPid > 0 ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+      ...(directorPid > 0 ? { directorPid } : {}),
       observedPids: observedPids.filter((pid) => isUsablePid(pid)),
+      apparatusPids,
       rows,
     });
 
@@ -1263,6 +1355,8 @@ export function createWindowsAncestrySampler(host?: WindowsProbeHostV1): (query:
         windowsHide: true,
         shell: false,
       });
+      recordSpawnResultPid(result);
+      recordEnvelopeScannerPid(result.stdout);
     } catch (error) {
       throw new Error(`ancestry sample unavailable: probe failed to start: ${errorMessage(error)}`);
     }
@@ -1516,6 +1610,18 @@ export type ProcessRowPlausibilityContextV1 = {
    * never includes a row.
    */
   readonly directorSessionId?: number;
+  /**
+   * Pids this Director created as measurement apparatus (probe / scanner
+   * / ancestry-sample PowerShell). Opposite polarity of `observedPids`.
+   * The Director's own pid is not a member: a leftover parented by the
+   * Director is the R7 spoof surface.
+   */
+  readonly apparatusPids?: ReadonlySet<number>;
+  /**
+   * Director process id. Used only to skip the Director row itself.
+   * Missing: {@link processRowCouldBelongToThisRun} uses `process.pid`.
+   */
+  readonly directorPid?: number;
 };
 
 export type ProcessRowPlausibilityContextInputV1 = {
@@ -1530,6 +1636,8 @@ export type ProcessRowPlausibilityContextInputV1 = {
     readonly creationDate?: string;
   }[];
   readonly directorSessionId?: number;
+  readonly apparatusPids?: Iterable<number>;
+  readonly directorPid?: number;
 };
 
 /**
@@ -1547,15 +1655,26 @@ export function processRowPlausibilityContext(
     }
   }
   if (isUsablePid(input.holderPid)) observedPids.add(input.holderPid);
+  const apparatusPids = new Set<number>();
+  if (input.apparatusPids !== undefined) {
+    for (const pid of input.apparatusPids) {
+      if (isUsablePid(pid)) apparatusPids.add(pid);
+    }
+  }
   const holderExitedAt = asUsableToken(input.holderExitedAt) ?? undefined;
   const directorSessionId = asSessionId(input.directorSessionId);
+  const directorPid = isUsablePid(input.directorPid)
+    ? input.directorPid
+    : (isUsablePid(process.pid) ? process.pid : undefined);
   return {
     runNonce: input.runNonce,
     createdNotBefore: input.createdNotBefore,
     ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
     ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+    ...(directorPid !== undefined ? { directorPid } : {}),
     observedPids,
+    apparatusPids,
     rows: input.rows,
   };
 }
@@ -1619,10 +1738,39 @@ export function rowHasPositiveRunIdentity(
  * negative fact and must not exclude a row. Everything else is host
  * noise.
  */
+/**
+ * Physical fact: this Director created this pid as measurement
+ * apparatus (`spawnSync.pid`), or this row *is* the Director process.
+ * A leftover the run created cannot occupy one of those slots.
+ *
+ * Parent-pid membership is only the measurement set. The Director's
+ * own pid is not a member: `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+ * onto the Director is the R7 spoof, and the executor is a legitimate
+ * child of the Director. An image basename is not read.
+ */
+export function rowIsMeasurementApparatus(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  const apparatus = ctx.apparatusPids;
+  if (isUsablePid(sighting.pid)) {
+    const directorPid = ctx.directorPid ?? process.pid;
+    if (isUsablePid(directorPid) && sighting.pid === directorPid) return true;
+    if (apparatus !== undefined && apparatus.has(sighting.pid)) return true;
+  }
+  if (isUsablePid(sighting.parentPid) && apparatus !== undefined && apparatus.has(sighting.parentPid)) {
+    return true;
+  }
+  return false;
+}
+
 export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
+  // Creation fact first. A scanner that inherited AION_RUN_NONCE is
+  // still apparatus, not a leftover of the executor.
+  if (rowIsMeasurementApparatus(sighting, ctx)) return false;
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
   // Do not return early on a foreign or unprovenanced nonce. A PEB that
   // contains AION_RUN_NONCE=not-ours, or a CommandLine scrape of one,
@@ -2151,7 +2299,7 @@ function windowsAncestrySampleScript(): string {
     "  $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "  [void]$hits.Add([ordered]@{ pid = [int]$p.ProcessId; parentPid = [int]$p.ParentProcessId; creationDate = $cd });",
     "}",
-    "[ordered]@{ ok = $true; processes = $hits } | ConvertTo-Json -Compress -Depth 5;",
+    "[ordered]@{ ok = $true; processes = $hits; scannerPid = [int]$PID } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",
     "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",
@@ -2173,7 +2321,13 @@ function windowsOrphanScanScript(
   holderPid: number,
   quotedFloorIso: string,
   quotedHolderExitIso = "''",
+  apparatusPids: readonly number[] = [],
+  directorPid = 0,
 ): string {
+  const seeded = apparatusPids
+    .filter((pid) => isUsablePid(pid))
+    .map((pid) => `[void]$scannerPid.Add(${pid});`)
+    .join("");
   return [
     "$ProgressPreference = 'SilentlyContinue';",
     "try {",
@@ -2303,9 +2457,13 @@ function windowsOrphanScanScript(
     "$pebCapped = $false;",
     "$hits = New-Object System.Collections.Generic.List[object];",
     "$unreadable = 0;",
-    "$scannerPid = $PID;",
+    "$scannerPid = New-Object 'System.Collections.Generic.HashSet[int]';",
+    "[void]$scannerPid.Add([int]$PID);",
+    seeded,
+    `$directorPid = ${isUsablePid(directorPid) ? directorPid : 0};`,
     "foreach ($c in $candidates) {",
-    "  if ([int]$c.pid -eq $scannerPid -or [int]$c.parentPid -eq $scannerPid) { continue };",
+    "  if ($scannerPid.Contains([int]$c.pid) -or $scannerPid.Contains([int]$c.parentPid)) { continue };",
+    "  if ($directorPid -gt 0 -and [int]$c.pid -eq $directorPid) { continue };",
     "  $n = $null;",
     "  $nonceReadable = $false;",
     "  $needsPeb = -not [bool]$c.isDesc;",
@@ -2327,7 +2485,7 @@ function windowsOrphanScanScript(
     "  [void]$hits.Add([ordered]@{ pid = $c.pid; name = $c.name; creationDate = $c.creationDate; runNonce = $n; parentPid = $c.parentPid; nonceReadable = [bool]$nonceReadable; parentPresent = $c.parentPresent; parentName = $c.parentName; parentCreationDate = $c.parentCreationDate; executablePath = $c.executablePath; sessionId = $c.sessionId });",
     "}",
     "$directorSessionId = $null; try { $directorSessionId = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId } catch { $directorSessionId = $null };",
-    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable; directorSessionId = $directorSessionId } | ConvertTo-Json -Compress -Depth 5;",
+    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable; directorSessionId = $directorSessionId; scannerPid = [int]$PID } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",
     "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",

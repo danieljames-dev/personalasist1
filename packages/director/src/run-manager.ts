@@ -114,6 +114,7 @@ import {
   hostWideTreeEvidenceFromScan,
   identityFromObservation,
   isUsablePid,
+  measurementApparatusPidsOfThisProcess,
   normaliseRunNonce,
   normalisedCreationDate,
   nextUndecidablePersistenceDecision,
@@ -300,6 +301,7 @@ export interface RunManagerDepsV1 {
     holderPid?: number;
     holderExitedAt?: string;
     observedPids?: readonly number[];
+    apparatusPids?: readonly number[];
   }) => WriterOrphanScanResultV1;
   /**
    * Optional test hook. When omitted and `scanOrphans` is also omitted,
@@ -2999,14 +3001,10 @@ function describeExecutorTree(input: {
     };
   }
   // leftoverConfirmed is a reporting conjunct, not a release conjunct.
-  // proveWriterExit does not require it: a later collectWriterOrphans that
-  // completed as SCANNED with no live sightings is the release fact. A sweep
-  // re-scan throw must not mint "tree gone" on the success conjunction (the
-  // Director could not confirm the kill), but it also must not un-mint a
-  // proof that the later scan already justified. Two helpers, two questions.
-  if (!input.leftoverConfirmed) {
-    return { ok: false, reason: "leftover kill could not be confirmed by a re-scan" };
-  }
+  // We are already on a completed SCANNED snapshot with zero live
+  // sightings — that is the release fact. A leftover-sweep re-scan
+  // throw must not un-mint it. leftoverRemaining still names leftovers
+  // a successful sweep actually saw.
   if (input.leftoverRemaining.length > 0) {
     return {
       ok: false,
@@ -3195,6 +3193,7 @@ async function collectWriterOrphans(input: {
       ...(holderPid !== undefined ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids: [...observedPids],
+      apparatusPids: [...measurementApparatusPidsOfThisProcess()],
     };
     const scanOnce = (): WriterOrphanScanResultV1 => {
       const scanned = resolveOrphanScanner(input.scanOrphans)(query);
@@ -3211,6 +3210,7 @@ async function collectWriterOrphans(input: {
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(sessionId !== undefined ? { directorSessionId: sessionId } : {}),
       observedPids,
+      apparatusPids: measurementApparatusPidsOfThisProcess(),
       rows,
     });
     let scanned = scanOnce();
@@ -3274,6 +3274,7 @@ async function collectWriterOrphans(input: {
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids,
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+      apparatusPids: measurementApparatusPidsOfThisProcess(),
     };
     const liveSightings = sightings.filter((sighting) =>
       processRowCouldBelongToThisRun(sighting, plausibility)
@@ -3323,6 +3324,7 @@ export function writerSightingNotProvenAbsent(
     readonly holderExitedAt?: string;
     readonly observedPids?: ReadonlySet<number>;
     readonly directorSessionId?: number;
+    readonly apparatusPids?: ReadonlySet<number>;
   } = {
     holderPid: null,
     rows: [],
@@ -3340,6 +3342,7 @@ export function writerSightingNotProvenAbsent(
     ...(tree.holderExitedAt !== undefined ? { holderExitedAt: tree.holderExitedAt } : {}),
     ...(tree.directorSessionId !== undefined ? { directorSessionId: tree.directorSessionId } : {}),
     observedPids: tree.observedPids,
+    apparatusPids: tree.apparatusPids ?? measurementApparatusPidsOfThisProcess(),
     rows: tree.rows,
   });
   return processRowCouldBelongToThisRun(sighting, ctx);
@@ -3372,6 +3375,7 @@ function killNonceBearingLeftovers(input: {
     ...(holderPid !== null ? { holderPid } : {}),
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids: [...observedPids],
+    apparatusPids: [...measurementApparatusPidsOfThisProcess()],
   };
   let scanned: WriterOrphanScanResultV1;
   try {
@@ -3382,7 +3386,9 @@ function killNonceBearingLeftovers(input: {
     if (error instanceof OrphanScanUnavailableError) {
       return {
         confirmed: false,
-        remaining: sightingsAsOrphans(error.undecidable),
+        // An incomplete scan is UNKNOWN, not leftover remaining.
+        // The later collectWriterOrphans snapshot is the membership fact.
+        remaining: [],
         killed: false,
       };
     }
@@ -3397,6 +3403,7 @@ function killNonceBearingLeftovers(input: {
     createdNotBefore,
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids,
+    apparatusPids: measurementApparatusPidsOfThisProcess(),
   };
   let killed = false;
   for (const leftover of leftovers) {
@@ -3411,6 +3418,7 @@ function killNonceBearingLeftovers(input: {
       ...(isUsablePid(holderPid) ? { holderPid } : {}),
       ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
       observedPids,
+      apparatusPids: measurementApparatusPidsOfThisProcess(),
       rows: snapshot,
     });
     if (!rowHasPositiveRunIdentity(leftover, leftoverCtx)) continue;

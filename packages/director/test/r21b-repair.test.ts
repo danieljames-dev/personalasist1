@@ -222,7 +222,9 @@ test("ITEM2 a nonce-tied WmiPrvSE.exe born inside the five-second shadow is not 
   const harness = [
     "$candidates = New-Object System.Collections.Generic.List[object];",
     "[void]$candidates.Add([ordered]@{ pid = 71928; name = 'WmiPrvSE.exe'; creationDate = ([datetime]::UtcNow).ToString('o'); parentPid = 4; parentPresent = $true; parentName = 'svchost.exe'; parentCreationDate = $null; executablePath = $null; isDesc = $true; commandLine = 'AION_RUN_NONCE=" + nonce + "'; sessionId = 0 });",
-    "$scannerPid = -1;",
+    "$scannerPid = New-Object 'System.Collections.Generic.HashSet[int]';",
+    "[void]$scannerPid.Add(-1);",
+    "$directorPid = 0;",
     "$scanStartedUtc = [datetime]::UtcNow;",
     "$pebCap = 64;",
     "$pebUsed = 0;",

@@ -38,6 +38,7 @@
  */
 import { spawnSync } from "node:child_process";
 import type { IsoTimestamp } from "./contracts.js";
+import { rememberMeasurementApparatusPid } from "./process-identity.js";
 
 export const GIT_TRUTH_SCHEMA_V1 = "aion.director.git-truth.v1" as const;
 
@@ -888,6 +889,7 @@ export function createNodeGitRunner(input: {
           windowsHide: true,
           shell: false,
         });
+        rememberMeasurementApparatusPid(result.pid);
       } catch (error) {
         return {
           argv: argv.slice(),

@@ -38,12 +38,17 @@ import {
 } from "../src/leases.js";
 import {
   createdBeforeFloor,
+  createWindowsOrphanScanner,
   holderLiveness,
+  hostWideTreeEvidenceFromScan,
   interpretWindowsOrphanScanOutput,
   parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
   processRowMakesScanUndecidable,
   processRowPlausibilityContext,
+  rememberMeasurementApparatusPid,
+  rowIsMeasurementApparatus,
+  undecidableRowsOf,
   writerOrphanScanResult,
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
@@ -1354,6 +1359,279 @@ test("R7 liveness: R22 WmiPrvSE/svchost 1800s window is still not tied", () => {
     observedPids: [4812],
   });
   assert.equal(interpreted.outcome, "SCANNED", interpreted.reason);
+});
+
+// ---------------------------------------------------------------------------
+// R23b — apparatus exclusion restores liveness; parent basename still not a skip
+// ---------------------------------------------------------------------------
+
+function apparatusScannerRow(over: Record<string, unknown> = {}) {
+  return {
+    pid: 36996,
+    name: "powershell.exe",
+    parentPid: 1234,
+    parentPresent: true,
+    parentName: "node.exe",
+    parentCreationDate: BOOT,
+    creationDate: AFTER_CEILING,
+    nonceReadable: true,
+    sessionId: 1,
+    ...over,
+  };
+}
+
+function apparatusConhostRow(over: Record<string, unknown> = {}) {
+  return {
+    pid: 109544,
+    name: "conhost.exe",
+    parentPid: 36996,
+    parentPresent: true,
+    parentName: "powershell.exe",
+    parentCreationDate: AFTER_CEILING,
+    creationDate: AFTER_CEILING,
+    nonceReadable: true,
+    sessionId: 1,
+    ...over,
+  };
+}
+
+function apparatusCtx(over: Parameters<typeof processRowPlausibilityContext>[0] extends infer T ? Partial<T> : never = {}) {
+  return processRowPlausibilityContext({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: [4812],
+    directorSessionId: 1,
+    directorPid: 1234,
+    rows: [
+      { pid: 4812, creationDate: T0 },
+      { pid: 1234, creationDate: BOOT },
+      { pid: 36996, parentPid: 1234, creationDate: AFTER_CEILING },
+      { pid: 109544, parentPid: 36996, creationDate: AFTER_CEILING },
+      { pid: 1500, creationDate: BOOT },
+      { pid: 7100, parentPid: 1500, creationDate: AFTER_CEILING },
+    ],
+    ...over,
+  });
+}
+
+test("R23b a live parented host row is still tied when it is not apparatus (R7 safety kept)", () => {
+  const row = svchostSpoofRow();
+  const ctx = apparatusCtx({ apparatusPids: [36996] });
+  assert.equal(rowIsMeasurementApparatus(row, ctx), false);
+  assert.equal(parentlessRowTiedToThisRun(row, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  const codeRow = svchostSpoofRow({ parentName: "Code.exe" });
+  assert.equal(processRowCouldBelongToThisRun(codeRow, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(codeRow, ctx), true);
+});
+
+test("R23b scanner powershell and its conhost are excluded by the spawn pid, not by parentName", () => {
+  const scanner = apparatusScannerRow();
+  const conhost = apparatusConhostRow();
+  const without = apparatusCtx();
+  assert.equal(processRowCouldBelongToThisRun(scanner, without), true);
+  assert.equal(processRowCouldBelongToThisRun(conhost, without), true);
+  assert.equal(undecidableRowsOf([scanner, conhost], without).map((row) => row.pid).join(","), "36996,109544");
+
+  const withApparatus = apparatusCtx({ apparatusPids: [36996] });
+  assert.equal(rowIsMeasurementApparatus(scanner, withApparatus), true);
+  assert.equal(rowIsMeasurementApparatus(conhost, withApparatus), true);
+  assert.equal(processRowCouldBelongToThisRun(scanner, withApparatus), false);
+  assert.equal(processRowCouldBelongToThisRun(conhost, withApparatus), false);
+  assert.equal(undecidableRowsOf([scanner, conhost, svchostSpoofRow()], withApparatus).map((row) => row.pid).join(","), "7100");
+});
+
+test("R23b a leftover parented by the Director pid is not excluded (R7 spoof surface)", () => {
+  const spoof = {
+    pid: 7100,
+    name: "node.exe",
+    parentPid: 1234,
+    parentPresent: true,
+    parentName: "node.exe",
+    parentCreationDate: BOOT,
+    creationDate: AFTER_CEILING,
+    nonceReadable: true,
+    sessionId: 1,
+  };
+  const ctx = apparatusCtx({ apparatusPids: [36996], directorPid: 1234 });
+  assert.equal(rowIsMeasurementApparatus(spoof, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(spoof, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(spoof, ctx), true);
+});
+
+test("R23b interpret drops apparatus rows so the scan is SCANNED", () => {
+  const scanner = apparatusScannerRow();
+  const conhost = apparatusConhostRow({ parentPresent: false });
+  const without = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({ ok: true, processes: [scanner, conhost], unreadable: 0, directorSessionId: 1 }),
+    stderr: "",
+    createdNotBefore: FLOOR,
+    runNonce: NONCE,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: [4812],
+    directorPid: 1234,
+  });
+  assert.equal(without.outcome, "UNAVAILABLE", without.reason);
+  assert.match(without.reason, /undecidable process-tree membership/);
+
+  const withApparatus = interpretWindowsOrphanScanOutput({
+    status: 0,
+    stdout: JSON.stringify({ ok: true, processes: [scanner, conhost], unreadable: 0, directorSessionId: 1 }),
+    stderr: "",
+    createdNotBefore: FLOOR,
+    runNonce: NONCE,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: [4812],
+    directorPid: 1234,
+    apparatusPids: [36996],
+  });
+  assert.equal(withApparatus.outcome, "SCANNED", withApparatus.reason);
+});
+
+test("R23b the envelope scannerPid is excluded even when spawnSync.pid is a wrapper", () => {
+  const scannerRow = apparatusScannerRow({ pid: 144916, parentPid: 1234 });
+  const conhostRow = apparatusConhostRow({ pid: 65700, parentPid: 144916 });
+  const leftover = svchostSpoofRow();
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: () => ({
+      status: 0,
+      pid: 91512,
+      stdout: JSON.stringify({
+        ok: true,
+        processes: [scannerRow, conhostRow],
+        unreadable: 0,
+        directorSessionId: 1,
+        scannerPid: 144916,
+      }),
+      stderr: "",
+    }),
+    waitSync: () => undefined,
+  });
+  const result = scanner({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: [4812],
+  });
+  assert.equal(result.snapshot.length, 2);
+  const ctx = processRowPlausibilityContext({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: [4812],
+    directorPid: 1234,
+    apparatusPids: [144916],
+    rows: [...result.snapshot, leftover],
+  });
+  assert.equal(processRowCouldBelongToThisRun(scannerRow, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(conhostRow, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(leftover, ctx), true);
+});
+
+test("R23b the scan script widens $scannerPid to a set and does not skip on parentName", () => {
+  rememberMeasurementApparatusPid(36996);
+  let script = "";
+  const scanner = createWindowsOrphanScanner({
+    spawnSync: (_cmd, args) => {
+      script = String(args[3] ?? "");
+      return { status: 0, stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}", stderr: "", pid: 42424 };
+    },
+    waitSync: () => undefined,
+  });
+  scanner({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    apparatusPids: [36996],
+  });
+  assert.match(script, /HashSet\[int\]/);
+  assert.match(script, /\$scannerPid\.Contains/);
+  assert.match(script, /36996/);
+  assert.match(script, /scannerPid = \[int\]\$PID/);
+  const skipAt = script.indexOf("$scannerPid.Contains");
+  assert.ok(skipAt >= 0, "widened $scannerPid skip must exist");
+  const skipLine = script.slice(skipAt, script.indexOf("\n", skipAt));
+  assert.doesNotMatch(skipLine, /parentName/);
+  assert.doesNotMatch(script.slice(script.indexOf("$scannerPid ="), script.indexOf("foreach ($c in $candidates)")), /parentName/);
+});
+
+test("R23b a leftover-sweep throw does not un-mint a later SCANNED empty tree", async () => {
+  let calls = 0;
+  const result = await runWith({
+    scanOrphans: () => {
+      calls += 1;
+      if (calls === 1) throw new Error("sweep re-scan failed");
+      return writerOrphanScanResult([]);
+    },
+  });
+  const tree = treeFinding(result);
+  assert.equal(result.spawned, true, result.reason);
+  assert.equal(tree?.ok, true, tree?.reason ?? result.reason);
+  assert.ok(calls >= 2, `expected leftover sweep then collectWriterOrphans, calls=${calls}`);
+});
+
+test("R23b a leftover host-wide lock with holder NOT_FOUND and tree CLEAR is reclaimed", () => {
+  const rootA = makeTempRoot("r23b-lock-a");
+  const rootB = makeTempRoot("r23b-lock-b");
+  const arbitration = makeTempRoot("r23b-lock-arb");
+  try {
+    const probe = notFoundProbe();
+    const storeA = createNodeLeaseStore(rootA, storeOptions({
+      hostArbitrationRoot: arbitration,
+      probe,
+      hostLockTreeEvidence: (holder: { readonly pid: number }) => {
+        assert.equal(holder.pid, 4812);
+        return hostWideTreeEvidenceFromScan({ performed: true, liveSightings: [] });
+      },
+    }));
+    const first = acquireLease({
+      existing: [],
+      leaseId: "lease-a",
+      kind: "PRODUCTION_WRITER",
+      resource: "writer-shared",
+      missionId: "m1",
+      runId: "run-a",
+      pid: 4812,
+      processIdentity: { pid: 4812, startedAt: T0, runToken: NONCE_0 },
+      now: LONG_AGO,
+    });
+    assert.equal(first.ok, true, first.reason);
+    storeA.save([first.lease!]);
+    assert.equal(lockFiles(join(arbitration, DIRECTOR_STORE_LAYOUT_V1.locksDir), "production-writer-").length, 1);
+
+    const storeB = createNodeLeaseStore(rootB, storeOptions({
+      hostArbitrationRoot: arbitration,
+      probe,
+      hostLockTreeEvidence: () => hostWideTreeEvidenceFromScan({ performed: true, liveSightings: [] }),
+    }));
+    const second = acquireLease({
+      existing: storeB.list(),
+      leaseId: "lease-b",
+      kind: "PRODUCTION_WRITER",
+      resource: "writer-shared",
+      missionId: "m2",
+      runId: "run-b",
+      pid: 5555,
+      now: EXPIRED,
+    });
+    storeB.save([second.lease!]);
+    assert.equal(storeB.list().length, 1);
+    assert.equal(lockFiles(join(arbitration, DIRECTOR_STORE_LAYOUT_V1.locksDir), "production-writer-").length, 1);
+    assert.equal(storeB.list()[0]?.leaseId, "lease-b");
+  } finally {
+    rmSync(rootA, { recursive: true, force: true });
+    rmSync(rootB, { recursive: true, force: true });
+    rmSync(arbitration, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
