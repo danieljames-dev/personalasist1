@@ -50,7 +50,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // store's idea of which directory a path names, and that alias collision comes back as a lease held
 // under one spelling and a lock file created under another.
 import { CONTROL_BYTES } from "./control-bytes.js";
-import { compareCreationDates, observedCreationIsStrictlyLater } from "./process-identity.js";
+import { compareCreationDates, observedCreationIsStrictlyLater, placeableInstantMs } from "./process-identity.js";
 import { canonicalResource, resourceIsIdentifiable, type LeaseKindV1 } from "./resource-identity.js";
 
 export const LEASE_SCHEMA_V1 = "aion.director.lease.v1" as const;
@@ -192,6 +192,20 @@ function hasStrongIdentity(identity: ProcessIdentityV1 | undefined): identity is
 }
 
 /**
+ * One expiry predicate for acquire and reclaim. Built on
+ * {@link placeableInstantMs}, not Date.parse. An unplaceable operand is
+ * "not expired" — the fail-safe answer — so a truncated row cannot
+ * permanently wedge a resource while also failing the other copy.
+ */
+export function leaseHasExpired(lease: { readonly expiresAt?: unknown }, now: string): boolean {
+  if (typeof lease.expiresAt !== "string") return false;
+  const expMs = placeableInstantMs(lease.expiresAt);
+  const nowMs = placeableInstantMs(now);
+  if (expMs === null || nowMs === null) return false;
+  return expMs < nowMs;
+}
+
+/**
  * Try to take a lease.
  *
  * A live holder refuses outright. An apparently expired holder refuses too, but says so differently:
@@ -259,7 +273,7 @@ export function acquireLease(input: {
 
   const held = input.existing.find((lease) => conflicts(lease, requested));
   if (held) {
-    const expired = Date.parse(held.expiresAt) < Date.parse(input.now);
+    const expired = leaseHasExpired(held, input.now);
     if (held.runId === input.runId) {
       const adoptedExistingHolder = held.pid !== null || held.processIdentity !== undefined;
       return {
@@ -416,7 +430,7 @@ export function reclaimStaleLease(input: {
     input.holderLiveness ??
     (input.holderProcessAlive === undefined ? "UNKNOWN" : input.holderProcessAlive ? "ALIVE" : "DEAD_CONFIRMED");
 
-  if (Date.parse(held.expiresAt) >= Date.parse(input.now)) {
+  if (!leaseHasExpired(held, input.now)) {
     return { ok: false, remaining: unchanged, reason: "the lease has not expired", refusal: "NOT_EXPIRED" };
   }
   if (liveness === "ALIVE") {

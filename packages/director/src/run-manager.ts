@@ -109,10 +109,10 @@ import {
   descendantPidsOf,
   detectOrphan,
   holderLiveness,
+  identityFromObservation,
   isUsablePid,
   normaliseRunNonce,
   normalisedCreationDate,
-  isBrokerHostName,
   nextUndecidablePersistenceDecision,
   parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
@@ -123,6 +123,8 @@ import {
   UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS,
   UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS,
   placeableInstantMs,
+  provenCreatedStrictlyAfter,
+  provenCreatedStrictlyBefore,
   type AncestrySampleRowV1,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
@@ -130,6 +132,7 @@ import {
   type ProcessObservationV1,
 } from "./process-identity.js";
 import {
+  answersAfterReboot,
   assertSpawnPermitBinding,
   existingIntentOn,
   isSpawnPermitSpent,
@@ -148,6 +151,14 @@ export const RUN_RESULT_SCHEMA_V1 = "aion.director.run-result.v1" as const;
 
 export const CANCEL_SOFT_MS = 5_000;
 export const CANCEL_HARD_MS = 10_000;
+
+/**
+ * What a clean orphan scan actually establishes. ShellExecute and a
+ * creation-time Job Object are outside this sentence. D2 CHILD_TREE is
+ * unmet until containment happens at creation time.
+ */
+export const EXECUTOR_TREE_GONE_REASON =
+  "no process attributable to this run by nonce, holder chain, or the parentless/broker window remains";
 
 const KNOWN_SUCCESS_EXIT_CODES: readonly number[] = [0];
 
@@ -348,7 +359,8 @@ export type LaunchRunRequestV1 = Omit<ExecuteRunRequestV1, "executablePath" | "a
   readonly promptPath: string;
   /**
    * Defaults to `IMPLEMENT` (measured implementer argv). Every role in
-   * {@link NON_WRITING_ROLES} receives `dontAsk` and no `--always-approve`.
+   * {@link NON_WRITING_ROLES} receives `plan` and no `--always-approve`.
+   * `dontAsk` is not treated as a non-writing launch.
    */
   readonly role?: ExecutorRoleV1;
 };
@@ -987,6 +999,153 @@ export function evaluateSuccessConjunction(input: {
   };
 }
 
+function emptyRefusalConjunction(runRoot: string, reason: string): SuccessConjunctionV1 {
+  const emptyParsed: HandoffParseV1 = { ok: false, handoff: null, problems: ["no handoff text"] };
+  return evaluateSuccessConjunction({
+    exitCode: null,
+    stillRunning: false,
+    executor: "local",
+    output: "",
+    parsed: emptyParsed,
+    reportedWorkItemId: null,
+    expectedMissionId: "",
+    expectedRunId: "",
+    expectedWorkItemId: "",
+    runRoot,
+    gitAfter: null,
+    gitVerdict: null,
+    authorisedProductionMutated: false,
+    declaredArtifactsInsideRunRoot: false,
+    declaredArtifactsInsideRunRootReason: reason,
+    executorTreeGone: true,
+    executorTreeReason: "this launch never created a process",
+    timedOut: false,
+    logStayedWithinBudget: true,
+    processWasCreated: false,
+  });
+}
+
+function invalidLaunchOrExecuteRequest(
+  request: unknown,
+  opts: { readonly requireArgv: boolean },
+): RunResultV1 | null {
+  if (request === null || typeof request !== "object") {
+    return namedRequestRefusal("request is not an object", request);
+  }
+  const row = request as Partial<ExecuteRunRequestV1>;
+  if (typeof row.runRoot !== "string") {
+    return namedRequestRefusal("runRoot is not a string", request);
+  }
+  if (opts.requireArgv) {
+    if (!Array.isArray(row.argv) || !row.argv.every((item) => typeof item === "string")) {
+      return namedRequestRefusal("argv is not an array of strings", request);
+    }
+  }
+  return null;
+}
+
+function namedRequestRefusal(reason: string, request: unknown): RunResultV1 {
+  const runId = request !== null && typeof request === "object" && typeof (request as { runId?: unknown }).runId === "string"
+    ? (request as { runId: string }).runId
+    : "";
+  return {
+    schema: RUN_RESULT_SCHEMA_V1,
+    resultPath: null,
+    runId,
+    ok: false,
+    spawned: false,
+    reason,
+    conjunction: emptyRefusalConjunction("", reason),
+    exitCode: null,
+    processIdentity: null,
+    intent: null,
+    handoff: null,
+    gitBefore: null,
+    gitAfter: null,
+    lease: null,
+    productionWriterLeaseReleasedByThisRun: false,
+    cancel: { timedOut: false, stages: [] },
+    log: null,
+  };
+}
+
+/**
+ * Reboot recovery entry point. Reads the durable intent and either records
+ * a terminal result or refuses with the holder named. Does not spawn.
+ *
+ * D2 CHILD_TREE remains unmet: this path does not claim the process tree
+ * is gone unless a later scan proves it.
+ */
+export async function recoverAbandonedRun(
+  runRoot: string,
+  deps: {
+    readonly fs: RunFileSystemV1;
+    readonly probe: HostProcessProbe;
+    readonly clock: ClockV1;
+  },
+): Promise<RunResultV1> {
+  if (typeof runRoot !== "string") {
+    return namedRequestRefusal("runRoot is not a string", { runRoot, runId: "" });
+  }
+  const intentPath = join(runRoot, "intent.json");
+  const resultPath = join(runRoot, "result.json");
+  const parsed = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
+  const answers = answersAfterReboot(parsed.ok ? parsed.intent : null);
+  const runId = parsed.ok ? parsed.intent.runId : "";
+  const finish = (reason: string, spawned: boolean): RunResultV1 => {
+    const result: RunResultV1 = {
+      schema: RUN_RESULT_SCHEMA_V1,
+      resultPath,
+      runId,
+      ok: false,
+      spawned,
+      reason,
+      conjunction: emptyRefusalConjunction(runRoot, reason),
+      exitCode: null,
+      processIdentity: parsed.ok ? parsed.intent.processIdentity : null,
+      intent: parsed.ok ? parsed.intent : null,
+      handoff: null,
+      gitBefore: null,
+      gitAfter: null,
+      lease: null,
+      productionWriterLeaseReleasedByThisRun: false,
+      cancel: { timedOut: false, stages: [] },
+      log: null,
+    };
+    const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, result, spawned);
+    return write === "failed" ? { ...result, resultPath: null } : result;
+  };
+  if (!parsed.ok) {
+    return finish("recover refused: intent is unreadable or absent", false);
+  }
+  if (!answers.started) {
+    return finish("recover: no recorded spawn; nothing to recover", false);
+  }
+  const holderPid = answers.spawnPid;
+  if (isUsablePid(holderPid)) {
+    let observation: ProcessObservationV1;
+    try {
+      observation = deps.probe.observe(holderPid);
+    } catch {
+      return finish(`recover refused: holder pid ${holderPid} liveness is UNKNOWN`, true);
+    }
+    if (observation.outcome === "FOUND") {
+      return finish(`recover refused: holder pid ${holderPid} is still present`, true);
+    }
+    if (observation.outcome === "UNAVAILABLE") {
+      return finish(`recover refused: holder pid ${holderPid} liveness is UNKNOWN`, true);
+    }
+    return finish(
+      `recover recorded a terminal result; holder pid ${holderPid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
+      true,
+    );
+  }
+  return finish(
+    "recover recorded a terminal result; no usable holder pid was recorded. D2 CHILD_TREE remains unmet.",
+    true,
+  );
+}
+
 /**
  * The reachable launch path: discovery → adapters → executeRun (intent, spawn, log, Git, conjunction).
  *
@@ -998,6 +1157,8 @@ export async function launchRun(
   request: LaunchRunRequestV1,
   deps: LaunchRunDepsV1,
 ): Promise<RunResultV1> {
+  const invalid = invalidLaunchOrExecuteRequest(request, { requireArgv: false });
+  if (invalid !== null) return invalid;
   const discovery = discoverExecutor(request.executor, deps.discoveryEnv, deps.discoveryFs);
   if (discovery.status !== "FOUND") {
     const reason = discovery.status === "AMBIGUOUS"
@@ -1161,14 +1322,16 @@ function refusedBeforeSpawn(
     cancel: { timedOut: false, stages: [] },
     log: null,
   };
-  writeResultIfPermitted(deps.fs, request.runRoot, resultPath, result, false);
-  return result;
+  const write = writeResultIfPermitted(deps.fs, request.runRoot, resultPath, result, false);
+  return write === "failed" ? { ...result, resultPath: null } : result;
 }
 
 export async function executeRun(
   request: ExecuteRunRequestV1,
   deps: RunManagerDepsV1,
 ): Promise<RunResultV1> {
+  const invalid = invalidLaunchOrExecuteRequest(request, { requireArgv: true });
+  if (invalid !== null) return invalid;
   const runRoot = request.runRoot;
   const intentPath = join(runRoot, "intent.json");
   const resultPath = join(runRoot, "result.json");
@@ -1215,15 +1378,18 @@ export async function executeRun(
       readonly gitBefore?: GitObservationV1 | null;
     },
   ): RunResultV1 => {
-    const result: RunResultV1 = {
+    const drafted: RunResultV1 = {
       ...partial,
       schema: RUN_RESULT_SCHEMA_V1,
       resultPath,
       runId: request.runId,
       gitBefore: partial.gitBefore ?? null,
     };
-    writeResultIfPermitted(deps.fs, runRoot, resultPath, result, partial.spawned === true);
-    return result;
+    const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, drafted, partial.spawned === true);
+    if (write === "failed") {
+      return { ...drafted, resultPath: null };
+    }
+    return drafted;
   };
 
   let heldLease: LeaseV1 | null = null;
@@ -2151,19 +2317,24 @@ export async function executeRun(
     } else {
       // First sample is synchronous so a short-lived launcher can still
       // land in observedPids before the exit race. Failures are ignored.
-      void sampleAncestryWhileChildAlive({
-        child,
-        holderPid: childPid,
-        observedPids: seenInTreePids,
-        wait: deps.wait,
-        sampleAncestry: resolveAncestrySampler(deps),
-      });
+      // Tests that inject scanOrphans get a no-op sampler; do not start
+      // the wait loop or a hanging mock child keeps the process alive
+      // for ANCESTRY_SAMPLE_MAX_PER_RUN intervals after the run ends.
+      if (deps.sampleAncestry !== undefined || deps.scanOrphans === undefined) {
+        void sampleAncestryWhileChildAlive({
+          child,
+          holderPid: childPid,
+          observedPids: seenInTreePids,
+          wait: deps.wait,
+          sampleAncestry: resolveAncestrySampler(deps),
+        });
+      }
       const raced = await Promise.race([
         raceExit(child, request.timeoutMs, deps.wait, () => {
           if (heldLease === null) return;
           const renewed = heartbeat(heldLease, deps.clock.now());
           heldLease = persistLeaseHolder(leaseStore, renewed, renewed.pid, null, runNonce, renewed);
-        }),
+        }, deps.clock),
         haltSignal.then(() => ({ tag: "halt" as const })),
       ]);
       if (raced.tag === "exit") {
@@ -2414,11 +2585,6 @@ export async function executeRun(
 }
 
 function releaseChildStreams(child: SpawnHandleV1 | null, log: BoundedLogV1 | null): void {
-  try {
-    log?.flush();
-  } catch {
-    // Flush errors must not escape executeRun.
-  }
   for (const stream of [child?.stdout, child?.stderr]) {
     if (stream == null) continue;
     try {
@@ -2426,6 +2592,11 @@ function releaseChildStreams(child: SpawnHandleV1 | null, log: BoundedLogV1 | nu
     } catch {
       // Destroy errors must not escape executeRun.
     }
+  }
+  try {
+    log?.seal();
+  } catch {
+    // Seal errors must not escape executeRun.
   }
 }
 
@@ -2557,7 +2728,7 @@ function describeExecutorTree(input: {
       reason: `leftover processes remain after kill: ${input.leftoverRemaining.map((item) => item.pid).join(", ")}`,
     };
   }
-  return { ok: true, reason: "no process of this run's tree was found" };
+  return { ok: true, reason: EXECUTOR_TREE_GONE_REASON };
 }
 
 function artifactsConfinedToRunRoot(input: {
@@ -2597,7 +2768,7 @@ function writeResultIfPermitted(
   resultPath: string,
   result: RunResultV1,
   spawned: boolean,
-): void {
+): "written" | "skipped" | "failed" {
   let existing = false;
   try {
     existing = fs.isFile(resultPath);
@@ -2605,15 +2776,17 @@ function writeResultIfPermitted(
     // Unreadable presence is not absence. Do not invent a first write over a
     // record we could not stat, unless this run already spawned (the result
     // must be persisted).
-    if (!spawned) return;
+    if (!spawned) return "skipped";
     existing = false;
   }
-  if (existing && !spawned) return;
+  if (existing && !spawned) return "skipped";
   try {
     fs.mkdirp(runRoot);
     fs.writeDurable(resultPath, `${JSON.stringify(result, null, 2)}\n`);
+    return "written";
   } catch {
-    // A failed result write is reported on the in-memory object.
+    // Bytes did not land. Callers must not label resultPath as if they did.
+    return "failed";
   }
 }
 
@@ -2699,6 +2872,20 @@ function sightingsAsOrphans(
   return out;
 }
 
+/** Resolves when `wait` does, or after `ms`, whichever is first. A hung wait cannot stall the run. */
+function waitWithCeiling(wait: (ms: number) => Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    void Promise.resolve(wait(ms)).then(() => {
+      clearTimeout(timer);
+      resolve();
+    }, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 async function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
@@ -2738,7 +2925,7 @@ async function collectWriterOrphans(input: {
       const wait = input.wait ?? (async () => undefined);
       let clean: readonly OrphanSightingV1[] | null = null;
       for (let attempt = 1; attempt < UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS; attempt++) {
-        await wait(UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
+        await waitWithCeiling(wait, UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
         let next: OrphanSightingV1[];
         try {
           next = scanOnce();
@@ -2778,7 +2965,7 @@ async function collectWriterOrphans(input: {
       sightings = [...clean];
       plausibility = ctxFor(sightings);
     }
-    rememberInTreePids(observedPids, sightings, input.runNonce, holderPid);
+    rememberInTreePids(observedPids, sightings, input.runNonce, holderPid, holderExitedAt);
     const membershipTree = {
       holderPid: holderPid ?? null,
       rows: sightings,
@@ -2835,7 +3022,6 @@ export function writerSightingNotProvenAbsent(
   // that failed the positive tests. The parentless closed interval is
   // the same F10-gated function so that half cannot drift.
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
-  if (isBrokerHostName(sighting.name)) return false;
   if (parentlessRowTiedToThisRun(sighting, ctx)) return true;
   // Same exclusion rule as processRowCouldBelongToThisRun: a nonce may
   // exclude only when it was read from the PEB. Unreadable, missing, or
@@ -2884,7 +3070,7 @@ function killNonceBearingLeftovers(input: {
   } catch {
     return { confirmed: false, remaining: [], killed: false };
   }
-  rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined);
+  rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined, input.holderExitedAt);
   const tree = { holderPid, rows: leftovers };
   let killed = false;
   for (const leftover of leftovers) {
@@ -2944,13 +3130,27 @@ async function raceExit(
   timeoutMs: number,
   wait: (ms: number) => Promise<void>,
   onHeartbeat?: () => void,
+  clock?: ClockV1,
 ): Promise<{ tag: "exit"; exit: SpawnExitV1 } | { tag: "timeout" }> {
   if (child.exited) return { tag: "exit", exit: await child.exit };
   const chunk = Math.max(1, Math.min(60_000, Math.floor(LEASE_TTL_MS / 2)));
+  const startMs = clock === undefined ? null : placeableInstantMs(clock.now());
   let waited = 0;
-  while (waited < timeoutMs) {
+  while (true) {
     if (child.exited) return { tag: "exit", exit: await child.exit };
-    const slice = Math.min(chunk, timeoutMs - waited);
+    // Slice bound always fires, including when the clock is frozen or unplaceable.
+    if (waited >= timeoutMs) break;
+    let remaining = timeoutMs - waited;
+    // Clock bound still times out a wait that overruns the requested slice.
+    if (clock !== undefined && startMs !== null) {
+      const nowMs = placeableInstantMs(clock.now());
+      if (nowMs !== null) {
+        const elapsed = nowMs - startMs;
+        if (elapsed >= timeoutMs) break;
+        remaining = Math.min(remaining, timeoutMs - elapsed);
+      }
+    }
+    const slice = Math.min(chunk, Math.max(1, remaining));
     try {
       await Promise.race([
         child.exit.then(() => "exit" as const).catch(() => "exit" as const),
@@ -3223,15 +3423,31 @@ function rememberInTreePids(
   sightings: readonly OrphanSightingV1[],
   runNonce: string,
   holderPid: number | undefined,
+  holderExitedAt?: string,
 ): void {
   if (isUsablePid(holderPid)) seen.add(holderPid);
+  const bounds = holderExitedAt !== undefined ? { holderExitedAt } : undefined;
   for (const sighting of sightings) {
     const nonce = normaliseRunNonce(sighting.runNonce);
     if (nonce !== null && nonce === runNonce) seen.add(sighting.pid);
-    if (isUsablePid(holderPid) && descendantPidsOf(holderPid, sightings).has(sighting.pid)) {
+    if (
+      isUsablePid(holderPid)
+      && descendantPidsOf(holderPid, sightings, bounds).has(sighting.pid)
+    ) {
       seen.add(sighting.pid);
     }
     if (sighting.parentPid !== undefined && seen.has(sighting.parentPid)) {
+      const parentIsHolder = isUsablePid(holderPid) && sighting.parentPid === holderPid;
+      if (parentIsHolder && provenCreatedStrictlyAfter(sighting.creationDate, holderExitedAt)) {
+        continue;
+      }
+      const parentRow = sightings.find((row) => row.pid === sighting.parentPid);
+      if (
+        parentRow !== undefined
+        && provenCreatedStrictlyBefore(sighting.creationDate, parentRow.creationDate)
+      ) {
+        continue;
+      }
       seen.add(sighting.pid);
     }
   }
@@ -3394,7 +3610,7 @@ function reclaimExpiredHolder(input: {
   // reclaimStaleLease's FOUND branch decides via occupant identity.
   const liveness = observation.outcome === "UNAVAILABLE" ? "UNKNOWN" : "DEAD_CONFIRMED";
 
-  const observedIdentity = leaseIdentityFromObservation(observation);
+  const observedIdentity = leaseIdentityFromProbe(observation);
   const result = reclaimStaleLease({
     existing: input.store.list(),
     kind: input.kind,
@@ -3410,8 +3626,35 @@ function reclaimExpiredHolder(input: {
   return { ok: result.ok };
 }
 
-function leaseIdentityFromObservation(observation: ProcessObservationV1): ProcessIdentityV1 | undefined {
+/**
+ * Build the lease-layer identity from the same probe the rest of the
+ * package uses. {@link identityFromObservation} is the strict form
+ * (usable pid + placeable start + resolved path + nonce). The lease
+ * layer genuinely accepts a weaker pid+startedAt pair, so when the
+ * strict form refuses we degrade through
+ * {@link leaseIdentityFromPidStartedAt} — and only that far.
+ */
+function leaseIdentityFromProbe(observation: ProcessObservationV1): ProcessIdentityV1 | undefined {
+  const strict = identityFromObservation(observation);
+  if (strict !== null) {
+    return {
+      pid: strict.pid,
+      startedAt: strict.creationDate,
+      runToken: strict.runNonce,
+    };
+  }
+  return leaseIdentityFromPidStartedAt(observation);
+}
+
+/**
+ * Deliberate lease-layer degradation of {@link identityFromObservation}.
+ * A lease may record pid+startedAt without a nonce or executable path.
+ * It still refuses a non-usable pid (`0`, NaN, negative). That is the
+ * only weakening. Do not add a third spelling.
+ */
+function leaseIdentityFromPidStartedAt(observation: ProcessObservationV1): ProcessIdentityV1 | undefined {
   if (observation.outcome !== "FOUND") return undefined;
+  if (!isUsablePid(observation.pid)) return undefined;
   const token = normaliseRunNonce(observation.runNonce);
   return {
     pid: observation.pid,
@@ -3547,8 +3790,9 @@ export function createNodeWait(): (ms: number) => Promise<void> {
  * Job Object on the holder: kill-on-close, breakaway denied, membership
  * queried with `JOBOBJECT_BASIC_PROCESS_ID_LIST`. No image name, environment
  * block, or dead intermediate can evade that. Ancestry sampling plus the
- * parentless predicates cannot close the same gap. Do not treat a green
- * suite as proof that the D2 CHILD_TREE requirement is met in production.
+ * parentless predicates cannot close the same gap. D2 CHILD_TREE is unmet
+ * until containment happens at creation time. Do not treat a green suite as
+ * proof that the D2 CHILD_TREE requirement is met in production.
  */
 /**
  * Whether a taskkill spawnSync result confirmed the tree stopped.

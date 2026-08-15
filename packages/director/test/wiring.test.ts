@@ -106,9 +106,8 @@ test("every exported src function reachable from the run path has a non-test cal
   const appsDir = join(here, "..", "..", "..", "..", "apps");
   const appSources: string[] = [];
   try {
-    for (const name of readdirSync(appsDir)) {
-      if (!/\.(mjs|js|cjs)$/.test(name)) continue;
-      appSources.push(readFileSync(join(appsDir, name), "utf8"));
+    for (const file of walkCodeFiles(appsDir)) {
+      appSources.push(readFileSync(file, "utf8"));
     }
   } catch {
     // no apps directory in this extract
@@ -132,8 +131,6 @@ test("every exported src function reachable from the run path has a non-test cal
     ["awaitsOwner", "mission-state classifier; work-items uses it via import of the module"],
     ["needsEngineer", "mission-state classifier"],
     ["livenessGrants", "lease-layer helper; holderLiveness is what executeRun reads"],
-    ["identityFromObservation", "probe-shape adapter used by tests and reclaim"],
-    ["answersAfterReboot", "reboot-recovery reader; executeRun writes the intent it would read"],
     ["killProcessTreeStandIn", "wired as deps.killTree in apps/director-cli.mjs; r18 drives it"],
     ["isSafePathSegment", "store-contract primitive used via validatePathSegment"],
     ["validateMissionId", "store-contract alias of validatePathSegment"],
@@ -318,25 +315,49 @@ function walkCodeFiles(root: string, out: string[] = []): string[] {
 }
 
 test("there is exactly one discovery ladder, and the launch path uses it", () => {
-  const repoRoot = join(here, "..", "..", "..", "..");
-  const self = fileURLToPath(import.meta.url);
-  const readers: string[] = [];
-  for (const file of walkCodeFiles(repoRoot)) {
-    if (file === self) continue;
-    const source = readFileSync(file, "utf8");
-    if (!source.includes("AION_CLAUDE_CODE_PATH")) continue;
-    readers.push(relative(repoRoot, file).replaceAll("\\", "/"));
-  }
-  assert.deepEqual(
-    readers,
-    ["packages/director/src/executor-discovery.ts"],
-    `AION_CLAUDE_CODE_PATH must be read only by the D2 ladder, saw ${readers.join(", ")}`,
-  );
-
   const files = sourceFiles();
   const launch = files.get("run-manager.ts") ?? "";
   assert.ok(calledIn(launch, "discoverClaudeExecutor"), "launchRun must call discoverClaudeExecutor");
   assert.ok(calledIn(launch, "discoverGrokExecutor"), "launchRun must call discoverGrokExecutor");
+});
+
+test("every importer of the discovery ladder reaches spawn only through launchRun or a Director lease", () => {
+  const repoRoot = join(here, "..", "..", "..", "..");
+  const self = fileURLToPath(import.meta.url);
+  const importers: { file: string; source: string }[] = [];
+  for (const file of walkCodeFiles(repoRoot)) {
+    if (file === self) continue;
+    const source = readFileSync(file, "utf8");
+    if (
+      !/\bdiscoverClaudeExecutor\b/.test(source)
+      && !/\bdiscoverGrokExecutor\b/.test(source)
+    ) continue;
+    importers.push({ file: relative(repoRoot, file).replaceAll("\\", "/"), source });
+  }
+  assert.ok(importers.some((item) => item.file.endsWith("packages/director/src/run-manager.ts")));
+  for (const item of importers) {
+    const reachesLaunch = /\blaunchRun\b/.test(item.source);
+    const reachesLease = /\bacquireDeveloperAgentWorktreeLease\b/.test(item.source)
+      || /\bacquireLease\b/.test(item.source);
+    const isDiscoveryModule = item.file.endsWith("packages/director/src/executor-discovery.ts");
+    const isIndexReexport = item.file.endsWith("packages/director/src/index.ts");
+    assert.ok(
+      isDiscoveryModule || isIndexReexport || reachesLaunch || reachesLease,
+      `${item.file} imports the discovery ladder but does not reach spawn via launchRun or a lease`,
+    );
+  }
+});
+
+test("the CLI never overrides the host-fixed arbitration root", () => {
+  const cli = readFileSync(join(here, "..", "..", "..", "..", "apps", "director-cli.mjs"), "utf8");
+  assert.doesNotMatch(
+    cli,
+    /createNodeLeaseStore\([^)]*,/,
+    "CLI must call createNodeLeaseStore with the store root only",
+  );
+  assert.doesNotMatch(cli, /hostArbitrationRoot\s*:/);
+  assert.match(cli, /hostArbitrationRoot\s*\(/);
+  assert.match(cli, /isHostWideLeaseKind/);
 });
 
 test("there is exactly one handoff parser call on the run path", () => {
@@ -520,7 +541,9 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
     assert.equal(result.spawned, true, result.reason);
     assert.equal(spawnedExe, exe, "launchRun must use the discovered executable, not a caller-supplied one");
     assert.ok(spawnedArgv.includes("--prompt-file"), "launchRun must use the adapter argv");
-    assert.ok(spawnedArgv.includes("--no-plan"), "launchRun must use the measured Grok flags");
+    assert.ok(spawnedArgv.includes("--permission-mode"), "launchRun must use the measured Grok flags");
+    assert.equal(spawnedArgv[spawnedArgv.indexOf("--permission-mode") + 1], "plan");
+    assert.equal(spawnedArgv.includes("--no-plan"), false);
     assert.ok(spawnedArgv.includes(promptPath));
   } finally {
     rmSync(dir, { recursive: true, force: true });

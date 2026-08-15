@@ -714,7 +714,7 @@ test("a successful PEB read with no nonce is not overridden by argv text", () =>
   const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z" });
   assert.deepEqual(hits, []);
   const pebAt = script.indexOf("[AionPebEnv]::GetNonce");
-  const cmdAt = script.indexOf("CommandLine -match");
+  const cmdAt = script.search(/commandLine -match/i);
   assert.ok(pebAt >= 0 && cmdAt >= 0 && pebAt < cmdAt, "PEB must be read before CommandLine");
   assert.match(script, /return ""/);
 });
@@ -822,10 +822,8 @@ test("a parentless readable row that is not a descendant is machine noise, not a
   });
   scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z", holderPid: 4812 });
   assert.match(script, /\$isBroker/);
-  assert.match(
-    script,
-    /if \(\$n -eq \$target -or \$isDesc -or \(\(\$n -ne \$target -or -not \$nonceReadable\) -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
-  );
+  assert.match(script, /\$parentProvenCapable/);
+  assert.match(script, /\$emit = \$isDesc -or \(\$atOrAfterFloor -and -not \$parentProvenCapable\)/);
 });
 
 test("a parentless readable-null-nonce leaf after the floor makes the scan UNAVAILABLE", () => {

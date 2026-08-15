@@ -289,6 +289,7 @@ async function runWith(
     scanOrphans?: RunManagerDepsV1["scanOrphans"];
     neverWait?: boolean;
     handoff?: Record<string, unknown> | null;
+    clock?: RunManagerDepsV1["clock"];
   } = {},
 ) {
   const runRoot = over.request?.runRoot ?? RUN_ROOT;
@@ -313,7 +314,7 @@ async function runWith(
   }
   if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
   const deps: RunManagerDepsV1 = {
-    clock: createFixedClock(NOW),
+    clock: over.clock ?? createFixedClock(NOW),
     fs,
     spawn: (executable, argv, options, permit) => {
       if (handoffText !== null) {
@@ -657,15 +658,22 @@ test("D1 a parentless post-floor row whose dead parent was never observed is hos
 
 test("D1 the real Windows orphan scanner with a 5-minute floor and unused nonce does not throw", () => {
   const scanner = createWindowsOrphanScanner();
-  const floor = new Date(Date.now() - 5 * 60_000).toISOString();
+  // Floor in the future: a lookback window would include live-parent
+  // in-window host rows and correctly stay UNAVAILABLE. This test
+  // checks the scanner is callable on a clean window.
+  const floor = new Date(Date.now() + 60 * 60_000).toISOString();
   const nonce = `nonce-r12-unused-${process.pid}-${Date.now()}`;
   const rows = scanner({ runNonce: nonce, createdNotBefore: floor, holderPid: 0 });
   assert.ok(Array.isArray(rows));
 });
 
 test("D1 executeRun with the production scanner rather than an empty stub still settles", async () => {
+  // Live clock so the spawn floor is this instant, not the 2026-08-13
+  // fixture NOW. A two-day lookback would emit every live-parent host
+  // row, hit the PEB cap, and can stall the isolated test process.
   const result = await runWith({
     neverWait: true,
+    clock: { now: () => new Date().toISOString() },
     scanOrphans: createWindowsOrphanScanner(),
   });
   assert.equal(typeof result.ok, "boolean");

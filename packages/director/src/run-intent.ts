@@ -9,6 +9,11 @@
  * worktree, branch, mission and work item; what exact executable and argv; the run nonce; when
  * the intent was written; when the spawn was observed.
  *
+ * Known limit, not closed this round: if both durable records (intent.json and
+ * result.json) are wiped and the lease is released, nothing durable binds
+ * `runId` to "already executed". The same runId can spawn again because the
+ * record is addressed by path.
+ *
  * ## The ordering is the property
  *
  * The only value that permits a spawn is returned after the intent has been durably written and
@@ -792,14 +797,7 @@ export function existingIntentOn(store: IntentStoreV1, intentPath: string): "non
   }
   const parsed = runIntentFrom(parseJson(raw));
   if (!parsed.ok) return "unreadable";
-  if (
-    parsed.intent.spawnAttemptedAt !== null
-    || parsed.intent.spawnPid !== null
-    || parsed.intent.processIdentity !== null
-  ) {
-    return "spawned";
-  }
-  return "unstarted";
+  return answersAfterReboot(parsed.intent).started ? "spawned" : "unstarted";
 }
 
 function permitMatchesIntent(permit: SpawnPermitV1, current: RunIntentV1): boolean {
@@ -834,9 +832,7 @@ function makePermit(intentPath: string, intent: RunIntentV1): SpawnPermitV1 {
 }
 
 function intentAlreadySpawned(intent: RunIntentV1): boolean {
-  return intent.spawnAttemptedAt !== null
-    || intent.spawnPid !== null
-    || intent.processIdentity !== null;
+  return answersAfterReboot(intent).started;
 }
 
 function launchMatchesAuthorised(

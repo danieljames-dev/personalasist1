@@ -169,8 +169,7 @@ function grokReviewArgv(promptPath = PROMPT, cwd = CWD): string[] {
   return [
     "--prompt-file", promptPath,
     "--cwd", cwd,
-    "--permission-mode", "dontAsk",
-    "--no-plan",
+    "--permission-mode", "plan",
     "--max-turns", String(GROK_MAX_TURNS),
   ];
 }
@@ -2602,12 +2601,12 @@ test("a clean run passes all ten success conjuncts", async () => {
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
 
-test("executorTreeIsGone success names that no process of this run's tree was found", async () => {
+test("executorTreeIsGone success names attribution, not a closed tree", async () => {
   const result = await runWith({ neverWait: true });
   assert.equal(finding(result, "executorTreeIsGone").ok, true, result.reason);
   assert.equal(
     finding(result, "executorTreeIsGone").reason,
-    "no process of this run's tree was found",
+    "no process attributable to this run by nonce, holder chain, or the parentless/broker window remains",
   );
 });
 
@@ -2798,9 +2797,9 @@ test("launchRun ADVERSARIAL_REVIEW argv cannot write", async () => {
     );
     assert.equal(result.spawned, true, result.reason);
     const mode = spawnedArgv.indexOf("--permission-mode");
-    assert.equal(spawnedArgv[mode + 1], "dontAsk");
+    assert.equal(spawnedArgv[mode + 1], "plan");
     assert.equal(spawnedArgv.includes("--always-approve"), false);
-    assert.ok(spawnedArgv.includes("--no-plan"));
+    assert.equal(spawnedArgv.includes("--no-plan"), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -766,10 +766,8 @@ test("D1 the generated scan script emit predicate includes the floor-bounded par
   scanner({ runNonce: NONCE, createdNotBefore: "2026-08-14T14:00:00.000Z", holderPid: 4812 });
   assert.match(script, /\$atOrAfterFloor/);
   assert.match(script, /\$isBroker/);
-  assert.match(
-    script,
-    /if \(\$n -eq \$target -or \$isDesc -or \(\(\$n -ne \$target -or -not \$nonceReadable\) -and \$atOrAfterFloor -and \(\(-not \$parentPresent\) -or \$isBroker\)\)\)/,
-  );
+  assert.match(script, /\$parentProvenCapable/);
+  assert.match(script, /\$emit = \$isDesc -or \(\$atOrAfterFloor -and -not \$parentProvenCapable\)/);
 });
 
 test("D1 the measured double-fork leaf row makes interpret UNAVAILABLE", () => {
@@ -902,8 +900,7 @@ test("E1-liveness a review role that commits nothing can still succeed", async (
       argv: [
         "--prompt-file", `${CWD}\\PROMPT.md`,
         "--cwd", CWD,
-        "--permission-mode", "dontAsk",
-        "--no-plan",
+        "--permission-mode", "plan",
         "--max-turns", String(GROK_MAX_TURNS),
       ],
     },

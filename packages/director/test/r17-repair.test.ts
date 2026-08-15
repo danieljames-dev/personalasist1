@@ -95,8 +95,7 @@ function grokReviewArgv(promptPath = PROMPT, cwd = CWD): string[] {
   return [
     "--prompt-file", promptPath,
     "--cwd", cwd,
-    "--permission-mode", "dontAsk",
-    "--no-plan",
+    "--permission-mode", "plan",
     "--max-turns", String(GROK_MAX_TURNS),
   ];
 }
@@ -498,7 +497,7 @@ test("F1 the orphan-scan script emits a foreign-nonce parentless in-window row",
     },
   });
   scanner({ runNonce: NONCE, createdNotBefore: T0, holderPid: 4812 });
-  assert.match(script, /\$n -ne \$target/);
+  assert.match(script, /\$atOrAfterFloor/);
   assert.match(script, /-not \$nonceReadable/);
   assert.equal(script.includes("(-not $n -and $atOrAfterFloor"), false);
 });
@@ -526,8 +525,9 @@ test("F1 liveness: foreign-nonce rows before the floor, after exit, with a live 
   });
   assert.equal(processRowMakesScanUndecidable(beforeFloor, PARENTLESS_CTX), false);
   assert.equal(processRowMakesScanUndecidable(afterExit, PARENTLESS_CTX), false);
-  assert.equal(processRowMakesScanUndecidable(liveParent, PARENTLESS_CTX), false);
-  assert.equal(processRowMakesScanUndecidable(brokerNamed, PARENTLESS_CTX), false);
+  // A live non-capable parent and a broker self-name are not negative facts.
+  assert.equal(processRowMakesScanUndecidable(liveParent, PARENTLESS_CTX), true);
+  assert.equal(processRowMakesScanUndecidable(brokerNamed, PARENTLESS_CTX), true);
 });
 
 test("F1 liveness: a clean empty scan still releases the PRODUCTION_WRITER lease", async () => {

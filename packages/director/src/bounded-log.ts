@@ -110,7 +110,17 @@ export interface LogWriteResultV1 {
 
 export interface BoundedLogV1 {
   write(stream: LogStreamV1, chunk: string | Uint8Array): LogWriteResultV1;
+  /**
+   * Durability flush on a live log. Emits completed lines and closed
+   * blocks. Does not end the secret-holdback regime: an open PEM or an
+   * incomplete token stays held so a later write cannot leak past a
+   * mid-run flush.
+   */
   flush(): void;
+  /**
+   * True end-of-stream. Call only after the pumps are detached.
+   */
+  seal(): void;
   markDrainIncomplete(stream?: LogStreamV1): void;
   liveTail(stream: LogStreamV1): Buffer;
   fileImage(stream: LogStreamV1): Buffer;
@@ -225,9 +235,9 @@ export function redactLogText(text: string): string {
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
   out = out.replace(
-    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)([^\s\r\n]+)(?:[^\S\r\n]+([^\s\r\n]+))?/gi,
-    (_m, head: string, scheme: string, cred: string | undefined) =>
-      cred === undefined ? head + REDACTED : `${head}${scheme} ${REDACTED}`,
+    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)(?:(Bearer|Basic|Digest|Negotiate|NTLM|Token|ApiKey)([^\S\r\n]+))?[^\s\r\n]+/gi,
+    (_m, head: string, scheme: string | undefined, space: string | undefined) =>
+      `${head}${scheme ?? ""}${space ?? ""}${REDACTED}`,
   );
   out = out.replace(/(?<![A-Za-z-])Bearer\s+\S+/g, `Bearer ${REDACTED}`);
   out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{8,}/g, REDACTED);
@@ -326,7 +336,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
         if (!privateKeyBlockIsClosed(state.pending)) {
           const dropped = Buffer.byteLength(state.pending, "utf8");
           state.pending = "";
-          state.pemOverflow = false;
+          state.pemOverflow = true;
           accountHoldbackDrop(stream, state, dropped);
           return;
         }
@@ -344,8 +354,11 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
           return;
         }
       }
+      const hadOpenBegin = firstUnterminatedPemBegin(state.pending) >= 0 || state.pemOverflow;
       const redacted = redactOpenPrivateKey(state.pending);
+      const stillOpen = hadOpenBegin && !privateKeyBlockIsClosed(redacted.text);
       state.pending = "";
+      state.pemOverflow = stillOpen;
       accountHoldbackDrop(stream, state, redacted.droppedBytes);
       if (redacted.text.length === 0) return;
       ingestRedacted(stream, Buffer.from(redactLogText(redacted.text), "utf8"));
@@ -387,9 +400,41 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
 
   function flush(): void {
     lastWriteAt = deps.clock.now();
+    emitDurability("stdout");
+    emitDurability("stderr");
+    noteHaltIfNeeded();
+  }
+
+  function seal(): void {
+    lastWriteAt = deps.clock.now();
     emitPending("stdout", true);
     emitPending("stderr", true);
     noteHaltIfNeeded();
+  }
+
+  function emitDurability(stream: LogStreamV1): void {
+    const state = streams[stream];
+    state.pending += state.decoder.end();
+    state.decoder = new StringDecoder("utf8");
+    if (state.pending.length === 0) return;
+    const openPem = state.pemOverflow || firstUnterminatedPemBegin(state.pending) >= 0;
+    const secretAt = secretHoldStart(state.pending);
+    const starterAt = longestSecretStarterPrefixSuffix(state.pending);
+    if (openPem || secretAt >= 0 || starterAt >= 0) {
+      const split = splitHoldback(state);
+      state.pending = split.hold;
+      if (openPem) state.pemOverflow = true;
+      accountHoldbackDrop(stream, state, split.droppedBytes);
+      if (split.emit.length > 0) {
+        ingestRedacted(stream, Buffer.from(redactLogText(split.emit), "utf8"));
+      }
+      return;
+    }
+    const redacted = redactOpenPrivateKey(state.pending);
+    state.pending = "";
+    accountHoldbackDrop(stream, state, redacted.droppedBytes);
+    if (redacted.text.length === 0) return;
+    ingestRedacted(stream, Buffer.from(redactLogText(redacted.text), "utf8"));
   }
 
   function reportStream(state: StreamState): StreamReportV1 {
@@ -407,6 +452,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   return {
     write,
     flush,
+    seal,
     markDrainIncomplete(stream?: LogStreamV1) {
       lastWriteAt = deps.clock.now();
       const marker = Buffer.from("\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n", "utf8");
@@ -591,7 +637,16 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
 // `((?:Proxy-)?Authorization"?[^\S\r\n]*:)` — including `authorization:`,
 // `Authorization :`, `Authorization":`, and `proxy-authorization:`.
 // `authorization` is the shared stem; both sides of the scan are folded.
-const SECRET_STARTERS = ["ghp_", "github_pat_", "sk-", "akia", "bearer ", "authorization", "-----begin "] as const;
+const SECRET_STARTERS = [
+  "ghp_",
+  "github_pat_",
+  "sk-",
+  "akia",
+  "bearer ",
+  "authorization",
+  "proxy-authorization",
+  "-----begin ",
+] as const;
 const SECRET_STARTER_MAX = Math.max(...SECRET_STARTERS.map((item) => item.length));
 
 function longestSecretStarterPrefixSuffix(hold: string): number {

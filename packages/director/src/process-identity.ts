@@ -164,6 +164,17 @@ export interface NonceBearingProcessV1 {
   readonly parentPresent?: boolean;
   /** Win32_Process.Name of ParentProcessId, when that parent row was in the same snapshot. */
   readonly parentName?: string;
+  /**
+   * Win32_Process.CreationDate of the occupant of ParentProcessId in the
+   * same CIM snapshot. Missing or unplaceable is UNKNOWN: a live parent
+   * slot is not proof of a capable creator.
+   */
+  readonly parentCreationDate?: string;
+  /**
+   * Win32_Process.ExecutablePath. A basename is not this fact and must
+   * not be used as a negative membership test.
+   */
+  readonly executablePath?: string;
 }
 
 export type OrphanScanInterpretationV1 =
@@ -708,6 +719,8 @@ export function interpretWindowsOrphanScanOutput(input: {
     const parentPresent = typeof row.parentPresent === "boolean" ? row.parentPresent : undefined;
     const parentName = asUsableToken(row.parentName) ?? undefined;
     const name = asUsableToken(row.name) ?? undefined;
+    const parentCreationDate = normalisedCreationDate(row.parentCreationDate);
+    const executablePath = asUsableToken(row.executablePath) ?? undefined;
     sightings.push({
       pid: row.pid,
       ...(name !== undefined ? { name } : {}),
@@ -717,6 +730,8 @@ export function interpretWindowsOrphanScanOutput(input: {
       ...(nonceReadable !== undefined ? { nonceReadable } : {}),
       ...(parentPresent !== undefined ? { parentPresent } : {}),
       ...(parentName !== undefined ? { parentName } : {}),
+      ...(parentCreationDate !== null ? { parentCreationDate } : {}),
+      ...(executablePath !== undefined ? { executablePath } : {}),
     });
   }
 
@@ -782,8 +797,15 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       throw new Error("orphan scan unavailable: createdNotBefore is not a placeable instant");
     }
     const floorIso = new Date(floorMs).toISOString();
-    const script = windowsOrphanScanScript(psSingleQuoted(runNonce), holderPid, psSingleQuoted(floorIso));
     const holderExitedAt = asUsableToken(query.holderExitedAt) ?? undefined;
+    const exitMs = holderExitedAt !== undefined ? placeableInstantMs(holderExitedAt) : null;
+    const quotedExit = exitMs !== null ? psSingleQuoted(new Date(exitMs).toISOString()) : "''";
+    const script = windowsOrphanScanScript(
+      psSingleQuoted(runNonce),
+      holderPid,
+      psSingleQuoted(floorIso),
+      quotedExit,
+    );
     const observedPids = [
       ...(holderPid > 0 ? [holderPid] : []),
       ...(query.observedPids ?? []),
@@ -886,7 +908,12 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       const nonceMatch = nonce === runNonce;
       const descendant = holderPid > 0
         && sighting.pid !== holderPid
-        && isInHolderTree(sighting, holderPid, rows);
+        && isInHolderTree(
+          sighting,
+          holderPid,
+          rows,
+          holderExitedAt !== undefined ? { holderExitedAt } : undefined,
+        );
       if (!nonceMatch && !descendant) return false;
       return sightingCreatedNotBefore(sighting, query.createdNotBefore);
     });
@@ -901,20 +928,38 @@ function isInHolderTree(
   sighting: NonceBearingProcessV1,
   holderPid: number,
   rows: readonly NonceBearingProcessV1[],
+  bounds?: HolderChainBoundsV1,
 ): boolean {
-  return descendantPidsOf(holderPid, rows).has(sighting.pid);
+  return descendantPidsOf(holderPid, rows, bounds).has(sighting.pid);
 }
 
-/** Walk ParentProcessId from CIM rows. No PEB read is required. */
+export type HolderChainBoundsV1 = {
+  readonly holderExitedAt?: string;
+};
+
+type ChainRowV1 = {
+  readonly pid: number;
+  readonly parentPid?: number;
+  readonly creationDate?: string;
+};
+
+/**
+ * Walk ParentProcessId from CIM rows. A PID is a slot: each *edge* is
+ * dropped only when a date comparison *proves* it cannot be descent.
+ * Missing or unplaceable dates keep the edge (UNKNOWN stays ours).
+ */
 export function descendantPidsOf(
   holderPid: number,
-  rows: readonly { readonly pid: number; readonly parentPid?: number }[],
+  rows: readonly ChainRowV1[],
+  bounds?: HolderChainBoundsV1,
 ): Set<number> {
-  const children = new Map<number, number[]>();
+  const children = new Map<number, ChainRowV1[]>();
+  const byPid = new Map<number, ChainRowV1>();
   for (const row of rows) {
+    byPid.set(row.pid, row);
     if (row.parentPid === undefined) continue;
     const list = children.get(row.parentPid) ?? [];
-    list.push(row.pid);
+    list.push(row);
     children.set(row.parentPid, list);
   }
   const out = new Set<number>();
@@ -922,12 +967,46 @@ export function descendantPidsOf(
   while (stack.length > 0) {
     const current = stack.pop()!;
     for (const child of children.get(current) ?? []) {
-      if (out.has(child)) continue;
-      out.add(child);
-      stack.push(child);
+      if (out.has(child.pid)) continue;
+      if (!holderChainEdgeIsPossible(holderPid, current, child, byPid.get(current), bounds)) continue;
+      out.add(child.pid);
+      stack.push(child.pid);
     }
   }
   return out;
+}
+
+/**
+ * Bound the edge, not the row. A genuine grandchild born after the
+ * holder exited stays in the chain because its edge is from the still-
+ * live intermediate, not from the holder.
+ *
+ * - Edge out of `holderPid`: drop only when the child is *proven*
+ *   created strictly after `holderExitedAt`.
+ * - Edge out of a snapshot parent: drop only when the child is *proven*
+ *   created strictly before that parent's `creationDate`.
+ * Missing or unplaceable dates keep the edge.
+ */
+function holderChainEdgeIsPossible(
+  holderPid: number,
+  parentPid: number,
+  child: ChainRowV1,
+  parentRow: ChainRowV1 | undefined,
+  bounds?: HolderChainBoundsV1,
+): boolean {
+  if (
+    parentPid === holderPid
+    && provenCreatedStrictlyAfter(child.creationDate, bounds?.holderExitedAt)
+  ) {
+    return false;
+  }
+  if (
+    parentRow !== undefined
+    && provenCreatedStrictlyBefore(child.creationDate, parentRow.creationDate)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -1182,6 +1261,8 @@ export type ProcessRowPlausibilityV1 = {
   readonly parentPid?: number;
   readonly parentPresent?: boolean;
   readonly parentName?: string | null;
+  readonly parentCreationDate?: string;
+  readonly executablePath?: string | null;
   readonly runNonce?: string | null;
   readonly creationDate?: string;
   /** True only when the PEB environment block was actually read. */
@@ -1205,6 +1286,14 @@ export type ProcessRowPlausibilityV1 = {
 export const UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS = 3;
 export const UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS = 300;
 
+/**
+ * Cap on PEB environment reads per orphan-scan snapshot. The emit set
+ * can include ordinary in-window host rows (live parent not proven
+ * capable). Reading every PEB is what hung the suite; hitting this cap
+ * marks the scan UNAVAILABLE rather than silently dropping rows.
+ */
+export const ORPHAN_SCAN_PEB_READ_CAP = 64;
+
 export type ProcessRowPlausibilityContextV1 = {
   readonly runNonce: string;
   readonly createdNotBefore: string;
@@ -1217,7 +1306,11 @@ export type ProcessRowPlausibilityContextV1 = {
    */
   readonly holderExitedAt?: string;
   readonly observedPids: ReadonlySet<number>;
-  readonly rows: readonly { readonly pid: number; readonly parentPid?: number }[];
+  readonly rows: readonly {
+    readonly pid: number;
+    readonly parentPid?: number;
+    readonly creationDate?: string;
+  }[];
 };
 
 export function isBrokerHostName(name: string | undefined | null): boolean {
@@ -1241,7 +1334,11 @@ export function rowIsInHolderChain(
 ): boolean {
   if (sighting.pid === undefined || !isUsablePid(sighting.pid)) return false;
   if (ctx.holderPid === undefined || ctx.holderPid <= 0) return false;
-  return descendantPidsOf(ctx.holderPid, ctx.rows).has(sighting.pid);
+  return descendantPidsOf(
+    ctx.holderPid,
+    ctx.rows,
+    ctx.holderExitedAt !== undefined ? { holderExitedAt: ctx.holderExitedAt } : undefined,
+  ).has(sighting.pid);
 }
 
 /**
@@ -1269,21 +1366,21 @@ export function rowHasPositiveRunIdentity(
  * A rewritten `AION_RUN_NONCE`, a CommandLine scrape, or a missing nonce
  * are the same UNKNOWN: the environment block does not contain *this*
  * run's nonce. That is not proof the process is not ours. See
- * {@link parentlessRowTiedToThisRun}. A broker image name may only
- * exclude a row that has already failed every positive test. Everything
- * else is host noise.
+ * {@link parentlessRowTiedToThisRun}. An image basename is not a
+ * negative fact and must not exclude a row. Everything else is host
+ * noise.
  */
 export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
-  // Name is a tiebreaker for rows with nothing else tying them to the run.
-  if (isBrokerHostName(sighting.name)) return false;
   // Do not return early on a foreign or unprovenanced nonce. A PEB that
   // contains AION_RUN_NONCE=not-ours, or a CommandLine scrape of one,
   // does not contain this run's nonce. That is the same UNKNOWN as a
   // successful PEB read that found no nonce at all.
+  // A process image name is not a negative fact either: the executor
+  // chooses the basename. Do not exclude on Name.
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
   return parentlessRowTiedToThisRun(sighting, ctx);
@@ -1320,10 +1417,47 @@ export function parentlessRowTiedToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
-  const parentless = sighting.parentPresent === false && sighting.parentPid !== undefined;
-  if (!parentless) return false;
-  if (ctx.observedPids.has(sighting.parentPid!)) return true;
+  if (sighting.parentPid === undefined) return false;
+  // A live parent excludes this branch only when it is proven capable of
+  // being the creator. Occupancy of ParentProcessId is not that proof:
+  // slots recycle and ShellExecute re-parents onto explorer.
+  if (parentIsProvenCapableCreator(sighting, ctx)) return false;
+  if (ctx.observedPids.has(sighting.parentPid)) return true;
   return provenCreatedAtOrBeforeCeiling(sighting.creationDate, ctx.holderExitedAt);
+}
+
+/**
+ * A live parent may exclude a row only when both hold:
+ * the occupant is proven created at or before the row, and the occupant
+ * is the holder itself or a descendant in the holder chain. "Parent
+ * existed before the spawn floor" is not used as a standalone exclusion:
+ * explorer and notepad satisfy that and are the demonstrated
+ * ShellExecute / recycled-slot fail-open. Missing or unplaceable
+ * parentCreationDate is UNKNOWN → not capable.
+ */
+export function parentIsProvenCapableCreator(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (sighting.parentPresent !== true) return false;
+  if (!provenCreatedAtOrBeforeCeiling(sighting.parentCreationDate, sighting.creationDate)) {
+    return false;
+  }
+  return parentOccupantIsInHolderChain(sighting, ctx);
+}
+
+function parentOccupantIsInHolderChain(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (ctx.holderPid === undefined || ctx.holderPid <= 0) return false;
+  if (!isUsablePid(sighting.parentPid)) return false;
+  if (sighting.parentPid === ctx.holderPid) return true;
+  return descendantPidsOf(
+    ctx.holderPid,
+    ctx.rows,
+    ctx.holderExitedAt !== undefined ? { holderExitedAt: ctx.holderExitedAt } : undefined,
+  ).has(sighting.parentPid);
 }
 
 /**
@@ -1454,14 +1588,43 @@ export function createdBeforeFloor(
   candidate: string | undefined,
   floor: string | undefined,
 ): boolean {
-  const floorToken = asUsableToken(floor);
-  if (floorToken === null) return false;
-  const floorMs = placeableInstantMs(floorToken);
-  if (floorMs === null) return false;
+  return provenCreatedStrictlyBefore(candidate, floor);
+}
+
+/**
+ * Whether `candidate` is *proven* strictly after `instant`. Unplaceable
+ * operands are not proven later — UNKNOWN keeps the edge.
+ */
+export function provenCreatedStrictlyAfter(
+  candidate: string | undefined,
+  instant: string | undefined,
+): boolean {
+  const instantToken = asUsableToken(instant);
+  if (instantToken === null) return false;
+  const instantMs = placeableInstantMs(instantToken);
+  if (instantMs === null) return false;
   if (candidate === undefined) return false;
   const at = placeableInstantMs(candidate);
   if (at === null) return false;
-  return at < floorMs;
+  return at > instantMs;
+}
+
+/**
+ * Whether `candidate` is *proven* strictly before `instant`. Unplaceable
+ * operands are not proven earlier — UNKNOWN keeps the edge.
+ */
+export function provenCreatedStrictlyBefore(
+  candidate: string | undefined,
+  instant: string | undefined,
+): boolean {
+  const instantToken = asUsableToken(instant);
+  if (instantToken === null) return false;
+  const instantMs = placeableInstantMs(instantToken);
+  if (instantMs === null) return false;
+  if (candidate === undefined) return false;
+  const at = placeableInstantMs(candidate);
+  if (at === null) return false;
+  return at < instantMs;
 }
 
 export function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {
@@ -1693,7 +1856,12 @@ function windowsAncestrySampleScript(): string {
   ].join("\n");
 }
 
-function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedFloorIso: string): string {
+function windowsOrphanScanScript(
+  quotedNonce: string,
+  holderPid: number,
+  quotedFloorIso: string,
+  quotedHolderExitIso = "''",
+): string {
   return [
     "$ProgressPreference = 'SilentlyContinue';",
     "try {",
@@ -1735,12 +1903,17 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedF
     `$target = ${quotedNonce};`,
     `$holderPid = ${holderPid};`,
     `$floorUtc = [datetimeoffset]::Parse(${quotedFloorIso}).UtcDateTime;`,
+    `$exitQuoted = ${quotedHolderExitIso};`,
+    "$exitUtc = $null;",
+    "if ($exitQuoted -ne '') { try { $exitUtc = [datetimeoffset]::Parse($exitQuoted).UtcDateTime } catch { $exitUtc = $null } };",
     "$rows = Get-CimInstance Win32_Process -ErrorAction Stop;",
     "$byParent = @{};",
+    "$byPid = @{};",
     "foreach ($p in $rows) {",
     "  $pp = [int]$p.ParentProcessId;",
     "  if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = New-Object System.Collections.Generic.List[object] };",
     "  [void]$byParent[$pp].Add($p);",
+    "  $byPid[[int]$p.ProcessId] = $p;",
     "}",
     "$desc = New-Object 'System.Collections.Generic.HashSet[int]';",
     "if ($holderPid -gt 0) {",
@@ -1751,6 +1924,15 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedF
     "    if ($byParent.ContainsKey($cur)) {",
     "      foreach ($ch in $byParent[$cur]) {",
     "        $id = [int]$ch.ProcessId;",
+    "        $chUtc = $null;",
+    "        if ($ch.CreationDate) { try { $chUtc = ([datetime]$ch.CreationDate).ToUniversalTime() } catch { $chUtc = $null } };",
+    "        if ($cur -eq $holderPid -and $exitUtc -ne $null -and $chUtc -ne $null -and $chUtc -gt $exitUtc) { continue };",
+    "        if ($byPid.ContainsKey($cur) -and $byPid[$cur].CreationDate -and $chUtc -ne $null) {",
+    "          try {",
+    "            $parUtc = ([datetime]$byPid[$cur].CreationDate).ToUniversalTime();",
+    "            if ($chUtc -lt $parUtc) { continue };",
+    "          } catch { }",
+    "        };",
     "        if ($desc.Add($id)) { $stack.Push($id) };",
     "      }",
     "    }",
@@ -1758,50 +1940,74 @@ function windowsOrphanScanScript(quotedNonce: string, holderPid: number, quotedF
     "}",
     "$pidSet = New-Object 'System.Collections.Generic.HashSet[int]';",
     "foreach ($p in $rows) { [void]$pidSet.Add([int]$p.ProcessId) };",
-    "$hits = New-Object System.Collections.Generic.List[object];",
-    "$unreadable = 0;",
+    "$candidates = New-Object System.Collections.Generic.List[object];",
     "foreach ($p in $rows) {",
     "  $id = [int]$p.ProcessId;",
     "  $isDesc = $desc.Contains($id);",
     "  $ppid = [int]$p.ParentProcessId;",
     "  $parentPresent = $pidSet.Contains($ppid);",
-    "  $n = [AionPebEnv]::GetNonce($id);",
-    "  $nonceReadable = $null -ne $n;",
-    "  if (-not $nonceReadable) {",
-    "    if ($p.CommandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
-    "  } elseif ($n -eq '') {",
-    "    $n = $null;",
-    "  };",
-    "  if ($isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
-    "  # Parentless in-window unreadable rows are still emitted below; JS",
-    "  # processRowMakesScanUndecidable turns them into UNAVAILABLE. Do not",
-    "  # widen $unreadable to every parentless row: that makes ordinary host",
-    "  # scans UNAVAILABLE and destroys liveness.",
     "  $atOrAfterFloor = $false;",
+    "  $childUtc = $null;",
     "  if ($p.CreationDate) {",
     "    try {",
-    "      $cdUtc = ([datetime]$p.CreationDate).ToUniversalTime();",
-    "      $atOrAfterFloor = $cdUtc -ge $floorUtc;",
-    "    } catch { $atOrAfterFloor = $false }",
+    "      $childUtc = ([datetime]$p.CreationDate).ToUniversalTime();",
+    "      $atOrAfterFloor = $childUtc -ge $floorUtc;",
+    "    } catch { $atOrAfterFloor = $false; $childUtc = $null }",
     "  };",
     "  $parentName = $null;",
-    "  if ($parentPresent) {",
-    "    foreach ($q in $rows) {",
-    "      if ([int]$q.ProcessId -eq $ppid) { $parentName = [string]$q.Name; break }",
+    "  $parentCreationDate = $null;",
+    "  $parentUtc = $null;",
+    "  if ($parentPresent -and $byPid.ContainsKey($ppid)) {",
+    "    $q = $byPid[$ppid];",
+    "    $parentName = [string]$q.Name;",
+    "    if ($q.CreationDate) {",
+    "      try {",
+    "        $parentUtc = ([datetime]$q.CreationDate).ToUniversalTime();",
+    "        $parentCreationDate = $q.CreationDate.ToString('o');",
+    "      } catch { $parentUtc = $null; $parentCreationDate = $null }",
     "    }",
     "  };",
     "  $name = [string]$p.Name;",
     `  $brokerNames = @(${BROKER_HOST_PROCESS_NAMES.map((name) => `'${name.replace(/'/g, "''")}'`).join(", ")});`,
     "  $isBroker = $false;",
     "  if ($parentName) { foreach ($b in $brokerNames) { if ($parentName -ieq $b) { $isBroker = $true } } };",
-    "  $isSelfBroker = $false;",
-    "  if ($name) { foreach ($b in $brokerNames) { if ($name -ieq $b) { $isSelfBroker = $true } } };",
-    "  if ($isSelfBroker -and $n -ne $target -and -not $isDesc) { continue };",
-    "  if ($n -eq $target -or $isDesc -or (($n -ne $target -or -not $nonceReadable) -and $atOrAfterFloor -and ((-not $parentPresent) -or $isBroker))) {",
+    "  $parentInChain = $false;",
+    "  if ($holderPid -gt 0 -and (($ppid -eq $holderPid) -or $desc.Contains($ppid))) { $parentInChain = $true };",
+    "  $parentBeforeChild = $false;",
+    "  if ($parentUtc -ne $null -and $childUtc -ne $null -and $parentUtc -le $childUtc) { $parentBeforeChild = $true };",
+    "  $parentProvenCapable = [bool]($parentPresent -and $parentInChain -and $parentBeforeChild);",
+    "  $emit = $isDesc -or ($atOrAfterFloor -and -not $parentProvenCapable);",
+    "  if ($emit) {",
     "    $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
-    "    [void]$hits.Add([ordered]@{ pid = $id; name = $name; creationDate = $cd; runNonce = $n; parentPid = $ppid; nonceReadable = [bool]$nonceReadable; parentPresent = [bool]$parentPresent; parentName = $parentName });",
+    "    $exe = if ($p.ExecutablePath) { [string]$p.ExecutablePath } else { $null };",
+    "    $cmd = if ($p.CommandLine) { [string]$p.CommandLine } else { '' };",
+    "    [void]$candidates.Add([ordered]@{ pid = $id; name = $name; creationDate = $cd; parentPid = $ppid; parentPresent = [bool]$parentPresent; parentName = $parentName; parentCreationDate = $parentCreationDate; executablePath = $exe; isDesc = [bool]$isDesc; commandLine = $cmd });",
     "  }",
     "}",
+    `$pebCap = ${ORPHAN_SCAN_PEB_READ_CAP};`,
+    "$pebUsed = 0;",
+    "$pebCapped = $false;",
+    "$hits = New-Object System.Collections.Generic.List[object];",
+    "$unreadable = 0;",
+    "foreach ($c in $candidates) {",
+    "  $n = $null;",
+    "  $nonceReadable = $false;",
+    "  if ($pebUsed -ge $pebCap) {",
+    "    $pebCapped = $true;",
+    "  } else {",
+    "    $pebUsed++;",
+    "    $n = [AionPebEnv]::GetNonce([int]$c.pid);",
+    "    $nonceReadable = $null -ne $n;",
+    "    if (-not $nonceReadable) {",
+    "      if ($c.commandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
+    "    } elseif ($n -eq '') {",
+    "      $n = $null;",
+    "    }",
+    "  };",
+    "  if ($c.isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
+    "  [void]$hits.Add([ordered]@{ pid = $c.pid; name = $c.name; creationDate = $c.creationDate; runNonce = $n; parentPid = $c.parentPid; nonceReadable = [bool]$nonceReadable; parentPresent = $c.parentPresent; parentName = $c.parentName; parentCreationDate = $c.parentCreationDate; executablePath = $c.executablePath });",
+    "}",
+    "if ($pebCapped) { $unreadable = [Math]::Max($unreadable, 1) };",
     "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",

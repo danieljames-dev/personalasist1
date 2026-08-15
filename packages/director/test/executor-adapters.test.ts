@@ -39,7 +39,7 @@ function withFixture(fn: (input: AdapterInputV1) => void): void {
 // Exact argv, element by element
 // ---------------------------------------------------------------------------
 
-test("Grok 1.0.3 argv is the measured flag list, including --no-plan", () => {
+test("Grok 1.0.3 review argv is plan without --no-plan", () => {
   withFixture((input) => {
     const result = adapterNamed("grok").build({ ...input, role: "INDEPENDENT_ACCEPTANCE" });
     assert.equal(result.ok, true, result.ok ? "" : result.reason);
@@ -47,8 +47,7 @@ test("Grok 1.0.3 argv is the measured flag list, including --no-plan", () => {
     assert.deepEqual(result.launch.argv, [
       "--prompt-file", input.promptPath,
       "--cwd", input.cwd,
-      "--permission-mode", "dontAsk",
-      "--no-plan",
+      "--permission-mode", "plan",
       "--max-turns", String(GROK_MAX_TURNS),
     ]);
     assert.equal(result.launch.cwd, input.cwd);
@@ -63,7 +62,7 @@ test("a reviewer Grok launch uses the permission mode that cannot write", () => 
     assert.ok(result.launch);
     const modeIndex = result.launch.argv.indexOf("--permission-mode");
     assert.ok(modeIndex >= 0);
-    assert.equal(result.launch.argv[modeIndex + 1], "dontAsk", "a review that can write is not a review");
+    assert.equal(result.launch.argv[modeIndex + 1], "plan", "a review that can write is not a review");
     assert.equal(result.launch.argv.includes("--always-approve"), false);
   });
 });

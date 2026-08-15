@@ -43,8 +43,11 @@ Usage:
     --run-root PATH --prompt-path PATH --lease-kind KIND --lease-resource RES
     --lease-id ID --run-nonce TOKEN [--timeout-ms MS]
 
+  node apps/director-cli.mjs --recover <run-root>
+
 Goes through launchRun only. Does not export or call executeRun.
-The lease store is the host-wide sandbox root (AION_DIRECTOR_ROOT or %TEMP%).
+PRODUCTION_WRITER / INTEGRATION locks live under the host-fixed
+ProgramData arbitration root, not %TEMP% or AION_DIRECTOR_ROOT.
 `;
 
 export async function runDirectorCli(argv, io = console) {
@@ -55,6 +58,22 @@ export async function runDirectorCli(argv, io = console) {
 
   const values = parseArgs(argv);
   const director = await import(pathToFileURL(directorEntry).href);
+
+  if (values.has("recover")) {
+    const runRoot = required(values, "recover");
+    const recovered = await director.recoverAbandonedRun(runRoot, {
+      clock: { now: nowIso },
+      fs: director.createNodeRunFileSystem(),
+      probe: director.createWindowsProcessProbe(),
+    });
+    io.log(JSON.stringify({
+      ok: recovered.ok,
+      spawned: recovered.spawned,
+      reason: recovered.reason,
+      resultPath: recovered.resultPath,
+    }));
+    return recovered.ok ? 0 : 1;
+  }
 
   const runRoot = required(values, "run-root");
   mkdirSync(runRoot, { recursive: true });
@@ -67,6 +86,21 @@ export async function runDirectorCli(argv, io = console) {
   }
 
   const storeRoot = director.sandboxDirectorStoreRoot();
+  const leaseKind = required(values, "lease-kind");
+  const arbitrationRoot = director.hostArbitrationRoot();
+  if (director.isHostWideLeaseKind(leaseKind)) {
+    if (arbitrationRoot !== director.hostArbitrationRoot()) {
+      io.error("PRODUCTION_WRITER refused: arbitration root is not the host-fixed directory");
+      return 2;
+    }
+    try {
+      mkdirSync(join(arbitrationRoot, "locks"), { recursive: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      io.error(`PRODUCTION_WRITER refused: host arbitration root is not creatable (${arbitrationRoot}): ${message}`);
+      return 2;
+    }
+  }
 
   const deps = {
     clock: { now: nowIso },
@@ -106,7 +140,7 @@ export async function runDirectorCli(argv, io = console) {
     promptPath: required(values, "prompt-path"),
     timeoutMs,
     lease: {
-      kind: required(values, "lease-kind"),
+      kind: leaseKind,
       resource: required(values, "lease-resource"),
       leaseId: required(values, "lease-id"),
     },

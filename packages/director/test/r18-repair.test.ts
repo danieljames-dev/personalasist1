@@ -84,8 +84,7 @@ function grokReviewArgv(promptPath = PROMPT, cwd = CWD): string[] {
   return [
     "--prompt-file", promptPath,
     "--cwd", cwd,
-    "--permission-mode", "dontAsk",
-    "--no-plan",
+    "--permission-mode", "plan",
     "--max-turns", String(GROK_MAX_TURNS),
   ];
 }
@@ -428,7 +427,7 @@ function greenConjunctionInput(
     declaredArtifactsInsideRunRoot: true,
     declaredArtifactsInsideRunRootReason: "every declared artifact is inside the run root",
     executorTreeGone: true,
-    executorTreeReason: "no process of this run's tree was found",
+    executorTreeReason: "no process attributable to this run by nonce, holder chain, or the parentless/broker window remains",
     timedOut: false,
     logStayedWithinBudget: true,
     role: "IMPLEMENT" as const,

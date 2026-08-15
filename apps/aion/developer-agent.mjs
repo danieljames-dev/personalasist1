@@ -5,8 +5,10 @@ import {
   SelectableDeveloperAgentRegistryV1, UnavailableDeveloperAgentBridgeV1,
 } from "../../packages/local-assistant/dist/index.js";
 import {
+  acquireDeveloperAgentWorktreeLease,
   createNodeFileSystemProbe,
   discoverClaudeExecutor,
+  releaseDeveloperAgentWorktreeLease,
 } from "../../packages/director/dist/index.js";
 
 /**
@@ -73,7 +75,12 @@ export async function resolveDeveloperAgentBridges(repositoryRoot, env = process
   const claude = options.claudeCandidates !== undefined
     ? await firstInstalled(options.claudeCandidates)
     : resolveClaudeCodeExecutable(env, options.claudeProbe);
-  if (claude) bridges.push(new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude));
+  if (claude) {
+    bridges.push(guardClaudeBridgeWithDirectorLease(
+      new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude),
+      repositoryRoot,
+    ));
+  }
   const codex = await firstInstalled(options.codexCandidates ?? developerAgentCandidates(env));
   if (codex) bridges.push(new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex));
 
@@ -91,4 +98,28 @@ export async function resolveDeveloperAgentBridges(repositoryRoot, env = process
 /** Backwards-compatible single-bridge resolution: the bridge AION would select by default. */
 export async function resolveDeveloperAgentBridge(repositoryRoot, env = process.env, options = {}) {
   return (await resolveDeveloperAgentBridges(repositoryRoot, env, options)).selected();
+}
+
+/**
+ * Discovery of claude.exe is not a spawn permit. Acquire a WORKTREE lease
+ * from the Director store (and refuse while PRODUCTION_WRITER is held)
+ * before the bridge's own argv builder reaches spawn.
+ */
+export function guardClaudeBridgeWithDirectorLease(bridge, repositoryRoot) {
+  const originalRun = bridge.run.bind(bridge);
+  bridge.run = async function runWithDirectorLease(task, signal) {
+    const acquired = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot,
+      now: new Date().toISOString(),
+    });
+    if (!acquired.ok) {
+      throw new Error(`developer-agent refused: ${acquired.reason}`);
+    }
+    try {
+      return await originalRun(task, signal);
+    } finally {
+      releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease);
+    }
+  };
+  return bridge;
 }

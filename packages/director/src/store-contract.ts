@@ -139,7 +139,10 @@ const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * Rejection rather than escaping is deliberate: sanitising an id changes which mission a caller is
  * addressing without telling anyone, and two different ids can sanitise to the same directory.
  */
-export function validatePathSegment(value: string): IdValidationV1 {
+export function validatePathSegment(value: unknown): IdValidationV1 {
+  if (typeof value !== "string") {
+    return { ok: false, rule: "ILLEGAL_CHARACTER", reason: "ids must be strings" };
+  }
   if (value === "") return { ok: false, rule: "EMPTY", reason: "an empty id addresses the parent directory" };
   if (value.length > MAX_ID_SEGMENT_LENGTH) {
     return { ok: false, rule: "TOO_LONG", reason: `ids are limited to ${MAX_ID_SEGMENT_LENGTH} characters` };

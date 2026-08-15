@@ -26,6 +26,7 @@ export {
   CANCEL_SOFT_MS,
   CANCEL_HARD_MS,
   launchRun,
+  recoverAbandonedRun,
   proveWriterExit,
   writerReleaseEvidence,
   isWriterExitProof,

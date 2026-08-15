@@ -483,7 +483,7 @@ test("F1 the emitted scanner script uses the guarded self-broker continue, not t
     },
   });
   scanner({ runNonce: NONCE, createdNotBefore: FLOOR, holderPid: 4812 });
-  assert.match(script, /if \(\$isSelfBroker -and \$n -ne \$target -and -not \$isDesc\) \{ continue \}/);
+  assert.equal(/\$isSelfBroker[\s\S]{0,80}continue/.test(script), false);
   assert.equal(script.includes("if ($isSelfBroker) { continue }"), false);
 });
 
@@ -568,7 +568,8 @@ test("F2 the same row with a live parent stays SCANNED", () => {
     holderExitedAt: HOLDER_EXIT,
     rows: [{ pid: 4812 }, { pid: 7777, parentPid: 6666 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({ ok: true, unreadable: 0, processes: [row] }),
@@ -579,7 +580,7 @@ test("F2 the same row with a live parent stays SCANNED", () => {
     observedPids: [4812],
     holderExitedAt: HOLDER_EXIT,
   });
-  assert.equal(interpreted.outcome, "SCANNED");
+  assert.equal(interpreted.outcome, "UNAVAILABLE");
 });
 
 test("F2 the same row created before the floor stays SCANNED", () => {
@@ -925,13 +926,13 @@ test("F5 ROLE_KIND partitions ROUTING exactly into WRITE, NON_WRITING, and LOCAL
   }
 });
 
-test("F5 every non-writing role gets dontAsk and no --always-approve, and HEAD movement fails the review conjunct", () => {
+test("F5 every non-writing role gets plan and no --always-approve, and HEAD movement fails the review conjunct", () => {
   for (const role of NON_WRITING_ROLES) {
     const argv = executorArgvFor("grok", { promptPath: PROMPT, cwd: CWD, role });
     assert.ok(argv, role);
     const mode = argv!.indexOf("--permission-mode");
     assert.ok(mode >= 0, role);
-    assert.equal(argv![mode + 1], "dontAsk", role);
+    assert.equal(argv![mode + 1], "plan", role);
     assert.equal(argv!.includes("--always-approve"), false, role);
     const conjunction = evaluateSuccessConjunction(conjunctionInput({ role }));
     const review = conjunction.findings.find((item) => item.name === "reviewLeftTreeUnchanged");

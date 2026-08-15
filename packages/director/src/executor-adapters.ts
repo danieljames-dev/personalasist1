@@ -119,16 +119,27 @@ export const GROK_WRITE_PERMISSION_MODE = "bypassPermissions" as const;
 export const GROK_WRITE_ALWAYS_APPROVE_FLAG = "--always-approve" as const;
 
 /**
- * Whether `argv` actually handed the child the write-permission tokens this
- * adapter emits for write roles. A caller-supplied role label is not this fact.
+ * The only `--permission-mode` value measured as read-only. Every other
+ * spelling, including vendor modes the Director has not observed and
+ * `dontAsk` (whose pre-approval set the Director cannot read), grants
+ * write. Absence of the flag does not grant.
+ */
+export const READ_ONLY_PERMISSION_MODE = "plan" as const;
+
+/**
+ * Whether `argv` handed the child write authority. Closed at the
+ * read-only allowlist, not at one write token: a new vendor mode then
+ * denies the "not a write launch" claim instead of granting it.
  */
 export function argvGrantsWritePermission(argv: readonly string[]): boolean {
+  if (!Array.isArray(argv)) return false;
+  if (argv.includes(GROK_WRITE_ALWAYS_APPROVE_FLAG)) return true;
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === "--permission-mode" && argv[i + 1] === GROK_WRITE_PERMISSION_MODE) {
-      return true;
-    }
+    if (argv[i] !== "--permission-mode") continue;
+    const mode = argv[i + 1];
+    if (typeof mode !== "string" || mode !== READ_ONLY_PERMISSION_MODE) return true;
   }
-  return argv.includes(GROK_WRITE_ALWAYS_APPROVE_FLAG);
+  return false;
 }
 
 export function executorArgvFor(
@@ -156,19 +167,26 @@ export function executorArgvFor(
     // hands Claude the literal path string as its entire prompt.
     // The user prompt is delivered on stdin (stdio pipe). Write roles
     // carry an explicit `--permission-mode bypassPermissions`; review
-    // roles carry `dontAsk`. The prompt path is not an argv element.
+    // roles carry `plan`, the only mode measured as read-only. `dontAsk`
+    // is not a non-writing launch: its pre-approval set is unobserved.
     const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
-    const permissionMode = reviewOnly ? "dontAsk" : GROK_WRITE_PERMISSION_MODE;
+    const permissionMode = reviewOnly ? READ_ONLY_PERMISSION_MODE : GROK_WRITE_PERMISSION_MODE;
     return ["-p", "--permission-mode", permissionMode];
   }
   const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
-  const permissionMode = reviewOnly ? "dontAsk" : GROK_WRITE_PERMISSION_MODE;
+  const permissionMode = reviewOnly ? READ_ONLY_PERMISSION_MODE : GROK_WRITE_PERMISSION_MODE;
+  // `--no-plan` is "Disable plan mode" (grok --help). It cannot sit on
+  // the same argv as `--permission-mode plan`: one asks for plan, the
+  // other turns it off. Review roles take plan and nothing that undoes
+  // it. Write roles take bypassPermissions, --always-approve, and
+  // --no-plan. Grok is only routed to non-writing roles, so the write
+  // branch is the other executor's list, kept here so the two cannot be
+  // copy-pasted into each other.
   return [
     "--prompt-file", input.promptPath,
     "--cwd", input.cwd,
     "--permission-mode", permissionMode,
-    ...(reviewOnly ? [] : [GROK_WRITE_ALWAYS_APPROVE_FLAG]),
-    "--no-plan",
+    ...(reviewOnly ? [] : [GROK_WRITE_ALWAYS_APPROVE_FLAG, "--no-plan"]),
     "--max-turns", String(GROK_MAX_TURNS),
   ];
 }

@@ -429,8 +429,9 @@ test("C1 the same row with a live parent stays SCANNED", () => {
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: GRANDCHILD_PID, parentPid: LAUNCHER_PID }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
-  assert.equal(interpretRows([row]).outcome, "SCANNED");
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  assert.equal(interpretRows([row]).outcome, "UNAVAILABLE");
 });
 
 test("C1 cancel-time scans with no holderExitedAt stay SCANNED for an unsampled parent", () => {
