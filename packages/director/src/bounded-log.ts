@@ -230,6 +230,16 @@ function firstPemBegin(pending: string): number {
   return match === null ? -1 : match.index;
 }
 
+/**
+ * One Bearer-token spelling. The redactor matches a complete
+ * `Bearer` + whitespace + token. The holdback is the same source with
+ * an optional/incomplete token (`\S*$`) so a split cannot emit the
+ * prefix. Do not copy a third spelling.
+ */
+const BEARER_TOKEN_PATTERN_SOURCE = String.raw`(?<![A-Za-z-])Bearer\s+\S+`;
+const BEARER_TOKEN_REDACTOR = new RegExp(BEARER_TOKEN_PATTERN_SOURCE, "g");
+const BEARER_WHITESPACE_TAIL = new RegExp(String.raw`(?<![A-Za-z-])bearer\s*\S*\r?$`, "i");
+
 export function redactLogText(text: string): string {
   const closedBlock = new RegExp(
     `${PRIVATE_KEY_BEGIN_LINE.source}[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
@@ -240,7 +250,7 @@ export function redactLogText(text: string): string {
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
   );
   out = out.replace(
-    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)("?)(?:(Bearer|Basic|Digest|Negotiate|NTLM|Token|ApiKey)([^\S\r\n]+))?([^\s\r\n"]*)("?)/gi,
+    /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)("?)(?:(Bearer|Basic|Digest|Negotiate|NTLM|Token|ApiKey)(\s+))?([^\s\r\n"]*)("?)/gi,
     (
       _m,
       head: string,
@@ -251,7 +261,7 @@ export function redactLogText(text: string): string {
       closeQuote: string | undefined,
     ) => `${head}${openQuote ?? ""}${scheme ?? ""}${space ?? ""}${REDACTED}${closeQuote ?? ""}`,
   );
-  out = out.replace(/(?<![A-Za-z-])Bearer\s+\S+/g, `Bearer ${REDACTED}`);
+  out = out.replace(BEARER_TOKEN_REDACTOR, `Bearer ${REDACTED}`);
   out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{8,}/g, REDACTED);
   out = out.replace(/\bghp_[A-Za-z0-9_]{8,}/g, REDACTED);
   out = out.replace(/\bAKIA[0-9A-Z]{16}\b/g, REDACTED);
@@ -726,14 +736,6 @@ const SECRET_STARTERS = [
   "-----begin ",
 ] as const;
 const SECRET_STARTER_MAX = Math.max(...SECRET_STARTERS.map((item) => item.length));
-
-/**
- * The redactor's Bearer rule, as a holdback. Proves: "these pending
- * bytes are a prefix of a `Bearer\s+\S+` match" — the same fact
- * `redactLogText` uses, not a second spelling of SECRET_STARTERS.
- * `\s*` must consume CR/LF so `Bearer\n` + token is one hold.
- */
-const BEARER_WHITESPACE_TAIL = /(?<![A-Za-z-])bearer\s*$/i;
 
 function longestSecretStarterPrefixSuffix(hold: string): number {
   const folded = hold.toLowerCase();

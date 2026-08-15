@@ -675,7 +675,7 @@ export function answersAfterReboot(intent: RunIntentV1 | null | undefined): Rebo
   }
   return {
     supposedToRun: intent.executablePath !== "" && Array.isArray(intent.argv),
-    started: intent.spawnAttemptedAt !== null || intent.spawnPid !== null || intent.processIdentity !== null,
+    started: intent.spawnAttemptedAt !== null || intent.spawnPid !== null || intent.processIdentity !== null || intent.spawnObservedAt !== null,
     worktree: intent.worktree,
     branch: intent.branch,
     missionId: intent.missionId,

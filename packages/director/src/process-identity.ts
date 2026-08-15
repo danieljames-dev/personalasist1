@@ -749,9 +749,10 @@ export function interpretWindowsOrphanScanOutput(input: {
     if (!Number.isInteger(unreadableRaw) || unreadableRaw < 0) {
       return { outcome: "UNAVAILABLE", reason: "scan unreadable count is not a usable integer" };
     }
-    if (unreadableRaw > 0) {
-      return { outcome: "UNAVAILABLE", reason: "unreadable descendants" };
-    }
+    // unreadable is a count of rows left undecided after cheap tests, not
+    // a global poison flag. Rows already decided (holder-chain, pre-floor)
+    // stay decided. Membership below reports unread in-window rows as
+    // undecidable; a cap must not turn a clean snapshot into UNAVAILABLE.
   }
 
   const sightings: NonceBearingProcessV1[] = [];
@@ -1430,10 +1431,10 @@ export const UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS = 3;
 export const UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS = 300;
 
 /**
- * Cap on PEB environment reads per orphan-scan snapshot. The emit set
- * can include ordinary in-window host rows (live parent not proven
- * capable). Reading every PEB is what hung the suite; hitting this cap
- * marks the scan UNAVAILABLE rather than silently dropping rows.
+ * Cap on PEB environment reads per orphan-scan snapshot. Applied only
+ * to rows that still need a PEB after cheap tests (holder-chain
+ * descendants skip it). Hitting the cap leaves unread rows UNKNOWN;
+ * it does not poison the snapshot.
  */
 export const ORPHAN_SCAN_PEB_READ_CAP = 64;
 
@@ -1574,12 +1575,13 @@ export function processRowCouldBelongToThisRun(
   // successful PEB read that found no nonce at all.
   // A process image name is not a negative fact either: the executor
   // chooses the basename. Do not exclude on Name.
-  // Session 0 is a physical boundary: a child inherits its parent's
-  // session, and crossing into session 0 requires CreateProcessAsUser
-  // with SeTcbPrivilege. Exclude only. A matching session is not a tie.
-  if (rowIsExcludedByInteractiveSession(sighting, ctx)) return false;
+  // Order: positive identity → floor → broker tie → session exclusion →
+  // parentless. A session id is a negative heuristic and must not delete
+  // a positive broker tie. Broker hosts live in session 0; evaluating
+  // the exclude first made that branch unreachable.
   if (!provenCreatedAtOrAfterFloor(sighting.creationDate, ctx.createdNotBefore)) return false;
   if (brokerParentedRowTiedToThisRun(sighting, ctx)) return true;
+  if (rowIsExcludedByInteractiveSession(sighting, ctx)) return false;
   return parentlessRowTiedToThisRun(sighting, ctx);
 }
 
@@ -2240,25 +2242,36 @@ function windowsOrphanScanScript(
     "$pebCapped = $false;",
     "$hits = New-Object System.Collections.Generic.List[object];",
     "$unreadable = 0;",
+    "$scannerPid = $PID;",
+    "$scanStartedUtc = [datetime]::UtcNow;",
     "foreach ($c in $candidates) {",
+    "  if ([int]$c.pid -eq $scannerPid -or [int]$c.parentPid -eq $scannerPid) { continue };",
+    "  if ($c.name -and $c.name -ieq 'WmiPrvSE.exe' -and $c.creationDate) {",
+    "    try {",
+    "      $provUtc = ([datetime]$c.creationDate).ToUniversalTime();",
+    "      if ($provUtc -ge $scanStartedUtc.AddSeconds(-5)) { continue };",
+    "    } catch { }",
+    "  };",
     "  $n = $null;",
     "  $nonceReadable = $false;",
-    "  if ($pebUsed -ge $pebCap) {",
-    "    $pebCapped = $true;",
-    "  } else {",
-    "    $pebUsed++;",
-    "    $n = [AionPebEnv]::GetNonce([int]$c.pid);",
-    "    $nonceReadable = $null -ne $n;",
-    "    if (-not $nonceReadable) {",
-    "      if ($c.commandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
-    "    } elseif ($n -eq '') {",
-    "      $n = $null;",
+    "  $needsPeb = -not [bool]$c.isDesc;",
+    "  if ($needsPeb) {",
+    "    if ($pebUsed -ge $pebCap) {",
+    "      $pebCapped = $true;",
+    "    } else {",
+    "      $pebUsed++;",
+    "      $n = [AionPebEnv]::GetNonce([int]$c.pid);",
+    "      $nonceReadable = $null -ne $n;",
+    "      if (-not $nonceReadable) {",
+    "        if ($c.commandLine -match 'AION_RUN_NONCE=([^\\s]+)') { $n = $Matches[1] };",
+    "      } elseif ($n -eq '') {",
+    "        $n = $null;",
+    "      }",
     "    }",
     "  };",
-    "  if ($c.isDesc -and -not $nonceReadable -and -not $n) { $unreadable++ };",
+    "  if ($needsPeb -and -not $nonceReadable -and -not $n) { $unreadable++ };",
     "  [void]$hits.Add([ordered]@{ pid = $c.pid; name = $c.name; creationDate = $c.creationDate; runNonce = $n; parentPid = $c.parentPid; nonceReadable = [bool]$nonceReadable; parentPresent = $c.parentPresent; parentName = $c.parentName; parentCreationDate = $c.parentCreationDate; executablePath = $c.executablePath; sessionId = $c.sessionId });",
     "}",
-    "if ($pebCapped) { $unreadable = [Math]::Max($unreadable, 1) };",
     "$directorSessionId = $null; try { $directorSessionId = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId } catch { $directorSessionId = $null };",
     "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable; directorSessionId = $directorSessionId } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",

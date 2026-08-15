@@ -175,6 +175,7 @@ test("every exported src function reachable from the run path has a non-test cal
     ["selectRunnable", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
     ["describeBoard", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
     ["unblockedByGate", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
+    ["assessReadiness", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD (only reached from schedule; in-degree is not reachability from a live root)"],
   ]);
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
@@ -198,6 +199,7 @@ test("every exported src function reachable from the run path has a non-test cal
           }
           continue;
         }
+        if (ownerDecisionDeadModules.has(otherFile)) continue;
         if (calledIn(source, name)) {
           called = true;
           break;
@@ -350,6 +352,22 @@ test("there is exactly one argv builder: the adapter, reached through launchRun"
     "the old capability-driven argv list must not remain beside the adapter",
   );
   assert.doesNotMatch(executors, /argv\.push/);
+
+  const assistantDir = join(here, "..", "..", "..", "local-assistant", "src");
+  const assistantBridge = readFileSync(join(assistantDir, "developer-bridge.ts"), "utf8");
+  assert.doesNotMatch(
+    assistantBridge,
+    /acceptEdits/,
+    "packages/local-assistant must not invent a write permission mode the Director adapter does not emit",
+  );
+  assert.match(
+    assistantBridge,
+    /--permission-mode["',\s]+plan/,
+  );
+  assert.match(
+    assistantBridge,
+    /--permission-mode["',\s]+bypassPermissions/,
+  );
 });
 
 test("deleted discovery and launch-plan names are not on the public surface of index.ts", async () => {

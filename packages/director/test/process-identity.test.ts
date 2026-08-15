@@ -531,13 +531,14 @@ test("equal instants in two encodings stay MATCH / ALIVE", () => {
   assert.equal(holderLiveness(RECORDED, dmtf), "ALIVE");
 });
 
-test("unreadable > 0 is UNAVAILABLE and distinguishable from unreadable 0", () => {
+test("unreadable > 0 is not a whole-scan poison when no row is undecidable", () => {
   const unread = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":1}",
     stderr: "",
   });
-  assert.equal(unread.outcome, "UNAVAILABLE");
+  assert.notEqual(unread.reason, "unreadable descendants");
+  assert.equal(unread.outcome, "SCANNED");
   const empty = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: "{\"ok\":true,\"processes\":[],\"unreadable\":0}",

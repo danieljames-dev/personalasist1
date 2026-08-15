@@ -1303,6 +1303,7 @@ test("7 CLI Owner-required exit is distinct from 0 and from ordinary failure", a
       env: {
         ...process.env,
         AION_GROK_PATH: stub,
+        AION_DIRECTOR_TEST_DOUBLE: "1",
         AION_HANDOFF_JSON: handoff,
         AION_DIRECTOR_ROOT: join(dir, "store"),
       },

@@ -110,6 +110,21 @@ export function openGate(input: {
  * requested name is kept even when it is not a recognised gate type.
  * `why` is labelled executor testimony; `directorReason` is the Director's.
  */
+/** Recorded when a frozen fact could not be observed. Never equals a real SHA or branch. */
+export const UNOBSERVED_FROZEN_FACT = "UNOBSERVED" as const;
+
+/**
+ * Every key supplied is written. Absence and empty string are UNOBSERVED,
+ * not omitted: an empty frozen object would skip every comparison.
+ */
+export function frozenFactsFrom(input: Readonly<Record<string, string | undefined>>): Record<string, string> {
+  const frozen: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    frozen[key] = value !== undefined && value !== "" ? value : UNOBSERVED_FROZEN_FACT;
+  }
+  return frozen;
+}
+
 export function ownerGateFromExecutorRefusal(input: {
   readonly gateId: OpaqueId;
   readonly missionId: OpaqueId;
@@ -121,9 +136,10 @@ export function ownerGateFromExecutorRefusal(input: {
 }): OwnerGateV1 {
   const requested = typeof input.requestedType === "string" ? input.requestedType : "";
   const type: OwnerGateTypeV1 = isOwnerGateType(requested) ? requested : "UNRECOGNISED_GATE_TYPE";
-  const frozen: Record<string, string> = {};
-  if (input.headAfter !== undefined && input.headAfter !== "") frozen.headAfter = input.headAfter;
-  if (input.branch !== undefined && input.branch !== "") frozen.branch = input.branch;
+  const frozen = frozenFactsFrom({
+    headAfter: input.headAfter,
+    branch: input.branch,
+  });
   return openGate({
     gateId: input.gateId,
     missionId: input.missionId,
@@ -172,6 +188,14 @@ export function resolveGate(input: {
   }
 
   const staleFacts: string[] = [];
+  if (input.approved && Object.keys(input.gate.safeFrozenState).length === 0) {
+    return {
+      ok: false,
+      gate: { ...input.gate, status: "SUPERSEDED", resolvedAt: input.at },
+      reason: "this gate recorded no frozen world to approve; an Owner cannot consent to a world nobody could see",
+      staleFacts: ["safeFrozenState: empty"],
+    };
+  }
   if (input.currentFacts) {
     for (const [key, was] of Object.entries(input.gate.safeFrozenState)) {
       const now = input.currentFacts[key];

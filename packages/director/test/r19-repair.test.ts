@@ -533,7 +533,7 @@ test("T1.4 30s and 300s lookback: live capable host parents are not undecidable"
   }
 });
 
-test("T1.4 session-0 row is excluded when the Director is interactive", () => {
+test("T1.4 session-0 broker-parented row still ties when the Director is interactive", () => {
   const row = {
     pid: 96636,
     name: "RuntimeBroker.exe",
@@ -553,11 +553,12 @@ test("T1.4 session-0 row is excluded when the Director is interactive", () => {
     directorSessionId: 1,
     rows: [{ pid: 4812 }, { pid: 1612, creationDate: BOOT }, { pid: 96636, parentPid: 1612 }],
   });
-  // Broker path would tie this row. Session 0 is a physical exclude.
+  // Broker path ties this row. Session 0 is a negative heuristic and
+  // must not delete a positive broker tie — those hosts live in session 0.
   assert.equal(processRowCouldBelongToThisRun(row, without), true);
   assert.equal(processRowMakesScanUndecidable(row, without), true);
-  assert.equal(processRowCouldBelongToThisRun(row, withSession), false);
-  assert.equal(processRowMakesScanUndecidable(row, withSession), false);
+  assert.equal(processRowCouldBelongToThisRun(row, withSession), true);
+  assert.equal(processRowMakesScanUndecidable(row, withSession), true);
 });
 
 test("T1.5 live explorer.exe parent inside the holder-alive window stays undecidable", () => {

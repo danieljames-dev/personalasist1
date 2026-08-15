@@ -227,7 +227,7 @@ export async function runDirectorCli(argv, io = console, env = process.env, host
     role: required(values, "role"),
     childEnv: {
       AION_HANDOFF_PATH: join(runRoot, "handoff.json"),
-      ...(process.env.AION_HANDOFF_JSON !== undefined
+      ...(process.env.AION_DIRECTOR_TEST_DOUBLE === "1" && process.env.AION_HANDOFF_JSON !== undefined
         ? { AION_HANDOFF_JSON: process.env.AION_HANDOFF_JSON }
         : {}),
     },

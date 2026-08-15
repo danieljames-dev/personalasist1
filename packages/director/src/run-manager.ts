@@ -1154,39 +1154,69 @@ export async function recoverAbandonedRun(
     if (write === "skipped") return { ...result, resultPath: null, resultPersisted: "skipped" };
     return { ...result, resultPersisted: "written" };
   };
-  if (!parsed.ok) {
-    return finish("recover refused: intent is unreadable or absent", "REFUSED_UNKNOWN", false);
-  }
-  const recorded = parsed.intent.processIdentity;
-  const leasePid = holderPidFromLeases(deps.leases, parsed.intent.runId);
-  const spawnPid = answers.spawnPid;
-  const probePid = isUsablePid(spawnPid)
-    ? spawnPid
-    : (recorded !== null && isUsablePid(recorded.pid) ? recorded.pid : leasePid);
-  if (!answers.started && probePid === null) {
-    return finish(UNRESOLVABLE_EXISTING_INTENT_REASON, "REFUSED_UNKNOWN", false);
-  }
-  if (probePid !== null) {
-    let observation: ProcessObservationV1;
+  try {
+    if (!parsed.ok) {
+      return finish("recover refused: intent is unreadable or absent", "REFUSED_UNKNOWN", false);
+    }
+    const recorded = parsed.intent.processIdentity;
+    let leasePid: number | null = null;
     try {
-      observation = deps.probe.observe(probePid);
-    } catch {
+      leasePid = holderPidFromLeases(deps.leases, parsed.intent.runId);
+    } catch (error) {
       return finish(
-        `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+        `recover refused: lease store unreadable; holder pid is UNKNOWN (${errorMessage(error)})`,
         "REFUSED_UNKNOWN",
         false,
       );
     }
-    if (recorded !== null) {
-      const liveness = holderLiveness(recorded, observation);
-      if (liveness === "ALIVE") {
+    const spawnPid = answers.spawnPid;
+    const probePid = isUsablePid(spawnPid)
+      ? spawnPid
+      : (recorded !== null && isUsablePid(recorded.pid) ? recorded.pid : leasePid);
+    if (!answers.started && probePid === null) {
+      return finish(UNRESOLVABLE_EXISTING_INTENT_REASON, "REFUSED_UNKNOWN", false);
+    }
+    if (probePid !== null) {
+      let observation: ProcessObservationV1;
+      try {
+        observation = deps.probe.observe(probePid);
+      } catch {
+        return finish(
+          `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+          "REFUSED_UNKNOWN",
+          false,
+        );
+      }
+      if (recorded !== null) {
+        const liveness = holderLiveness(recorded, observation);
+        if (liveness === "ALIVE") {
+          return finish(
+            `recover refused: holder pid ${probePid} is still present`,
+            "REFUSED_ALIVE",
+            true,
+          );
+        }
+        if (liveness === "UNKNOWN") {
+          return finish(
+            `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+            "REFUSED_UNKNOWN",
+            false,
+          );
+        }
+        return finish(
+          `recover recorded a terminal result; holder pid ${probePid} is DEAD_CONFIRMED. D2 CHILD_TREE remains unmet.`,
+          "TERMINAL",
+          true,
+        );
+      }
+      if (observation.outcome === "FOUND") {
         return finish(
           `recover refused: holder pid ${probePid} is still present`,
           "REFUSED_ALIVE",
           true,
         );
       }
-      if (liveness === "UNKNOWN") {
+      if (observation.outcome === "UNAVAILABLE") {
         return finish(
           `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
           "REFUSED_UNKNOWN",
@@ -1194,36 +1224,26 @@ export async function recoverAbandonedRun(
         );
       }
       return finish(
-        `recover recorded a terminal result; holder pid ${probePid} is DEAD_CONFIRMED. D2 CHILD_TREE remains unmet.`,
+        `recover recorded a terminal result; holder pid ${probePid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
         "TERMINAL",
         true,
       );
     }
-    if (observation.outcome === "FOUND") {
-      return finish(
-        `recover refused: holder pid ${probePid} is still present`,
-        "REFUSED_ALIVE",
-        true,
-      );
-    }
-    if (observation.outcome === "UNAVAILABLE") {
-      return finish(
-        `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
-        "REFUSED_UNKNOWN",
-        false,
-      );
-    }
+    // Started (a spawn was recorded) but no holder pid is known. That is
+    // UNKNOWN, not a terminal observation. A later sweep that can probe
+    // must still be able to promote this record.
     return finish(
-      `recover recorded a terminal result; holder pid ${probePid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
-      "TERMINAL",
-      true,
+      "recover refused: a spawn was recorded but no holder pid was; liveness is UNKNOWN",
+      "REFUSED_UNKNOWN",
+      false,
+    );
+  } catch (error) {
+    return finish(
+      `recover refused: recovery observation failed (${errorMessage(error)})`,
+      "REFUSED_UNKNOWN",
+      false,
     );
   }
-  return finish(
-    "recover recorded a terminal result; no usable holder pid was recorded. D2 CHILD_TREE remains unmet.",
-    "TERMINAL",
-    answers.started,
-  );
 }
 
 function holderPidFromLeases(store: LeaseStoreV1 | undefined, runId: string): number | null {
@@ -1860,7 +1880,27 @@ export async function executeRun(
     }
 
     const intentState = existingIntentOn(intentStoreFromFs(deps.fs), intentPath);
-    const sameRunHeld = leaseStore.list().find((item) =>
+    let listedLeases: readonly LeaseV1[];
+    try {
+      listedLeases = leaseStore.list();
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `lease store unreadable: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    const sameRunHeld = listedLeases.find((item) =>
       item.runId === request.runId
       && conflicts(item, { kind: request.lease.kind, resource: request.lease.resource }),
     );

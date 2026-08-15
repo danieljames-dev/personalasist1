@@ -464,7 +464,8 @@ test("C1 generated orphan-scan script no longer continues on $isSelfBroker", () 
   assert.match(script, /holderExitedAt|exitUtc|exitQuoted/);
   assert.match(script, /\$parentProvenCapable/);
   assert.match(script, /\$emit = \$isDesc -or \(\$atOrAfterFloor -and -not \$parentProvenCapable\)/);
-  assert.match(script, /\$pebCap = 64/);
+  assert.match(script, /\$needsPeb = -not \[bool\]\$c\.isDesc/);
+  assert.doesNotMatch(script, /if \(\$pebCapped\) \{ \$unreadable = \[Math\]::Max/);
 });
 
 test("C1 liveness: a clean PRODUCTION_WRITER run still releases the lease", async () => {

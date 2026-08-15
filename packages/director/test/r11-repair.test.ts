@@ -1130,6 +1130,7 @@ test("H director-cli launches at USD 0 against a local stub and returns ok:true"
       env: {
         ...process.env,
         AION_GROK_PATH: stub,
+        AION_DIRECTOR_TEST_DOUBLE: "1",
         AION_HANDOFF_JSON: handoff,
         AION_DIRECTOR_ROOT: join(dir, "store"),
       },

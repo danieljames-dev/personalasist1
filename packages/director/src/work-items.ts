@@ -21,6 +21,7 @@
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 import type { OwnerGateV1 } from "./gates.js";
 import type { ExecutorRoleV1 } from "./executors.js";
+import { canonicalResource, type LeaseKindV1 } from "./resource-identity.js";
 
 export const WORK_ITEM_SCHEMA_V1 = "aion.director.work-item.v1" as const;
 
@@ -86,8 +87,46 @@ export interface ReadinessV1 {
   detail: string;
 }
 
-function resourceKey(lease: { kind: string; resource: string }): string {
+const LEASE_KINDS: ReadonlySet<string> = new Set([
+  "WORKTREE",
+  "BRANCH",
+  "INTEGRATION",
+  "PREVIEW",
+  "PRODUCTION_WRITER",
+]);
+
+function isLeaseKind(value: string): value is LeaseKindV1 {
+  return LEASE_KINDS.has(value);
+}
+
+/** One identity spelling. The same canonicaliser leases and locks use. */
+function resourceIdentityKey(lease: { kind: string; resource: string }): string {
+  if (isLeaseKind(lease.kind)) {
+    const canon = canonicalResource(lease.kind, lease.resource);
+    if (canon !== "") return `${lease.kind}:${canon}`;
+  }
   return `${lease.kind}:${lease.resource}`.toLowerCase();
+}
+
+function heldIdentityKeys(held: readonly string[]): Set<string> {
+  const keys = new Set<string>();
+  for (const raw of held) {
+    keys.add(raw);
+    keys.add(raw.toLowerCase());
+    const colon = raw.indexOf(":");
+    if (colon > 0) {
+      const kind = raw.slice(0, colon);
+      const resource = raw.slice(colon + 1);
+      if (isLeaseKind(kind)) {
+        const canon = canonicalResource(kind, resource);
+        if (canon !== "") {
+          keys.add(`${kind}:${canon}`);
+          keys.add(canon);
+        }
+      }
+    }
+  }
+  return keys;
 }
 
 /**
@@ -137,7 +176,7 @@ export function assessReadiness(item: WorkItemV1, board: BoardV1): ReadinessV1 {
     };
   }
 
-  if (item.requiresLease && board.heldResources.map((r) => r.toLowerCase()).includes(resourceKey(item.requiresLease))) {
+  if (item.requiresLease && heldIdentityKeys(board.heldResources).has(resourceIdentityKey(item.requiresLease))) {
     return {
       workItemId: item.workItemId, ready: false, reason: "RESOURCE_HELD",
       detail: "something else is using the same working copy",
@@ -223,7 +262,7 @@ export function selectRunnable(input: {
 }): WorkItemV1[] {
   const maxWriters = input.maxWritersPerExecutor ?? 1;
   const running: Record<string, number> = { ...input.runningByExecutor };
-  const taken = new Set(input.heldResources.map((r) => r.toLowerCase()));
+  const taken = heldIdentityKeys(input.heldResources);
   const chosen: WorkItemV1[] = [];
 
   for (const item of input.scheduling.ready) {
@@ -232,7 +271,7 @@ export function selectRunnable(input: {
 
     if (!isLocal && (running[executor] ?? 0) >= maxWriters) continue;
     if (item.requiresLease) {
-      const key = resourceKey(item.requiresLease);
+      const key = resourceIdentityKey(item.requiresLease);
       if (taken.has(key)) continue;
       taken.add(key);
     }

@@ -464,7 +464,7 @@ test("P1a incomplete writer context fails closed rather than releasing over host
   assert.equal(writerSightingNotProvenAbsent(row, NONCE, incomplete), true);
 });
 
-test("P1b WmiPrvSE.exe session-0 is excluded by both scanner and run-manager contexts", async () => {
+test("P1b WmiPrvSE.exe session-0 broker tie is not deleted by the session exclude", async () => {
   const row = wmiSessionZeroRow();
   const rows = [
     { pid: 4812, creationDate: T0 },
@@ -489,8 +489,10 @@ test("P1b WmiPrvSE.exe session-0 is excluded by both scanner and run-manager con
     directorSessionId: 1,
     rows,
   });
-  assert.deepEqual(undecidableRowsOf([row], scannerCtx).map((item) => item.pid), []);
-  assert.deepEqual(undecidableRowsOf([row], runManagerCtx).map((item) => item.pid), []);
+  // Positive broker tie outranks the session-0 exclude. Both contexts
+  // must agree; supplying directorSessionId must not invent a grant.
+  assert.deepEqual(undecidableRowsOf([row], scannerCtx).map((item) => item.pid), [90001]);
+  assert.deepEqual(undecidableRowsOf([row], runManagerCtx).map((item) => item.pid), [90001]);
   assert.deepEqual(scannerCtx, runManagerCtx);
 
   const result = await runWith({
@@ -501,9 +503,10 @@ test("P1b WmiPrvSE.exe session-0 is excluded by both scanner and run-manager con
       directorSessionId: 1,
     }),
   });
-  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.ok, false, result.reason);
   const tree = result.conjunction.findings.find((finding) => finding.name === "executorTreeIsGone");
-  assert.equal(tree?.ok, true, tree?.reason);
+  assert.equal(tree?.ok, false, tree?.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
 });
 
 test("P1c after-ceiling broker row with a populated parentCreationDate is not proven absent", async () => {
@@ -599,6 +602,7 @@ test("P2a unstarted intent with no recoverable pid is UNKNOWN and not a completi
       [intentPath]: recordedIntent({
         spawnAttemptedAt: null,
         spawnPid: null,
+        spawnObservedAt: null,
         processIdentity: null,
       }),
     },

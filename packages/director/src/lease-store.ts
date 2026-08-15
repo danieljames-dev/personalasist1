@@ -240,14 +240,29 @@ export function createNodeLeaseStore(root: string, options?: NodeLeaseStoreOptio
   const leasesPath = join(resolved, "leases.json");
 
   const list = (): LeaseV1[] => {
+    let raw: string;
     try {
-      const raw = readFileSync(leasesPath, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      return parsed.filter(isLeaseRecord);
-    } catch {
-      return [];
+      raw = readFileSync(leasesPath, "utf8");
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return [];
+      const message = error instanceof Error ? error.message : String(error);
+      const wrapped = new Error(`lease store unreadable: ${leasesPath}: ${message}`);
+      if (error !== null && typeof error === "object" && "code" in error) {
+        (wrapped as NodeJS.ErrnoException).code = String((error as { code?: unknown }).code);
+      }
+      throw wrapped;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`lease store unreadable: ${leasesPath} is not parseable: ${message}`);
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(`lease store unreadable: ${leasesPath} is not a lease array`);
+    }
+    return parsed.filter(isLeaseRecord);
   };
 
   const save = (leases: readonly LeaseV1[]): void => {
@@ -536,10 +551,20 @@ function isLeaseRecord(value: unknown): value is LeaseV1 {
   return true;
 }
 
+let developerAgentInvocationSeq = 0;
+
+function nextDeveloperAgentInvocationId(): string {
+  developerAgentInvocationSeq += 1;
+  return `dev-agent-${process.pid}-${developerAgentInvocationSeq}`;
+}
+
 /**
  * Second launch path (developer-agent) must take a WORKTREE lease from
  * the same store and refuse when a host PRODUCTION_WRITER lock is held.
- * Discovery of the binary is not a spawn permit.
+ * Discovery of the binary is not a spawn permit. Each invocation mints
+ * its own runId/leaseId and records this process as the holder so a
+ * second concurrent agent conflicts instead of adopting, and so an
+ * expired row can be reclaimed from a pid observation.
  */
 export function acquireDeveloperAgentWorktreeLease(input: {
   readonly repositoryRoot: string;
@@ -562,17 +587,26 @@ export function acquireDeveloperAgentWorktreeLease(input: {
   if (host.state === "HELD") {
     return { ok: false, reason: `a PRODUCTION_WRITER lease is held on this host: ${host.reason}` };
   }
-  const existing = store.list();
+  let existing: readonly LeaseV1[];
+  try {
+    existing = store.list();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `lease store unreadable: ${message}` };
+  }
   if (existing.some((row) => row.kind === "PRODUCTION_WRITER")) {
     return { ok: false, reason: "a PRODUCTION_WRITER lease is held in this store" };
   }
+  const invocation = nextDeveloperAgentInvocationId();
   const attempt = acquireLease({
     existing,
-    leaseId: "devagent1",
+    leaseId: invocation,
     kind: "WORKTREE",
     resource: input.repositoryRoot,
     missionId: input.missionId ?? "dev-agent",
-    runId: input.runId ?? "dev-agent-run",
+    runId: input.runId ?? invocation,
+    pid: process.pid,
+    processIdentity: { pid: process.pid, startedAt: input.now },
     now: input.now,
   });
   if (!attempt.ok || attempt.lease === null) {
@@ -597,7 +631,7 @@ export function releaseDeveloperAgentWorktreeLease(
   try {
     store.save(releaseLease(store.list(), lease));
   } catch {
-    // Best-effort release.
+    // Best-effort release. An unlistable store is not a successful release.
   }
 }
 

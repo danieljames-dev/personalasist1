@@ -180,8 +180,12 @@ export class ClaudeCodeCliDeveloperAgentBridgeV1 extends LocalCliDeveloperAgentB
   }
   protected taskArgs(mode: DeveloperAgentModeV1): readonly string[] {
     const shared = ["-p", "--output-format", "text", "--strict-mcp-config", "--no-session-persistence"];
+    // Write authority is the Director's closed allowlist: only `plan` is
+    // read-only. Workspace-write uses the same write token the Director
+    // adapter emits (`bypassPermissions`). A vendor mode that is not
+    // `plan` grants write; this path must not invent a third token.
     return mode === "read-only"
       ? [...shared, "--permission-mode", "plan", "--tools", "Read,Glob,Grep", "--disallowed-tools", "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"]
-      : [...shared, "--permission-mode", "acceptEdits", "--tools", "Read,Glob,Grep,Edit,Write,Bash", "--disallowed-tools", "WebFetch,WebSearch"];
+      : [...shared, "--permission-mode", "bypassPermissions", "--tools", "Read,Glob,Grep,Edit,Write,Bash", "--disallowed-tools", "WebFetch,WebSearch"];
   }
 }
