@@ -32,7 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { CONTROL_BYTES } from "./control-bytes.js";
+import { CONTROL_BYTES, asUsableToken } from "./control-bytes.js";
 import type { IdentityMatchV1, ProcessLivenessV1 } from "./leases.js";
 import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
 
@@ -1593,13 +1593,6 @@ export function isUsablePid(value: unknown): value is number {
  */
 export function normaliseRunNonce(value: unknown): string | null {
   return asUsableToken(value);
-}
-
-function asUsableToken(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (trimmed === "" || CONTROL_BYTES.test(trimmed)) return null;
-  return trimmed;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -89,6 +89,103 @@ function modulesCalling(files: Map<string, string>, name: string): string[] {
   return hits.sort();
 }
 
+test("every exported src function reachable from the run path has a non-test call site", () => {
+  const files = sourceFiles();
+  const exportFn = /export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\(/g;
+  const exported = new Map<string, string[]>();
+  for (const [name, source] of files) {
+    const found: string[] = [];
+    exportFn.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = exportFn.exec(source)) !== null) {
+      found.push(match[1]!);
+    }
+    exported.set(name, found);
+  }
+
+  const appsDir = join(here, "..", "..", "..", "..", "apps");
+  const appSources: string[] = [];
+  try {
+    for (const name of readdirSync(appsDir)) {
+      if (!/\.(mjs|js|cjs)$/.test(name)) continue;
+      appSources.push(readFileSync(join(appsDir, name), "utf8"));
+    }
+  } catch {
+    // no apps directory in this extract
+  }
+
+  const productionSources = [...files.values(), ...appSources];
+  const exceptions = new Map<string, string>([
+    ["modulesReachableFrom", "test-only import-graph helper"],
+    ["createFixedClock", "test/injected clock constructor; production uses Date"],
+    ["allExecutorAdapters", "registry enumerator for adapter tests"],
+    ["adapterNamed", "registry lookup; launch path calls buildExecutorLaunch"],
+    ["resolveGate", "Owner-answer API; this run only opens a gate"],
+    ["describeGate", "Owner-facing formatter; not on the spawn path"],
+    ["openGates", "dashboard listing; not on the spawn path"],
+    ["describeVerdict", "human formatter for Git verdicts"],
+    ["createNewMission", "mission-creation entry; D2 spawn path starts from an existing mission"],
+    ["missionRecordFrom", "mission parse helper; not invoked by executeRun"],
+    ["unclassifiedMissionStates", "table-completeness check"],
+    ["declaredTarget", "transition-table helper"],
+    ["legalEventsFrom", "transition-table helper"],
+    ["awaitsOwner", "mission-state classifier; work-items uses it via import of the module"],
+    ["needsEngineer", "mission-state classifier"],
+    ["livenessGrants", "lease-layer helper; holderLiveness is what executeRun reads"],
+    ["identityFromObservation", "probe-shape adapter used by tests and reclaim"],
+    ["answersAfterReboot", "reboot-recovery reader; executeRun writes the intent it would read"],
+    ["killProcessTreeStandIn", "wired as deps.killTree in apps/director-cli.mjs; r18 drives it"],
+    ["isSafePathSegment", "store-contract primitive used via validatePathSegment"],
+    ["validateMissionId", "store-contract alias of validatePathSegment"],
+    ["validateRunId", "store-contract alias of validatePathSegment"],
+    ["schedule", "work-item planner; not invoked by executeRun"],
+    ["selectRunnable", "work-item planner; not invoked by executeRun"],
+    ["describeBoard", "work-item dashboard; not invoked by executeRun"],
+    ["unblockedByGate", "work-item gate helper; openGate is the new run-path caller"],
+  ]);
+
+  const orphans: string[] = [];
+  for (const [file, names] of exported) {
+    for (const name of names) {
+      const key = `${file}:${name}`;
+      if (exceptions.has(name) || exceptions.has(key)) continue;
+      let called = false;
+      for (const [otherFile, source] of files) {
+        if (otherFile === file) {
+          if (calledIn(source, name) && withoutDeclaration(source, name) !== source) {
+            // call inside the defining module after stripping the declaration
+            if (calledIn(withoutDeclaration(source, name), name)) {
+              called = true;
+              break;
+            }
+          }
+          continue;
+        }
+        if (calledIn(source, name)) {
+          called = true;
+          break;
+        }
+      }
+      if (!called) {
+        for (const app of appSources) {
+          if (new RegExp(String.raw`\b${name}\s*\(`).test(app)) {
+            called = true;
+            break;
+          }
+        }
+      }
+      if (!called) orphans.push(`${file}:${name}`);
+    }
+  }
+
+  assert.deepEqual(
+    orphans,
+    [],
+    `exported functions with no non-test call site: ${orphans.join(", ")}`,
+  );
+  void productionSources;
+});
+
 test("every src module is reachable by a transitive import walk from index.ts", () => {
   const files = sourceFiles();
   assert.ok(files.has("index.ts"), "src/index.ts is the package entry");
@@ -310,6 +407,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
       spawnedArgv = argv;
       assert.equal(options.shell, false);
       assert.equal(options.windowsHide, true);
+      hostFs.writeDurable(join(runRoot, "handoff.json"), honestHandoff);
       const child: SpawnHandleV1 = {
         pid: 4812,
         stdout: Readable.from([""]),
@@ -325,7 +423,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
 
     const hostFs = createNodeRunFileSystem();
     hostFs.mkdirp(runRoot);
-    hostFs.writeDurable(join(runRoot, "handoff.json"), JSON.stringify({
+    const honestHandoff = JSON.stringify({
       schema: HANDOFF_SCHEMA_V1,
       executor: "grok",
       missionId: "mission-1",
@@ -342,10 +440,11 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
       nextRecommendedGate: null,
       artifacts: [],
       startedAt: "2026-08-13T12:00:00.000Z",
-      finishedAt: "2026-08-13T12:00:30.000Z",
+      finishedAt: "2026-08-13T12:00:00.000Z",
       capacityStatus: "AVAILABLE",
+      runNonce: "nonce-run-1",
       summary: "ok",
-    }));
+    });
 
     const result = await launchRun(
       {
@@ -455,29 +554,29 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
     runNonce: recorded.runNonce,
   };
   let observeIndex = 0;
-  const files = new Map<string, string>([
-    [join(runRoot, "handoff.json"), JSON.stringify({
-      schema: HANDOFF_SCHEMA_V1,
-      executor: "grok",
-      missionId: "mission-1",
-      runId: "run-1",
-      workItemId: "work-1",
-      branch: "executor/oracle",
-      headBefore: "a".repeat(40),
-      headAfter,
-      status: "PASS",
-      tests: [{ suite: "director", total: 1, passed: 1, failed: 0, skipped: 0 }],
-      productionMutated: false,
-      spendUsd: 0,
-      requiresOwner: false,
-      nextRecommendedGate: null,
-      artifacts: ["notes.md"],
-      startedAt: now,
-      finishedAt: later,
-      capacityStatus: "AVAILABLE",
-      summary: "ok",
-    })],
-  ]);
+  const files = new Map<string, string>();
+  const plantedHandoff = JSON.stringify({
+    schema: HANDOFF_SCHEMA_V1,
+    executor: "grok",
+    missionId: "mission-1",
+    runId: "run-1",
+    workItemId: "work-1",
+    branch: "executor/oracle",
+    headBefore: "a".repeat(40),
+    headAfter,
+    status: "PASS",
+    tests: [{ suite: "director", total: 1, passed: 1, failed: 0, skipped: 0 }],
+    productionMutated: false,
+    spendUsd: 0,
+    requiresOwner: false,
+    nextRecommendedGate: null,
+    artifacts: ["notes.md"],
+    startedAt: now,
+    finishedAt: now,
+    capacityStatus: "AVAILABLE",
+    runNonce: nonce,
+    summary: "ok",
+  });
   const dirs = new Set([cwd, runRoot]);
   let leases: LeaseV1[] = [];
 
@@ -497,18 +596,11 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       runId: "run-1",
       missionId: "mission-1",
       workItemId: "work-1",
-      executor: "grok",
+      executor: "claude",
       worktree: cwd,
       branch: "executor/oracle",
-      executablePath: exe,
-      argv: [
-        "--prompt-file", `${cwd}\\PROMPT.md`,
-        "--cwd", cwd,
-        "--permission-mode", "bypassPermissions",
-        "--always-approve",
-        "--no-plan",
-        "--max-turns", "50",
-      ],
+      executablePath: "C:\\Tools\\claude.exe",
+      argv: ["-p", "--permission-mode", "bypassPermissions"],
       cwd,
       promptPath: `${cwd}\\PROMPT.md`,
       runNonce: nonce,
@@ -540,6 +632,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       },
       spawn: (_exe, _argv, _options, permit) => {
         requireSpawnPermit(permit);
+        files.set(join(runRoot, "handoff.json"), plantedHandoff);
         return child;
       },
       git: {
@@ -578,9 +671,9 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       wait: async () => undefined,
       killTree: () => undefined,
       scanOrphans: () => [{ pid: 7777, runNonce: nonce, creationDate: t0 }],
-      discoveryEnv: { AION_GROK_PATH: exe },
+      discoveryEnv: { AION_GROK_PATH: exe, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
       discoveryFs: {
-        isFile: (path) => path === exe,
+        isFile: (path) => path === exe || path === "C:\\Tools\\claude.exe",
         readDir: () => [],
       },
     },

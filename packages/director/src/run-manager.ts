@@ -59,6 +59,7 @@ import {
 import {
   argvIsSafe,
   isExecutorRole,
+  LOCAL_ROLES,
   NON_WRITING_ROLES,
   routeRole,
   WRITE_ROLES,
@@ -81,13 +82,14 @@ import {
   type ExecutorHandoffV1,
   type HandoffParseV1,
 } from "./handoff.js";
-import { isResolvedHostPath } from "./host-path.js";
+import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
 import {
   createNodeLeaseStore,
   sandboxDirectorStoreRoot,
 } from "./lease-store.js";
 import {
   acquireLease,
+  canonicalResource,
   conflicts,
   heartbeat,
   LEASE_TTL_MS,
@@ -162,7 +164,9 @@ export type SuccessConjunctNameV1 =
   | "logStayedWithinBudget"
   | "reviewLeftTreeUnchanged"
   | "writeMovedHead"
-  | "writeRoleWasGrantedWritePermission";
+  | "writeRoleWasGrantedWritePermission"
+  | "ownerNotRequired"
+  | "capacityNotExhausted";
 
 export interface ConjunctFindingV1 {
   readonly name: SuccessConjunctNameV1;
@@ -380,6 +384,12 @@ export interface WriterOrphanScanV1 {
    * orphan question.
    */
   readonly liveSightings: readonly OrphanSightingV1[];
+  /**
+   * Rows that made membership UNKNOWN. Empty when the scan completed or
+   * failed for a reason other than an undecidable occupant. A blocked
+   * operator must be able to see which pid blocked them.
+   */
+  readonly undecidable: readonly OrphanSightingV1[];
 }
 
 const WRITER_EXIT_PROOF = Symbol("aion.director.writer-exit-proof.v1");
@@ -516,7 +526,11 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
         && isUsablePid(input.probedPid);
       if (!ownedSettled && !adoptedSlotGone) return null;
       const nonce = normaliseRunNonce(input.runNonce ?? "");
-      if (nonce !== null && sightingsDenyWriterExit(
+      // Pass the normalised value through even when it is null. Omitted,
+      // "", and null are "no nonce to judge by": any leftover sighting
+      // then denies. Guarding `nonce !== null &&` made that deny-check
+      // unreachable and minted a proof over a live in-tree process.
+      if (sightingsDenyWriterExit(
         input.orphanSightings,
         nonce,
         null,
@@ -652,6 +666,16 @@ export function evaluateSuccessConjunction(input: {
    * tree unchanged".
    */
   readonly treeIncludingIgnored?: GitStatusObservationV1 | null;
+  /**
+   * This run's Director-minted nonce. A parsed handoff must echo it.
+   * Omitted is UNKNOWN: a report cannot bind to an unnamed invocation.
+   */
+  readonly expectedRunNonce?: string | null;
+  /**
+   * Director-observed completion instant (handle exit / now after settle).
+   * `finishedAt` after this ceiling is not this invocation's report.
+   */
+  readonly observedCompletedAt?: string | null;
 }): SuccessConjunctionV1 {
   const known = KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -694,13 +718,30 @@ export function evaluateSuccessConjunction(input: {
     ? null
     : placeableInstantMs(input.spawnedAtFloor);
   const finishedMs = handoff === null ? null : placeableInstantMs(handoff.finishedAt);
+  const completedMs = input.observedCompletedAt === undefined || input.observedCompletedAt === null
+    ? null
+    : placeableInstantMs(input.observedCompletedAt);
+  const expectedNonce = input.expectedRunNonce === undefined || input.expectedRunNonce === null
+    ? null
+    : normaliseRunNonce(input.expectedRunNonce);
+  const reportedNonce = handoff === null ? null : normaliseRunNonce(handoff.runNonce);
+  const nonceMatches = expectedNonce !== null && reportedNonce !== null && reportedNonce === expectedNonce;
+  const processWasCreatedForWindow = input.processWasCreated !== false;
   const handoffInThisRunWindow = handoff === null
     ? false
-    : finishedMs !== null && floorMs !== null && finishedMs >= floorMs;
+    : finishedMs !== null
+      && floorMs !== null
+      && finishedMs >= floorMs
+      && (
+        !processWasCreatedForWindow
+          ? true
+          : completedMs !== null && finishedMs <= completedMs
+      );
   const handoffParsedOk = handoff !== null
     && handoff.status === "PASS"
     && statusContradiction === undefined
     && selfTiming === undefined
+    && nonceMatches
     && handoffInThisRunWindow;
 
   let handoffParsedReason: string;
@@ -712,12 +753,22 @@ export function evaluateSuccessConjunction(input: {
     handoffParsedReason = statusContradiction.detail;
   } else if (selfTiming !== undefined) {
     handoffParsedReason = selfTiming.detail;
+  } else if (!nonceMatches) {
+    handoffParsedReason = reportedNonce === null
+      ? "handoff runNonce is missing or not a usable token; the file is not this invocation's report"
+      : expectedNonce === null
+        ? "this run's nonce is missing or not a usable token; UNKNOWN does not bind the report to this run"
+        : "handoff runNonce does not match this run's nonce; the file is not this invocation's report";
   } else if (!handoffInThisRunWindow) {
     handoffParsedReason = finishedMs === null
       ? "handoff finishedAt is not a placeable instant; UNKNOWN does not bind the report to this run"
       : floorMs === null
         ? "this run's spawn floor is not a placeable instant; UNKNOWN does not bind the report to this run"
-        : "handoff finishedAt precedes this run's spawn floor; the file is not this invocation's report";
+        : completedMs === null && processWasCreatedForWindow
+          ? "this run's completion instant is not a placeable instant; UNKNOWN does not bind the report to this run"
+          : completedMs !== null && finishedMs > completedMs
+            ? "handoff finishedAt is after this run's observed completion; the file is not this invocation's report"
+            : "handoff finishedAt precedes this run's spawn floor; the file is not this invocation's report";
   } else {
     handoffParsedReason = "handoff parsed";
   }
@@ -853,12 +904,37 @@ export function evaluateSuccessConjunction(input: {
 
   let writeGrantOk = true;
   let writeGrantReason = "role is not a write role that must be granted write permission";
-  if (processWasCreated && isWriteRole) {
+  if (processWasCreated && argvGrantedWrite && !isWriteRole) {
+    writeGrantOk = false;
+    writeGrantReason = "argv granted write permission but the role is not a write role";
+  } else if (processWasCreated && isWriteRole) {
     if (!argvGrantedWrite) {
       writeGrantOk = false;
       writeGrantReason = "write role argv does not grant write permission";
     } else {
       writeGrantReason = "write role argv grants write permission";
+    }
+  }
+
+  let ownerOk = true;
+  let ownerReason = "no parsed handoff whose Owner requirement can be checked";
+  if (handoff !== null) {
+    if (handoff.requiresOwner === true) {
+      ownerOk = false;
+      ownerReason = "handoff requires an Owner decision; this is not a successful autonomous run";
+    } else {
+      ownerReason = "handoff does not require an Owner decision";
+    }
+  }
+
+  let capacityOk = true;
+  let capacityReason = "no parsed handoff whose capacity claim can be checked";
+  if (handoff !== null) {
+    if (handoff.capacityStatus === "CAPACITY_EXHAUSTED") {
+      capacityOk = false;
+      capacityReason = "handoff reports CAPACITY_EXHAUSTED; this run is not a successful autonomous run";
+    } else {
+      capacityReason = `handoff capacityStatus is ${handoff.capacityStatus}`;
     }
   }
 
@@ -899,6 +975,8 @@ export function evaluateSuccessConjunction(input: {
     { name: "reviewLeftTreeUnchanged", ok: reviewOk, reason: reviewReason },
     { name: "writeMovedHead", ok: writeMovedOk, reason: writeMovedReason },
     { name: "writeRoleWasGrantedWritePermission", ok: writeGrantOk, reason: writeGrantReason },
+    { name: "ownerNotRequired", ok: ownerOk, reason: ownerReason },
+    { name: "capacityNotExhausted", ok: capacityOk, reason: capacityReason },
   ];
 
   const failedConjuncts = findings.filter((finding) => !finding.ok).map((finding) => finding.name);
@@ -1162,7 +1240,7 @@ export async function executeRun(
   let spawnedAtFloor: string | null = null;
   let holderExitedAt: string | null = null;
   let gitBefore: GitObservationV1 | null = null;
-  let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [] };
+  let orphanScan: WriterOrphanScanV1 = { performed: false, sightings: [], liveSightings: [], undecidable: [] };
   let exitProof: WriterExitProofV1 | null = null;
   let captureTimeIdentityNotFound = false;
   const seenInTreePids = new Set<number>();
@@ -1310,6 +1388,119 @@ export async function executeRun(
         gitAfter: null,
         lease: null,
         productionWriterLeaseReleasedByThisRun: writerReleaseEvidence(null),
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    if (request.lease.kind === "WORKTREE") {
+      const leasePlace = canonicalResource("WORKTREE", request.lease.resource);
+      const cwdPlace = canonicalizeHostPath(request.cwd);
+      const worktreePlace = canonicalizeHostPath(request.worktree);
+      if (leasePlace === "" || cwdPlace === "" || leasePlace !== cwdPlace) {
+        return finish({
+          ok: false,
+          spawned: false,
+          reason: "WORKTREE lease resource is not the directory the child will run in",
+          conjunction: emptyConjunction,
+          exitCode: null,
+          processIdentity: null,
+          intent: null,
+          handoff: null,
+          gitAfter: null,
+          lease: null,
+          productionWriterLeaseReleasedByThisRun: false,
+          cancel: emptyCancel,
+          log: null,
+        });
+      }
+      if (worktreePlace === "" || worktreePlace !== cwdPlace) {
+        return finish({
+          ok: false,
+          spawned: false,
+          reason: "WORKTREE worktree is not the directory the child will run in",
+          conjunction: emptyConjunction,
+          exitCode: null,
+          processIdentity: null,
+          intent: null,
+          handoff: null,
+          gitAfter: null,
+          lease: null,
+          productionWriterLeaseReleasedByThisRun: false,
+          cancel: emptyCancel,
+          log: null,
+        });
+      }
+    }
+
+    if (LOCAL_ROLES.has(role)) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `role ${role} is a local role and is not launched through an executor`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (routeRole(role) !== request.executor) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `role ${role} is routed to ${routeRole(role)}, not ${request.executor}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
+    let handoffAlreadyPresent = false;
+    try {
+      handoffAlreadyPresent = deps.fs.isFile(handoffPath);
+    } catch {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "handoff path could not be stat'd before spawn; UNKNOWN is not absence",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (handoffAlreadyPresent) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "handoff.json already exists at the path the child is told to write; refusing to spawn over a pre-existing report",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
         cancel: emptyCancel,
         log: null,
       });
@@ -2153,6 +2344,8 @@ export async function executeRun(
       role,
       argvGrantedWrite,
       spawnedAtFloor,
+      expectedRunNonce: runNonce,
+      observedCompletedAt: holderExitedAt ?? deps.clock.now(),
       ...(treeIncludingIgnored !== undefined ? { treeIncludingIgnored } : {}),
     });
 
@@ -2331,6 +2524,16 @@ function describeExecutorTree(input: {
     return { ok: false, reason: "the executor process tree could not be observed" };
   }
   if (!input.orphanScan.performed) {
+    const undecidable = input.orphanScan.undecidable;
+    if (undecidable.length > 0) {
+      const named = undecidable
+        .map((row) => `pid ${row.pid}${row.name !== undefined ? ` (${row.name})` : ""}`)
+        .join(", ");
+      return {
+        ok: false,
+        reason: `membership undecidable for ${named}; the process-tree scan was not performed`,
+      };
+    }
     return { ok: false, reason: "the process-tree scan was not performed" };
   }
   if (input.orphanScan.liveSightings.length > 0) {
@@ -2476,6 +2679,26 @@ async function sampleAncestryWhileChildAlive(input: {
   }
 }
 
+function sightingsAsOrphans(
+  rows: readonly { readonly pid?: number; readonly name?: string | null; readonly parentPid?: number; readonly parentPresent?: boolean; readonly parentName?: string | null; readonly runNonce?: string | null; readonly creationDate?: string; readonly nonceReadable?: boolean }[],
+): OrphanSightingV1[] {
+  const out: OrphanSightingV1[] = [];
+  for (const row of rows) {
+    if (!isUsablePid(row.pid)) continue;
+    out.push({
+      pid: row.pid,
+      ...(row.name !== undefined && row.name !== null ? { name: row.name } : {}),
+      ...(row.parentPid !== undefined ? { parentPid: row.parentPid } : {}),
+      ...(row.parentPresent !== undefined ? { parentPresent: row.parentPresent } : {}),
+      ...(row.parentName !== undefined && row.parentName !== null ? { parentName: row.parentName } : {}),
+      ...(row.runNonce !== undefined && row.runNonce !== null ? { runNonce: row.runNonce } : {}),
+      ...(row.creationDate !== undefined ? { creationDate: row.creationDate } : {}),
+      ...(row.nonceReadable !== undefined ? { nonceReadable: row.nonceReadable } : {}),
+    });
+  }
+  return out;
+}
+
 async function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
@@ -2520,11 +2743,21 @@ async function collectWriterOrphans(input: {
         try {
           next = scanOnce();
         } catch {
-          return { performed: false, sightings: [], liveSightings: [] };
+          return {
+            performed: false,
+            sightings,
+            liveSightings: [],
+            undecidable: sightingsAsOrphans(undecidable),
+          };
         }
         const decision = nextUndecidablePersistenceDecision(undecidable, next, ctxFor(next));
         if (decision.action === "unavailable") {
-          return { performed: false, sightings: [], liveSightings: [] };
+          return {
+            performed: false,
+            sightings: next,
+            liveSightings: [],
+            undecidable: sightingsAsOrphans(undecidableRowsOf(next, ctxFor(next))),
+          };
         }
         if (decision.action === "scan-clean") {
           clean = next;
@@ -2535,7 +2768,12 @@ async function collectWriterOrphans(input: {
         plausibility = ctxFor(next);
       }
       if (clean === null) {
-        return { performed: false, sightings: [], liveSightings: [] };
+        return {
+          performed: false,
+          sightings,
+          liveSightings: [],
+          undecidable: sightingsAsOrphans(undecidable),
+        };
       }
       sightings = [...clean];
       plausibility = ctxFor(sightings);
@@ -2552,11 +2790,11 @@ async function collectWriterOrphans(input: {
       processRowCouldBelongToThisRun(sighting, plausibility)
       && writerSightingNotProvenAbsent(sighting, input.runNonce, membershipTree),
     );
-    return { performed: true, sightings, liveSightings };
+    return { performed: true, sightings, liveSightings, undecidable: [] };
   } catch {
     // A throwing CIM/WMI scan is not a completed scan. Escaping executeRun
     // used to release the writer lease from `finally` with no result.json.
-    return { performed: false, sightings: [], liveSightings: [] };
+    return { performed: false, sightings: [], liveSightings: [], undecidable: [] };
   }
 }
 
@@ -2954,11 +3192,20 @@ function recordedIdentityFromHeldLease(
   lease: LeaseV1,
   intentIdentity: ExecutorProcessIdentityV1 | null,
 ): ExecutorProcessIdentityV1 | null {
-  if (intentIdentity !== null) return intentIdentity;
   const id = lease.processIdentity;
+  const rowPid = id?.pid ?? lease.pid;
+  const rowToken = normaliseRunNonce(id?.runToken ?? "");
+  const rowStartedAt = id?.startedAt !== undefined ? normalisedCreationDate(id.startedAt) : null;
+  if (intentIdentity !== null) {
+    // Intent under runRoot is testimony. It may corroborate the Director-owned
+    // row; it may never replace it. Disagreement on any field the proof or
+    // the scan consumes is a refusal of the file, not a substitution.
+    if (rowPid !== undefined && rowPid !== null && intentIdentity.pid !== rowPid) return null;
+    if (rowToken !== null && intentIdentity.runNonce !== rowToken) return null;
+    if (rowStartedAt !== null && intentIdentity.creationDate !== rowStartedAt) return null;
+  }
   if (id === undefined || !isUsablePid(id.pid)) return null;
-  const token = normaliseRunNonce(id.runToken ?? "");
-  if (token === null) return null;
+  if (rowToken === null) return null;
   // Same door as processIdentityFrom: an un-normalisable startedAt is
   // missing, not an invented instant. Feb 31 must not mint death.
   const creationDate = normalisedCreationDate(id.startedAt);
@@ -2967,7 +3214,7 @@ function recordedIdentityFromHeldLease(
     pid: id.pid,
     creationDate,
     executablePath: "C:\\adopted-holder",
-    runNonce: token,
+    runNonce: rowToken,
   };
 }
 
@@ -3002,10 +3249,11 @@ async function proveAdoptedWriterExit(input: {
 }): Promise<WriterExitProofV1 | null> {
   const identity = recordedIdentityFromHeldLease(input.lease, input.intentIdentity);
   const holderPid = input.lease.pid ?? identity?.pid;
-  const floor = identity?.creationDate
-    ?? (input.lease.processIdentity?.startedAt !== undefined
-      ? (normalisedCreationDate(input.lease.processIdentity.startedAt) ?? input.lease.acquiredAt)
-      : input.lease.acquiredAt);
+  // The scan floor is a Director-owned instant. An executor-written
+  // creationDate in intent.json must not move the emit predicate.
+  const floor = input.lease.processIdentity?.startedAt !== undefined
+    ? (normalisedCreationDate(input.lease.processIdentity.startedAt) ?? input.lease.acquiredAt)
+    : input.lease.acquiredAt;
   const probedPid = identity?.pid ?? (isUsablePid(holderPid) ? holderPid : null);
   let observation: ProcessObservationV1 | null = null;
   if (probedPid !== null) {
@@ -3233,6 +3481,10 @@ export function createNodeSpawner(): SpawnFnV1 {
       stdio: [stdinPayload !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
     if (stdinPayload !== undefined && child.stdin !== null) {
+      // Child closed its input (startup crash, CLAUDE_NOT_LOGGED_IN, early
+      // exit). The exit code and conjunction decide; an unhandled 'error'
+      // on stdin kills the Director and voids the cancel ladder.
+      child.stdin.on("error", () => {});
       child.stdin.end(stdinPayload);
     }
     return wrapChildProcess(child);
@@ -3240,6 +3492,10 @@ export function createNodeSpawner(): SpawnFnV1 {
 }
 
 export function wrapChildProcess(child: ChildProcess): SpawnHandleV1 {
+  // Attach before any pump so an early stream error cannot become an
+  // unhandled 'error' that exits the Director process.
+  if (child.stdout !== null) child.stdout.on("error", () => {});
+  if (child.stderr !== null) child.stderr.on("error", () => {});
   let exited = child.exitCode !== null || child.signalCode !== null;
   const exit = new Promise<SpawnExitV1>((resolve) => {
     if (exited) {

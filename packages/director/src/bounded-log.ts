@@ -159,13 +159,22 @@ export function createMemoryLogSink(): MemoryLogSinkV1 {
 
 /** File-backed sink for `stdout.log` / `stderr.log` under a run root. */
 export function createFileLogSink(filePath: string): LogSinkV1 {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, Buffer.alloc(0));
+  // Construction is not a write. Truncating here destroyed the previous
+  // log on every refused retry, including ones that never spawned.
+  let prepared = false;
+  const prepare = (): void => {
+    if (prepared) return;
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, Buffer.alloc(0));
+    prepared = true;
+  };
   return {
     append(bytes) {
+      prepare();
       appendFileSync(filePath, Buffer.from(bytes));
     },
     replace(bytes) {
+      prepare();
       writeFileSync(filePath, Buffer.from(bytes));
     },
   };

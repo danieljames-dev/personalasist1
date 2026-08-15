@@ -22,7 +22,7 @@
 import { readFileSync } from "node:fs";
 import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 import { writeAtomic } from "./atomic-write.js";
-import { CONTROL_BYTES } from "./control-bytes.js";
+import { CONTROL_BYTES, asUsableToken } from "./control-bytes.js";
 import { redactLogText } from "./bounded-log.js";
 import { isResolvedHostPath } from "./host-path.js";
 import {
@@ -892,13 +892,6 @@ function isIsoTimestamp(value: unknown): value is IsoTimestamp {
   if (typeof value !== "string" || value === "") return false;
   if (CONTROL_BYTES.test(value)) return false;
   return isPlaceableInstant(value);
-}
-
-function asUsableToken(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (trimmed === "" || CONTROL_BYTES.test(trimmed)) return null;
-  return trimmed;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -299,6 +299,7 @@ const handoffJson = (over: Record<string, unknown> = {}) => JSON.stringify({
   startedAt: NOW,
   finishedAt: LATER,
   capacityStatus: "AVAILABLE",
+  runNonce: "nonce-r1",
   summary: "done",
   ...over,
 });

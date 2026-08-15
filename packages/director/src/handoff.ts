@@ -59,7 +59,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // stem at the first "." only, so `NUL` was refused and `NUL:` was accepted — and `NUL:` opens the null
 // device in any real directory. Two predicates for one Windows rule will always drift apart; this is
 // the pure leaf both path layers already depend on, so there is no new coupling and no cycle.
-import { CONTROL_BYTES as CONTROL_BYTES_IN_PATH } from "./control-bytes.js";
+import { asUsableToken, CONTROL_BYTES as CONTROL_BYTES_IN_PATH } from "./control-bytes.js";
 import { namesReservedDeviceSegment, isResolvedHostPath } from "./host-path.js";
 
 export const HANDOFF_SCHEMA_V1 = "aion.director.handoff.v1" as const;
@@ -128,6 +128,11 @@ export interface ExecutorHandoffV1 {
   startedAt: IsoTimestamp;
   finishedAt: IsoTimestamp;
   capacityStatus: ExecutorCapacityV1;
+  /**
+   * The Director-minted run nonce, echoed from `AION_RUN_NONCE`.
+   * A report that cannot prove it is this invocation's is not this invocation's.
+   */
+  runNonce: string;
   /** Free text from the executor. Read by people; never parsed for control. */
   summary: string;
 }
@@ -687,6 +692,15 @@ export function parseHandoff(raw: string | unknown, options: HandoffParseOptions
   const startedAt = requireTimestamp("startedAt");
   const finishedAt = requireTimestamp("finishedAt");
 
+  const rawNonce = value.runNonce;
+  // Same token leaf as `normaliseRunNonce` (it is `asUsableToken`).
+  const runNonce = asUsableToken(rawNonce);
+  if (rawNonce === undefined || rawNonce === null) {
+    problems.push("runNonce is missing; a report that cannot prove it is this invocation's is not this invocation's");
+  } else if (runNonce === null) {
+    problems.push("runNonce is empty or contains control bytes");
+  }
+
   const nextRecommendedGate = typeof value.nextRecommendedGate === "string" && value.nextRecommendedGate.trim() !== ""
     ? value.nextRecommendedGate.trim()
     : null;
@@ -716,6 +730,7 @@ export function parseHandoff(raw: string | unknown, options: HandoffParseOptions
       startedAt,
       finishedAt,
       capacityStatus: capacity as ExecutorCapacityV1,
+      runNonce: runNonce as string,
       summary,
     },
   };

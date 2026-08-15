@@ -61,7 +61,7 @@ const T0 = "2026-08-13T12:00:01.000Z";
 const RECORDED: ExecutorProcessIdentityV1 = {
   pid: 4812,
   creationDate: T0,
-  executablePath: EXE,
+  executablePath: "C:\\Tools\\claude.exe",
   runNonce: NONCE,
 };
 
@@ -85,8 +85,9 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
     nextRecommendedGate: null,
     artifacts: ["notes.md"],
     startedAt: NOW,
-    finishedAt: LATER,
+    finishedAt: NOW,
     capacityStatus: "AVAILABLE",
+    runNonce: NONCE,
     summary: "ok",
     ...over,
   };
@@ -108,11 +109,11 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     runId: "run-1",
     missionId: "mission-1",
     workItemId: "work-1",
-    executor: "grok",
+    executor: "claude",
     worktree: CWD,
     branch: "executor/oracle",
-    executablePath: EXE,
-    argv: grokImplementerArgv(),
+    executablePath: "C:\\Tools\\claude.exe",
+    argv: ["-p", "--permission-mode", "bypassPermissions"],
     cwd: CWD,
     runNonce: NONCE,
     runRoot: RUN_ROOT,
@@ -120,6 +121,7 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     timeoutMs: 30_000,
     lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-1" },
     authorisedProductionMutated: false,
+    role: "IMPLEMENT",
     ...over,
   };
 }
@@ -281,17 +283,43 @@ async function runWith(
     neverWait?: boolean;
   } = {},
 ) {
-  const fs = over.fs ?? memoryFs({
-    files: over.handoff === null
-      ? {}
-      : { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(over.handoff ?? goodHandoff()) },
-  });
+  const runRoot = over.request?.runRoot ?? RUN_ROOT;
+  const handoffPath = join(runRoot, "handoff.json");
+  const fs = over.fs ?? memoryFs();
+  let handoffText: string | null = null;
+  if (over.handoff === null) {
+    handoffText = null;
+  } else if (over.handoff !== undefined) {
+    handoffText = JSON.stringify(over.handoff);
+  } else {
+    try {
+      if (fs.isFile(handoffPath)) {
+        handoffText = fs.readUtf8(handoffPath);
+        if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
+      } else {
+        handoffText = JSON.stringify(goodHandoff());
+      }
+    } catch {
+      handoffText = JSON.stringify(goodHandoff());
+    }
+  }
+  if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
+  const innerSpawn = over.spawn ?? trackingSpawn(() => exitingProcess());
+  const spawn: SpawnFnV1 = (executable, argv, options, permit) => {
+    if (handoffText !== null) {
+      try { fs.writeDurable(handoffPath, handoffText); } catch { /* conjunction records absence */ }
+    }
+    return innerSpawn(executable, argv, options, permit);
+  };
   const deps: RunManagerDepsV1 = {
     clock: createFixedClock(NOW),
     fs,
-    spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
+    spawn,
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
+    probe: over.probe ?? sequentialProbe([
+      foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\claude.exe" }),
+      HOLDER_GONE,
+    ]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.neverWait === true ? (() => new Promise(() => {})) : async () => undefined,
@@ -868,6 +896,8 @@ test("E1-liveness a review role that commits nothing can still succeed", async (
   const result = await runWith({
     neverWait: true,
     request: {
+      executor: "grok",
+      executablePath: EXE,
       role: "INDEPENDENT_ACCEPTANCE",
       argv: [
         "--prompt-file", `${CWD}\\PROMPT.md`,
@@ -878,6 +908,7 @@ test("E1-liveness a review role that commits nothing can still succeed", async (
       ],
     },
     git: matchingGit(HEAD_AFTER),
+    probe: sequentialProbe([foundObservation({ ...RECORDED, executablePath: EXE }), HOLDER_GONE]),
   });
   assert.equal(result.ok, true, result.reason);
 });
@@ -978,7 +1009,7 @@ test("E3 a handoff whose finishedAt precedes the spawn floor is denied", async (
 test("E3-liveness a normal fast run's handoff still parses", async () => {
   const result = await runWith({
     neverWait: true,
-    handoff: goodHandoff({ startedAt: NOW, finishedAt: LATER }),
+    handoff: goodHandoff({ startedAt: NOW, finishedAt: NOW }),
   });
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.conjunction.findings.find((item) => item.name === "handoffParsed")?.ok, true);
@@ -1125,10 +1156,30 @@ function compileHandoffStub(dir: string): string {
     "using System;",
     "using System.IO;",
     "class P {",
+    "  static string SetJsonString(string json, string key, string value) {",
+    "    var needle = \"\\\"\" + key + \"\\\"\";",
+    "    var i = json.IndexOf(needle, StringComparison.Ordinal);",
+    "    if (i < 0) {",
+    "      var close = json.LastIndexOf('}');",
+    "      if (close < 0) return json;",
+    "      return json.Substring(0, close) + \",\\\"\" + key + \"\\\":\\\"\" + value + \"\\\"}\";",
+    "    }",
+    "    var colon = json.IndexOf(':', i);",
+    "    var q1 = json.IndexOf('\"', colon + 1);",
+    "    if (q1 < 0) return json;",
+    "    var q2 = json.IndexOf('\"', q1 + 1);",
+    "    if (q2 < 0) return json;",
+    "    return json.Substring(0, q1 + 1) + value + json.Substring(q2);",
+    "  }",
     "  static int Main() {",
     "    var path = Environment.GetEnvironmentVariable(\"AION_HANDOFF_PATH\");",
     "    var json = Environment.GetEnvironmentVariable(\"AION_HANDOFF_JSON\");",
+    "    var nonce = Environment.GetEnvironmentVariable(\"AION_RUN_NONCE\") ?? \"\";",
     "    if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(json)) return 2;",
+    "    var now = DateTime.UtcNow.ToString(\"yyyy-MM-ddTHH:mm:ss.fffZ\");",
+    "    json = SetJsonString(json, \"runNonce\", nonce);",
+    "    json = SetJsonString(json, \"finishedAt\", now);",
+    "    json = SetJsonString(json, \"startedAt\", now);",
     "    var folder = Path.GetDirectoryName(path);",
     "    if (!string.IsNullOrEmpty(folder)) Directory.CreateDirectory(folder);",
     "    File.WriteAllText(path, json);",

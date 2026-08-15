@@ -3,7 +3,7 @@
  * Thin launch path for @aion/director. Calls launchRun only.
  * Bind nothing but 127.0.0.1 if anything is bound. Spend USD 0.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -127,7 +127,29 @@ export async function runDirectorCli(argv, io = console) {
     resultPath: result.resultPath,
     spendUsd: result.handoff?.spendUsd ?? 0,
   }));
-  return result.ok ? 0 : 1;
+  if (result.ok) return 0;
+  if (result.handoff?.requiresOwner === true) {
+    const named = result.handoff.nextRecommendedGate;
+    const gateType = director.isOwnerGateType(named)
+      ? named
+      : "PRODUCTION_DEPLOY_APPROVAL_REQUIRED";
+    const gate = director.openGate({
+      gateId: `owner-${required(values, "run-id")}`,
+      missionId: required(values, "mission-id"),
+      type: gateType,
+      why: result.handoff.summary || "the executor reported that an Owner decision is required",
+      requiredInput: "approve or reject this gate",
+      at: nowIso(),
+      resumeState: "WAITING_FOR_OWNER",
+    });
+    try {
+      writeFileSync(join(runRoot, "owner-gate.json"), `${JSON.stringify(gate, null, 2)}\n`);
+    } catch {
+      // The gate object was still opened in memory; a write failure is not a silent skip.
+    }
+    return 3;
+  }
+  return 1;
 }
 
 const invoked = process.argv[1] !== undefined

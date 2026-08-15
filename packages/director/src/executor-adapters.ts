@@ -13,10 +13,21 @@
  * Discovery (which binary) lives next door. Spawning lives in the run manager. This module answers
  * only: given a prompt path, a working directory and a run nonce, what exact argv and child
  * environment does this executor take?
+ *
+ * The run nonce is delivered as `AION_RUN_NONCE` in the child environment, never on argv.
+ * A legitimate executor must echo that exact token as `runNonce` in `handoff.json`. A report
+ * that omits it is not this invocation's report.
  */
 import { statSync } from "node:fs";
-import { CONTROL_BYTES } from "./control-bytes.js";
-import { isExecutorRole, NON_WRITING_ROLES, type ExecutorNameV1, type ExecutorRoleV1 } from "./executors.js";
+import { CONTROL_BYTES, asUsableToken } from "./control-bytes.js";
+import {
+  isExecutorRole,
+  LOCAL_ROLES,
+  NON_WRITING_ROLES,
+  routeRole,
+  type ExecutorNameV1,
+  type ExecutorRoleV1,
+} from "./executors.js";
 import { isResolvedHostPath } from "./host-path.js";
 
 /**
@@ -125,6 +136,12 @@ export function executorArgvFor(
   input: Pick<AdapterInputV1, "promptPath" | "cwd" | "role">,
 ): readonly string[] | null {
   if (name === "local") return null;
+  // Absent role is IMPLEMENT, same default launchRun uses. The adapter table
+  // is the single leaf that knows which executor may take which role.
+  const role = input.role ?? "IMPLEMENT";
+  if (!isExecutorRole(role)) return null;
+  if (LOCAL_ROLES.has(role)) return null;
+  if (routeRole(role) !== name) return null;
   if (name === "claude") {
     // Claude 2.1.232 (Claude Code), measured 2026-08-15 against
     // C:\Users\User\.vscode\extensions\anthropic.claude-code-2.1.232-win32-x64\resources\native-binary\claude.exe
@@ -173,7 +190,11 @@ const grokAdapter: ExecutorAdapterV1 = {
   build(input) {
     const checked = validateInput(input);
     if (!checked.ok) return checked;
-    return ready(buildGrokLaunch(checked));
+    const argv = executorArgvFor("grok", checked);
+    if (argv === null) {
+      return refused("INVALID_ROLE", `role ${checked.role ?? "IMPLEMENT"} is not routed to grok`);
+    }
+    return ready(launchOf(checked, argv));
   },
   classifyExit(exitCode) {
     return exitCode === 0 ? { kind: "COMPLETED", exitCode } : { kind: "FAILED", exitCode };
@@ -185,7 +206,11 @@ const claudeAdapter: ExecutorAdapterV1 = {
   build(input) {
     const checked = validateInput(input);
     if (!checked.ok) return checked;
-    return ready(buildClaudeLaunch(checked));
+    const argv = executorArgvFor("claude", checked);
+    if (argv === null) {
+      return refused("INVALID_ROLE", `role ${checked.role ?? "IMPLEMENT"} is not routed to claude`);
+    }
+    return ready(launchOf(checked, argv));
   },
   classifyExit(exitCode, output) {
     if (isClaudeNotLoggedIn(exitCode, output)) {
@@ -237,32 +262,6 @@ export const EXECUTOR_ADAPTERS: Readonly<Record<ExecutorNameV1, ExecutorAdapterV
 // ---------------------------------------------------------------------------
 // Argv
 // ---------------------------------------------------------------------------
-
-function buildGrokLaunch(input: ValidatedInput): AdapterLaunchV1 {
-  // Grok 1.0.3, measured. -p is --single <PROMPT> and takes the prompt inline. Combining it with
-  // --prompt-file starves --single of its argument: `-p --prompt-file` is a prompt of the literal
-  // string "--prompt-file" and the path becomes an unknown option. The run is garbage. Never emit
-  // both.
-  //
-  // --no-plan is required. Without it Grok 1.0.3 emits a plan, ends its turn and exits 0 having
-  // written nothing. Four D2 launches were lost to this before it was found, and every one of
-  // them reported success by exit code. Do not remove it as noise.
-  //
-  // A reviewer that can write is not a review. The measured implementer list stays
-  // `bypassPermissions` + `--always-approve`. Every NON_WRITING_ROLES member is
-  // dontAsk and must not carry --always-approve.
-  const argv = executorArgvFor("grok", input);
-  if (argv === null) return launchOf(input, []);
-  return launchOf(input, argv);
-}
-
-function buildClaudeLaunch(input: ValidatedInput): AdapterLaunchV1 {
-  // See executorArgvFor("claude"): measured 2.1.232. -p is boolean; the
-  // prompt file is not an argv element. cwd is the spawn cwd, not a flag.
-  const argv = executorArgvFor("claude", input);
-  if (argv === null) return launchOf(input, []);
-  return launchOf(input, argv);
-}
 
 function buildLocalLaunch(input: ValidatedInput): AdapterLaunchV1 {
   return launchOf(input, []);
@@ -338,13 +337,6 @@ function validateInput(input: AdapterInputV1): AdapterResultV1 & { ok: false } |
 
 function refused(code: AdapterRefusalCodeV1, reason: string): AdapterResultV1 & { ok: false } {
   return { ok: false, code, reason, launch: null };
-}
-
-function asUsableToken(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (trimmed === "" || CONTROL_BYTES.test(trimmed)) return null;
-  return trimmed;
 }
 
 function asUsablePath(value: unknown): string | null {

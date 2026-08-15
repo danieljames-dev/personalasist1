@@ -61,7 +61,7 @@ const LONG_AGO = "2026-08-13T10:00:00.000Z";
 const RECORDED: ExecutorProcessIdentityV1 = {
   pid: 4812,
   creationDate: T0,
-  executablePath: EXE,
+  executablePath: "C:\\Tools\\claude.exe",
   runNonce: NONCE,
 };
 
@@ -79,10 +79,14 @@ function grokImplementerArgv(promptPath = PROMPT, cwd = CWD): string[] {
 }
 
 function matchingDiscovery(exe = EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "discoveryFs"> {
+  const claude = "C:\\Tools\\claude.exe";
   return {
-    discoveryEnv: { AION_GROK_PATH: exe },
+    discoveryEnv: {
+      AION_GROK_PATH: EXE,
+      AION_CLAUDE_CODE_PATH: exe === EXE ? claude : exe,
+    },
     discoveryFs: {
-      isFile: (path) => path === exe,
+      isFile: (path) => path === EXE || path === claude || path === exe,
       readDir: () => [],
     },
   };
@@ -106,8 +110,9 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
     nextRecommendedGate: null,
     artifacts: ["notes.md"],
     startedAt: NOW,
-    finishedAt: LATER,
+    finishedAt: NOW,
     capacityStatus: "AVAILABLE",
+    runNonce: NONCE,
     summary: "ok",
     ...over,
   };
@@ -118,11 +123,11 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     runId: "run-1",
     missionId: "mission-1",
     workItemId: "work-1",
-    executor: "grok",
+    executor: "claude",
     worktree: CWD,
     branch: "executor/oracle",
-    executablePath: EXE,
-    argv: grokImplementerArgv(),
+    executablePath: "C:\\Tools\\claude.exe",
+    argv: ["-p", "--permission-mode", "bypassPermissions"],
     cwd: CWD,
     runNonce: NONCE,
     runRoot: RUN_ROOT,
@@ -130,6 +135,7 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     timeoutMs: 30_000,
     lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-1" },
     authorisedProductionMutated: false,
+    role: "IMPLEMENT",
     ...over,
   };
 }
@@ -338,17 +344,41 @@ async function runWith(
     handoff?: Record<string, unknown> | null;
   } = {},
 ) {
-  const fs = over.fs ?? memoryFs({
-    files: over.handoff === null
-      ? {}
-      : { [join(over.request?.runRoot ?? RUN_ROOT, "handoff.json")]: JSON.stringify(over.handoff ?? goodHandoff()) },
-  });
+  const runRoot = over.request?.runRoot ?? RUN_ROOT;
+  const handoffPath = join(runRoot, "handoff.json");
+  const fs = over.fs ?? memoryFs();
+  let handoffText = null;
+  if (over.handoff === null) {
+    handoffText = null;
+  } else if (over.handoff !== undefined) {
+    handoffText = JSON.stringify(over.handoff);
+  } else {
+    try {
+      if (fs.isFile(handoffPath)) {
+        handoffText = fs.readUtf8(handoffPath);
+        if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
+      } else {
+        handoffText = JSON.stringify(goodHandoff());
+      }
+    } catch {
+      handoffText = JSON.stringify(goodHandoff());
+    }
+  }
+  if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
   const deps: RunManagerDepsV1 = {
     clock: over.clock ?? createFixedClock(HOLDER_EXIT),
     fs,
-    spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
+    spawn: (executable, argv, options, permit) => {
+      if (handoffText !== null) {
+        try { fs.writeDurable(handoffPath, handoffText); } catch { /* conjunction records absence */ }
+      }
+      return (over.spawn ?? trackingSpawn(() => exitingProcess()))(executable, argv, options, permit);
+    },
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
+    probe: over.probe ?? sequentialProbe([
+      foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\claude.exe" }),
+      HOLDER_GONE,
+    ]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
@@ -475,7 +505,7 @@ test("F3 a real child that prints and exits during a blocking probe keeps its st
         runRoot: join(dir, "run"),
         executablePath: process.execPath,
         promptPath,
-        argv: grokImplementerArgv(promptPath, dir),
+        argv: ["-p", "--permission-mode", "bypassPermissions"],
         runNonce: "nonce-f3-bytes",
         timeoutMs: 15_000,
         lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-f3" },

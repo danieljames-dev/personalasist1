@@ -53,7 +53,7 @@ const HOLDER_EXIT = "2026-08-13T12:00:10.000Z";
 const RECORDED: ExecutorProcessIdentityV1 = {
   pid: 4812,
   creationDate: T0,
-  executablePath: EXE,
+  executablePath: "C:\\Tools\\claude.exe",
   runNonce: NONCE,
 };
 
@@ -132,8 +132,9 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
     nextRecommendedGate: null,
     artifacts: ["notes.md"],
     startedAt: NOW,
-    finishedAt: LATER,
+    finishedAt: NOW,
     capacityStatus: "AVAILABLE",
+    runNonce: NONCE,
     summary: "ok",
     ...over,
   };
@@ -144,11 +145,11 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     runId: "run-1",
     missionId: "mission-1",
     workItemId: "work-1",
-    executor: "grok",
+    executor: "claude",
     worktree: CWD,
     branch: "executor/oracle",
-    executablePath: EXE,
-    argv: grokImplementerArgv(),
+    executablePath: "C:\\Tools\\claude.exe",
+    argv: ["-p", "--permission-mode", "bypassPermissions"],
     cwd: CWD,
     runNonce: NONCE,
     runRoot: RUN_ROOT,
@@ -156,6 +157,7 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     timeoutMs: 30_000,
     lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-1" },
     authorisedProductionMutated: false,
+    role: "IMPLEMENT",
     ...over,
   };
 }
@@ -320,17 +322,41 @@ async function runWith(
     clock?: RunManagerDepsV1["clock"];
   } = {},
 ) {
-  const fs = over.fs ?? memoryFs({
-    files: over.handoff === null
-      ? {}
-      : { [join(over.request?.runRoot ?? RUN_ROOT, "handoff.json")]: JSON.stringify(over.handoff ?? goodHandoff()) },
-  });
+  const runRoot = over.request?.runRoot ?? RUN_ROOT;
+  const handoffPath = join(runRoot, "handoff.json");
+  const fs = over.fs ?? memoryFs();
+  let handoffText = null;
+  if (over.handoff === null) {
+    handoffText = null;
+  } else if (over.handoff !== undefined) {
+    handoffText = JSON.stringify(over.handoff);
+  } else {
+    try {
+      if (fs.isFile(handoffPath)) {
+        handoffText = fs.readUtf8(handoffPath);
+        if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
+      } else {
+        handoffText = JSON.stringify(goodHandoff());
+      }
+    } catch {
+      handoffText = JSON.stringify(goodHandoff());
+    }
+  }
+  if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
   const deps: RunManagerDepsV1 = {
     clock: over.clock ?? createFixedClock(AFTER),
     fs,
-    spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
+    spawn: (executable, argv, options, permit) => {
+      if (handoffText !== null) {
+        try { fs.writeDurable(handoffPath, handoffText); } catch { /* conjunction records absence */ }
+      }
+      return (over.spawn ?? trackingSpawn(() => exitingProcess()))(executable, argv, options, permit);
+    },
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
+    probe: over.probe ?? sequentialProbe([
+      foundObservation({ ...RECORDED, executablePath: "C:\\Tools\\claude.exe" }),
+      HOLDER_GONE,
+    ]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),

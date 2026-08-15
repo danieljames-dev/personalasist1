@@ -82,7 +82,7 @@ const T1 = "2026-08-13T13:00:00.000Z";
 const RECORDED: ExecutorProcessIdentityV1 = {
   pid: 4812,
   creationDate: T0,
-  executablePath: EXE,
+  executablePath: "C:\\Tools\\claude.exe",
   runNonce: NONCE,
 };
 
@@ -128,8 +128,9 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
     nextRecommendedGate: null,
     artifacts: ["notes.md"],
     startedAt: NOW,
-    finishedAt: LATER,
+    finishedAt: NOW,
     capacityStatus: "AVAILABLE",
+    runNonce: NONCE,
     summary: "ok",
     ...over,
   };
@@ -158,11 +159,27 @@ function realNodeSpawn(script: string): SpawnFnV1 {
   };
 }
 
-function matchingDiscovery(exe = EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "discoveryFs"> {
+const CLAUDE_EXE = "C:\\Tools\\claude.exe";
+
+function claudeImplementerArgv(): string[] {
+  return ["-p", "--permission-mode", "bypassPermissions"];
+}
+
+function grokReviewArgv(promptPath = PROMPT, cwd = CWD): string[] {
+  return [
+    "--prompt-file", promptPath,
+    "--cwd", cwd,
+    "--permission-mode", "dontAsk",
+    "--no-plan",
+    "--max-turns", String(GROK_MAX_TURNS),
+  ];
+}
+
+function matchingDiscovery(exe = CLAUDE_EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "discoveryFs"> {
   return {
-    discoveryEnv: { AION_GROK_PATH: exe },
+    discoveryEnv: { AION_GROK_PATH: EXE, AION_CLAUDE_CODE_PATH: exe === EXE ? CLAUDE_EXE : exe },
     discoveryFs: {
-      isFile: (path) => path === exe,
+      isFile: (path) => path === EXE || path === CLAUDE_EXE || path === exe,
       readDir: () => [],
     },
   };
@@ -173,11 +190,11 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     runId: "run-1",
     missionId: "mission-1",
     workItemId: "work-1",
-    executor: "grok",
+    executor: "claude",
     worktree: CWD,
     branch: "executor/oracle",
-    executablePath: EXE,
-    argv: grokImplementerArgv(),
+    executablePath: CLAUDE_EXE,
+    argv: claudeImplementerArgv(),
     cwd: CWD,
     runNonce: NONCE,
     runRoot: RUN_ROOT,
@@ -185,6 +202,7 @@ function request(over: Partial<ExecuteRunRequestV1> = {}): ExecuteRunRequestV1 {
     timeoutMs: 30_000,
     lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-1" },
     authorisedProductionMutated: false,
+    role: "IMPLEMENT",
     ...over,
   };
 }
@@ -427,18 +445,47 @@ async function runWith(
     logSinks?: RunManagerDepsV1["logSinks"];
   } = {},
 ) {
-  const fs = over.fs ?? memoryFs({
-    files: over.handoff === null
-      ? {}
-      : { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(over.handoff ?? goodHandoff()) },
-  });
-  const spawn = over.spawn ?? trackingSpawn(() => exitingProcess());
+  const runRoot = over.request?.runRoot ?? RUN_ROOT;
+  const handoffPath = join(runRoot, "handoff.json");
+  const fs = over.fs ?? memoryFs();
+  let handoffText: string | null = null;
+  if (over.handoff === null) {
+    handoffText = null;
+  } else if (over.handoff !== undefined) {
+    handoffText = JSON.stringify(over.handoff);
+  } else {
+    try {
+      if (fs.isFile(handoffPath)) {
+        handoffText = fs.readUtf8(handoffPath);
+        if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
+      } else {
+        handoffText = JSON.stringify(goodHandoff());
+      }
+    } catch {
+      handoffText = JSON.stringify(goodHandoff());
+    }
+  }
+  if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
+  const innerSpawn = over.spawn ?? trackingSpawn(() => exitingProcess());
+  const spawn: SpawnFnV1 = (executable, argv, options, permit) => {
+    if (handoffText !== null) {
+      try {
+        fs.writeDurable(handoffPath, handoffText);
+      } catch {
+        // spawn still proceeds; conjunction records a missing handoff
+      }
+    }
+    return innerSpawn(executable, argv, options, permit);
+  };
   const deps: RunManagerDepsV1 = {
     clock: createFixedClock(NOW),
     fs,
     spawn,
     git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
-    probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
+    probe: over.probe ?? sequentialProbe([
+      foundObservation({ ...RECORDED, executablePath: CLAUDE_EXE }),
+      HOLDER_GONE,
+    ]),
     capacity: over.capacity ?? memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (over.neverWait ? (() => new Promise(() => {})) : async () => undefined),
@@ -1183,9 +1230,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
   // Director death in that window left spawnAttemptedAt=null / spawnPid=null.
   // persist treated "unstarted" as resumable, minted a fresh permit, and
   // acquireLease returned ok for the same runId. Two executors in one worktree.
-  const fs = memoryFs({
-    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
-  });
+  const fs = memoryFs();
   const filesAtCrash = new Map<string, string>();
   const original = fs.writeDurable.bind(fs);
   fs.writeDurable = (path, utf8) => {
@@ -1295,7 +1340,7 @@ test("a real node process is spawned with shell false and its exit is collected"
         runRoot: join(dir, "run"),
         executablePath: process.execPath,
         promptPath,
-        argv: grokImplementerArgv(promptPath, dir),
+        argv: claudeImplementerArgv(),
         runNonce: "nonce-real-node",
         timeoutMs: 15_000,
         lease: { kind: "WORKTREE", resource: dir, leaseId: "lease-real-1" },
@@ -1349,7 +1394,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
         runRoot: join(dir, "run"),
         executablePath: process.execPath,
         promptPath,
-        argv: grokImplementerArgv(promptPath, dir),
+        argv: claudeImplementerArgv(),
         runNonce: "nonce-real-exit-proof",
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-real" },
@@ -1687,7 +1732,7 @@ test("a swapped intent.json between spawn and its record does not adopt the swap
   const result = await runWith({ fs, spawn, neverWait: true });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.ok, false, "a swapped command must not be recorded as a successful run");
-  assert.equal(result.intent?.executablePath, EXE);
+  assert.equal(result.intent?.executablePath, CLAUDE_EXE);
   assert.deepEqual(result.intent ? [...result.intent.argv] : [], [...request().argv]);
   assert.equal(result.intent?.cwd, CWD);
   const raw = fs.files.get(join(RUN_ROOT, "intent.json"));
@@ -1716,7 +1761,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         runRoot: join(dir, "run-a"),
         executablePath: process.execPath,
         promptPath,
-        argv: grokImplementerArgv(promptPath, dir),
+        argv: claudeImplementerArgv(),
         runNonce: nonce,
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-1" },
@@ -1753,7 +1798,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         runRoot: join(dir, "run-b"),
         executablePath: process.execPath,
         promptPath,
-        argv: grokImplementerArgv(promptPath, dir),
+        argv: claudeImplementerArgv(),
         runNonce: `${nonce}-b`,
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live-2" },
@@ -2078,8 +2123,8 @@ test("injected dependency throws do not leak capacity or block a later run", asy
       request: {
         runId: "run-later",
         runRoot: "C:\\AION\\director\\RUNS\\run-later",
-        lease: { kind: "WORKTREE", resource: "C:\\wt-later", leaseId: "lease-later" },
-        worktree: "C:\\wt-later",
+        lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-later" },
+        worktree: CWD,
         cwd: CWD,
       },
     });
@@ -2312,7 +2357,7 @@ test("a real instant-exit production writer releases its own lease", async () =>
         worktree: dir,
         runRoot: join(dir, "run"),
         promptPath: join(dir, "PROMPT.md"),
-        argv: grokImplementerArgv(join(dir, "PROMPT.md"), dir),
+        argv: claudeImplementerArgv(),
         timeoutMs: 15_000,
         lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-instant" },
       },
@@ -2552,7 +2597,7 @@ test("exit 0 with a throwing scanner fails executorTreeIsGone", async () => {
 test("a clean run passes all ten success conjuncts", async () => {
   const result = await runWith({ neverWait: true });
   assert.equal(result.ok, true, result.reason);
-  assert.equal(result.conjunction.findings.length, 13);
+  assert.equal(result.conjunction.findings.length, 15);
   assert.deepEqual(result.conjunction.failedConjuncts, []);
   assert.ok(result.conjunction.findings.every((item) => item.ok));
 });
@@ -2834,9 +2879,7 @@ test("a run longer than LEASE_TTL_MS keeps the lease unexpired via heartbeat", a
     }),
     {
       clock: { now: () => new Date(nowMs).toISOString() },
-      fs: memoryFs({
-        files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
-      }),
+      fs: memoryFs(),
       spawn: trackingSpawn(() => hung),
       git: matchingGit(),
       probe: sequentialProbe([foundObservation(RECORDED), foundObservation(RECORDED)]),
@@ -3074,7 +3117,8 @@ test("an R&D worktree path in argv still spawns and completes", async () => {
       cwd: rd,
       worktree: rd,
       promptPath: `${rd}\\PROMPT.md`,
-      argv: grokImplementerArgv(`${rd}\\PROMPT.md`, rd),
+      argv: claudeImplementerArgv(),
+      lease: { kind: "WORKTREE", resource: rd, leaseId: "lease-rd" },
     },
   });
   assert.equal(result.spawned, true, result.reason);
@@ -3144,7 +3188,12 @@ test("proveWriterExit denies when liveSightings is omitted or null", () => {
   delete (omitted as { liveSightings?: unknown }).liveSightings;
   assert.equal(proveWriterExit(omitted), null);
   assert.equal(proveWriterExit({ ...base, liveSightings: null }), null);
-  assert.ok(proveWriterExit({ ...base, liveSightings: [] }));
+  assert.ok(proveWriterExit({
+    ...base,
+    liveSightings: [],
+    orphanSightings: [],
+    runNonce: NONCE,
+  }));
 });
 
 test("a descendant carrying a different nonce is still this run's tree", () => {

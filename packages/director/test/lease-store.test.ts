@@ -144,11 +144,11 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
       return child();
     };
     const fs = createNodeRunFileSystem();
-    const handoff = {
+    const handoffFor = (runId: string) => ({
       schema: HANDOFF_SCHEMA_V1,
       executor: "grok",
       missionId: "mission-1",
-      runId: "run-1",
+      runId,
       workItemId: "work-1",
       branch: "executor/oracle",
       headBefore: "a".repeat(40),
@@ -161,31 +161,24 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
       nextRecommendedGate: null,
       artifacts: [],
       startedAt: NOW,
-      finishedAt: "2026-08-13T12:00:30.000Z",
+      finishedAt: NOW,
       capacityStatus: "AVAILABLE",
+      runNonce: `nonce-${runId}`,
       summary: "ok",
-    };
+    });
     const run = (runId: string, store: typeof storeA) => {
       const runRoot = join(root, runId);
       fs.mkdirp(runRoot);
-      fs.writeDurable(join(runRoot, "handoff.json"), JSON.stringify(handoff));
       return executeRun(
         {
           runId,
           missionId: "mission-1",
           workItemId: "work-1",
-          executor: "grok",
+          executor: "claude",
           worktree: wt,
           branch: "executor/oracle",
-          executablePath: "C:\\Tools\\grok.exe",
-          argv: [
-            "--prompt-file", `${wt}\\PROMPT.md`,
-            "--cwd", wt,
-            "--permission-mode", "bypassPermissions",
-            "--always-approve",
-            "--no-plan",
-            "--max-turns", "50",
-          ],
+          executablePath: "C:\\Tools\\claude.exe",
+          argv: ["-p", "--permission-mode", "bypassPermissions"],
           cwd: wt,
           promptPath: `${wt}\\PROMPT.md`,
           runNonce: `nonce-${runId}`,
@@ -193,6 +186,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           timeoutMs: 5_000,
           lease: { kind: "WORKTREE", resource: wt, leaseId: `lease-${runId}` },
           authorisedProductionMutated: false,
+          role: "IMPLEMENT",
         },
         {
           clock: createFixedClock(NOW),
@@ -230,9 +224,9 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           killTree: () => undefined,
           scanOrphans: () => [],
           resolveArtifactPath: (absolutePath) => absolutePath,
-          discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
+          discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
           discoveryFs: {
-            isFile: (path) => path === "C:\\Tools\\grok.exe",
+            isFile: (path) => path === "C:\\Tools\\grok.exe" || path === "C:\\Tools\\claude.exe",
             readDir: () => [],
           },
         },

@@ -43,6 +43,7 @@ function goodHandoff(over: Record<string, unknown> = {}): Record<string, unknown
     startedAt: NOW,
     finishedAt: LATER,
     capacityStatus: "AVAILABLE",
+    runNonce: "nonce-r1",
     summary: "repaired the handoff contract",
     ...over,
   };

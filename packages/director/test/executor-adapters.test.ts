@@ -41,14 +41,13 @@ function withFixture(fn: (input: AdapterInputV1) => void): void {
 
 test("Grok 1.0.3 argv is the measured flag list, including --no-plan", () => {
   withFixture((input) => {
-    const result = adapterNamed("grok").build(input);
+    const result = adapterNamed("grok").build({ ...input, role: "INDEPENDENT_ACCEPTANCE" });
     assert.equal(result.ok, true, result.ok ? "" : result.reason);
     assert.ok(result.launch);
     assert.deepEqual(result.launch.argv, [
       "--prompt-file", input.promptPath,
       "--cwd", input.cwd,
-      "--permission-mode", "bypassPermissions",
-      "--always-approve",
+      "--permission-mode", "dontAsk",
       "--no-plan",
       "--max-turns", String(GROK_MAX_TURNS),
     ]);
@@ -103,7 +102,12 @@ test("no adapter emits -p with --prompt-file, prompt text, or the nonce on the c
     assert.ok(adapters.length >= 3, "the registry must name every known executor");
 
     for (const adapter of adapters) {
-      const result = adapter.build(input);
+      const role = adapter.name === "grok"
+        ? "INDEPENDENT_ACCEPTANCE"
+        : adapter.name === "claude"
+          ? "IMPLEMENT"
+          : undefined;
+      const result = adapter.build(role === undefined ? input : { ...input, role });
       assert.ok(result.launch, `${adapter.name} must still describe a launch shape`);
       const argv = result.launch.argv;
 

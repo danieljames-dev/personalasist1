@@ -28,18 +28,25 @@ export const GATE_SCHEMA_V1 = "aion.director.gate.v1" as const;
  * Each is here because the consequence is either irreversible, costs money, exposes something, or
  * legally belongs to a person. None is here because the decision is merely difficult.
  */
-export type OwnerGateTypeV1 =
-  | "PHYSICAL_IPHONE_TEST_REQUIRED"
-  | "SPEND_APPROVAL_REQUIRED"
-  | "OAUTH_REQUIRED"
-  | "PUBLIC_EXPOSURE_APPROVAL_REQUIRED"
-  | "DESTRUCTIVE_ACTION_APPROVAL_REQUIRED"
-  | "PRIMARY_TRANSFER_REQUIRED"
-  | "PRODUCTION_DEPLOY_APPROVAL_REQUIRED"
-  | "MAJOR_SECURITY_CHANGE_REQUIRED"
-  | "CREDENTIAL_STORE_REQUIRED"
-  | "FINANCIAL_LEGAL_REQUIRED"
-  | "REAL_EXTERNAL_BUSINESS_WRITE_REQUIRED";
+export const OWNER_GATE_TYPES = [
+  "PHYSICAL_IPHONE_TEST_REQUIRED",
+  "SPEND_APPROVAL_REQUIRED",
+  "OAUTH_REQUIRED",
+  "PUBLIC_EXPOSURE_APPROVAL_REQUIRED",
+  "DESTRUCTIVE_ACTION_APPROVAL_REQUIRED",
+  "PRIMARY_TRANSFER_REQUIRED",
+  "PRODUCTION_DEPLOY_APPROVAL_REQUIRED",
+  "MAJOR_SECURITY_CHANGE_REQUIRED",
+  "CREDENTIAL_STORE_REQUIRED",
+  "FINANCIAL_LEGAL_REQUIRED",
+  "REAL_EXTERNAL_BUSINESS_WRITE_REQUIRED",
+] as const;
+
+export type OwnerGateTypeV1 = (typeof OWNER_GATE_TYPES)[number];
+
+export function isOwnerGateType(value: unknown): value is OwnerGateTypeV1 {
+  return typeof value === "string" && (OWNER_GATE_TYPES as readonly string[]).includes(value);
+}
 
 export type GateStatusV1 = "OPEN" | "APPROVED" | "REJECTED" | "SUPERSEDED";
 
