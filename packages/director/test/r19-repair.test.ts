@@ -4,9 +4,10 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Readable } from "node:stream";
 import test from "node:test";
 import {
@@ -17,6 +18,7 @@ import {
   redactLogText,
 } from "../src/bounded-log.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
+import { createNodeLeaseStore } from "../src/lease-store.js";
 import {
   acquireLease,
   type LeaseV1,
@@ -1099,19 +1101,78 @@ test("C5 degenerate holderExitedAt equals floor does not drop the holder-edge in
   );
 });
 
-test("C10 every DeveloperAgentBridgeV1 construction pushed into the registry is lease-guarded", () => {
-  const here = fileURLToPath(new URL(".", import.meta.url));
-  const src = readFileSync(join(here, "..", "..", "..", "..", "apps", "aion", "developer-agent.mjs"), "utf8");
-  const constructions = [...src.matchAll(/new (?!Unavailable)\w+DeveloperAgentBridgeV1\s*\(/g)];
-  assert.ok(constructions.length >= 2, `expected Claude and Codex constructions, got ${constructions.length}`);
-  for (const match of constructions) {
-    const at = match.index ?? 0;
-    const before = src.slice(Math.max(0, at - 48), at);
-    assert.match(
-      before,
-      /guardBridgeWithDirectorLease\s*\(\s*$/,
-      `unguarded construction: ${match[0]} after ${JSON.stringify(before)}`,
+test("C10 every registry bridge refuses while PRODUCTION_WRITER is held, and runs when it is not", async () => {
+  const { resolveDeveloperAgentBridges } = await import(
+    pathToFileURL(fileURLToPath(new URL("../../../../apps/aion/developer-agent.mjs", import.meta.url))).href
+  );
+  const repositoryRoot = resolve(process.cwd());
+  const stub = process.execPath;
+  const arb = mkdtempSync(join(tmpdir(), "aion-r19b-c10-arb-"));
+  const heldRoot = mkdtempSync(join(tmpdir(), "aion-r19b-c10-held-"));
+  const freeRoot = mkdtempSync(join(tmpdir(), "aion-r19b-c10-free-"));
+  try {
+    const held = createNodeLeaseStore(heldRoot, { hostArbitrationRoot: arb });
+    const writer = acquireLease({
+      existing: [],
+      leaseId: "lease-pw-c10",
+      kind: "PRODUCTION_WRITER",
+      resource: "default",
+      missionId: "mission-1",
+      runId: "run-c10",
+      now: NOW,
+    });
+    assert.equal(writer.ok, true, writer.reason);
+    held.save([writer.lease!]);
+
+    const refused = await resolveDeveloperAgentBridges(repositoryRoot, process.env, {
+      claudeCandidates: [stub],
+      codexCandidates: [stub],
+      store: held,
+      now: NOW,
+    });
+    const refusedBridges = refused.list() as ReadonlyArray<{
+      readonly id: string;
+      run(
+        task: { repositoryRoot: string; instruction: string; mode: "read-only" },
+        signal: AbortSignal,
+      ): Promise<{ exitCode: number; summary: string }>;
+    }>;
+    assert.ok(
+      refusedBridges.some((bridge) => bridge.id === "claude-code"),
+      `missing claude-code in ${refusedBridges.map((bridge) => bridge.id).join(",")}`,
     );
+    assert.ok(
+      refusedBridges.some((bridge) => bridge.id === "codex"),
+      `missing codex in ${refusedBridges.map((bridge) => bridge.id).join(",")}`,
+    );
+    for (const bridge of refusedBridges) {
+      await assert.rejects(
+        () => bridge.run(
+          { repositoryRoot, instruction: "say ok", mode: "read-only" },
+          new AbortController().signal,
+        ),
+        /developer-agent refused|PRODUCTION_WRITER/,
+      );
+    }
+
+    const free = createNodeLeaseStore(freeRoot, { hostArbitrationRoot: arb });
+    const live = await resolveDeveloperAgentBridges(repositoryRoot, process.env, {
+      claudeCandidates: [stub],
+      codexCandidates: [stub],
+      store: free,
+      now: NOW,
+    });
+    const first = live.list()[0];
+    assert.ok(first, "liveness registry must return a spawnable bridge");
+    const ran = await first.run(
+      { repositoryRoot, instruction: "say ok", mode: "read-only" },
+      AbortSignal.timeout(15_000),
+    );
+    assert.equal(typeof ran.exitCode, "number", "the bridge ran; a lease refusal would have thrown");
+  } finally {
+    rmSync(arb, { recursive: true, force: true });
+    rmSync(heldRoot, { recursive: true, force: true });
+    rmSync(freeRoot, { recursive: true, force: true });
   }
 });
 

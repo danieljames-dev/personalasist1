@@ -71,27 +71,23 @@ async function firstInstalled(candidates) {
  * stop running on any machine where a developer agent happens to be installed.
  */
 export async function resolveDeveloperAgentBridges(repositoryRoot, env = process.env, options = {}) {
-  const bridges = [];
+  const raw = [];
   const claude = options.claudeCandidates !== undefined
     ? await firstInstalled(options.claudeCandidates)
     : resolveClaudeCodeExecutable(env, options.claudeProbe);
   if (claude) {
-    bridges.push(guardBridgeWithDirectorLease(
-      new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude),
-      repositoryRoot,
-    ));
+    raw.push(new ClaudeCodeCliDeveloperAgentBridgeV1(repositoryRoot, claude));
   }
   const codex = await firstInstalled(options.codexCandidates ?? developerAgentCandidates(env));
   if (codex) {
-    bridges.push(guardBridgeWithDirectorLease(
-      new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex),
-      repositoryRoot,
-    ));
+    raw.push(new CodexCliDeveloperAgentBridgeV1(repositoryRoot, codex));
   }
 
   const confirmed = [];
-  for (const bridge of bridges) if ((await bridge.status()).available) confirmed.push(bridge);
-  if (confirmed.length) return new SelectableDeveloperAgentRegistryV1(confirmed);
+  for (const bridge of raw) if ((await bridge.status()).available) confirmed.push(bridge);
+  if (confirmed.length) {
+    return createGuardedDeveloperAgentRegistry(confirmed, repositoryRoot, options);
+  }
 
   return new SelectableDeveloperAgentRegistryV1([
     new UnavailableDeveloperAgentBridgeV1(
@@ -110,12 +106,30 @@ export async function resolveDeveloperAgentBridge(repositoryRoot, env = process.
  * from the Director store (and refuse while PRODUCTION_WRITER is held)
  * before the bridge's own argv builder reaches spawn.
  */
-export function guardBridgeWithDirectorLease(bridge, repositoryRoot) {
+/**
+ * Every spawnable bridge the factory returns must take a Director lease
+ * first. The registry constructor is not that factory: callers that
+ * construct {@link SelectableDeveloperAgentRegistryV1} directly can still
+ * push an unguarded bridge. Production resolution goes through
+ * {@link createGuardedDeveloperAgentRegistry}.
+ */
+export function createGuardedDeveloperAgentRegistry(bridges, repositoryRoot, options = {}) {
+  return new SelectableDeveloperAgentRegistryV1(
+    bridges.map((bridge) => (
+      bridge.id === "none"
+        ? bridge
+        : guardBridgeWithDirectorLease(bridge, repositoryRoot, options)
+    )),
+  );
+}
+
+export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {}) {
   const originalRun = bridge.run.bind(bridge);
   bridge.run = async function runWithDirectorLease(task, signal) {
     const acquired = acquireDeveloperAgentWorktreeLease({
       repositoryRoot,
-      now: new Date().toISOString(),
+      now: options.now ?? new Date().toISOString(),
+      ...(options.store !== undefined ? { store: options.store } : {}),
     });
     if (!acquired.ok) {
       throw new Error(`developer-agent refused: ${acquired.reason}`);

@@ -337,14 +337,15 @@ test("every importer of the discovery ladder reaches spawn only through launchRu
   assert.ok(importers.some((item) => item.file.endsWith("packages/director/src/run-manager.ts")));
   for (const item of importers) {
     const reachesLaunch = /\blaunchRun\b/.test(item.source);
-    const reachesLease = /\bacquireDeveloperAgentWorktreeLease\b/.test(item.source)
-      || /\bacquireLease\b/.test(item.source)
-      || /\bguardBridgeWithDirectorLease\b/.test(item.source);
     const isDiscoveryModule = item.file.endsWith("packages/director/src/executor-discovery.ts");
     const isIndexReexport = item.file.endsWith("packages/director/src/index.ts");
+    // developer-agent.mjs is the second spawn path. Identifier-in-file is
+    // not a lease: the C10 behavioural test constructs both bridges and
+    // asserts every registry member refuses while PRODUCTION_WRITER is held.
+    const isDeveloperAgentFactory = item.file.endsWith("apps/aion/developer-agent.mjs");
     assert.ok(
-      isDiscoveryModule || isIndexReexport || reachesLaunch || reachesLease,
-      `${item.file} imports the discovery ladder but does not reach spawn via launchRun or a lease`,
+      isDiscoveryModule || isIndexReexport || reachesLaunch || isDeveloperAgentFactory,
+      `${item.file} imports the discovery ladder but does not reach spawn via launchRun or the guarded developer-agent factory`,
     );
   }
 });
