@@ -1060,7 +1060,7 @@ test("C11 a redirected ProgramData is ignored; two ProgramData values share one 
   const created: string[] = [];
   const redirected = prepareHostArbitrationLocks(
     { SystemDrive: "C:", ProgramData: pdA },
-    { mkdir: (path) => { created.push(path); } },
+    { mkdir: (path) => { created.push(path); }, resolve: (path) => path },
   );
   assert.equal(redirected.ok, true, "ProgramData is not the lock directory");
   assert.equal(redirected.ok && redirected.root, derived);
@@ -1068,12 +1068,70 @@ test("C11 a redirected ProgramData is ignored; two ProgramData values share one 
   assert.ok(created.every((path) => !path.includes("pdA-r19b")));
 });
 
-test("C11 the CLI guard verifies the created lock directory, not ProgramData", () => {
+test("C11 the CLI guard verifies the created lock directory, not ProgramData", async () => {
   const here = fileURLToPath(new URL(".", import.meta.url));
-  const cli = readFileSync(join(here, "..", "..", "..", "..", "apps", "director-cli.mjs"), "utf8");
+  const cliPath = join(here, "..", "..", "..", "..", "apps", "director-cli.mjs");
+  const cli = readFileSync(cliPath, "utf8");
   assert.match(cli, /prepareHostArbitrationLocks/);
   assert.doesNotMatch(cli, /hostProgramDataIsHostFixed/);
   assert.doesNotMatch(cli, /ProgramData is not the host-fixed/);
+
+  const { runDirectorCli } = await import(pathToFileURL(cliPath).href);
+  const runRoot = mkdtempSync(join(tmpdir(), "aion-r20b-c11-"));
+  writeFileSync(join(runRoot, "handoff.json"), "{}\n");
+  const argv = [
+    "--run-id", "run-c11",
+    "--mission-id", "mission-1",
+    "--work-item-id", "work-1",
+    "--executor", "grok",
+    "--role", "INDEPENDENT_ACCEPTANCE",
+    "--worktree", "C:\\wt",
+    "--cwd", "C:\\wt",
+    "--run-root", runRoot,
+    "--prompt-path", "C:\\wt\\PROMPT.md",
+    "--lease-kind", "PRODUCTION_WRITER",
+    "--lease-resource", "default",
+    "--lease-id", "lease-c11",
+    "--run-nonce", "nonce-c11",
+  ];
+  try {
+    const liveErrors: string[] = [];
+    await runDirectorCli(argv, {
+      log() { /* unused */ },
+      error(message: string) { liveErrors.push(String(message)); },
+    }, {
+      ...process.env,
+      SystemDrive: "D:",
+      ProgramData: "C:\\ProgramData",
+    }, {
+      mkdir() { /* created */ },
+      resolve(path: string) { return path; },
+    });
+    assert.doesNotMatch(liveErrors.join("\n"), /ProgramData is not the host-fixed/);
+    assert.equal(
+      liveErrors.some((row) => row.includes("PRODUCTION_WRITER refused")),
+      false,
+      liveErrors.join("\n"),
+    );
+
+    const safeErrors: string[] = [];
+    const safeCode = await runDirectorCli(argv, {
+      log() { /* unused */ },
+      error(message: string) { safeErrors.push(String(message)); },
+    }, {
+      ...process.env,
+      SystemDrive: "C:",
+      ProgramData: "C:\\ProgramData",
+    }, {
+      mkdir() { throw new Error("injected-mkdir-denied-r20b"); },
+      resolve(path: string) { return path; },
+    });
+    assert.equal(safeCode, 2);
+    assert.match(safeErrors.join("\n"), /host arbitration root is not creatable/);
+    assert.match(safeErrors.join("\n"), /injected-mkdir-denied-r20b/);
+  } finally {
+    rmSync(runRoot, { recursive: true, force: true });
+  }
 });
 
 function plantHostWriterLock(

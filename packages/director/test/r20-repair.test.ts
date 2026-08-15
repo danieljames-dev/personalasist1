@@ -897,7 +897,7 @@ test("P6a ProgramData redirection is not a PRODUCTION_WRITER refusal", async () 
   const created: string[] = [];
   const prepared = prepareHostArbitrationLocks(
     { SystemDrive: "C:", ProgramData: join(tmpdir(), "aion-r20-p6a-pd") },
-    { mkdir: (path) => { created.push(path); } },
+    { mkdir: (path) => { created.push(path); }, resolve: (path) => path },
   );
   assert.equal(prepared.ok, true);
   assert.equal(prepared.ok && prepared.root, derivedHostArbitrationRoot({ SystemDrive: "C:" }));
@@ -906,6 +906,48 @@ test("P6a ProgramData redirection is not a PRODUCTION_WRITER refusal", async () 
   assert.match(cli, /prepareHostArbitrationLocks/);
   assert.doesNotMatch(cli, /hostProgramDataIsHostFixed/);
   assert.doesNotMatch(cli, /ProgramData is not the host-fixed/);
+});
+
+test("P6a the created lock directory is observed, not compared to itself", async () => {
+  const { prepareHostArbitrationLocks, derivedHostArbitrationRoot } = await import("../src/lease-store.js");
+  const identity = (path: string) => path;
+  const honest = prepareHostArbitrationLocks(
+    { SystemDrive: "D:" },
+    { mkdir() { /* created */ }, resolve: identity },
+  );
+  assert.equal(honest.ok, true);
+  assert.equal(honest.ok && honest.root, derivedHostArbitrationRoot({ SystemDrive: "D:" }));
+
+  const redirectedProgramData = prepareHostArbitrationLocks(
+    { SystemDrive: "C:", ProgramData: "D:\\ProgramData" },
+    { mkdir() { /* created */ }, resolve: identity },
+  );
+  assert.equal(redirectedProgramData.ok, true);
+  assert.equal(
+    redirectedProgramData.ok && redirectedProgramData.root,
+    derivedHostArbitrationRoot({ SystemDrive: "C:" }),
+  );
+
+  const elsewhere = prepareHostArbitrationLocks(
+    { SystemDrive: "C:" },
+    { mkdir() { /* created */ }, resolve: () => "Z:\\not-the-derived-locks" },
+  );
+  assert.equal(elsewhere.ok, false);
+  assert.match(
+    elsewhere.ok ? "" : elsewhere.reason,
+    /created lock directory is not the host-fixed arbitration root/,
+  );
+
+  const uncreatable = prepareHostArbitrationLocks(
+    { SystemDrive: "C:" },
+    { mkdir() { throw new Error("injected-mkdir-denied-r20b"); }, resolve: identity },
+  );
+  assert.equal(uncreatable.ok, false);
+  assert.match(
+    uncreatable.ok ? "" : uncreatable.reason,
+    /host arbitration root is not creatable/,
+  );
+  assert.match(uncreatable.ok ? "" : uncreatable.reason, /injected-mkdir-denied-r20b/);
 });
 
 test("P6b pathIsInside is inclusive and artifactPathWithinRoot is strictly inside", () => {

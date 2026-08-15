@@ -52,7 +52,7 @@ PRODUCTION_WRITER / INTEGRATION locks live under the host-fixed
 ProgramData arbitration root, not %TEMP% or AION_DIRECTOR_ROOT.
 `;
 
-export async function runDirectorCli(argv, io = console, env = process.env) {
+export async function runDirectorCli(argv, io = console, env = process.env, host = {}) {
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
     io.log(HELP);
     return 0;
@@ -174,7 +174,7 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
   const storeRoot = director.sandboxDirectorStoreRoot(env);
   const leaseKind = required(values, "lease-kind");
   if (director.isHostWideLeaseKind(leaseKind)) {
-    const prepared = director.prepareHostArbitrationLocks(env);
+    const prepared = director.prepareHostArbitrationLocks(env, host);
     if (!prepared.ok) {
       io.error(`PRODUCTION_WRITER refused: ${prepared.reason}`);
       return 2;

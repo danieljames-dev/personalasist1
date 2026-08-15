@@ -21,6 +21,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -93,26 +94,42 @@ export function derivedHostArbitrationRoot(
 }
 
 /**
- * True when `ProgramData` is unset or names the same directory as
- * {@link derivedHostArbitrationRoot}. A redirected `ProgramData` is not
- * the host-fixed root.
+ * Derive the host-fixed arbitration root, create its locks directory, and
+ * confirm the directory that now exists is that derivation. `ProgramData`
+ * is ignored. Creation failure, an unreadable created path, and a resolved
+ * path that is not the derivation all fail closed.
  */
 export function prepareHostArbitrationLocks(
   env: Readonly<Record<string, string | undefined>> = process.env,
   host: {
     readonly mkdir?: (path: string, opts: { recursive: boolean }) => void;
+    readonly resolve?: (path: string) => string;
   } = {},
 ): { readonly ok: true; readonly root: string } | { readonly ok: false; readonly reason: string } {
   const root = derivedHostArbitrationRoot(env);
   const locks = join(root, DIRECTOR_STORE_LAYOUT_V1.locksDir);
   const mkdir = host.mkdir ?? mkdirSync;
+  const resolve = host.resolve ?? ((path: string) => realpathSync.native(path));
   try {
     mkdir(locks, { recursive: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, reason: `host arbitration root is not creatable (${root}): ${message}` };
   }
-  if (canonicalizeHostPath(locks) !== canonicalizeHostPath(join(root, DIRECTOR_STORE_LAYOUT_V1.locksDir))) {
+  let observed: string;
+  try {
+    observed = resolve(locks);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      reason: `created lock directory is not the host-fixed arbitration root (${message})`,
+    };
+  }
+  const expected = canonicalizeHostPath(
+    join(derivedHostArbitrationRoot(env), DIRECTOR_STORE_LAYOUT_V1.locksDir),
+  );
+  if (canonicalizeHostPath(observed) !== expected) {
     return { ok: false, reason: "created lock directory is not the host-fixed arbitration root" };
   }
   return { ok: true, root };
