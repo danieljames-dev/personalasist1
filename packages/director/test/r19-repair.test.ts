@@ -18,6 +18,7 @@ import {
   redactLogText,
 } from "../src/bounded-log.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
+import { ownerGateFromExecutorRefusal } from "../src/gates.js";
 import { createNodeLeaseStore } from "../src/lease-store.js";
 import {
   acquireLease,
@@ -1175,6 +1176,88 @@ test("C10 every registry bridge refuses while PRODUCTION_WRITER is held, and run
     rmSync(freeArb, { recursive: true, force: true });
     rmSync(heldRoot, { recursive: true, force: true });
     rmSync(freeRoot, { recursive: true, force: true });
+  }
+});
+
+test("C13 an unrecognised gate name is recorded and is not promoted to production deploy", () => {
+  const gate = ownerGateFromExecutorRefusal({
+    gateId: "owner-run-c13",
+    missionId: "mission-1",
+    at: NOW,
+    requestedType: "OAUTH_REQUIRED_TYPO",
+    executorSummary: "read-only review completed; nothing written to the worktree",
+    headAfter: HEAD_AFTER,
+    branch: "executor/oracle",
+  });
+  assert.equal(gate.requestedType, "OAUTH_REQUIRED_TYPO");
+  assert.equal(gate.type, "UNRECOGNISED_GATE_TYPE");
+  assert.notEqual(gate.type, "PRODUCTION_DEPLOY_APPROVAL_REQUIRED");
+  assert.match(gate.why, /^executor testimony:/);
+  assert.match(gate.directorReason, /Director/);
+  assert.equal(gate.safeFrozenState.headAfter, HEAD_AFTER);
+  assert.equal(gate.safeFrozenState.branch, "executor/oracle");
+});
+
+test("C13 --resolve-gate against a moved HEAD is SUPERSEDED; against an unmoved HEAD it approves", async () => {
+  const { runDirectorCli } = await import(
+    pathToFileURL(fileURLToPath(new URL("../../../../apps/director-cli.mjs", import.meta.url))).href
+  );
+  const { writeFileSync: write, mkdirSync: mkdir } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "aion-r19b-c13-"));
+  const worktree = join(dir, "wt");
+  const runRoot = join(dir, "run");
+  mkdir(worktree);
+  mkdir(runRoot);
+  spawnSync("git", ["init"], { cwd: worktree, windowsHide: true, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "c13@example.test"], { cwd: worktree, windowsHide: true });
+  spawnSync("git", ["config", "user.name", "c13"], { cwd: worktree, windowsHide: true });
+  write(join(worktree, "seed.txt"), "seed\n");
+  spawnSync("git", ["add", "seed.txt"], { cwd: worktree, windowsHide: true });
+  spawnSync("git", ["commit", "-m", "seed"], { cwd: worktree, windowsHide: true });
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: worktree, windowsHide: true, encoding: "utf8" }).stdout.trim();
+  const branch = spawnSync("git", ["symbolic-ref", "-q", "--short", "HEAD"], {
+    cwd: worktree,
+    windowsHide: true,
+    encoding: "utf8",
+  }).stdout.trim() || "master";
+  const gate = ownerGateFromExecutorRefusal({
+    gateId: "owner-c13",
+    missionId: "mission-1",
+    at: NOW,
+    requestedType: "OAUTH_REQUIRED",
+    executorSummary: "need owner",
+    headAfter: head,
+    branch,
+  });
+  write(join(runRoot, "owner-gate.json"), `${JSON.stringify(gate, null, 2)}\n`);
+  write(join(runRoot, "result.json"), `${JSON.stringify({
+    gitAfter: { worktreePath: worktree, head: { outcome: "FOUND", sha: head }, branch: { outcome: "ATTACHED", name: branch } },
+  }, null, 2)}\n`);
+  try {
+    const logs: string[] = [];
+    const live = await runDirectorCli(
+      ["--resolve-gate", runRoot, "--approved", "true"],
+      { log: (m: string) => { logs.push(String(m)); }, error: () => undefined },
+    );
+    assert.equal(live, 0, logs.join("\n"));
+    const approved = JSON.parse(readFileSync(join(runRoot, "owner-gate.json"), "utf8")) as { status: string };
+    assert.equal(approved.status, "APPROVED");
+
+    write(join(worktree, "moved.txt"), "moved\n");
+    spawnSync("git", ["add", "moved.txt"], { cwd: worktree, windowsHide: true });
+    spawnSync("git", ["commit", "-m", "moved"], { cwd: worktree, windowsHide: true });
+    write(join(runRoot, "owner-gate.json"), `${JSON.stringify(gate, null, 2)}\n`);
+    const staleLogs: string[] = [];
+    const stale = await runDirectorCli(
+      ["--resolve-gate", runRoot, "--approved", "true"],
+      { log: (m: string) => { staleLogs.push(String(m)); }, error: () => undefined },
+    );
+    assert.equal(stale, 4, staleLogs.join("\n"));
+    const parsed = JSON.parse(staleLogs.join("\n") || "{}") as { status?: string; staleFacts?: string[] };
+    assert.equal(parsed.status, "SUPERSEDED");
+    assert.ok((parsed.staleFacts ?? []).some((fact) => fact.includes("headAfter")), JSON.stringify(parsed));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

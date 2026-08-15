@@ -3,7 +3,7 @@
  * Thin launch path for @aion/director. Calls launchRun only.
  * Bind nothing but 127.0.0.1 if anything is bound. Spend USD 0.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -45,6 +45,8 @@ Usage:
 
   node apps/director-cli.mjs --recover <run-root>
 
+  node apps/director-cli.mjs --resolve-gate <run-root> --approved true|false [--owner-note TEXT]
+
 Goes through launchRun only. Does not export or call executeRun.
 PRODUCTION_WRITER / INTEGRATION locks live under the host-fixed
 ProgramData arbitration root, not %TEMP% or AION_DIRECTOR_ROOT.
@@ -58,6 +60,61 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
 
   const values = parseArgs(argv);
   const director = await import(pathToFileURL(directorEntry).href);
+
+  if (values.has("resolve-gate")) {
+    const runRoot = required(values, "resolve-gate");
+    const approvedRaw = values.get("approved");
+    if (approvedRaw !== "true" && approvedRaw !== "false") {
+      io.error("--approved must be true or false");
+      return 2;
+    }
+    let gate;
+    let recorded;
+    try {
+      gate = JSON.parse(readFileSync(join(runRoot, "owner-gate.json"), "utf8"));
+      recorded = JSON.parse(readFileSync(join(runRoot, "result.json"), "utf8"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      io.error(`--resolve-gate could not read owner-gate.json or result.json: ${message}`);
+      return 2;
+    }
+    const worktree = recorded?.gitAfter?.worktreePath ?? recorded?.gitBefore?.worktreePath;
+    if (typeof worktree !== "string" || worktree.trim() === "") {
+      io.error("--resolve-gate could not find a worktree path on the recorded result");
+      return 2;
+    }
+    const observation = director.collectGitTruth({
+      runner: director.createNodeGitRunner({ worktreePath: worktree }),
+      worktreePath: worktree,
+      now: nowIso(),
+    });
+    const currentFacts = {};
+    if (observation.observation.head.outcome === "FOUND") {
+      currentFacts.headAfter = observation.observation.head.sha;
+    }
+    if (observation.observation.branch.outcome === "ATTACHED") {
+      currentFacts.branch = observation.observation.branch.name;
+    }
+    const resolved = director.resolveGate({
+      gate,
+      approved: approvedRaw === "true",
+      at: nowIso(),
+      ownerNote: values.get("owner-note") ?? null,
+      currentFacts,
+    });
+    try {
+      writeFileSync(join(runRoot, "owner-gate.json"), `${JSON.stringify(resolved.gate, null, 2)}\n`);
+    } catch {
+      // The resolution was still computed; a write failure is not a silent skip.
+    }
+    io.log(JSON.stringify({
+      ok: resolved.ok,
+      status: resolved.gate.status,
+      reason: resolved.reason,
+      staleFacts: resolved.staleFacts,
+    }));
+    return resolved.ok ? 0 : 4;
+  }
 
   if (values.has("recover")) {
     const runRoot = required(values, "recover");
@@ -168,17 +225,15 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
   if (result.ok) return 0;
   if (result.handoff?.requiresOwner === true) {
     const named = result.handoff.nextRecommendedGate;
-    const gateType = director.isOwnerGateType(named)
-      ? named
-      : "PRODUCTION_DEPLOY_APPROVAL_REQUIRED";
-    const gate = director.openGate({
+    const gitAfter = result.gitAfter;
+    const gate = director.ownerGateFromExecutorRefusal({
       gateId: `owner-${required(values, "run-id")}`,
       missionId: required(values, "mission-id"),
-      type: gateType,
-      why: result.handoff.summary || "the executor reported that an Owner decision is required",
-      requiredInput: "approve or reject this gate",
       at: nowIso(),
-      resumeState: "WAITING_FOR_OWNER",
+      requestedType: typeof named === "string" ? named : null,
+      executorSummary: result.handoff.summary || "",
+      ...(gitAfter?.head?.outcome === "FOUND" ? { headAfter: gitAfter.head.sha } : {}),
+      ...(gitAfter?.branch?.outcome === "ATTACHED" ? { branch: gitAfter.branch.name } : {}),
     });
     try {
       writeFileSync(join(runRoot, "owner-gate.json"), `${JSON.stringify(gate, null, 2)}\n`);

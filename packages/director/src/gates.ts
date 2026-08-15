@@ -40,6 +40,7 @@ export const OWNER_GATE_TYPES = [
   "CREDENTIAL_STORE_REQUIRED",
   "FINANCIAL_LEGAL_REQUIRED",
   "REAL_EXTERNAL_BUSINESS_WRITE_REQUIRED",
+  "UNRECOGNISED_GATE_TYPE",
 ] as const;
 
 export type OwnerGateTypeV1 = (typeof OWNER_GATE_TYPES)[number];
@@ -56,8 +57,12 @@ export interface OwnerGateV1 {
   missionId: OpaqueId;
   type: OwnerGateTypeV1;
   status: GateStatusV1;
+  /** The name the executor asked for, even when it is not an OwnerGateTypeV1. */
+  requestedType: string;
   /** Why this is being asked, in the Owner's terms. Never a class name. */
   why: string;
+  /** The Director's reason. Distinct from executor testimony in `why`. */
+  directorReason: string;
   /** Exactly what the Owner must do or supply. */
   requiredInput: string;
   requestedAt: IsoTimestamp;
@@ -79,6 +84,8 @@ export function openGate(input: {
   at: IsoTimestamp;
   safeFrozenState?: Record<string, string>;
   resumeState: MissionStateV1;
+  requestedType?: string;
+  directorReason?: string;
 }): OwnerGateV1 {
   return {
     schema: GATE_SCHEMA_V1,
@@ -86,7 +93,9 @@ export function openGate(input: {
     missionId: input.missionId,
     type: input.type,
     status: "OPEN",
+    requestedType: input.requestedType ?? input.type,
     why: input.why,
+    directorReason: input.directorReason ?? input.why,
     requiredInput: input.requiredInput,
     requestedAt: input.at,
     resolvedAt: null,
@@ -94,6 +103,39 @@ export function openGate(input: {
     resumeState: input.resumeState,
     ownerNote: null,
   };
+}
+
+/**
+ * Record an Owner stop from an executor `requiresOwner` result. The
+ * requested name is kept even when it is not a recognised gate type.
+ * `why` is labelled executor testimony; `directorReason` is the Director's.
+ */
+export function ownerGateFromExecutorRefusal(input: {
+  readonly gateId: OpaqueId;
+  readonly missionId: OpaqueId;
+  readonly at: IsoTimestamp;
+  readonly requestedType: string | null;
+  readonly executorSummary: string;
+  readonly headAfter?: string;
+  readonly branch?: string;
+}): OwnerGateV1 {
+  const requested = typeof input.requestedType === "string" ? input.requestedType : "";
+  const type: OwnerGateTypeV1 = isOwnerGateType(requested) ? requested : "UNRECOGNISED_GATE_TYPE";
+  const frozen: Record<string, string> = {};
+  if (input.headAfter !== undefined && input.headAfter !== "") frozen.headAfter = input.headAfter;
+  if (input.branch !== undefined && input.branch !== "") frozen.branch = input.branch;
+  return openGate({
+    gateId: input.gateId,
+    missionId: input.missionId,
+    type,
+    requestedType: requested === "" ? "(absent)" : requested,
+    why: `executor testimony: ${input.executorSummary || "(none)"}`,
+    directorReason: "the executor set requiresOwner; the Director opened a gate and did not adopt the executor summary as its reason",
+    requiredInput: "approve or reject this gate",
+    at: input.at,
+    safeFrozenState: frozen,
+    resumeState: "WAITING_FOR_OWNER",
+  });
 }
 
 export interface GateResolutionV1 {
