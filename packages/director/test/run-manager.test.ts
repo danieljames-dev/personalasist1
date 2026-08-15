@@ -2464,6 +2464,20 @@ test("a foreign process with a different nonce and no ancestry does not block re
       NONCE,
       { holderPid: RECORDED.pid, rows: [{ pid: 42, runNonce: "nonce-other", parentPid: 1 }] },
     ),
+    true,
+    "incomplete context must fail closed",
+  );
+  assert.equal(
+    writerSightingNotProvenAbsent(
+      { pid: 42, runNonce: "nonce-other", parentPid: 1 },
+      NONCE,
+      {
+        holderPid: RECORDED.pid,
+        rows: [{ pid: 42, runNonce: "nonce-other", parentPid: 1 }],
+        createdNotBefore: NOW,
+        observedPids: new Set([RECORDED.pid]),
+      },
+    ),
     false,
   );
 });
@@ -2485,6 +2499,16 @@ test("writerSightingNotProvenAbsent treats ancestry as this run's tree", () => {
     writerSightingNotProvenAbsent({ pid: 9, runNonce: "other", parentPid: 1 }, NONCE, {
       holderPid: RECORDED.pid,
       rows,
+    }),
+    true,
+    "incomplete context must fail closed",
+  );
+  assert.equal(
+    writerSightingNotProvenAbsent({ pid: 9, runNonce: "other", parentPid: 1 }, NONCE, {
+      holderPid: RECORDED.pid,
+      rows,
+      createdNotBefore: NOW,
+      observedPids: new Set([RECORDED.pid]),
     }),
     false,
   );

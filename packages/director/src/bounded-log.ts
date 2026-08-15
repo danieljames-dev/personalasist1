@@ -99,6 +99,11 @@ export interface BoundedLogReportV1 {
    * with an empty log and no indication anything was lost.
    */
   readonly sinkFailed: boolean;
+  /**
+   * False when the pump did not ingest every post-exit byte. Unread
+   * bytes are UNKNOWN and must not read as "within budget".
+   */
+  readonly drainComplete: boolean;
 }
 
 export interface LogWriteResultV1 {
@@ -268,6 +273,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   let haltedAt: IsoTimestamp | null = null;
   let lastWriteAt: IsoTimestamp | null = null;
   let sinkFailed = false;
+  let drainComplete = true;
 
   const writeSink = (op: () => void): void => {
     try {
@@ -483,6 +489,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     seal,
     markDrainIncomplete(stream?: LogStreamV1) {
       lastWriteAt = deps.clock.now();
+      drainComplete = false;
       const marker = Buffer.from("\n[AION_LOG_TRUNCATED dropped=unknown reason=stream-drain-timeout]\n", "utf8");
       const names: readonly LogStreamV1[] = stream === "stderr" || stream === "stdout"
         ? [stream]
@@ -516,6 +523,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
         stdout: reportStream(stdout),
         stderr: reportStream(stderr),
         sinkFailed,
+        drainComplete,
       };
     },
   };
@@ -660,10 +668,17 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
     const keepFrom = secretHoldStart(hold);
     if (keepFrom >= 0) {
       emit += hold.slice(0, keepFrom);
-      hold = hold.slice(keepFrom);
-      if (hold.length > SECRET_TAIL_BYTES) {
-        emit += hold.slice(0, hold.length - SECRET_TAIL_BYTES);
-        hold = hold.slice(hold.length - SECRET_TAIL_BYTES);
+      const secretHold = hold.slice(keepFrom);
+      if (secretHold.length > SECRET_TAIL_BYTES) {
+        const anchorLen = secretAnchorKeepLength(secretHold);
+        if (secretHold.length > SECRET_TAIL_BYTES + anchorLen) {
+          const discarded = secretHold.slice(anchorLen, secretHold.length - SECRET_TAIL_BYTES);
+          hold = secretHold.slice(0, anchorLen) + secretHold.slice(secretHold.length - SECRET_TAIL_BYTES);
+          return { emit, hold, droppedBytes: Buffer.byteLength(discarded, "utf8") };
+        }
+        hold = secretHold;
+      } else {
+        hold = secretHold;
       }
     } else {
       emit += hold;
@@ -671,6 +686,21 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
     }
   }
   return { emit, hold, droppedBytes: 0 };
+}
+
+function secretAnchorKeepLength(hold: string): number {
+  const auth = /^(?:proxy-)?authorization"?[^\S\r\n]*:/i.exec(hold);
+  if (auth !== null) return Math.min(auth[0].length, 64);
+  const bearer = /^(?:.*?)((?<![A-Za-z-])bearer)/i.exec(hold);
+  if (bearer !== null && bearer[1] !== undefined) {
+    return Math.min((bearer.index ?? 0) + bearer[1].length, 64);
+  }
+  const folded = hold.toLowerCase();
+  let best = 0;
+  for (const starter of SECRET_STARTERS) {
+    if (folded.startsWith(starter) && starter.length > best) best = starter.length;
+  }
+  return Math.max(best, 1);
 }
 
 // Holdback anchors, lower-cased. Must cover every redactor match of
@@ -718,6 +748,11 @@ function longestSecretStarterPrefixSuffix(hold: string): number {
 }
 
 function secretHoldStart(hold: string): number {
+  const head = hold.slice(0, Math.min(hold.length, SECRET_STARTER_MAX + 16));
+  const auth = /(?:proxy-)?authorization"?[^\S\r\n]*:/i.exec(head);
+  if (auth !== null) return auth.index;
+  const bearer = /(?<![A-Za-z-])bearer/i.exec(head);
+  if (bearer !== null) return bearer.index;
   const windowStart = Math.max(0, hold.length - SECRET_TAIL_BYTES - 32);
   const window = hold.slice(windowStart);
   const folded = window.toLowerCase();

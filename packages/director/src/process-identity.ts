@@ -205,14 +205,21 @@ export type OrphanKindV1 = "NONCE_MISMATCH" | "EXECUTABLE_MISMATCH" | "DEAD_PARE
 export interface WriterOrphanScanResultV1 {
   readonly snapshot: readonly NonceBearingProcessV1[];
   readonly killable: readonly NonceBearingProcessV1[];
+  /** Session of the Director process that produced this snapshot, when known. */
+  readonly directorSessionId?: number;
 }
 
 /** Test doubles and empty production fallbacks share this constructor. */
 export function writerOrphanScanResult(
   snapshot: readonly NonceBearingProcessV1[],
   killable: readonly NonceBearingProcessV1[] = snapshot,
+  extra?: { readonly directorSessionId?: number },
 ): WriterOrphanScanResultV1 {
-  return { snapshot, killable };
+  return {
+    snapshot,
+    killable,
+    ...(extra?.directorSessionId !== undefined ? { directorSessionId: extra.directorSessionId } : {}),
+  };
 }
 
 export interface OrphanVerdictV1 {
@@ -291,6 +298,16 @@ export function captureProcessIdentity(
         reason: "the occupant of this pid is not the executable this run launched; a reused slot is not a holder record",
       };
     }
+  }
+
+  const observedNonce = normaliseRunNonce(observation.runNonce);
+  if (observedNonce !== null && observedNonce !== runNonce) {
+    return {
+      ok: false,
+      identity: null,
+      observation,
+      reason: "the occupant of this pid carries another run's nonce",
+    };
   }
 
   return {
@@ -772,7 +789,7 @@ export function interpretWindowsOrphanScanOutput(input: {
   }
   const holderExitedAt = asUsableToken(input.holderExitedAt) ?? undefined;
   const directorSessionId = asSessionId(parsed.directorSessionId) ?? asSessionId(input.directorSessionId);
-  const plausibility = {
+  const plausibility = processRowPlausibilityContext({
     runNonce: input.runNonce ?? "",
     createdNotBefore: input.createdNotBefore ?? "",
     ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
@@ -780,7 +797,7 @@ export function interpretWindowsOrphanScanOutput(input: {
     ...(directorSessionId !== undefined ? { directorSessionId } : {}),
     observedPids,
     rows: sightings,
-  };
+  });
   // A row whose membership cannot be decided is UNKNOWN, not absent.
   // Collect the full snapshot so persistence can ask whether those
   // occupants are still alive; do not fail on the first hit and drop
@@ -906,13 +923,13 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       throw new Error(`orphan scan unavailable: ${first.reason}`);
     }
 
-    const ctxFor = (rows: readonly NonceBearingProcessV1[]): ProcessRowPlausibilityContextV1 => ({
+    const ctxFor = (rows: readonly NonceBearingProcessV1[]): ProcessRowPlausibilityContextV1 => processRowPlausibilityContext({
       runNonce,
       createdNotBefore: query.createdNotBefore,
       ...(holderPid > 0 ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
-      observedPids: new Set(observedPids.filter((pid) => isUsablePid(pid))),
+      observedPids: observedPids.filter((pid) => isUsablePid(pid)),
       rows,
     });
 
@@ -954,7 +971,11 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       query.createdNotBefore,
       holderExitedAt,
     ));
-    return writerOrphanScanResult(rows, killable);
+    return writerOrphanScanResult(
+      rows,
+      killable,
+      directorSessionId !== undefined ? { directorSessionId } : undefined,
+    );
   };
 }
 
@@ -1441,6 +1462,48 @@ export type ProcessRowPlausibilityContextV1 = {
   readonly directorSessionId?: number;
 };
 
+export type ProcessRowPlausibilityContextInputV1 = {
+  readonly runNonce: string;
+  readonly createdNotBefore: string;
+  readonly holderPid?: number;
+  readonly holderExitedAt?: string;
+  readonly observedPids?: Iterable<number>;
+  readonly rows: readonly {
+    readonly pid: number;
+    readonly parentPid?: number;
+    readonly creationDate?: string;
+  }[];
+  readonly directorSessionId?: number;
+};
+
+/**
+ * The only production constructor for {@link ProcessRowPlausibilityContextV1}.
+ * Callers must not assemble a weaker object: a missing field that changes
+ * membership is UNKNOWN, not a silent degrade.
+ */
+export function processRowPlausibilityContext(
+  input: ProcessRowPlausibilityContextInputV1,
+): ProcessRowPlausibilityContextV1 {
+  const observedPids = new Set<number>();
+  if (input.observedPids !== undefined) {
+    for (const pid of input.observedPids) {
+      if (isUsablePid(pid)) observedPids.add(pid);
+    }
+  }
+  if (isUsablePid(input.holderPid)) observedPids.add(input.holderPid);
+  const holderExitedAt = asUsableToken(input.holderExitedAt) ?? undefined;
+  const directorSessionId = asSessionId(input.directorSessionId);
+  return {
+    runNonce: input.runNonce,
+    createdNotBefore: input.createdNotBefore,
+    ...(isUsablePid(input.holderPid) ? { holderPid: input.holderPid } : {}),
+    ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+    ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+    observedPids,
+    rows: input.rows,
+  };
+}
+
 export function isBrokerHostName(name: string | undefined | null): boolean {
   if (name === undefined || name === null || name === "") return false;
   const lower = name.toLowerCase();
@@ -1582,8 +1645,13 @@ export function parentlessRowTiedToThisRun(
     if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
     // Live occupant proven created at or before this row, and not in
     // this run's chain: a complete explanation that is not this run.
+    // A re-parenting broker is not provenance — the same question
+    // parentIsProvenCapableCreator asks (occupant in the holder chain).
     // Missing or later parentCreationDate is a recycled slot — UNKNOWN.
-    if (provenCreatedAtOrBeforeCeiling(sighting.parentCreationDate, sighting.creationDate)) {
+    if (
+      !isBrokerHostName(sighting.parentName)
+      && provenCreatedAtOrBeforeCeiling(sighting.parentCreationDate, sighting.creationDate)
+    ) {
       return false;
     }
     return true;

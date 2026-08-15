@@ -28,9 +28,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeAtomic } from "./atomic-write.js";
-import { DIRECTOR_ROOT_ENV } from "./contracts.js";
+import { DEFAULT_DIRECTOR_ROOT, DIRECTOR_ROOT_ENV } from "./contracts.js";
 import { CONTROL_BYTES } from "./control-bytes.js";
-import { canonicalizeHostPath } from "./host-path.js";
+import { canonicalizeHostPath, isResolvedHostPath, namesReservedDevice, pathIsInside } from "./host-path.js";
 import {
   acquireLease,
   LEASE_SCHEMA_V1,
@@ -41,6 +41,7 @@ import {
   createWindowsProcessProbe,
   holderLiveness,
   isUsablePid,
+  livenessGrants,
   placeableInstantMs,
   type HostProcessProbe,
   type ProcessObservationV1,
@@ -96,13 +97,43 @@ export function derivedHostArbitrationRoot(
  * {@link derivedHostArbitrationRoot}. A redirected `ProgramData` is not
  * the host-fixed root.
  */
-export function hostProgramDataIsHostFixed(
+export function prepareHostArbitrationLocks(
   env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  const programData = typeof env.ProgramData === "string" ? env.ProgramData.trim() : "";
-  if (programData === "" || CONTROL_BYTES.test(programData)) return true;
-  const offered = join(programData, "AION", "director-d2-host-locks");
-  return canonicalizeHostPath(offered) === canonicalizeHostPath(derivedHostArbitrationRoot(env));
+  host: {
+    readonly mkdir?: (path: string, opts: { recursive: boolean }) => void;
+  } = {},
+): { readonly ok: true; readonly root: string } | { readonly ok: false; readonly reason: string } {
+  const root = derivedHostArbitrationRoot(env);
+  const locks = join(root, DIRECTOR_STORE_LAYOUT_V1.locksDir);
+  const mkdir = host.mkdir ?? mkdirSync;
+  try {
+    mkdir(locks, { recursive: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `host arbitration root is not creatable (${root}): ${message}` };
+  }
+  if (canonicalizeHostPath(locks) !== canonicalizeHostPath(join(root, DIRECTOR_STORE_LAYOUT_V1.locksDir))) {
+    return { ok: false, reason: "created lock directory is not the host-fixed arbitration root" };
+  }
+  return { ok: true, root };
+}
+
+function assertSafeDirectorStoreRoot(root: string): void {
+  if (root === "") {
+    throw new Error("lease store root is empty");
+  }
+  if (CONTROL_BYTES.test(root)) {
+    throw new Error("lease store root contains control bytes");
+  }
+  if (namesReservedDevice(root)) {
+    throw new Error(`lease store root names a reserved device: ${root}`);
+  }
+  if (!isResolvedHostPath(root)) {
+    throw new Error(`lease store root is not an identifiable host path: ${root}`);
+  }
+  if (pathIsInside(root, DEFAULT_DIRECTOR_ROOT)) {
+    throw new Error(`lease store root must not be inside ${DEFAULT_DIRECTOR_ROOT}`);
+  }
 }
 
 /**
@@ -158,7 +189,7 @@ export function inspectHostProductionWriterLock(input: {
     const lockPath = join(dir, name);
     const reclaim = reclaimStaleHostLockFile(lockPath, probe);
     if (reclaim.ok) continue;
-    if (/UNKNOWN/i.test(reclaim.reason)) {
+    if (reclaim.holderState === "UNKNOWN") {
       unknown = reclaim.reason;
       continue;
     }
@@ -175,15 +206,17 @@ export function sandboxDirectorStoreRoot(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
   const override = env[DIRECTOR_ROOT_ENV];
-  if (typeof override === "string" && override.trim() !== "") return override.trim();
+  if (typeof override === "string" && override.trim() !== "") {
+    const trimmed = override.trim();
+    assertSafeDirectorStoreRoot(trimmed);
+    return trimmed;
+  }
   return join(tmpdir(), "aion-director-d2-store");
 }
 
 export function createNodeLeaseStore(root: string, options?: NodeLeaseStoreOptionsV1): NodeLeaseStoreV1 {
   const resolved = root.trim();
-  if (resolved === "") {
-    throw new Error("lease store root is empty");
-  }
+  assertSafeDirectorStoreRoot(resolved);
   const locksDir = join(resolved, DIRECTOR_STORE_LAYOUT_V1.locksDir);
   const arbitrationRoot = options?.hostArbitrationRoot ?? hostArbitrationRoot();
   const probe = options?.probe ?? createWindowsProcessProbe();
@@ -326,7 +359,7 @@ function openExclusiveLock(lockPath: string, kind: LeaseKindV1, probe: HostProce
 
 type LockReclaimV1 =
   | { readonly ok: true }
-  | { readonly ok: false; readonly reason: string };
+  | { readonly ok: false; readonly reason: string; readonly holderState: "HELD" | "UNKNOWN" };
 
 /**
  * Read the holder record and reclaim only on holderLiveness
@@ -341,6 +374,7 @@ function reclaimStaleHostLockFile(lockPath: string, probe: HostProcessProbe): Lo
     const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
+      holderState: "UNKNOWN",
       reason: `host lock record is unreadable (holder liveness UNKNOWN): ${lockPath}: ${message}`,
     };
   }
@@ -350,11 +384,13 @@ function reclaimStaleHostLockFile(lockPath: string, probe: HostProcessProbe): Lo
     if (parsed.reason === "lock file has no usable holder pid") {
       return {
         ok: false,
+        holderState: "UNKNOWN",
         reason: `host-wide lock is already held (holder liveness UNKNOWN; no usable pid): ${lockPath}`,
       };
     }
     return {
       ok: false,
+      holderState: "UNKNOWN",
       reason: `host lock record is unparseable (holder liveness UNKNOWN): ${lockPath}: ${parsed.reason}`,
     };
   }
@@ -366,14 +402,16 @@ function reclaimStaleHostLockFile(lockPath: string, probe: HostProcessProbe): Lo
     const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
+      holderState: "UNKNOWN",
       reason: `host lock holder probe threw (holder liveness UNKNOWN): ${lockPath}: ${message}`,
     };
   }
 
   const liveness = livenessOfLockHolder(parsed, observation);
-  if (liveness !== "DEAD_CONFIRMED") {
+  if (!livenessGrants(liveness).reclaim) {
     return {
       ok: false,
+      holderState: liveness === "ALIVE" ? "HELD" : "UNKNOWN",
       reason: `host-wide lock is already held (holder liveness ${liveness}): ${lockPath}`,
     };
   }
@@ -385,6 +423,7 @@ function reclaimStaleHostLockFile(lockPath: string, probe: HostProcessProbe): Lo
     const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
+      holderState: "UNKNOWN",
       reason: `host lock could not be unlinked after DEAD_CONFIRMED (holder liveness UNKNOWN): ${lockPath}: ${message}`,
     };
   }

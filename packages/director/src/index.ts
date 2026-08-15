@@ -60,6 +60,8 @@ export type {
   ExecuteRunRequestV1,
   LaunchRunRequestV1,
   RunResultV1,
+  RecoverOutcomeV1,
+  ResultPersistedV1,
   WriterOrphanScanV1,
   WriterExitProofV1,
   WriterExitProofInputV1,

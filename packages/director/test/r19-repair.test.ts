@@ -571,6 +571,7 @@ test("T1.5 live explorer.exe parent inside the holder-alive window stays undecid
     parentPid: 51876,
     parentPresent: true,
     parentName: "explorer.exe",
+    parentCreationDate: BOOT,
     creationDate: AFTER,
     nonceReadable: true,
     runNonce: null,

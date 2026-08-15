@@ -60,7 +60,7 @@ import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // device in any real directory. Two predicates for one Windows rule will always drift apart; this is
 // the pure leaf both path layers already depend on, so there is no new coupling and no cycle.
 import { asUsableToken, CONTROL_BYTES as CONTROL_BYTES_IN_PATH } from "./control-bytes.js";
-import { namesReservedDeviceSegment, isResolvedHostPath } from "./host-path.js";
+import { canonicalizeHostPath, namesReservedDeviceSegment, isResolvedHostPath } from "./host-path.js";
 
 export const HANDOFF_SCHEMA_V1 = "aion.director.handoff.v1" as const;
 
@@ -273,22 +273,17 @@ export function artifactPathWithinRoot(root: string, candidate: string): boolean
   // not the string that gets opened, which is the only thing containment can be about.
   if (CONTROL_BYTES_IN_PATH.test(root) || CONTROL_BYTES_IN_PATH.test(candidate)) return false;
 
-  // The parser refuses these before it ever asks about containment, but this function is exported
-  // and called directly — including by the consumer the module docblock tells to re-check after
-  // resolving symlinks. A guard that only exists on one of two paths into the same decision is the
-  // shape that produced most of this package's defects, so both paths ask the same questions.
-  if (namesAlternateDataStream(candidate) || namesReservedDevice(candidate)) return false;
+  // Host-path identity first: `\\?\C:\...` is one directory, not an ADS.
+  // Device and stream checks run on that identity, not the raw prefix.
+  const rootKey = isResolvedHostPath(root) ? canonicalizeHostPath(root) : root;
+  const candidateKey = isResolvedHostPath(candidate) ? canonicalizeHostPath(candidate) : candidate;
+  if (namesAlternateDataStream(candidateKey) || namesReservedDevice(candidateKey)) return false;
+  if (!isResolvedHostPath(root) || namesReservedDevice(rootKey) || namesAlternateDataStream(rootKey)) return false;
 
-  // The root faces the same acceptance test the parser applies. Without it this function answered
-  // about roots `decideArtifactRoot` refuses outright — and the comment directly above already argued
-  // that a guard existing on only one of two paths into a decision is this package's signature
-  // defect. It was true of the candidate side and left untrue of the root side in the same function.
-  if (!isResolvedHostPath(root) || namesReservedDevice(root) || namesAlternateDataStream(root)) return false;
-
-  const rootPath = normalizePath(root);
+  const rootPath = normalizePath(rootKey);
   if (!rootAnchorsContainment(rootPath)) return false;
 
-  const candidatePath = normalizePath(candidate);
+  const candidatePath = normalizePath(candidateKey);
   if (candidatePath.escaped) return false;
 
   let resolved: string[];
@@ -414,7 +409,9 @@ function decideArtifactRoot(supplied: unknown): ArtifactRootDecisionV1 {
   if (!isResolvedHostPath(trimmed) || namesReservedDevice(trimmed)) {
     return { root: null, problem: `artifactRoot ${trimmed} does not name one directory on this host` };
   }
-  if (!rootAnchorsContainment(normalizePath(trimmed))) {
+  // Host-path already accepted this spelling (including `\\?\C:\...`).
+  // Containment uses that module's identity, not a second parser.
+  if (!rootAnchorsContainment(normalizePath(canonicalizeHostPath(trimmed)))) {
     return { root: null, problem: `artifactRoot ${trimmed} is not an absolute directory path` };
   }
   return { root: trimmed, problem: null };

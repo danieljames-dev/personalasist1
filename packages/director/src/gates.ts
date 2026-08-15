@@ -175,7 +175,13 @@ export function resolveGate(input: {
   if (input.currentFacts) {
     for (const [key, was] of Object.entries(input.gate.safeFrozenState)) {
       const now = input.currentFacts[key];
-      if (now !== undefined && now !== was) staleFacts.push(`${key}: was ${was}, now ${now}`);
+      if (now === undefined || now !== was) {
+        staleFacts.push(
+          now === undefined
+            ? `${key}: was ${was}, now could not be read`
+            : `${key}: was ${was}, now ${now}`,
+        );
+      }
     }
   }
   if (staleFacts.length > 0 && input.approved) {

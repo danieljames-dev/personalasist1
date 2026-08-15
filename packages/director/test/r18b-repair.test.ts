@@ -41,7 +41,7 @@ import {
   createNodeLeaseStore,
   derivedHostArbitrationRoot,
   hostArbitrationRoot,
-  hostProgramDataIsHostFixed,
+  prepareHostArbitrationLocks,
 } from "../src/lease-store.js";
 import {
   DIRECTOR_STORE_LAYOUT_V1,
@@ -1057,41 +1057,23 @@ test("C11 a redirected ProgramData is ignored; two ProgramData values share one 
   assert.equal(fromB, derived);
   assert.equal(fromA.includes("pdA-r19b"), false);
   assert.equal(fromB.includes("pdB-r19b"), false);
-  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:", ProgramData: pdA }), false);
-  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:", ProgramData: pdB }), false);
-  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:", ProgramData: "C:\\ProgramData" }), true);
-  assert.equal(hostProgramDataIsHostFixed({ SystemDrive: "C:" }), true);
+  const created: string[] = [];
+  const redirected = prepareHostArbitrationLocks(
+    { SystemDrive: "C:", ProgramData: pdA },
+    { mkdir: (path) => { created.push(path); } },
+  );
+  assert.equal(redirected.ok, true, "ProgramData is not the lock directory");
+  assert.equal(redirected.ok && redirected.root, derived);
+  assert.ok(created.every((path) => path.toLowerCase().includes("c:\\programdata\\aion\\director-d2-host-locks")));
+  assert.ok(created.every((path) => !path.includes("pdA-r19b")));
 });
 
-test("C11 the CLI guard refuses a redirected ProgramData on a host-wide lease", async () => {
-  const { runDirectorCli } = await import(
-    pathToFileURL(fileURLToPath(new URL("../../../../apps/director-cli.mjs", import.meta.url))).href
-  );
-  const errors: string[] = [];
-  const code = await runDirectorCli([
-    "--run-id", "run-c11",
-    "--mission-id", "mission-1",
-    "--work-item-id", "work-1",
-    "--executor", "grok",
-    "--role", "INDEPENDENT_ACCEPTANCE",
-    "--worktree", "C:\\wt",
-    "--cwd", "C:\\wt",
-    "--run-root", join(tmpdir(), "aion-r19b-c11-run"),
-    "--prompt-path", "C:\\wt\\PROMPT.md",
-    "--lease-kind", "PRODUCTION_WRITER",
-    "--lease-resource", "default",
-    "--lease-id", "lease-c11",
-    "--run-nonce", "nonce-c11",
-  ], {
-    log() { /* unused */ },
-    error(message: string) { errors.push(String(message)); },
-  }, {
-    ...process.env,
-    ProgramData: join(tmpdir(), "aion-r19b-c11-pd"),
-    SystemDrive: "C:",
-  });
-  assert.equal(code, 2);
-  assert.match(errors.join("\n"), /ProgramData|host-fixed/i);
+test("C11 the CLI guard verifies the created lock directory, not ProgramData", () => {
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const cli = readFileSync(join(here, "..", "..", "..", "..", "apps", "director-cli.mjs"), "utf8");
+  assert.match(cli, /prepareHostArbitrationLocks/);
+  assert.doesNotMatch(cli, /hostProgramDataIsHostFixed/);
+  assert.doesNotMatch(cli, /ProgramData is not the host-fixed/);
 });
 
 function plantHostWriterLock(

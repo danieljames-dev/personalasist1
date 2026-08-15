@@ -77,8 +77,46 @@ function withoutDeclaration(source: string, name: string): string {
   );
 }
 
+function stripCommentsAndStrings(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    const n = source[i + 1];
+    if (c === "/" && n === "/") {
+      i += 2;
+      while (i < source.length && source[i] !== "\n") i += 1;
+      out += " ";
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      i += 2;
+      while (i + 1 < source.length && !(source[i] === "*" && source[i + 1] === "/")) i += 1;
+      i += 2;
+      out += " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      i += 1;
+      while (i < source.length && source[i] !== quote) {
+        if (source[i] === "\\") i += 1;
+        i += 1;
+      }
+      i += 1;
+      out += " ";
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
 function calledIn(source: string, name: string): boolean {
-  return new RegExp(String.raw`\b${name}\s*\(`).test(withoutDeclaration(source, name));
+  return new RegExp(String.raw`\b${name}\s*\(`).test(
+    stripCommentsAndStrings(withoutDeclaration(source, name)),
+  );
 }
 
 function modulesCalling(files: Map<string, string>, name: string): string[] {
@@ -128,7 +166,7 @@ test("every exported src function reachable from the run path has a non-test cal
     ["legalEventsFrom", "cannot have a production caller yet: dashboard enumerator of advance"],
     ["awaitsOwner", "cannot have a production caller yet: mission-state classifier"],
     ["needsEngineer", "cannot have a production caller yet: mission-state classifier"],
-    ["livenessGrants", "cannot have a production caller: holderLiveness is what executeRun reads"],
+
     ["killProcessTreeStandIn", "cannot have a call-site: wired as a function value on deps.killTree"],
     ["isSafePathSegment", "cannot have a production caller: used via validatePathSegment"],
     ["validateMissionId", "cannot have a production caller: alias of validatePathSegment"],
@@ -404,8 +442,9 @@ test("the CLI never overrides the host-fixed arbitration root", () => {
     "CLI must call createNodeLeaseStore with the store root only",
   );
   assert.doesNotMatch(cli, /hostArbitrationRoot\s*:/);
-  assert.match(cli, /hostArbitrationRoot\s*\(/);
+  assert.match(cli, /prepareHostArbitrationLocks/);
   assert.match(cli, /isHostWideLeaseKind/);
+  assert.doesNotMatch(cli, /hostProgramDataIsHostFixed/);
 });
 
 test("there is exactly one handoff parser call on the run path", () => {

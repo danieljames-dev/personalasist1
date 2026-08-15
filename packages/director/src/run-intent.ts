@@ -175,6 +175,10 @@ export interface RebootAnswersV1 {
   readonly spawnObservedAt: IsoTimestamp | null;
 }
 
+/** Same bytes persistRunIntent and recoverAbandonedRun report for an unstarted existing intent. */
+export const UNRESOLVABLE_EXISTING_INTENT_REASON =
+  "an existing intent at this path is unresolvable; refusing to overwrite it";
+
 /**
  * Write the intent, flush it, read it back, and only then return the spawn permit.
  *
@@ -201,7 +205,7 @@ export function persistRunIntent(
     if (existing === "unreadable") {
       return refused("an existing intent at this path is unreadable; refusing to overwrite it");
     }
-    return refused("an existing intent at this path is unresolvable; refusing to overwrite it");
+    return refused(UNRESOLVABLE_EXISTING_INTENT_REASON);
   }
 
   const serialised = serialiseIntent(intent);

@@ -115,7 +115,7 @@ import {
   normalisedCreationDate,
   nextUndecidablePersistenceDecision,
   OrphanScanUnavailableError,
-  parentlessRowTiedToThisRun,
+  processRowPlausibilityContext,
   processRowCouldBelongToThisRun,
   writerOrphanScanResult,
   type WriterOrphanScanResultV1,
@@ -143,6 +143,7 @@ import {
   recordSpawnAttempt,
   recordSpawnObservation,
   spendSpawnPermit,
+  UNRESOLVABLE_EXISTING_INTENT_REASON,
   withPersistedIntent,
   type IntentStoreV1,
   type RunIntentV1,
@@ -368,6 +369,10 @@ export type LaunchRunRequestV1 = Omit<ExecuteRunRequestV1, "executablePath" | "a
   readonly role?: ExecutorRoleV1;
 };
 
+export type RecoverOutcomeV1 = "REFUSED_UNKNOWN" | "REFUSED_ALIVE" | "TERMINAL";
+
+export type ResultPersistedV1 = "written" | "skipped" | "failed";
+
 export interface RunResultV1 {
   readonly schema: typeof RUN_RESULT_SCHEMA_V1;
   readonly runId: string;
@@ -386,6 +391,8 @@ export interface RunResultV1 {
   readonly cancel: CancelReportV1;
   readonly log: BoundedLogReportV1 | null;
   readonly resultPath: string | null;
+  readonly resultPersisted?: ResultPersistedV1;
+  readonly recoverOutcome?: RecoverOutcomeV1;
 }
 
 export interface WriterOrphanScanV1 {
@@ -405,6 +412,7 @@ export interface WriterOrphanScanV1 {
    * operator must be able to see which pid blocked them.
    */
   readonly undecidable: readonly OrphanSightingV1[];
+  readonly directorSessionId?: number;
 }
 
 const WRITER_EXIT_PROOF = Symbol("aion.director.writer-exit-proof.v1");
@@ -477,6 +485,10 @@ export interface WriterExitProofInputV1 {
    * Omitted is "no nonce to judge by": any leftover sighting then denies.
    */
   readonly runNonce?: string | null;
+  readonly createdNotBefore?: string;
+  readonly holderExitedAt?: string;
+  readonly observedPids?: ReadonlySet<number>;
+  readonly directorSessionId?: number;
 }
 
 /**
@@ -551,6 +563,7 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
         null,
         input.probedPid,
         "DEAD_CONFIRMED",
+        input,
       )) {
         return null;
       }
@@ -574,6 +587,7 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
       input.recordedIdentity,
       input.recordedIdentity.pid,
       liveness,
+      input,
     )) {
       return null;
     }
@@ -604,6 +618,12 @@ function sightingsDenyWriterExit(
   recorded: ExecutorProcessIdentityV1 | null,
   holderPid: number | null,
   parentLiveness: "DEAD_CONFIRMED",
+  membership?: {
+    readonly createdNotBefore?: string;
+    readonly holderExitedAt?: string;
+    readonly observedPids?: ReadonlySet<number>;
+    readonly directorSessionId?: number;
+  },
 ): boolean {
   if (sightings === null) return false;
   if (runNonce === null) return sightings.length > 0;
@@ -611,6 +631,10 @@ function sightingsDenyWriterExit(
     const inTree = writerSightingNotProvenAbsent(sighting, runNonce, {
       holderPid,
       rows: sightings,
+      ...(membership?.createdNotBefore !== undefined ? { createdNotBefore: membership.createdNotBefore } : {}),
+      ...(membership?.holderExitedAt !== undefined ? { holderExitedAt: membership.holderExitedAt } : {}),
+      ...(membership?.observedPids !== undefined ? { observedPids: membership.observedPids } : {}),
+      ...(membership?.directorSessionId !== undefined ? { directorSessionId: membership.directorSessionId } : {}),
     });
     if (!inTree) continue;
     if (recorded === null) return true;
@@ -1069,6 +1093,7 @@ function namedRequestRefusal(reason: string, request: unknown): RunResultV1 {
     productionWriterLeaseReleasedByThisRun: false,
     cancel: { timedOut: false, stages: [] },
     log: null,
+    resultPersisted: "skipped",
   };
 }
 
@@ -1085,6 +1110,7 @@ export async function recoverAbandonedRun(
     readonly fs: RunFileSystemV1;
     readonly probe: HostProcessProbe;
     readonly clock: ClockV1;
+    readonly leases?: LeaseStoreV1;
   },
 ): Promise<RunResultV1> {
   if (typeof runRoot !== "string") {
@@ -1095,13 +1121,14 @@ export async function recoverAbandonedRun(
   const parsed = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
   const answers = answersAfterReboot(parsed.ok ? parsed.intent : null);
   const runId = parsed.ok ? parsed.intent.runId : "";
-  // `answers.started` is a fact about a *previous* invocation. It belongs
-  // in the result body. It must not be the ownership flag
-  // writeResultIfPermitted uses to suppress the existing-record guard —
-  // that substitution overwrote a completed result.json on every
-  // --recover sweep, including when the probe merely threw.
-  const finish = (reason: string): RunResultV1 => {
-    const spawned = parsed.ok ? answers.started : false;
+  // `answers.started` is a workflow flag written after spawn returns. It
+  // is not the physical fact "a process exists". A missing spawn record
+  // is UNKNOWN. Recover refusals are not executeRun completions.
+  const finish = (
+    reason: string,
+    outcome: RecoverOutcomeV1,
+    spawned: boolean,
+  ): RunResultV1 => {
     const result: RunResultV1 = {
       schema: RUN_RESULT_SCHEMA_V1,
       resultPath,
@@ -1109,6 +1136,7 @@ export async function recoverAbandonedRun(
       ok: false,
       spawned,
       reason,
+      recoverOutcome: outcome,
       conjunction: emptyRefusalConjunction(runRoot, reason),
       exitCode: null,
       processIdentity: parsed.ok ? parsed.intent.processIdentity : null,
@@ -1122,56 +1150,90 @@ export async function recoverAbandonedRun(
       log: null,
     };
     const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, result, false);
-    return write === "failed" ? { ...result, resultPath: null } : result;
+    if (write === "failed") return { ...result, resultPath: null, resultPersisted: "failed" };
+    if (write === "skipped") return { ...result, resultPath: null, resultPersisted: "skipped" };
+    return { ...result, resultPersisted: "written" };
   };
   if (!parsed.ok) {
-    return finish("recover refused: intent is unreadable or absent");
-  }
-  if (!answers.started) {
-    return finish("recover: no recorded spawn; nothing to recover");
+    return finish("recover refused: intent is unreadable or absent", "REFUSED_UNKNOWN", false);
   }
   const recorded = parsed.intent.processIdentity;
+  const leasePid = holderPidFromLeases(deps.leases, parsed.intent.runId);
   const spawnPid = answers.spawnPid;
   const probePid = isUsablePid(spawnPid)
     ? spawnPid
-    : (recorded !== null && isUsablePid(recorded.pid) ? recorded.pid : null);
+    : (recorded !== null && isUsablePid(recorded.pid) ? recorded.pid : leasePid);
+  if (!answers.started && probePid === null) {
+    return finish(UNRESOLVABLE_EXISTING_INTENT_REASON, "REFUSED_UNKNOWN", false);
+  }
   if (probePid !== null) {
     let observation: ProcessObservationV1;
     try {
       observation = deps.probe.observe(probePid);
     } catch {
-      return finish(`recover refused: holder pid ${probePid} liveness is UNKNOWN`);
+      return finish(
+        `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+        "REFUSED_UNKNOWN",
+        false,
+      );
     }
     if (recorded !== null) {
-      // The physical fact is whether the *recorded holder* is still
-      // running, not whether the pid slot is occupied. After a reboot
-      // the slot is routinely recycled.
       const liveness = holderLiveness(recorded, observation);
       if (liveness === "ALIVE") {
-        return finish(`recover refused: holder pid ${probePid} is still present`);
+        return finish(
+          `recover refused: holder pid ${probePid} is still present`,
+          "REFUSED_ALIVE",
+          true,
+        );
       }
       if (liveness === "UNKNOWN") {
-        return finish(`recover refused: holder pid ${probePid} liveness is UNKNOWN`);
+        return finish(
+          `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+          "REFUSED_UNKNOWN",
+          false,
+        );
       }
       return finish(
         `recover recorded a terminal result; holder pid ${probePid} is DEAD_CONFIRMED. D2 CHILD_TREE remains unmet.`,
+        "TERMINAL",
+        true,
       );
     }
-    // No recorded identity: pid occupancy is all we have. Keep the
-    // pid-only path only in that case.
     if (observation.outcome === "FOUND") {
-      return finish(`recover refused: holder pid ${probePid} is still present`);
+      return finish(
+        `recover refused: holder pid ${probePid} is still present`,
+        "REFUSED_ALIVE",
+        true,
+      );
     }
     if (observation.outcome === "UNAVAILABLE") {
-      return finish(`recover refused: holder pid ${probePid} liveness is UNKNOWN`);
+      return finish(
+        `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+        "REFUSED_UNKNOWN",
+        false,
+      );
     }
     return finish(
       `recover recorded a terminal result; holder pid ${probePid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
+      "TERMINAL",
+      true,
     );
   }
   return finish(
     "recover recorded a terminal result; no usable holder pid was recorded. D2 CHILD_TREE remains unmet.",
+    "TERMINAL",
+    answers.started,
   );
+}
+
+function holderPidFromLeases(store: LeaseStoreV1 | undefined, runId: string): number | null {
+  if (store === undefined) return null;
+  for (const lease of store.list()) {
+    if (lease.runId !== runId) continue;
+    if (isUsablePid(lease.pid)) return lease.pid;
+    if (isUsablePid(lease.processIdentity?.pid)) return lease.processIdentity.pid;
+  }
+  return null;
 }
 
 /**
@@ -1351,7 +1413,9 @@ function refusedBeforeSpawn(
     log: null,
   };
   const write = writeResultIfPermitted(deps.fs, request.runRoot, resultPath, result, false);
-  return write === "failed" ? { ...result, resultPath: null } : result;
+  if (write === "failed") return { ...result, resultPath: null, resultPersisted: "failed" };
+  if (write === "skipped") return { ...result, resultPath: null, resultPersisted: "skipped" };
+  return { ...result, resultPersisted: "written" };
 }
 
 export async function executeRun(
@@ -1415,9 +1479,12 @@ export async function executeRun(
     };
     const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, drafted, partial.spawned === true);
     if (write === "failed") {
-      return { ...drafted, resultPath: null };
+      return { ...drafted, resultPath: null, resultPersisted: "failed" };
     }
-    return drafted;
+    if (write === "skipped") {
+      return { ...drafted, resultPath: null, resultPersisted: "skipped" };
+    }
+    return { ...drafted, resultPersisted: "written" };
   };
 
   let heldLease: LeaseV1 | null = null;
@@ -2306,7 +2373,15 @@ export async function executeRun(
       && captured.observation !== null
       && captured.observation.outcome === "NOT_FOUND";
     processIdentity = captured.ok ? captured.identity : null;
-    if (processIdentity !== null) {
+    if (captured.reason === "the occupant of this pid carries another run's nonce") {
+      const withoutIdentity: LeaseV1 = { ...heldLease, pid: childPid };
+      delete (withoutIdentity as { processIdentity?: unknown }).processIdentity;
+      leaseStore.save([
+        ...leaseStore.list().filter((item) => !leaseIdentityEquals(item, withoutIdentity)),
+        withoutIdentity,
+      ]);
+      heldLease = withoutIdentity;
+    } else if (processIdentity !== null) {
       const observed = recordSpawnObservation({
         permit,
         identity: processIdentity,
@@ -2552,7 +2627,7 @@ export async function executeRun(
       executorTreeGone: tree.ok,
       executorTreeReason: tree.reason,
       timedOut,
-      logStayedWithinBudget: logReport.mustHalt !== true && !logReport.sinkFailed,
+      logStayedWithinBudget: logReport.mustHalt !== true && !logReport.sinkFailed && logReport.drainComplete === true,
       role,
       argvGrantedWrite,
       spawnedAtFloor,
@@ -2573,6 +2648,10 @@ export async function executeRun(
       liveSightings: orphanScan.liveSightings,
       ownedHandleExit,
       runNonce,
+      createdNotBefore: spawnedAtFloor ?? "",
+      ...(holderExitedAt !== null ? { holderExitedAt } : {}),
+      observedPids: seenInTreePids,
+      ...(orphanScan.directorSessionId !== undefined ? { directorSessionId: orphanScan.directorSessionId } : {}),
     });
     const proofBeforeRelease = exitProof;
     releaseHeld();
@@ -2821,7 +2900,9 @@ function writeResultIfPermitted(
     if (!spawned) return "skipped";
     existing = false;
   }
-  if (existing && !spawned) return "skipped";
+  if (existing && !spawned) {
+    if (!mayPromoteRecoverRecord(fs, resultPath, result)) return "skipped";
+  }
   try {
     fs.mkdirp(runRoot);
     fs.writeDurable(resultPath, `${JSON.stringify(result, null, 2)}\n`);
@@ -2953,19 +3034,25 @@ async function collectWriterOrphans(input: {
     };
     const scanOnce = (): WriterOrphanScanResultV1 => {
       const scanned = resolveOrphanScanner(input.scanOrphans)(query);
-      return writerOrphanScanResult([...scanned.snapshot], [...scanned.killable]);
+      return writerOrphanScanResult(
+        [...scanned.snapshot],
+        [...scanned.killable],
+        scanned.directorSessionId !== undefined ? { directorSessionId: scanned.directorSessionId } : undefined,
+      );
     };
-    const ctxFor = (rows: readonly OrphanSightingV1[]) => ({
+    const ctxFor = (rows: readonly OrphanSightingV1[], sessionId?: number) => processRowPlausibilityContext({
       runNonce: input.runNonce,
       createdNotBefore,
       ...(isUsablePid(holderPid) ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
+      ...(sessionId !== undefined ? { directorSessionId: sessionId } : {}),
       observedPids,
       rows,
     });
     let scanned = scanOnce();
     let sightings = [...scanned.snapshot];
-    let plausibility = ctxFor(sightings);
+    let directorSessionId = scanned.directorSessionId;
+    let plausibility = ctxFor(sightings, directorSessionId);
     let undecidable = undecidableRowsOf(sightings, plausibility);
     if (undecidable.length > 0) {
       const wait = input.wait ?? (async () => undefined);
@@ -2984,13 +3071,15 @@ async function collectWriterOrphans(input: {
           };
         }
         const nextRows = [...next.snapshot];
-        const decision = nextUndecidablePersistenceDecision(undecidable, nextRows, ctxFor(nextRows));
+        if (next.directorSessionId !== undefined) directorSessionId = next.directorSessionId;
+        const decision = nextUndecidablePersistenceDecision(undecidable, nextRows, ctxFor(nextRows, directorSessionId));
         if (decision.action === "unavailable") {
           return {
             performed: false,
             sightings: nextRows,
             liveSightings: [],
-            undecidable: sightingsAsOrphans(undecidableRowsOf(nextRows, ctxFor(nextRows))),
+            undecidable: sightingsAsOrphans(undecidableRowsOf(nextRows, ctxFor(nextRows, directorSessionId))),
+            ...(directorSessionId !== undefined ? { directorSessionId } : {}),
           };
         }
         if (decision.action === "scan-clean") {
@@ -2999,7 +3088,7 @@ async function collectWriterOrphans(input: {
         }
         undecidable = decision.undecidable;
         sightings = nextRows;
-        plausibility = ctxFor(nextRows);
+        plausibility = ctxFor(nextRows, directorSessionId);
       }
       if (clean === null) {
         return {
@@ -3007,10 +3096,11 @@ async function collectWriterOrphans(input: {
           sightings,
           liveSightings: [],
           undecidable: sightingsAsOrphans(undecidable),
+          ...(directorSessionId !== undefined ? { directorSessionId } : {}),
         };
       }
       sightings = [...clean];
-      plausibility = ctxFor(sightings);
+      plausibility = ctxFor(sightings, directorSessionId);
     }
     rememberInTreePids(observedPids, sightings, input.runNonce, holderPid, holderExitedAt, createdNotBefore);
     const membershipTree = {
@@ -3019,12 +3109,19 @@ async function collectWriterOrphans(input: {
       createdNotBefore,
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids,
+      ...(directorSessionId !== undefined ? { directorSessionId } : {}),
     };
     const liveSightings = sightings.filter((sighting) =>
       processRowCouldBelongToThisRun(sighting, plausibility)
       && writerSightingNotProvenAbsent(sighting, input.runNonce, membershipTree),
     );
-    return { performed: true, sightings, liveSightings, undecidable: [] };
+    return {
+      performed: true,
+      sightings,
+      liveSightings,
+      undecidable: [],
+      ...(directorSessionId !== undefined ? { directorSessionId } : {}),
+    };
   } catch (error) {
     // A throwing CIM/WMI scan is not a completed scan. Escaping executeRun
     // used to release the writer lease from `finally` with no result.json.
@@ -3061,37 +3158,27 @@ export function writerSightingNotProvenAbsent(
     readonly createdNotBefore?: string;
     readonly holderExitedAt?: string;
     readonly observedPids?: ReadonlySet<number>;
+    readonly directorSessionId?: number;
   } = {
     holderPid: null,
     rows: [],
   },
 ): boolean {
-  const ctx = {
-    runNonce,
-    createdNotBefore: tree.createdNotBefore ?? "",
-    ...(tree.holderPid !== null ? { holderPid: tree.holderPid } : {}),
-    ...(tree.holderExitedAt !== undefined ? { holderExitedAt: tree.holderExitedAt } : {}),
-    observedPids: tree.observedPids ?? new Set<number>(),
-    rows: tree.rows,
-  };
-  if (tree.createdNotBefore !== undefined && tree.observedPids !== undefined) {
-    return processRowCouldBelongToThisRun(sighting, ctx);
+  // A missing field that changes the answer is UNKNOWN, not "proven absent".
+  // The incomplete shape must fail closed (deny the exit proof), never open.
+  if (tree.createdNotBefore === undefined || tree.observedPids === undefined) {
+    return true;
   }
-  // Incomplete leftover-remaining shape. A name may only exclude a row
-  // that failed the positive tests. The parentless closed interval is
-  // the same F10-gated function so that half cannot drift.
-  if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
-  if (parentlessRowTiedToThisRun(sighting, ctx)) return true;
-  // Same exclusion rule as processRowCouldBelongToThisRun: a nonce may
-  // exclude only when it was read from the PEB. Unreadable, missing, or
-  // a CommandLine scrape stay UNKNOWN (not proven absent). A parentless
-  // row with a foreign token is the same UNKNOWN as a missing nonce.
-  if (sighting.nonceReadable === false) return true;
-  const nonce = normaliseRunNonce(sighting.runNonce);
-  if (nonce === null) return true;
-  if (nonce === runNonce) return true;
-  if (sighting.parentPresent === false) return true;
-  return false;
+  const ctx = processRowPlausibilityContext({
+    runNonce,
+    createdNotBefore: tree.createdNotBefore,
+    ...(tree.holderPid !== null && isUsablePid(tree.holderPid) ? { holderPid: tree.holderPid } : {}),
+    ...(tree.holderExitedAt !== undefined ? { holderExitedAt: tree.holderExitedAt } : {}),
+    ...(tree.directorSessionId !== undefined ? { directorSessionId: tree.directorSessionId } : {}),
+    observedPids: tree.observedPids,
+    rows: tree.rows,
+  });
+  return processRowCouldBelongToThisRun(sighting, ctx);
 }
 
 interface LeftoverSweepV1 {
@@ -3155,14 +3242,14 @@ function killNonceBearingLeftovers(input: {
     if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
     // Same "is this process mine?" answer the reporting filter uses.
     // An in-snapshot ParentProcessId chain is not a stale historical PID.
-    const leftoverCtx = {
+    const leftoverCtx = processRowPlausibilityContext({
       runNonce: input.runNonce,
       createdNotBefore,
       ...(isUsablePid(holderPid) ? { holderPid } : {}),
       ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
       observedPids,
       rows: snapshot,
-    };
+    });
     if (!rowHasPositiveRunIdentity(leftover, leftoverCtx)) continue;
     try {
       input.killTree(leftover.pid);
@@ -3193,6 +3280,7 @@ function killNonceBearingLeftovers(input: {
         createdNotBefore,
         observedPids,
         ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+        ...(after.directorSessionId !== undefined ? { directorSessionId: after.directorSessionId } : {}),
       },
     ));
   } catch {
@@ -3385,6 +3473,14 @@ async function settleStreams(
     }),
     wait(50),
   ]);
+  // Instant test waits can win the race before an already-ended
+  // Readable.from buffer fires `end`. One event-loop turn is enough
+  // for that; a grandchild still holding the pipe stays unsettled.
+  if (!done) {
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+  }
   return done;
 }
 
@@ -3613,6 +3709,10 @@ async function proveAdoptedWriterExit(input: {
     orphanSightings: orphanScan.performed ? orphanScan.sightings : null,
     liveSightings: orphanScan.performed ? orphanScan.liveSightings : null,
     runNonce: scanNonce,
+    createdNotBefore: floor,
+    holderExitedAt,
+    observedPids: input.observedPids,
+    ...(orphanScan.directorSessionId !== undefined ? { directorSessionId: orphanScan.directorSessionId } : {}),
   });
 }
 
@@ -3683,6 +3783,10 @@ function existingCompletionOn(
     return "unreadable";
   }
   if (!isPlainObject(parsed)) return "unreadable";
+  const recoverOutcome = parsed.recoverOutcome;
+  if (recoverOutcome === "REFUSED_UNKNOWN" || recoverOutcome === "REFUSED_ALIVE") {
+    return "none";
+  }
   if (parsed.spawned === true) {
     const recordedRunId = parsed.runId;
     if (typeof recordedRunId === "string" && recordedRunId !== runId) return "unreadable";
@@ -3690,6 +3794,35 @@ function existingCompletionOn(
   }
   if (parsed.spawned === false) return "unstarted";
   return "unreadable";
+}
+
+function mayPromoteRecoverRecord(
+  fs: RunFileSystemV1,
+  resultPath: string,
+  incoming: RunResultV1,
+): boolean {
+  let raw: string;
+  try {
+    raw = fs.readUtf8(resultPath);
+  } catch {
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!isPlainObject(parsed)) return false;
+  const prior = parsed.recoverOutcome;
+  const next = incoming.recoverOutcome;
+  if (prior === "REFUSED_UNKNOWN" && (next === "TERMINAL" || next === "REFUSED_ALIVE" || next === "REFUSED_UNKNOWN")) {
+    return true;
+  }
+  if (prior === "REFUSED_ALIVE" && next === "TERMINAL") {
+    return true;
+  }
+  return false;
 }
 
 function reclaimExpiredHolder(input: {

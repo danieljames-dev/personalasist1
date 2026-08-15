@@ -377,9 +377,12 @@ test("the Windows host probe can observe this process by more than its pid", () 
   assert.ok(observation.creationDate, "creationDate is why a reused pid is not this process");
   assert.ok(observation.executablePath, "executablePath is why a later node.exe is not the holder");
 
+  const observedNonce = observation.runNonce;
   const captured = captureProcessIdentity(createWindowsProcessProbe(), {
     pid: process.pid,
-    runNonce: "nonce-self-probe",
+    runNonce: typeof observedNonce === "string" && observedNonce.trim() !== ""
+      ? observedNonce
+      : "nonce-self-probe",
   });
   assert.equal(captured.ok, true, captured.ok ? "" : captured.reason);
   if (!captured.ok) return;

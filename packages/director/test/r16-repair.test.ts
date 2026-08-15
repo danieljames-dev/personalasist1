@@ -616,7 +616,7 @@ test("F6 a readable parentless in-window row makes the scan undecidable and with
     parentPid: 1,
     parentPresent: false,
     nonceReadable: true,
-    creationDate: AFTER,
+    creationDate: HOLDER_EXIT,
   };
   const foreignNonce = { ...emptyNonce, runNonce: "not-your-nonce" };
   assert.equal(processRowCouldBelongToThisRun(emptyNonce, ctx), true);

@@ -122,12 +122,15 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
       clock: { now: nowIso },
       fs: director.createNodeRunFileSystem(),
       probe: director.createWindowsProcessProbe(),
+      leases: director.createNodeLeaseStore(director.sandboxDirectorStoreRoot(env)),
     });
     io.log(JSON.stringify({
       ok: recovered.ok,
       spawned: recovered.spawned,
       reason: recovered.reason,
       resultPath: recovered.resultPath,
+      resultPersisted: recovered.resultPersisted,
+      recoverOutcome: recovered.recoverOutcome,
     }));
     return recovered.ok ? 0 : 1;
   }
@@ -170,21 +173,10 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
 
   const storeRoot = director.sandboxDirectorStoreRoot(env);
   const leaseKind = required(values, "lease-kind");
-  const arbitrationRoot = director.derivedHostArbitrationRoot(env);
   if (director.isHostWideLeaseKind(leaseKind)) {
-    if (!director.hostProgramDataIsHostFixed(env)) {
-      io.error("PRODUCTION_WRITER refused: ProgramData is not the host-fixed SystemDrive\\ProgramData directory");
-      return 2;
-    }
-    if (director.hostArbitrationRoot(env) !== arbitrationRoot) {
-      io.error("PRODUCTION_WRITER refused: arbitration root is not the host-fixed directory");
-      return 2;
-    }
-    try {
-      mkdirSync(join(arbitrationRoot, "locks"), { recursive: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      io.error(`PRODUCTION_WRITER refused: host arbitration root is not creatable (${arbitrationRoot}): ${message}`);
+    const prepared = director.prepareHostArbitrationLocks(env);
+    if (!prepared.ok) {
+      io.error(`PRODUCTION_WRITER refused: ${prepared.reason}`);
       return 2;
     }
   }
@@ -246,6 +238,7 @@ export async function runDirectorCli(argv, io = console, env = process.env) {
     spawned: result.spawned,
     reason: result.reason,
     resultPath: result.resultPath,
+    resultPersisted: result.resultPersisted,
     spendUsd: result.handoff?.spendUsd ?? 0,
   }));
   if (result.ok) return 0;
