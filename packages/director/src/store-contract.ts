@@ -25,7 +25,7 @@
  * what is actually happening.
  */
 import { createHash } from "node:crypto";
-import { DEFAULT_DIRECTOR_ROOT, DIRECTOR_ROOT_ENV, type IsoTimestamp, type OpaqueId } from "./contracts.js";
+import type { IsoTimestamp, OpaqueId } from "./contracts.js";
 // Path identity comes from the shared pure module, never the other way round: this file is where
 // filesystem code will land, and the lease rules must stay testable without any of it.
 import { resourceIsIdentifiable } from "./resource-identity.js";
@@ -39,18 +39,9 @@ export const DIRECTOR_STORE_SCHEMA_V1 = "aion.director.store.v1" as const;
 // Host root
 // ---------------------------------------------------------------------------
 
-/**
- * The runtime root, given an environment rather than reading one.
- *
- * Pure on purpose: taking `process.env` inside would make every call site untestable and would let a
- * stray override change behaviour invisibly. An override that is empty or whitespace is treated as
- * absent, because `set AION_DIRECTOR_ROOT=` on Windows leaves an empty string behind and rooting the
- * store at `""` would silently write into the current working directory — usually a worktree.
- */
-export function resolveDirectorRoot(env: Readonly<Record<string, string | undefined>>): string {
-  const override = env[DIRECTOR_ROOT_ENV];
-  return override && override.trim() !== "" ? override.trim() : DEFAULT_DIRECTOR_ROOT;
-}
+// `resolveDirectorRoot` (default `C:\AION\director`) was deleted. That path is
+// on the never-touch list; the live store is {@link sandboxDirectorStoreRoot}
+// in `lease-store.ts` (`AION_DIRECTOR_ROOT` or `%TEMP%\aion-director-d2-store`).
 
 /** Fixed names under the root. Layout is part of the contract; a reader must find yesterday's state. */
 export const DIRECTOR_STORE_LAYOUT_V1 = {
@@ -78,7 +69,7 @@ export const DIRECTOR_STORE_LAYOUT_V1 = {
  * somebody copies wrongly. The implementation moved so the lease rules could stop importing the
  * store; where it is imported from did not have to change with it.
  */
-export {
+import {
   canonicalizeHostPath,
   inspectHostPath,
   isResolvedHostPath,
@@ -89,6 +80,18 @@ export {
   type HostPathClassV1,
   type HostPathV1,
 } from "./host-path.js";
+
+export {
+  canonicalizeHostPath,
+  inspectHostPath,
+  isResolvedHostPath,
+  pathIsInside,
+  namesReservedDevice,
+  namesReservedDeviceSegment,
+  IDENTITY_CLASSES,
+  type HostPathClassV1,
+  type HostPathV1,
+};
 
 // ---------------------------------------------------------------------------
 // Identifier validation
@@ -124,14 +127,9 @@ export const MAX_ID_SEGMENT_LENGTH = 64;
 /**
  * Windows refuses these names in any directory, with or without an extension, and a create against
  * one opens a device instead of failing — `NUL` swallows writes and reports success, which would look
- * exactly like a mission whose state saves and never comes back.
+ * exactly like a mission whose state saves and never comes back. The predicate is
+ * {@link namesReservedDeviceSegment} — one Windows rule, one spelling.
  */
-const RESERVED_DEVICE_NAMES: ReadonlySet<string> = new Set([
-  "con", "prn", "aux", "nul",
-  "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-]);
-
 /** Everything a single path segment may contain. Anything outside it is refused, not sanitised. */
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -156,8 +154,7 @@ export function validatePathSegment(value: string): IdValidationV1 {
   if (/[. ]$/.test(value)) {
     return { ok: false, rule: "TRAILING_DOT_OR_SPACE", reason: "a trailing dot or space resolves to a different name on Windows" };
   }
-  const stem = (value.split(".")[0] ?? "").toLowerCase();
-  if (RESERVED_DEVICE_NAMES.has(stem)) {
+  if (namesReservedDeviceSegment(value)) {
     return { ok: false, rule: "RESERVED_DEVICE_NAME", reason: `${value} names a Windows device, not a file` };
   }
   if (!SAFE_SEGMENT.test(value)) {

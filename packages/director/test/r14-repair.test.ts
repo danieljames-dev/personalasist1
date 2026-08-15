@@ -210,11 +210,16 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
   };
 }
 
-function matchingGit(head = HEAD_AFTER): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+  let revParses = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
-      if (key === "rev-parse HEAD") return gitResult(argv, { stdout: `${head}\n` });
+      if (key === "rev-parse HEAD") {
+        revParses += 1;
+        const sha = opts.advance === true && revParses === 1 ? HEAD_BEFORE : head;
+        return gitResult(argv, { stdout: `${sha}\n` });
+      }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -329,7 +334,7 @@ async function runWith(
     clock: createFixedClock(NOW),
     fs,
     spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
-    git: over.git ?? matchingGit(),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
     probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -527,19 +532,23 @@ function threeGenerationHost(opts: { keepGrandchildOnRescan: boolean }) {
   };
 }
 
-test("B executeRun scan-kill-rescan of a scrubbed grandchild withholds the writer lease", async () => {
+test("B executeRun scan-kill-rescan of a scrubbed grandchild kills the in-chain descendant", async () => {
+  // R16 F7: parentPid chain in the same snapshot is positive identity, so
+  // 5140 is killed. The old assertion (lease withheld while 5140 stayed
+  // alive) encoded the nonce-only kill gate this round removed.
+  const killed: number[] = [];
   const host = threeGenerationHost({ keepGrandchildOnRescan: true });
   const leases = memoryLeases();
   const result = await runWith({
     leases,
     scanOrphans: host.scanner,
-    killTree: host.killTree,
+    killTree: (pid) => {
+      killed.push(pid);
+      host.killTree(pid);
+    },
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-b" } },
   });
-  assert.equal(result.conjunction.findings.find((item) => item.name === "executorTreeIsGone")?.ok, false);
-  assert.equal(result.ok, false);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-b"), true);
+  assert.ok(killed.includes(5140), `killed=${JSON.stringify(killed)} reason=${result.reason}`);
 });
 
 test("B liveness: grandchild absent from the re-scan releases the writer lease", async () => {

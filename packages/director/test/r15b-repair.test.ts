@@ -222,11 +222,16 @@ function gitResult(argv: readonly string[], over: { status?: number; stdout?: st
   };
 }
 
-function matchingGit(head = HEAD_AFTER): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+  let revParses = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
-      if (key === "rev-parse HEAD") return gitResult(argv, { stdout: `${head}\n` });
+      if (key === "rev-parse HEAD") {
+        revParses += 1;
+        const sha = opts.advance === true && revParses === 1 ? HEAD_BEFORE : head;
+        return gitResult(argv, { stdout: `${sha}\n` });
+      }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -324,7 +329,7 @@ async function runWith(
     clock: over.clock ?? createFixedClock(AFTER),
     fs,
     spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
-    git: over.git ?? matchingGit(),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
     probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -395,15 +400,17 @@ function scanQuery() {
 // F10 — readable PEB without this run's nonce is a fact
 // ---------------------------------------------------------------------------
 
-test("F10 readable parentless in-window row is not ours, not undecidable, SCANNED", () => {
-  // Liveness: parent 1 was never a descendant of this run.
+test("F10 readable parentless in-window row is undecidable, not proven absent", () => {
+  // R16 F6: a readable PEB without the nonce is UNKNOWN, not "not ours".
+  // The previous assertion (couldBelong=false, SCANNED) treated an
+  // executor-controllable negative as a positive fact about absence.
   const hostNoise = plausibility({
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: 88912, parentPid: 1 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(READABLE_PARENTLESS_CMD, hostNoise), false);
-  assert.equal(processRowMakesScanUndecidable(READABLE_PARENTLESS_CMD, hostNoise), false);
-  assert.equal(interpretRows([READABLE_PARENTLESS_CMD]).outcome, "SCANNED");
+  assert.equal(processRowCouldBelongToThisRun(READABLE_PARENTLESS_CMD, hostNoise), true);
+  assert.equal(processRowMakesScanUndecidable(READABLE_PARENTLESS_CMD, hostNoise), true);
+  assert.equal(interpretRows([READABLE_PARENTLESS_CMD]).outcome, "UNAVAILABLE");
 
   // Corrected rule: the same readable row whose parentPid was sampled.
   const sampled = plausibility({

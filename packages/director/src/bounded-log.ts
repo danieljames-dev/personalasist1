@@ -94,6 +94,11 @@ export interface BoundedLogReportV1 {
   readonly lastWriteAt: IsoTimestamp | null;
   readonly stdout: StreamReportV1;
   readonly stderr: StreamReportV1;
+  /**
+   * True when an injected sink threw. The run must not report success
+   * with an empty log and no indication anything was lost.
+   */
+  readonly sinkFailed: boolean;
 }
 
 export interface LogWriteResultV1 {
@@ -230,6 +235,15 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
   let haltReason: string | null = null;
   let haltedAt: IsoTimestamp | null = null;
   let lastWriteAt: IsoTimestamp | null = null;
+  let sinkFailed = false;
+
+  const writeSink = (op: () => void): void => {
+    try {
+      op();
+    } catch {
+      sinkFailed = true;
+    }
+  };
 
   function ingestRedacted(stream: LogStreamV1, payload: Buffer): void {
     if (payload.length === 0) return;
@@ -255,10 +269,10 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
       state.droppedFileBytes += dropped;
       state.fileTruncated = true;
       state.truncatedAt ??= instant;
-      sink.replace(fileImageOf(state));
+      writeSink(() => sink.replace(fileImageOf(state)));
     } else {
       state.filePayload = nextFile;
-      sink.append(payload);
+      writeSink(() => sink.append(payload));
     }
   }
 
@@ -273,7 +287,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     // The report already counted these bytes. Re-image so the on-disk
     // artifact carries `[AION_LOG_TRUNCATED dropped=N]`. Do not add the
     // marker length to droppedFileBytes.
-    deps.sinks[stream].replace(fileImageOf(state));
+    writeSink(() => deps.sinks[stream].replace(fileImageOf(state)));
   }
 
   function emitPending(stream: LogStreamV1, force: boolean): void {
@@ -284,6 +298,21 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     }
     if (state.pending.length === 0) return;
     if (force) {
+      // pemOverflow means we are between a consumed BEGIN and its END.
+      // Flush must not ship the held body as plaintext just because the
+      // block never terminated. Drop when there is neither a BEGIN nor
+      // an END line left to emit.
+      if (
+        state.pemOverflow
+        && !PRIVATE_KEY_BEGIN_LINE.test(state.pending)
+        && !/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(state.pending)
+      ) {
+        const dropped = Buffer.byteLength(state.pending, "utf8");
+        state.pending = "";
+        state.pemOverflow = false;
+        accountHoldbackDrop(stream, state, dropped);
+        return;
+      }
       const redacted = redactOpenPrivateKey(state.pending);
       state.pending = "";
       accountHoldbackDrop(stream, state, redacted.droppedBytes);
@@ -378,6 +407,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
         lastWriteAt,
         stdout: reportStream(stdout),
         stderr: reportStream(stderr),
+        sinkFailed,
       };
     },
   };
@@ -393,7 +423,11 @@ interface StreamState {
   droppedLiveBytes: number;
   droppedFileBytes: number;
   truncatedAt: IsoTimestamp | null;
-  /** Set only when splitHoldback takes the MAX_PEM_HOLD overflow path. Never reset. */
+  /**
+   * True while a BEGIN was consumed by the overflow path and its END has
+   * not yet been emitted. Reset when the END is emitted or the hold is
+   * force-dropped. Not "ever overflowed".
+   */
   pemOverflow: boolean;
 }
 
@@ -455,6 +489,7 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
     const endFinder = /-----END [A-Z0-9 ]*PRIVATE KEY-----[^\n]*\n/;
     const endMatch = endFinder.exec(pending);
     if (endMatch !== null && endMatch.index !== undefined) {
+      state.pemOverflow = false;
       const discarded = pending.slice(0, endMatch.index);
       return {
         emit: pending.slice(endMatch.index),
@@ -462,6 +497,17 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
         droppedBytes: Buffer.byteLength(discarded, "utf8"),
       };
     }
+    // Stay in the hold. The generic last-newline emit would ship the
+    // 64-column PEM body as plaintext. Keep only the bounded tail.
+    if (pending.length > SECRET_TAIL_BYTES) {
+      const hold = pending.slice(pending.length - SECRET_TAIL_BYTES);
+      return {
+        emit: "",
+        hold,
+        droppedBytes: Buffer.byteLength(pending.slice(0, pending.length - SECRET_TAIL_BYTES), "utf8"),
+      };
+    }
+    return { emit: "", hold: pending, droppedBytes: 0 };
   }
 
   const lastNl = pending.lastIndexOf("\n");

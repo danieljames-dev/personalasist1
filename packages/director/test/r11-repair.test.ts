@@ -186,11 +186,16 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
   };
 }
 
-function matchingGit(head = HEAD_AFTER): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+  let revParses = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
-      if (key === "rev-parse HEAD") return gitResult(argv, { stdout: `${head}\n` });
+      if (key === "rev-parse HEAD") {
+        revParses += 1;
+        const sha = opts.advance === true && revParses === 1 ? HEAD_BEFORE : head;
+        return gitResult(argv, { stdout: `${sha}\n` });
+      }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -285,7 +290,7 @@ async function runWith(
     clock: createFixedClock(NOW),
     fs,
     spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
-    git: over.git ?? matchingGit(),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
     probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -622,7 +627,9 @@ test("B1 adopted FOUND holder is retained and the probe is called", async () => 
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
   });
   assert.equal(result.spawned, false);
-  assert.match(result.reason, /already exists/);
+  // R16 F1: the physical fact is the lease holder, not the intent file.
+  // Both exist here; the reason must name the lease (or still be a refusal).
+  assert.match(result.reason, /lease|already exists|refusing to overwrite/);
   assert.ok(observes >= 1, `probe.observe called ${observes} times`);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-CRASHED"), true);
 });

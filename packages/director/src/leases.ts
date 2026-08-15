@@ -527,8 +527,9 @@ function isRecordedHolderPid(pid: number | null): pid is number {
  *
  * A startedAt disagreement uses {@link observedCreationIsStrictlyLater} — the same
  * ordering rule as {@link holderLiveness}. An earlier or unorderable instant is
- * not proof the holder died. A differing runToken is a different process
- * regardless of instants.
+ * not proof the holder died. A differing runToken is a different process only
+ * when the instants do not contradict that claim: identical start instants
+ * plus different tokens are self-contradictory and grant nothing.
  */
 function occupantIsNotRecordedHolder(
   recorded: ProcessIdentityV1 | undefined,
@@ -543,7 +544,14 @@ function occupantIsNotRecordedHolder(
     && observed.runToken !== undefined
     && recorded.runToken !== observed.runToken
   ) {
-    return true;
+    // Same start + different token is a contradiction, not a different process.
+    if (
+      recorded.startedAt === undefined
+      || observed.startedAt === undefined
+      || compareCreationDates(recorded.startedAt, observed.startedAt) !== "SAME"
+    ) {
+      return true;
+    }
   }
   if (recorded.startedAt !== undefined && observed.startedAt !== undefined) {
     return observedCreationIsStrictlyLater(recorded.startedAt, observed.startedAt);

@@ -14,10 +14,13 @@ import {
   acquireLease, reclaimStaleLease, conflicts, canonicalResource, processIdentityMatches,
   type HolderObservationV1, type LeaseV1, type ProcessIdentityV1,
 } from "../src/leases.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  canonicalizeHostPath, pathIsInside, resolveDirectorRoot, isSafePathSegment, validatePathSegment,
+  canonicalizeHostPath, pathIsInside, isSafePathSegment, validatePathSegment,
   validateMissionId, validateRunId, MAX_ID_SEGMENT_LENGTH,
 } from "../src/store-contract.js";
+import { sandboxDirectorStoreRoot } from "../src/lease-store.js";
 import { DEFAULT_DIRECTOR_ROOT, DIRECTOR_ROOT_ENV } from "../src/contracts.js";
 
 const NOW = "2026-08-13T12:00:00.000Z";
@@ -505,11 +508,16 @@ test("the Director root sits outside every worktree, so `git clean` cannot erase
   }
 });
 
-test("the root override is honoured, and an empty one falls back rather than rooting at nothing", () => {
-  assert.equal(resolveDirectorRoot({}), DEFAULT_DIRECTOR_ROOT);
-  assert.equal(resolveDirectorRoot({ [DIRECTOR_ROOT_ENV]: "D:/aion-state" }), "D:/aion-state");
+test("the live store root never defaults to C:\\AION\\director", () => {
+  // resolveDirectorRoot was deleted: its default was DEFAULT_DIRECTOR_ROOT
+  // (C:\\AION\\director), which is on the never-touch list. The wired
+  // resolver is sandboxDirectorStoreRoot.
+  const fallback = join(tmpdir(), "aion-director-d2-store");
+  assert.equal(sandboxDirectorStoreRoot({}), fallback);
+  assert.equal(sandboxDirectorStoreRoot({ [DIRECTOR_ROOT_ENV]: "D:/aion-state" }), "D:/aion-state");
   // `set AION_DIRECTOR_ROOT=` leaves an empty string, and rooting at "" writes into the cwd.
-  assert.equal(resolveDirectorRoot({ [DIRECTOR_ROOT_ENV]: "  " }), DEFAULT_DIRECTOR_ROOT);
+  assert.equal(sandboxDirectorStoreRoot({ [DIRECTOR_ROOT_ENV]: "  " }), fallback);
+  assert.notEqual(fallback.toLowerCase(), DEFAULT_DIRECTOR_ROOT.toLowerCase());
 });
 
 test("path containment does not mistake a sibling with a shared prefix for a child", () => {

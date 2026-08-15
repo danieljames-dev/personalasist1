@@ -272,11 +272,16 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
   };
 }
 
-function matchingGit(head = HEAD_AFTER): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+  let revParses = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
-      if (key === "rev-parse HEAD") return gitResult(argv, { stdout: `${head}\n` });
+      if (key === "rev-parse HEAD") {
+        revParses += 1;
+        const sha = opts.advance === true && revParses === 1 ? HEAD_BEFORE : head;
+        return gitResult(argv, { stdout: `${sha}\n` });
+      }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -431,7 +436,7 @@ async function runWith(
     clock: createFixedClock(NOW),
     fs,
     spawn,
-    git: over.git ?? matchingGit(),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
     probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
     capacity: over.capacity ?? memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -540,7 +545,9 @@ test("Git disagreeing with the handoff headAfter fails the git conjunct", async 
   // Defect: the executor's claimed SHA was believed. The Director's observation is the check.
   const result = await runWith({
     neverWait: true,
-    git: matchingGit(OTHER_HEAD),
+    // Advance HEAD so writeMovedHead (now evaluated for implementer argv)
+    // is not a second failure. The after SHA is still OTHER_HEAD.
+    git: matchingGit(OTHER_HEAD, { advance: true }),
   });
   assert.equal(result.ok, false);
   assert.deepEqual(result.conjunction.failedConjuncts, ["gitAgreesWithHandoff"]);
@@ -2983,9 +2990,10 @@ test("without a captured identity the kill sweep still keeps the spawn floor and
     },
   });
   assert.equal(result.processIdentity, null);
-  // C2: a PID slot is not a process. Ancestry-only leftovers with a foreign
-  // nonce are not killed. 1234 is also before the floor. 1239 has no ancestry.
-  assert.deepEqual(killed, []);
+  // R16 F7: an in-snapshot ParentProcessId chain is positive identity.
+  // 1238 is the holder's child (after the floor) and must be killed even
+  // with a foreign nonce. 1234 is before the floor. 1239 has no chain.
+  assert.deepEqual(killed, [1238]);
 });
 
 test("a stdout stream error before settleStreams still returns a RunResultV1", async () => {

@@ -101,6 +101,25 @@ export function buildExecutorLaunch(
  * list. `executeRun` re-checks the request against it so a file-URL import
  * cannot spawn an arbitrary command.
  */
+/** Permission mode the Grok write-role adapter emits. One spelling. */
+export const GROK_WRITE_PERMISSION_MODE = "bypassPermissions" as const;
+
+/** Flag the Grok write-role adapter emits. One spelling. */
+export const GROK_WRITE_ALWAYS_APPROVE_FLAG = "--always-approve" as const;
+
+/**
+ * Whether `argv` actually handed the child the write-permission tokens this
+ * adapter emits for write roles. A caller-supplied role label is not this fact.
+ */
+export function argvGrantsWritePermission(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--permission-mode" && argv[i + 1] === GROK_WRITE_PERMISSION_MODE) {
+      return true;
+    }
+  }
+  return argv.includes(GROK_WRITE_ALWAYS_APPROVE_FLAG);
+}
+
 export function executorArgvFor(
   name: ExecutorNameV1,
   input: Pick<AdapterInputV1, "promptPath" | "cwd" | "role">,
@@ -108,12 +127,12 @@ export function executorArgvFor(
   if (name === "local") return null;
   if (name === "claude") return ["-p", input.promptPath];
   const reviewOnly = input.role !== undefined && NON_WRITING_ROLES.has(input.role);
-  const permissionMode = reviewOnly ? "dontAsk" : "bypassPermissions";
+  const permissionMode = reviewOnly ? "dontAsk" : GROK_WRITE_PERMISSION_MODE;
   return [
     "--prompt-file", input.promptPath,
     "--cwd", input.cwd,
     "--permission-mode", permissionMode,
-    ...(reviewOnly ? [] : ["--always-approve"]),
+    ...(reviewOnly ? [] : [GROK_WRITE_ALWAYS_APPROVE_FLAG]),
     "--no-plan",
     "--max-turns", String(GROK_MAX_TURNS),
   ];

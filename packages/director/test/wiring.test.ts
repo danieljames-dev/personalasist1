@@ -5,6 +5,9 @@
  * fix stay live in the older copy. Declaration-matching regexes are not a physical fact:
  * they stay green while the symbol is never invoked. Call-position checks strip the
  * declaration first; the launch path is driven.
+ *
+ * The reachability walk matches `import type` as well as runtime imports, so it
+ * proves import-graph reachability, not call reachability.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";

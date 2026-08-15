@@ -205,11 +205,16 @@ function gitResult(argv: readonly string[], over: { status?: number; stdout?: st
   };
 }
 
-function matchingGit(head = HEAD_AFTER): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+  let revParses = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
-      if (key === "rev-parse HEAD") return gitResult(argv, { stdout: `${head}\n` });
+      if (key === "rev-parse HEAD") {
+        revParses += 1;
+        const sha = opts.advance === true && revParses === 1 ? HEAD_BEFORE : head;
+        return gitResult(argv, { stdout: `${sha}\n` });
+      }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -310,7 +315,7 @@ async function runWith(
     clock: over.clock ?? createFixedClock(AFTER),
     fs,
     spawn: over.spawn ?? trackingSpawn(() => lingeringProcess()),
-    git: over.git ?? matchingGit(),
+    git: over.git ?? matchingGit(HEAD_AFTER, { advance: true }),
     probe: over.probe ?? sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -428,7 +433,7 @@ test("C1 cancel-time scans with no holderExitedAt stay SCANNED for an unsampled 
   assert.equal(interpreted.outcome, "SCANNED");
 });
 
-test("C1 a readable parentless in-window row whose parent was never a descendant stays SCANNED", () => {
+test("C1 a readable parentless in-window row whose parent was never a descendant is UNAVAILABLE", () => {
   const hostNoise = {
     pid: 88912,
     name: "cmd.exe",
@@ -443,9 +448,11 @@ test("C1 a readable parentless in-window row whose parent was never a descendant
     observedPids: new Set([4812, LAUNCHER_PID]),
     rows: [{ pid: 4812 }, { pid: LAUNCHER_PID, parentPid: 4812 }, { pid: 88912, parentPid: 1 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(hostNoise, ctx), false);
-  assert.equal(processRowMakesScanUndecidable(hostNoise, ctx), false);
-  assert.equal(interpretRows([hostNoise], { observedPids: [4812, LAUNCHER_PID] }).outcome, "SCANNED");
+  // R16 F6: readable PEB without the nonce is UNKNOWN. The previous
+  // SCANNED assertion spent that UNKNOWN as "not ours".
+  assert.equal(processRowCouldBelongToThisRun(hostNoise, ctx), true);
+  assert.equal(processRowMakesScanUndecidable(hostNoise, ctx), true);
+  assert.equal(interpretRows([hostNoise], { observedPids: [4812, LAUNCHER_PID] }).outcome, "UNAVAILABLE");
 });
 
 test("C1 executeRun with a sampled-parent scrubbed grandchild holds the PRODUCTION_WRITER lease", async () => {

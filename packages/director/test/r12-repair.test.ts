@@ -197,11 +197,16 @@ function gitResult(argv: readonly string[], over: Partial<GitCommandResultV1> = 
   };
 }
 
-function matchingGit(head = HEAD_AFTER): GitRunner {
+function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {}): GitRunner {
+  let revParses = 0;
   return {
     run(argv) {
       const key = argv.join(" ");
-      if (key === "rev-parse HEAD") return gitResult(argv, { stdout: `${head}\n` });
+      if (key === "rev-parse HEAD") {
+        revParses += 1;
+        const sha = opts.advance === true && revParses === 1 ? HEAD_BEFORE : head;
+        return gitResult(argv, { stdout: `${sha}\n` });
+      }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -289,7 +294,7 @@ async function runWith(
     clock: createFixedClock(NOW),
     fs,
     spawn: over.spawn ?? trackingSpawn(() => exitingProcess()),
-    git: matchingGit(),
+    git: matchingGit(HEAD_AFTER, { advance: true }),
     probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
     capacity: memoryCapacity(),
     leases: over.leases ?? memoryLeases(),
@@ -448,7 +453,7 @@ test("C4 executeRun imported from dist/run-manager.js refuses an arbitrary launc
         files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
       }),
       spawn: trackingSpawn(() => exitingProcess()),
-      git: matchingGit(),
+      git: matchingGit(HEAD_AFTER, { advance: true }),
       probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
       capacity: memoryCapacity(),
       leases: memoryLeases(),
@@ -522,7 +527,7 @@ test("B1 crash window with pid-null lease and recorded spawnPid keeps the lock f
         clock: createFixedClock(NOW),
         fs: hostFs,
         spawn: trackingSpawn(() => exitingProcess()),
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { advance: true }),
         probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
         capacity: memoryCapacity(),
         leases: store,
@@ -773,7 +778,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
           firstSpawned = true;
           return hanging;
         },
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { advance: true }),
         probe: sequentialProbe([foundObservation(RECORDED)]),
         capacity: memoryCapacity(),
         wait: () => new Promise(() => {}),
@@ -813,7 +818,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         clock: createFixedClock(NOW),
         fs: createNodeRunFileSystem(),
         spawn: trackingSpawn(() => exitingProcess({ pid: 9999 })),
-        git: matchingGit(),
+        git: matchingGit(HEAD_AFTER, { advance: true }),
         probe: sequentialProbe([foundObservation({ ...RECORDED, pid: 9999 }), HOLDER_GONE]),
         capacity: memoryCapacity(),
         wait: async () => undefined,

@@ -64,6 +64,12 @@ export interface RunIntentV1 {
   readonly secretsPresent: false;
   readonly promptPath?: string;
   readonly role?: ExecutorRoleV1;
+  /**
+   * Keys of the environment object handed to the child (not values).
+   * Values can contain secrets; keys are the durable record of what
+   * a bypassPermissions executor was given.
+   */
+  readonly childEnvKeys?: readonly string[];
 }
 
 export interface PersistRunIntentInputV1 {
@@ -80,6 +86,7 @@ export interface PersistRunIntentInputV1 {
   readonly now: IsoTimestamp;
   readonly promptPath?: string;
   readonly role?: ExecutorRoleV1;
+  readonly childEnvKeys?: readonly string[];
 }
 
 /**
@@ -593,6 +600,20 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
     role = roleRaw;
   }
 
+  const childEnvKeysRaw = own(parsed, "childEnvKeys");
+  let childEnvKeys: readonly string[] | undefined;
+  if (childEnvKeysRaw !== undefined && childEnvKeysRaw !== null) {
+    if (!Array.isArray(childEnvKeysRaw) || !childEnvKeysRaw.every((item) => typeof item === "string")) {
+      return { ok: false, reason: "childEnvKeys must be an array of strings" };
+    }
+    const keys: string[] = [];
+    for (const item of childEnvKeysRaw) {
+      if (CONTROL_BYTES.test(item)) return { ok: false, reason: "childEnvKeys contains a control byte" };
+      keys.push(item);
+    }
+    childEnvKeys = Object.freeze(keys);
+  }
+
   const intent: RunIntentV1 = {
     schema: RUN_INTENT_SCHEMA_V1,
     runId,
@@ -612,6 +633,7 @@ export function runIntentFrom(parsed: unknown): { ok: true; intent: RunIntentV1 
     secretsPresent: false,
     ...(promptPath !== undefined ? { promptPath } : {}),
     ...(role !== undefined ? { role } : {}),
+    ...(childEnvKeys !== undefined ? { childEnvKeys } : {}),
   };
   return { ok: true, intent };
 }
@@ -745,6 +767,9 @@ function buildIntent(input: PersistRunIntentInputV1): BuiltIntentV1 {
     secretsPresent: false,
     ...(promptPath !== undefined ? { promptPath } : {}),
     ...(input.role !== undefined ? { role: input.role } : {}),
+    ...(input.childEnvKeys !== undefined
+      ? { childEnvKeys: Object.freeze([...input.childEnvKeys]) }
+      : {}),
   };
 
   if (containsSecret(serialiseIntent(intent))) {

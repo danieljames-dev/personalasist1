@@ -43,7 +43,12 @@ import {
   type ClockV1,
   type LogSinkV1,
 } from "./bounded-log.js";
-import { buildExecutorLaunch, classifyExecutorExit, executorArgvFor } from "./executor-adapters.js";
+import {
+  argvGrantsWritePermission,
+  buildExecutorLaunch,
+  classifyExecutorExit,
+  executorArgvFor,
+} from "./executor-adapters.js";
 import {
   discoverClaudeExecutor,
   discoverGrokExecutor,
@@ -102,6 +107,7 @@ import {
   holderLiveness,
   isUsablePid,
   normaliseRunNonce,
+  normalisedCreationDate,
   isBrokerHostName,
   nextUndecidablePersistenceDecision,
   parentlessRowTiedToThisRun,
@@ -575,6 +581,11 @@ export function evaluateSuccessConjunction(input: {
    * wording. Omitted means a process existed (live evaluation).
    */
   readonly processWasCreated?: boolean;
+  /**
+   * Physical fact: the argv handed to the child contained the adapter's
+   * write-permission tokens. A missing role label cannot turn this off.
+   */
+  readonly argvGrantedWrite?: boolean;
 }): SuccessConjunctionV1 {
   const known = input.knownSuccessExitCodes ?? KNOWN_SUCCESS_EXIT_CODES;
   const classified = input.exitCode === null
@@ -714,6 +725,12 @@ export function evaluateSuccessConjunction(input: {
   const afterSha = observedHeadSha(input.gitAfter);
   const role = input.role;
   const processWasCreated = input.processWasCreated !== false;
+  const argvGrantedWrite = input.argvGrantedWrite === true;
+  const isWriteRole = role !== undefined && isExecutorRole(role) && WRITE_ROLES.has(role);
+  const isReviewRole = role !== undefined && isExecutorRole(role) && NON_WRITING_ROLES.has(role);
+  // Physical fact: write-permission tokens on argv cannot be turned off by omitting a label.
+  const mustAdvanceHead = isWriteRole || argvGrantedWrite;
+  const mustLeaveTree = isReviewRole && !argvGrantedWrite;
   let reviewOk = true;
   let reviewReason = "role is not a review that must leave the tree unchanged";
   let writeMovedOk = true;
@@ -728,7 +745,7 @@ export function evaluateSuccessConjunction(input: {
     reviewReason = `role ${String(role)} is not an enumerated executor role`;
     writeMovedOk = false;
     writeMovedReason = `role ${String(role)} is not an enumerated executor role`;
-  } else if (role !== undefined && NON_WRITING_ROLES.has(role)) {
+  } else if (mustLeaveTree) {
     if (beforeSha === null || afterSha === null) {
       reviewOk = false;
       reviewReason = beforeSha === null
@@ -742,7 +759,7 @@ export function evaluateSuccessConjunction(input: {
     }
   }
 
-  if (processWasCreated && role !== undefined && isExecutorRole(role) && WRITE_ROLES.has(role)) {
+  if (processWasCreated && mustAdvanceHead) {
     if (beforeSha === null || afterSha === null) {
       writeMovedOk = false;
       writeMovedReason = beforeSha === null
@@ -883,6 +900,7 @@ function launchPathMatchesDiscoveredAdapter(
   request: ExecuteRunRequestV1,
   deps: RunManagerDepsV1,
   runNonce: string,
+  role: ExecutorRoleV1,
 ): { ok: true } | { ok: false; reason: string } {
   const env = deps.discoveryEnv ?? {};
   const probe = deps.discoveryFs ?? { isFile: () => false, readDir: () => [] };
@@ -909,7 +927,7 @@ function launchPathMatchesDiscoveredAdapter(
   const expected = executorArgvFor(request.executor, {
     promptPath,
     cwd: request.cwd,
-    role: request.role ?? "IMPLEMENT",
+    role,
   });
   if (expected === null) {
     return { ok: false, reason: "launch path refused: adapter has no argv for this executor" };
@@ -929,6 +947,9 @@ function refusedBeforeSpawn(
   reason: string,
 ): RunResultV1 {
   const emptyParsed: HandoffParseV1 = { ok: false, handoff: null, problems: ["no handoff text"] };
+  const refusedRole = request.role === undefined
+    ? "IMPLEMENT"
+    : isExecutorRole(request.role) ? request.role : undefined;
   const conjunction = evaluateSuccessConjunction({
     exitCode: null,
     stillRunning: false,
@@ -950,7 +971,7 @@ function refusedBeforeSpawn(
     timedOut: false,
     logStayedWithinBudget: true,
     processWasCreated: false,
-    ...(request.role !== undefined ? { role: request.role } : {}),
+    ...(refusedRole !== undefined ? { role: refusedRole } : {}),
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -992,6 +1013,11 @@ export async function executeRun(
 
   const emptyCancel: CancelReportV1 = { timedOut: false, stages: [] };
   const emptyParsed: HandoffParseV1 = { ok: false, handoff: null, problems: ["no handoff text"] };
+  // Validity is checked on the raw field. Everything else in this function
+  // uses the single resolved `role` below.
+  const roleIsEnumerated = request.role === undefined || isExecutorRole(request.role);
+  const role: ExecutorRoleV1 = roleIsEnumerated ? (request.role ?? "IMPLEMENT") : "IMPLEMENT";
+  const argvGrantedWrite = argvGrantsWritePermission(request.argv);
   const emptyConjunction = evaluateSuccessConjunction({
     exitCode: null,
     stillRunning: false,
@@ -1013,7 +1039,8 @@ export async function executeRun(
     timedOut: false,
     logStayedWithinBudget: true,
     processWasCreated: false,
-    ...(request.role !== undefined ? { role: request.role } : {}),
+    ...(role !== undefined ? { role } : {}),
+    argvGrantedWrite,
     ...(request.knownSuccessExitCodes !== undefined
       ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
       : {}),
@@ -1077,7 +1104,8 @@ export async function executeRun(
       executorTreeReason: "the run threw before the process tree could be observed",
       timedOut: timedOutFlag,
       logStayedWithinBudget: true,
-      ...(request.role !== undefined ? { role: request.role } : {}),
+      ...(role !== undefined && isExecutorRole(role) ? { role } : {}),
+      argvGrantedWrite,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
         : {}),
@@ -1113,7 +1141,7 @@ export async function executeRun(
   try {
     // 1. timeout, cwd, nonce, argv, then the launch-path predicate.
     // Pure input checks — nothing acquired yet.
-    if (request.role !== undefined && !isExecutorRole(request.role)) {
+    if (!roleIsEnumerated) {
       return finish({
         ok: false,
         spawned: false,
@@ -1225,12 +1253,29 @@ export async function executeRun(
       });
     }
 
-    const launchPath = launchPathMatchesDiscoveredAdapter(request, deps, runNonce);
+    const launchPath = launchPathMatchesDiscoveredAdapter(request, deps, runNonce, role);
     if (!launchPath.ok) {
       return finish({
         ok: false,
         spawned: false,
         reason: launchPath.reason,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (NON_WRITING_ROLES.has(role) && argvGrantedWrite) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "role and argv disagree about write permission",
         conjunction: emptyConjunction,
         exitCode: null,
         processIdentity: null,
@@ -1456,8 +1501,10 @@ export async function executeRun(
       });
     }
 
-    if (intentState !== "none") {
-      const prior = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
+    if (intentState !== "none" || adoptedExistingHolder) {
+      const prior = intentState !== "none"
+        ? readRunIntent(intentPath, intentStoreFromFs(deps.fs))
+        : { ok: false as const, intent: null };
       const intentIdentity = prior.ok ? prior.intent.processIdentity : null;
       exitProof = await proveAdoptedWriterExit({
         lease: heldLease,
@@ -1467,16 +1514,19 @@ export async function executeRun(
         intentIdentity,
         observedPids: seenInTreePids,
         wait: deps.wait,
+        clock: deps.clock,
       });
       releaseHeld();
       const adoptedWriterFact = writerReleaseEvidence(exitProof)
         && releasedLeaseId === heldLease.leaseId
         && heldLease.kind === "PRODUCTION_WRITER";
-      const why = intentState === "spawned"
-        ? "a recorded spawn already exists; refusing to overwrite it"
-        : intentState === "unreadable"
-          ? "an existing intent at this path is unreadable; refusing to overwrite it"
-          : "an existing intent at this path is unresolvable; refusing to overwrite it";
+      const why = adoptedExistingHolder
+        ? "a lease row for this run already records a holder; refusing to overwrite it"
+        : intentState === "spawned"
+          ? "a recorded spawn already exists; refusing to overwrite it"
+          : intentState === "unreadable"
+            ? "an existing intent at this path is unreadable; refusing to overwrite it"
+            : "an existing intent at this path is unresolvable; refusing to overwrite it";
       return finish({
         ok: false,
         spawned: false,
@@ -1522,7 +1572,13 @@ export async function executeRun(
       runNonce,
       now: deps.clock.now(),
       ...(request.promptPath !== undefined ? { promptPath: request.promptPath } : {}),
-      ...(request.role !== undefined ? { role: request.role } : {}),
+      role,
+      childEnvKeys: Object.freeze([
+        ...new Set([
+          ...Object.keys(request.childEnv ?? {}),
+          "AION_RUN_NONCE",
+        ]),
+      ].sort()),
     };
     let permit: SpawnPermitV1 | null = null;
     let child: SpawnHandleV1;
@@ -1650,6 +1706,33 @@ export async function executeRun(
       });
     }
 
+    // Attach the pump before the event loop can turn. captureProcessIdentity
+    // is a blocking CIM call; if the child exits inside it, Node's
+    // flushStdio resumes un-listened streams and drops the bytes. pause()
+    // does not help — flushStdio resumes unconditionally.
+    const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
+    const log = createBoundedLog({ clock: deps.clock, sinks });
+    boundedLog = log;
+    let sinkFailed = false;
+    let haltRequested = false;
+    let resolveHalt: (() => void) | null = null;
+    const haltSignal = new Promise<void>((resolve) => {
+      resolveHalt = resolve;
+    });
+    const writeAndWatch = (stream: "stdout" | "stderr") => (chunk: Uint8Array): void => {
+      try {
+        const written = log.write(stream, chunk);
+        if (written.mustHalt && !haltRequested) {
+          haltRequested = true;
+          resolveHalt?.();
+        }
+      } catch {
+        sinkFailed = true;
+      }
+    };
+    const stdoutDone = pumpStream(child.stdout, writeAndWatch("stdout")).catch(() => undefined);
+    const stderrDone = pumpStream(child.stderr, writeAndWatch("stderr")).catch(() => undefined);
+
     // Stamp the holder onto the lease before the durable spawn record so a
     // crash cannot leave intent.spawnPid set while the lease still says
     // pid:null. Must stay after the spawn; must not move any intent write
@@ -1682,6 +1765,10 @@ export async function executeRun(
       const confirmedStopped = observation.outcome === "NOT_FOUND";
       stillRunning = !confirmedStopped;
       if (confirmedStopped) holderExitedAt = deps.clock.now();
+      // Ceiling is the known exit instant, or now if the holder may still
+      // be running. A missing ceiling would turn in-window rows into
+      // "not ours" instead of undecidable.
+      const attemptCeiling = holderExitedAt ?? deps.clock.now();
       try {
         killNonceBearingLeftovers({
           scanOrphans: deps.scanOrphans,
@@ -1693,7 +1780,7 @@ export async function executeRun(
           holderPid: childPid,
           createdNotBefore: spawnedAtFloor ?? "",
           observedPids: seenInTreePids,
-          ...(holderExitedAt !== null ? { holderExitedAt } : {}),
+          holderExitedAt: attemptCeiling,
         });
       } catch {
         // A failed leftover kill is not a confirmed absence.
@@ -1706,8 +1793,11 @@ export async function executeRun(
         createdNotBefore: spawnedAtFloor ?? "",
         observedPids: seenInTreePids,
         wait: deps.wait,
-        ...(holderExitedAt !== null ? { holderExitedAt } : {}),
+        holderExitedAt: attemptCeiling,
       });
+      const streamsSettledAttempt = await settleStreams(stdoutDone, stderrDone, deps.wait);
+      if (!streamsSettledAttempt || sinkFailed) log.markDrainIncomplete();
+      log.flush();
       const reason = confirmedStopped
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
         : `spawn returned but the attempt could not be recorded; stillRunning: true; pid ${child.pid}: ${attempted.reason}`;
@@ -1724,7 +1814,7 @@ export async function executeRun(
         lease: heldLease,
         productionWriterLeaseReleasedByThisRun: false,
         cancel: { timedOut, stages: cancelStages },
-        log: null,
+        log: { ...log.report(), sinkFailed: sinkFailed || log.report().sinkFailed },
       });
     }
     permit = attempted.permit;
@@ -1769,30 +1859,6 @@ export async function executeRun(
     } else {
       heldLease = persistLeaseHolder(leaseStore, heldLease, childPid, { pid: childPid, runNonce }, runNonce);
     }
-
-    if (!child.exited) {
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-    }
-
-    const sinks = deps.logSinks ?? { stdout: createMemoryLogSink(), stderr: createMemoryLogSink() };
-    const log = createBoundedLog({ clock: deps.clock, sinks });
-    boundedLog = log;
-    let haltRequested = false;
-    let resolveHalt: (() => void) | null = null;
-    const haltSignal = new Promise<void>((resolve) => {
-      resolveHalt = resolve;
-    });
-    const writeAndWatch = (stream: "stdout" | "stderr") => (chunk: Uint8Array): void => {
-      const written = log.write(stream, chunk);
-      if (written.mustHalt && !haltRequested) {
-        haltRequested = true;
-        resolveHalt?.();
-      }
-    };
-    const stdoutDone = pumpStream(child.stdout, writeAndWatch("stdout")).catch(() => undefined);
-    const stderrDone = pumpStream(child.stderr, writeAndWatch("stderr")).catch(() => undefined);
 
     // 6. Timeout / cancel ladder. mustHalt resolves the race immediately.
     let exitCode: number | null = null;
@@ -1842,7 +1908,7 @@ export async function executeRun(
     }
 
     const streamsSettledEarly = await settleStreams(stdoutDone, stderrDone, deps.wait);
-    if (!streamsSettledEarly) log.markDrainIncomplete();
+    if (!streamsSettledEarly || sinkFailed || log.report().sinkFailed) log.markDrainIncomplete();
     log.flush();
     if (log.report().mustHalt && cancelStages.length === 0) {
       const cancelled = await cancelLadder(
@@ -1860,11 +1926,14 @@ export async function executeRun(
       if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
     }
 
-    const logReport = log.report();
+    const logReport = { ...log.report(), sinkFailed: sinkFailed || log.report().sinkFailed };
     const output = `${log.liveTail("stdout").toString("utf8")}\n${log.liveTail("stderr").toString("utf8")}`;
 
     // Nonce sweep on every exit path, not only timeout / mustHalt.
     if (child.exited && holderExitedAt === null) holderExitedAt = deps.clock.now();
+    // Sound ceiling: known exit, or now if the holder has not been observed
+    // to exit. Omitting it would treat in-window rows as "not ours".
+    const sweepCeiling = holderExitedAt ?? deps.clock.now();
     let leftoverSweep: LeftoverSweepV1 = { confirmed: false, remaining: [], killed: false };
     try {
       leftoverSweep = killNonceBearingLeftovers({
@@ -1877,7 +1946,7 @@ export async function executeRun(
         holderPid: processIdentity?.pid ?? childPid,
         createdNotBefore: spawnedAtFloor ?? "",
         observedPids: seenInTreePids,
-        ...(holderExitedAt !== null ? { holderExitedAt } : {}),
+        holderExitedAt: sweepCeiling,
       });
     } catch {
       leftoverSweep = { confirmed: false, remaining: [], killed: false };
@@ -1933,7 +2002,9 @@ export async function executeRun(
       createdNotBefore: spawnedAtFloor ?? "",
       observedPids: seenInTreePids,
       wait: deps.wait,
-      ...(holderExitedAt !== null ? { holderExitedAt } : {}),
+      // Same sound ceiling as the leftover sweep. The live path must
+      // answer "is this row ours?" identically to the adopted path.
+      holderExitedAt: sweepCeiling,
     });
 
     const ownedHandleExit: OwnedHandleExitV1 = {
@@ -1979,8 +2050,9 @@ export async function executeRun(
       executorTreeGone: tree.ok,
       executorTreeReason: tree.reason,
       timedOut,
-      logStayedWithinBudget: logReport.mustHalt !== true,
-      ...(request.role !== undefined ? { role: request.role } : {}),
+      logStayedWithinBudget: logReport.mustHalt !== true && !logReport.sinkFailed,
+      role,
+      argvGrantedWrite,
       spawnedAtFloor,
       ...(request.knownSuccessExitCodes !== undefined
         ? { knownSuccessExitCodes: request.knownSuccessExitCodes }
@@ -2042,7 +2114,7 @@ export async function executeRun(
       lease: heldLease,
       productionWriterLeaseReleasedByThisRun: false,
       cancel: { timedOut, stages: cancelStages },
-      log: null,
+      log: boundedLog === null ? null : boundedLog.report(),
     });
   } finally {
     releaseHeld();
@@ -2087,9 +2159,10 @@ function persistLeaseHolder(
       && base.processIdentity.runToken !== ""
       ? base.processIdentity.runToken
       : runNonce;
-  const startedAt = identity !== null && identity.creationDate !== undefined && identity.creationDate !== ""
+  const rawStartedAt = identity !== null && identity.creationDate !== undefined && identity.creationDate !== ""
     ? identity.creationDate
     : base.processIdentity?.startedAt;
+  const startedAt = rawStartedAt === undefined ? undefined : (normalisedCreationDate(rawStartedAt) ?? undefined);
   const identityPid = identity !== null
     ? identity.pid
     : typeof pid === "number"
@@ -2476,10 +2549,17 @@ function killNonceBearingLeftovers(input: {
     if (leftover.pid === input.childPid) continue;
     if (!writerSightingNotProvenAbsent(leftover, input.runNonce, tree)) continue;
     if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
-    // A leftover is killed only when its normalised nonce equals this run's
-    // nonce and it was created at or after the spawn floor. Ancestry alone
-    // never authorises a kill: a PID slot is not a process.
-    if (normaliseRunNonce(leftover.runNonce) !== input.runNonce) continue;
+    // Same "is this process mine?" answer the reporting filter uses.
+    // An in-snapshot ParentProcessId chain is not a stale historical PID.
+    const leftoverCtx = {
+      runNonce: input.runNonce,
+      createdNotBefore,
+      ...(isUsablePid(holderPid) ? { holderPid } : {}),
+      ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+      observedPids,
+      rows: leftovers,
+    };
+    if (!rowHasPositiveRunIdentity(leftover, leftoverCtx)) continue;
     input.killTree(leftover.pid);
     killed = true;
   }
@@ -2578,9 +2658,9 @@ async function cancelLadder(
   const stillAfterHard = !child.exited;
 
   // ORPHAN: after cancel, scan by AION_RUN_NONCE and spawn floor; kill leftovers.
-  const leftoverCeiling = child.exited
-    ? (holderExitedAt ?? deps.clock.now())
-    : holderExitedAt ?? undefined;
+  // Always a sound ceiling: known exit, or now if the holder is still
+  // running. An absent ceiling is the F2 defect (in-window → "not ours").
+  const leftoverCeiling = holderExitedAt ?? deps.clock.now();
   let leftoverSweep: LeftoverSweepV1 = { confirmed: false, remaining: [], killed: false };
   try {
     leftoverSweep = killNonceBearingLeftovers({
@@ -2593,7 +2673,7 @@ async function cancelLadder(
       holderPid: recorded?.pid ?? child.pid,
       createdNotBefore,
       ...(observedPids !== undefined ? { observedPids } : {}),
-      ...(leftoverCeiling ? { holderExitedAt: leftoverCeiling } : {}),
+      holderExitedAt: leftoverCeiling,
     });
     if (leftoverSweep.killed && !stages.includes("ORPHAN")) stages.push("ORPHAN");
   } catch {
@@ -2611,7 +2691,15 @@ function pumpStream(stream: Readable | null, write: (chunk: Uint8Array) => void)
   if (stream === null) return Promise.resolve();
   return new Promise((resolve) => {
     stream.on("data", (chunk: unknown) => {
-      write(chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk)));
+      // A synchronous throw here is not a promise rejection; the pump
+      // `.catch` cannot see it. writeAndWatch and the sink already
+      // swallow; this is the last guard so an injected write cannot
+      // kill the Director process.
+      try {
+        write(chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk)));
+      } catch {
+        // Lost bytes are a drain failure, not an uncaught exception.
+      }
     });
     stream.on("end", () => resolve());
     stream.on("error", () => resolve());
@@ -2739,8 +2827,10 @@ function recordedIdentityFromHeldLease(
   if (id === undefined || !isUsablePid(id.pid)) return null;
   const token = normaliseRunNonce(id.runToken ?? "");
   if (token === null) return null;
-  const creationDate = id.startedAt;
-  if (creationDate === undefined || creationDate === "") return null;
+  // Same door as processIdentityFrom: an un-normalisable startedAt is
+  // missing, not an invented instant. Feb 31 must not mint death.
+  const creationDate = normalisedCreationDate(id.startedAt);
+  if (creationDate === null) return null;
   return {
     pid: id.pid,
     creationDate,
@@ -2776,12 +2866,14 @@ async function proveAdoptedWriterExit(input: {
   readonly intentIdentity: ExecutorProcessIdentityV1 | null;
   readonly observedPids: Set<number>;
   readonly wait?: (ms: number) => Promise<void>;
+  readonly clock: ClockV1;
 }): Promise<WriterExitProofV1 | null> {
   const identity = recordedIdentityFromHeldLease(input.lease, input.intentIdentity);
   const holderPid = input.lease.pid ?? identity?.pid;
   const floor = identity?.creationDate
-    ?? input.lease.processIdentity?.startedAt
-    ?? input.lease.acquiredAt;
+    ?? (input.lease.processIdentity?.startedAt !== undefined
+      ? (normalisedCreationDate(input.lease.processIdentity.startedAt) ?? input.lease.acquiredAt)
+      : input.lease.acquiredAt);
   const probedPid = identity?.pid ?? (isUsablePid(holderPid) ? holderPid : null);
   let observation: ProcessObservationV1 | null = null;
   if (probedPid !== null) {
@@ -2791,6 +2883,10 @@ async function proveAdoptedWriterExit(input: {
       observation = { outcome: "UNAVAILABLE", reason: "probe threw" };
     }
   }
+  // The holder exited at or before this instant (or we just failed to see
+  // it). [floor, now] is the maximally-uncertain but sound window. A
+  // missing ceiling would answer the opposite of the live path.
+  const holderExitedAt = input.clock.now();
   const orphanScan = await collectWriterOrphans({
     scanOrphans: input.scanOrphans,
     recorded: identity,
@@ -2799,6 +2895,7 @@ async function proveAdoptedWriterExit(input: {
     observedPids: input.observedPids,
     ...(input.wait !== undefined ? { wait: input.wait } : {}),
     ...(isUsablePid(holderPid) ? { holderPid } : {}),
+    holderExitedAt,
   });
   return proveWriterExit({
     processStillRunning: false,

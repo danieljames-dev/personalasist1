@@ -1213,12 +1213,11 @@ export function rowHasPositiveRunIdentity(
  * A row is plausible when its nonce matches, it is in the holder's pid chain,
  * it was created in [floor, holder exit] with no nonce and a broker parent,
  * or it is parentless (dead parent) with no nonce and either a previously
- * observed parent pid or an *unreadable* creation instant in the closed
- * [floor, holder exit] window. A readable PEB that does not carry this
- * run's nonce proves only that the environment block lacks the nonce —
- * see {@link parentlessRowTiedToThisRun}. A broker image name may only
- * exclude a row that has already failed every positive test. Everything
- * else is host noise.
+ * observed parent pid or a creation instant in the closed [floor, holder
+ * exit] window. A readable PEB that does not carry this run's nonce is
+ * not evidence of absence — see {@link parentlessRowTiedToThisRun}. A
+ * broker image name may only exclude a row that has already failed every
+ * positive test. Everything else is host noise.
  */
 export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -1240,23 +1239,26 @@ export function processRowCouldBelongToThisRun(
  * or an ancestry sample while the holder was alive) ties the row to this
  * run regardless of the child's image name or environment block.
  *
- * The closed-interval half stays gated on an *unreadable* PEB
- * (`nonceReadable === false`). A successful PEB read that found no
+ * The closed-interval half fires for any parentless in-window row whose
+ * parent was never sampled. A successful PEB read that found no
  * `AION_RUN_NONCE` proves only that this process's environment block
  * does not contain the nonce. It does not prove the process is not
  * ours: `CreateProcess` takes `lpEnvironment`, and a caller that
  * supplies one (`ProcessStartInfo.EnvironmentVariables.Remove`, or
  * `spawn(..., { env })`) mints a readable block without the nonce.
- * That bit is executor-controllable. UNKNOWN (`nonceReadable === false`)
- * stays UNKNOWN.
+ * That bit is executor-controllable. A readable block without the nonce
+ * is the same UNKNOWN as an unreadable one: the row stays tied when it
+ * sits in `[floor, holderExitedAt]`, and
+ * {@link processRowMakesScanUndecidable} turns that into UNAVAILABLE.
  *
  * An intermediate that is born and dies entirely between two ancestry
  * samples is never added to `observedPids`, so this function still
- * cannot see that grandchild. Closing that gap requires a Windows Job
- * Object on the holder (kill-on-close, breakaway denied, membership
- * queried with `JOBOBJECT_BASIC_PROCESS_ID_LIST`). No image name,
- * environment block, or dead intermediate can evade that. That
- * primitive is an Owner decision and is not in scope this round.
+ * cannot see that grandchild except through the closed interval. Closing
+ * that gap requires a Windows Job Object on the holder (kill-on-close,
+ * breakaway denied, membership queried with
+ * `JOBOBJECT_BASIC_PROCESS_ID_LIST`). No image name, environment block,
+ * or dead intermediate can evade that. That primitive is an Owner
+ * decision and is not in scope this round.
  */
 export function parentlessRowTiedToThisRun(
   sighting: ProcessRowPlausibilityV1,
@@ -1265,7 +1267,6 @@ export function parentlessRowTiedToThisRun(
   const parentless = sighting.parentPresent === false && sighting.parentPid !== undefined;
   if (!parentless) return false;
   if (ctx.observedPids.has(sighting.parentPid!)) return true;
-  if (sighting.nonceReadable !== false) return false;
   return provenCreatedAtOrBeforeCeiling(sighting.creationDate, ctx.holderExitedAt);
 }
 
@@ -1418,6 +1419,37 @@ export function compareCreationDates(recorded: string, observed: string): Creati
   return "UNCOMPARABLE";
 }
 
+/**
+ * Build a UTC instant from the calendar the token named. Range-checking
+ * the components is not enough: `Date.UTC` rolls Feb 31 into March and
+ * remaps years 0–99 onto 1900–1999. A token that names no real day must
+ * be refused, not invented.
+ */
+function utcFromNamedCalendar(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  ms: number,
+): number | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (!Number.isFinite(ms)) return null;
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  if (!Number.isFinite(asUtc)) return null;
+  const calendar = new Date(asUtc);
+  if (
+    calendar.getUTCFullYear() !== year
+    || calendar.getUTCMonth() !== month - 1
+    || calendar.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return asUtc;
+}
+
 function parseProcessTimestamp(value: string): number | null {
   const trimmed = value.trim();
   if (trimmed === "") return null;
@@ -1436,12 +1468,9 @@ function parseIso8601Instant(value: string): number | null {
   const minute = Number(match[5]);
   const second = Number(match[6]);
   const fraction = match[7] ?? "";
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  if (hour > 23 || minute > 59 || second > 59) return null;
   const ms = fraction === "" ? 0 : Number(fraction.padEnd(3, "0").slice(0, 3));
-  if (!Number.isFinite(ms)) return null;
-  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, ms);
-  if (!Number.isFinite(asUtc)) return null;
+  const asUtc = utcFromNamedCalendar(year, month, day, hour, minute, second, ms);
+  if (asUtc === null) return null;
   if (/Z$/i.test(value)) return asUtc;
   if (match[8] === undefined) return null;
   const offsetHours = Number(match[9]);
@@ -1463,10 +1492,16 @@ function parseDmtfDatetime(value: string): number | null {
   const micro = Number(match[7]);
   const sign = match[8];
   const offsetMinutes = Number(match[9]);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  if (hour > 23 || minute > 59 || second > 59) return null;
-  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second, Math.floor(micro / 1000));
-  if (!Number.isFinite(asUtc)) return null;
+  const asUtc = utcFromNamedCalendar(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    Math.floor(micro / 1000),
+  );
+  if (asUtc === null) return null;
   const offsetMs = offsetMinutes * 60 * 1000;
   return sign === "+" ? asUtc - offsetMs : asUtc + offsetMs;
 }
