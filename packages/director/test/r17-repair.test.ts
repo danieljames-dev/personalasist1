@@ -31,6 +31,7 @@ import {
   resolveWindowsSystemExecutable,
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { persistRunIntent, requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -389,7 +390,7 @@ async function runWith(
       setTimeout(resolve, Math.min(ms, 30));
     })),
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
@@ -451,7 +452,7 @@ test("F1 executeRun withholds the writer lease for a live foreign-nonce parentle
     killTree: (pid) => {
       killed.push(pid);
     },
-    scanOrphans: () => [row],
+    scanOrphans: () => writerOrphanScanResult([row]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-f1" } },
   });
   assert.equal(result.ok, false, result.reason);
@@ -535,7 +536,7 @@ test("F1 liveness: a clean empty scan still releases the PRODUCTION_WRITER lease
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-clean" } },
   });
   assert.equal(result.ok, true, result.reason);
@@ -641,7 +642,7 @@ test("F3 adopted {pid, runToken} lease plus NOT_FOUND and a clean scan releases 
     leases,
     fs: memoryFs({ dirs: [CWD, RUN_ROOT] }),
     probe: { observe: () => HOLDER_GONE },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-adopt" } },
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
@@ -671,10 +672,10 @@ test("F3 adopted crash-window safety: UNAVAILABLE, FOUND, missing scan, and live
     });
     return { released: result.productionWriterLeaseReleasedByThisRun, left: leases.list().length };
   };
-  assert.deepEqual(await make({ outcome: "UNAVAILABLE", reason: "denied" }, () => []), { released: false, left: 1 });
-  assert.deepEqual(await make(foundObservation(RECORDED), () => []), { released: false, left: 1 });
+  assert.deepEqual(await make({ outcome: "UNAVAILABLE", reason: "denied" }, () => writerOrphanScanResult([])), { released: false, left: 1 });
+  assert.deepEqual(await make(foundObservation(RECORDED), () => writerOrphanScanResult([])), { released: false, left: 1 });
   assert.deepEqual(await make(HOLDER_GONE, "throw"), { released: false, left: 1 });
-  assert.deepEqual(await make(HOLDER_GONE, () => [parentlessInWindow({ nonceReadable: true, runNonce: "x" })]), {
+  assert.deepEqual(await make(HOLDER_GONE, () => writerOrphanScanResult([parentlessInWindow({ nonceReadable: true, runNonce: "x" })])), {
     released: false,
     left: 1,
   });

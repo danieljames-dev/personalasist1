@@ -36,6 +36,7 @@ import {
   processRowMakesScanUndecidable,
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -336,7 +337,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: over.neverWait === true ? (() => new Promise(() => {})) : async () => undefined,
     killTree: () => undefined,
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   };
@@ -496,7 +497,7 @@ test("C4 executeRun imported from dist/run-manager.js refuses an arbitrary launc
       leases: memoryLeases(),
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       ...matchingDiscovery(),
     },
   );
@@ -570,7 +571,7 @@ test("B1 crash window with pid-null lease and recorded spawnPid keeps the lock f
         leases: store,
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         ...matchingDiscovery(),
       },
     );
@@ -671,7 +672,8 @@ test("D1 the real Windows orphan scanner with a 5-minute floor and unused nonce 
   const floor = new Date(Date.now() + 60 * 60_000).toISOString();
   const nonce = `nonce-r12-unused-${process.pid}-${Date.now()}`;
   const rows = scanner({ runNonce: nonce, createdNotBefore: floor, holderPid: 0 });
-  assert.ok(Array.isArray(rows));
+  assert.ok(Array.isArray(rows.snapshot));
+  assert.ok(Array.isArray(rows.killable));
 });
 
 test("D1 executeRun with the production scanner rather than an empty stub still settles", async () => {
@@ -831,7 +833,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         capacity: memoryCapacity(),
         wait: () => new Promise(() => {}),
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: EXE },
         discoveryFs: { isFile: (path) => path === EXE, readDir: () => [] },
       },
@@ -883,7 +885,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         capacity: memoryCapacity(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: EXE },
         discoveryFs: { isFile: (path) => path === EXE, readDir: () => [] },
       },

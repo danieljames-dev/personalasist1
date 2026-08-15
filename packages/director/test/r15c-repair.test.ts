@@ -25,6 +25,7 @@ import {
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
   type ProcessRowPlausibilityContextV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -342,7 +343,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     sampleAncestry: over.sampleAncestry ?? (() => []),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
@@ -501,14 +502,14 @@ test("C1 executeRun with a sampled-parent scrubbed grandchild holds the PRODUCTI
         { pid: LAUNCHER_PID, parentPid: holderPid },
       ];
     },
-    scanOrphans: () => [{
+    scanOrphans: () => writerOrphanScanResult([{
       pid: SCRUBBED_GRANDCHILD.pid,
       name: SCRUBBED_GRANDCHILD.name,
       creationDate: SCRUBBED_GRANDCHILD.creationDate,
       parentPid: SCRUBBED_GRANDCHILD.parentPid,
       nonceReadable: SCRUBBED_GRANDCHILD.nonceReadable,
       parentPresent: SCRUBBED_GRANDCHILD.parentPresent,
-    }],
+    }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-c1" } },
   });
   assert.equal(result.ok, false, result.reason);
@@ -541,7 +542,7 @@ test("C1 a failed ancestry sample is not a scan and must not force UNAVAILABLE",
     sampleAncestry: () => {
       throw new Error("cim-error");
     },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-c1-fail" } },
   });
   assert.equal(result.spawned, true, result.reason);

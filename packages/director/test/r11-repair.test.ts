@@ -30,6 +30,7 @@ import {
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type ProcessObservationV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit, type SpawnPermitV1 } from "../src/run-intent.js";
 import { GROK_MAX_TURNS } from "../src/executor-adapters.js";
@@ -324,7 +325,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: over.neverWait === true ? (() => new Promise(() => {})) : async () => undefined,
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     discoveryEnv: { AION_GROK_PATH: EXE, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
     discoveryFs: {
@@ -668,7 +669,7 @@ test("B1 adopted NOT_FOUND holder is released on the same re-entry path", async 
     leases,
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
   });
   assert.equal(result.spawned, false);
@@ -720,7 +721,7 @@ test("C2 an ancestry-only leftover older than the recorded holder is not killed"
     creationDate: "2026-08-13T11:00:00.000Z",
   };
   await runWith({
-    scanOrphans: () => [leftover],
+    scanOrphans: () => writerOrphanScanResult([leftover]),
     killTree: (pid) => {
       killed.push(pid);
     },
@@ -741,7 +742,7 @@ test("C2-liveness a nonce-bearing detached grandchild is still killed", async ()
     creationDate: T0,
   };
   await runWith({
-    scanOrphans: () => (gone ? [] : [grandchild]),
+    scanOrphans: () => writerOrphanScanResult(gone ? [] : [grandchild]),
     killTree: (pid) => {
       killed.push(pid);
       if (pid === 7172) gone = true;
@@ -797,13 +798,13 @@ test("D1 end-to-end the double-fork leaf withholds the PRODUCTION_WRITER lease",
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [{
+    scanOrphans: () => writerOrphanScanResult([{
       pid: 20328,
       parentPid: 19990,
       parentPresent: false,
       nonceReadable: true,
       creationDate: "2026-08-13T12:00:05.000Z",
-    }],
+    }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-d1" } },
   });
   assert.equal(result.ok, false);
@@ -856,13 +857,13 @@ test("D2 end-to-end an unreadable-nonce sighting withholds the writer lease", as
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [{
+    scanOrphans: () => writerOrphanScanResult([{
       pid: 7777,
       parentPid: 6666,
       nonceReadable: false,
       parentPresent: true,
       creationDate: T0,
-    }],
+    }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-d2" } },
   });
   assert.equal(result.ok, false);
@@ -977,7 +978,7 @@ test("E2 ADVERSARIAL_REVIEW that actually commits fails reviewLeftTreeUnchanged"
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: EXE },
         discoveryFs: { isFile: (path) => path === EXE, readDir: () => [] },
       },

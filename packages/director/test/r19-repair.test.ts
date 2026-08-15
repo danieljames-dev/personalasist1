@@ -32,11 +32,13 @@ import {
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
   type ProcessRowPlausibilityContextV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
   executeRun,
   recoverAbandonedRun,
+  writerSightingNotProvenAbsent,
   type CapacityGateV1,
   type ExecuteRunRequestV1,
   type LeaseStoreV1,
@@ -351,7 +353,7 @@ async function runWith(over: {
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
     ...(over.sampleAncestry !== undefined ? { sampleAncestry: over.sampleAncestry } : {}),
@@ -384,7 +386,7 @@ test("T1.2 executeRun withholds the writer lease for the above-ceiling parentles
     killTree: (pid) => {
       killed.push(pid);
     },
-    scanOrphans: () => [CLASS1_ROW as never],
+    scanOrphans: () => writerOrphanScanResult([CLASS1_ROW as never]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-t12" } },
   });
   // Base HEAD released the lease and set executorTreeIsGone.ok = true.
@@ -433,7 +435,8 @@ test("T1.4 production scanner on a 0ms window reaches SCANNED", { timeout: 60_00
         holderPid: process.pid,
         holderExitedAt: new Date().toISOString(),
       });
-      assert.ok(Array.isArray(rows));
+      assert.ok(Array.isArray(rows.snapshot));
+      assert.ok(Array.isArray(rows.killable));
       return;
     } catch (error) {
       lastError = error;
@@ -610,7 +613,7 @@ test("C6 adopted lease with a mismatched invocation nonce refuses the writer pro
   const result = await runWith({
     leases,
     probe: { observe: () => HOLDER_GONE },
-    scanOrphans: () => [leftover as never],
+    scanOrphans: () => writerOrphanScanResult([leftover as never]),
     request: {
       runNonce: "NEW-NONCE",
       lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-c6" },
@@ -632,7 +635,7 @@ test("C6 a nonce mismatch refuses even when the scan is empty", async () => {
   const result = await runWith({
     leases,
     probe: { observe: () => HOLDER_GONE },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: {
       runNonce: "NEW-NONCE",
       lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-c6b" },
@@ -653,7 +656,7 @@ test("C6 liveness: matching tokens and a clean scan still release the adopted wr
   const result = await runWith({
     leases,
     probe: { observe: () => HOLDER_GONE },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: {
       runNonce: NONCE,
       lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-c6-live" },
@@ -995,6 +998,83 @@ test("C3/C4 production scanner keeps an unattributable row visible and does not 
   assert.match(String(tree?.reason), /9911/);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-c34"), true);
+});
+
+test("C3 production scanner snapshot includes a non-killable row the predicate sees", async () => {
+  const noise = {
+    pid: 104604,
+    name: "sppsvc.exe",
+    parentPid: 1420,
+    parentPresent: true,
+    parentName: "services.exe",
+    parentCreationDate: BOOT,
+    creationDate: AFTER,
+    nonceReadable: true,
+    runNonce: "FOREIGN-NONCE",
+  };
+  const mine = {
+    pid: 88002,
+    name: "node.exe",
+    parentPid: 4812,
+    parentPresent: true,
+    parentName: "node.exe",
+    parentCreationDate: T0,
+    nonceReadable: true,
+    runNonce: NONCE,
+    creationDate: AFTER,
+  };
+  const envelope = (processes: readonly unknown[]) => ({
+    status: 0,
+    stdout: JSON.stringify({ ok: true, unreadable: 0, processes, directorSessionId: 1 }),
+    stderr: "",
+  });
+  const scannerBoth = createWindowsOrphanScanner({
+    spawnSync: () => envelope([noise, mine]),
+    waitSync: () => undefined,
+  });
+  const scanned = scannerBoth({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+  });
+  assert.deepEqual(scanned.snapshot.map((row) => row.pid).sort((a, b) => a - b), [88002, 104604]);
+  const expectedKillable = scanned.snapshot.filter((row) => orphanRowIsKillable(
+    row,
+    NONCE,
+    4812,
+    scanned.snapshot,
+    FLOOR,
+    HOLDER_EXIT,
+  ));
+  assert.deepEqual(scanned.killable, expectedKillable);
+  assert.deepEqual(scanned.killable.map((row) => row.pid), [88002]);
+  const membership = {
+    holderPid: 4812,
+    rows: scanned.snapshot,
+    createdNotBefore: FLOOR,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: new Set([4812]),
+  };
+  assert.equal(writerSightingNotProvenAbsent(noise, NONCE, membership), false);
+  assert.equal(scanned.snapshot.some((row) => row.pid === 104604), true);
+  assert.equal(scanned.killable.some((row) => row.pid === 104604), false);
+
+  const noiseOnly = createWindowsOrphanScanner({
+    spawnSync: () => envelope([noise]),
+    waitSync: () => undefined,
+  });
+  const released = await runWith({
+    scanOrphans: noiseOnly,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-c3-noise" } },
+  });
+  assert.equal(released.productionWriterLeaseReleasedByThisRun, true, released.reason);
+
+  const withheld = await runWith({
+    scanOrphans: scannerBoth,
+    request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-c3-both" } },
+  });
+  assert.equal(withheld.productionWriterLeaseReleasedByThisRun, false, withheld.reason);
 });
 
 test("C5 degenerate holderExitedAt equals floor does not drop the holder-edge in PowerShell", () => {

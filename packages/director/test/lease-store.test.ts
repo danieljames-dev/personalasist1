@@ -2,6 +2,7 @@
  * Host-wide exclusion: two stores, one lock file, the OS decides.
  */
 import assert from "node:assert/strict";
+import { writerOrphanScanResult } from "../src/process-identity.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -222,7 +223,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           leases: store,
           wait: async () => undefined,
           killTree: () => undefined,
-          scanOrphans: () => [],
+          scanOrphans: () => writerOrphanScanResult([]),
           resolveArtifactPath: (absolutePath) => absolutePath,
           discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
           discoveryFs: {

@@ -59,6 +59,7 @@ import {
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
   type ProcessRowPlausibilityContextV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import {
   existingIntentOn,
@@ -364,7 +365,7 @@ async function runWith(over: {
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   });
@@ -385,7 +386,7 @@ test("C1 rename-the-leftover: six names share the UNDECIDABLE verdict and keep t
     const result = await runWith({
       leases,
       request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-c1" } },
-      scanOrphans: () => [row as never],
+      scanOrphans: () => writerOrphanScanResult([row as never]),
     });
     assert.equal(result.productionWriterLeaseReleasedByThisRun, false, name);
     assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-c1"), true, name);
@@ -409,7 +410,7 @@ test("C1 ShellExecute explorer parent is UNDECIDABLE and retains the writer leas
   const result = await runWith({
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-shell" } },
-    scanOrphans: () => [row as never],
+    scanOrphans: () => writerOrphanScanResult([row as never]),
   });
   assert.equal(result.ok, false, result.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
@@ -466,7 +467,7 @@ test("C1 liveness: a clean PRODUCTION_WRITER run still releases the lease", asyn
   const result = await runWith({
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live" } },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.conjunction.findings.length, 15);
@@ -515,7 +516,7 @@ test("C2 reused holder slot after exit is not in the chain and is not killed", a
       spawned = true;
       return handle;
     },
-    scanOrphans: () => [row],
+    scanOrphans: () => writerOrphanScanResult([row]),
     killTree: (pid) => {
       killed.push(pid);
     },
@@ -573,7 +574,7 @@ test("C2 the same row created before holderExitedAt stays in the chain and is ki
       spawned = true;
       return handle;
     },
-    scanOrphans: () => [row],
+    scanOrphans: () => writerOrphanScanResult([row]),
     killTree: (pid) => {
       killed.push(pid);
     },
@@ -972,7 +973,7 @@ test("C7 liveness: a review-role stand-in still writes handoff.json", async () =
       leases: memoryLeases(),
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       discoveryEnv: { AION_GROK_PATH: process.execPath, AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
       discoveryFs: {
         isFile: (path) => path === process.execPath || path === CLAUDE_EXE,
@@ -1254,7 +1255,7 @@ test("C10 executeRun and launchRun return RunResultV1 for hostile runRoot and ar
     leases: memoryLeases(),
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     discoveryEnv: discovery.discoveryEnv ?? {},
     discoveryFs: discovery.discoveryFs ?? { isFile: () => false, readDir: () => [] },
   };

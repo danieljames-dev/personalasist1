@@ -53,7 +53,7 @@ import {
   type WriterExitProofInputV1,
 } from "../src/run-manager.js";
 import { persistRunIntent, requireSpawnPermit } from "../src/run-intent.js";
-import type { ExecutorProcessIdentityV1, ProcessObservationV1 } from "../src/process-identity.js";
+import { writerOrphanScanResult, type ExecutorProcessIdentityV1, type ProcessObservationV1 } from "../src/process-identity.js";
 
 const NOW = "2026-08-13T12:00:00.000Z";
 const HEAD_BEFORE = "a".repeat(40);
@@ -358,7 +358,7 @@ async function runAdopted(over: {
       killTree: () => undefined,
       scanOrphans: (query) => {
         createdNotBefore = query.createdNotBefore;
-        return over.scanOrphans === undefined ? [] : over.scanOrphans(query);
+        return over.scanOrphans === undefined ? writerOrphanScanResult([]) : over.scanOrphans(query);
       },
       resolveArtifactPath: (absolutePath) => absolutePath,
       ...matchingDiscovery(),
@@ -467,7 +467,7 @@ test("1a forged intent startedAt does not become the orphan scan floor", async (
   const out = await runAdopted({
     intentIdentity: { ...RECORDED, creationDate: "2099-01-01T00:00:00.000Z" },
     probe: HOLDER_GONE,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.notEqual(out.createdNotBefore, "2099-01-01T00:00:00.000Z");
   assert.equal(out.createdNotBefore, T0);
@@ -477,7 +477,7 @@ test("1a liveness: honest intent plus NOT_FOUND releases the writer", async () =
   const out = await runAdopted({
     intentIdentity: RECORDED,
     probe: HOLDER_GONE,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(out.released, true);
   assert.equal(out.rows, 0);
@@ -551,7 +551,7 @@ test("1b a pre-existing handoff.json is refused before spawn", async () => {
     leases: memoryLeases(),
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     ...matchingDiscovery(),
   });
   assert.equal(result.spawned, false, result.reason);
@@ -591,7 +591,7 @@ test("1b liveness: a stub that echoes AION_RUN_NONCE with an in-window finishedA
     leases: memoryLeases(),
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   });
@@ -626,7 +626,7 @@ test("1c two overlapping executeRun calls with the same cwd and divergent WORKTR
       setTimeout(resolve, Math.min(ms, 20));
     }),
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     ...matchingDiscovery(),
   });
   const firstP = executeRun(
@@ -695,7 +695,7 @@ test("1c WORKTREE resource forms that host-path already normalises are accepted"
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         resolveArtifactPath: (absolutePath) => absolutePath,
         ...matchingDiscovery(),
       },
@@ -727,7 +727,7 @@ test("2 executeRun with claude + INDEPENDENT_ACCEPTANCE is refused before spawn"
       leases: memoryLeases(),
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       ...matchingDiscovery(),
     },
   );
@@ -755,7 +755,7 @@ test("2 executeRun with grok + IMPLEMENT is refused before spawn", async () => {
       leases: memoryLeases(),
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       ...matchingDiscovery(),
     },
   );
@@ -779,7 +779,7 @@ test("2 executeRun with each LOCAL role is refused before spawn", async () => {
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         ...matchingDiscovery(),
       },
     );
@@ -988,7 +988,7 @@ test("4 executeRun with the real node spawner and a large Claude stdin still wri
         leases,
         wait: createNodeWait(),
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         resolveArtifactPath: (absolutePath) => absolutePath,
         discoveryEnv: { AION_CLAUDE_CODE_PATH: process.execPath },
         discoveryFs: {
@@ -1151,14 +1151,14 @@ test("6 an undecidable parentless row names pid and name in the tree reason", as
     leases: memoryLeases(),
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [{
+    scanOrphans: () => writerOrphanScanResult([{
       pid: 37420,
       name: "head.exe",
       parentPid: 1,
       parentPresent: false,
       nonceReadable: true,
       creationDate: HOLDER_EXIT,
-    }],
+    }]),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   });
@@ -1207,7 +1207,7 @@ test("6 liveness: a clean scan still reports the tree gone and still releases th
     leases,
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   });

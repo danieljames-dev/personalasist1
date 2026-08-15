@@ -575,7 +575,7 @@ test("the orphan scanner keeps only this nonce and drops processes created too e
     }),
   });
   const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-13T11:00:00.000Z" });
-  assert.deepEqual(hits.map((item) => item.pid), [11]);
+  assert.deepEqual(hits.killable.map((item) => item.pid), [11]);
 });
 
 test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its environment", async () => {
@@ -594,7 +594,7 @@ test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its env
         createdNotBefore: floor,
       });
       assert.ok(
-        sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
+        sightings.killable.some((item) => item.pid === child.pid && item.runNonce === nonce),
         `expected pid ${child.pid} in ${JSON.stringify(sightings)}`,
       );
     } catch (error) {
@@ -671,7 +671,7 @@ test("the orphan scanner sees a child whose argv names a different nonce than it
         createdNotBefore: floor,
       });
       assert.ok(
-        sightings.some((item) => item.pid === child.pid && item.runNonce === nonce),
+        sightings.killable.some((item) => item.pid === child.pid && item.runNonce === nonce),
         `decoy argv must not hide pid ${child.pid}: ${JSON.stringify(sightings)}`,
       );
     } catch (error) {
@@ -713,7 +713,8 @@ test("a successful PEB read with no nonce is not overridden by argv text", () =>
     },
   });
   const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-14T14:00:00.000Z" });
-  assert.deepEqual(hits, []);
+  assert.deepEqual(hits.killable, []);
+  assert.equal(hits.snapshot.some((row) => row.pid === 4120), true);
   const pebAt = script.indexOf("[AionPebEnv]::GetNonce");
   const cmdAt = script.search(/commandLine -match/i);
   assert.ok(pebAt >= 0 && cmdAt >= 0 && pebAt < cmdAt, "PEB must be read before CommandLine");

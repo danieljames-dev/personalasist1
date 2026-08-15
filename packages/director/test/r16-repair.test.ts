@@ -27,6 +27,7 @@ import {
   processRowMakesScanUndecidable,
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -383,7 +384,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
@@ -476,7 +477,7 @@ test("F2 adopted path does not release on a nonce-less broker-parented in-window
     leases,
     fs: memoryFs({ dirs: [CWD, RUN_ROOT_RETRY] }),
     probe: { observe: () => HOLDER_GONE },
-    scanOrphans: () => [brokerRow],
+    scanOrphans: () => writerOrphanScanResult([brokerRow]),
     request: {
       runRoot: RUN_ROOT_RETRY,
       lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-1" },
@@ -536,7 +537,7 @@ test("F3 a real child that prints and exits during a blocking probe keeps its st
         leases: memoryLeases(),
         wait: createNodeWait(),
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         logSinks: { stdout, stderr },
         ...matchingDiscovery(process.execPath),
       },
@@ -626,7 +627,7 @@ test("F6 a readable parentless in-window row makes the scan undecidable and with
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [emptyNonce],
+    scanOrphans: () => writerOrphanScanResult([emptyNonce]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-f6" } },
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
@@ -650,7 +651,7 @@ test("F7 a clean-exit descendant with parentPid === holderPid is killed", async 
     killTree: (pid) => {
       killed.push(pid);
     },
-    scanOrphans: () => [leftover],
+    scanOrphans: () => writerOrphanScanResult([leftover]),
   });
   assert.ok(killed.includes(12080), `killed=${JSON.stringify(killed)} reason=${result.reason}`);
 });

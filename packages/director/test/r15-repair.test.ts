@@ -27,6 +27,7 @@ import {
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
   type ProcessRowPlausibilityContextV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -345,7 +346,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: async () => undefined,
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
@@ -507,7 +508,7 @@ test("F1 executeRun with a broker-named nonce-bearing in-chain leftover withhold
     killTree: (pid) => {
       killed.push(pid);
     },
-    scanOrphans: () => [leftover],
+    scanOrphans: () => writerOrphanScanResult([leftover]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-f1" } },
   });
   assert.equal(result.ok, false, result.reason);
@@ -614,7 +615,7 @@ test("F2 executeRun with the detached grandchild retains the writer lease and mi
   const result = await runWith({
     leases,
     clock: createFixedClock(AFTER),
-    scanOrphans: () => [DETACHED_GRANDCHILD],
+    scanOrphans: () => writerOrphanScanResult([DETACHED_GRANDCHILD]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-f2" } },
   });
   assert.equal(result.ok, false, result.reason);
@@ -856,7 +857,7 @@ test("F3f executeRun reports droppedLiveBytes when the durable stdout is shorter
       setTimeout(resolve, Math.min(ms, 30));
     }),
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     resolveArtifactPath: (absolutePath) => absolutePath,
     logSinks: { stdout, stderr: createMemoryLogSink() },
     ...matchingDiscovery(),
@@ -993,7 +994,7 @@ async function refusedLaunch(role: ExecutorRoleV1) {
       leases: memoryLeases(),
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       discoveryEnv: {},
       discoveryFs: { isFile: () => false, readDir: () => [] },
     },
@@ -1064,7 +1065,7 @@ test("F8 executeRun destroys hanging stdout/stderr and keeps the bytes already w
       setTimeout(resolve, Math.min(ms, 30));
     }),
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   });

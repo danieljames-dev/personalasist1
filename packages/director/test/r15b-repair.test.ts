@@ -22,6 +22,7 @@ import {
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
   type ProcessRowPlausibilityContextV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -361,7 +362,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: over.wait ?? (async () => undefined),
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
   };
@@ -578,7 +579,7 @@ test("F11 a transient OpenConsole row is gone on the re-scan so the scanner retu
   const { host, spawned } = sequentialHost([cimOk([OPEN_CONSOLE]), cimOk([])], waits);
   const scanner = createWindowsOrphanScanner(host);
   const hits = scanner(scanQuery());
-  assert.deepEqual(hits, []);
+  assert.deepEqual(hits, writerOrphanScanResult([]));
   assert.ok(spawned() >= 2, `expected a re-scan, spawned=${spawned()}`);
   assert.ok(waits.length >= 1, `expected a bounded wait, waits=${waits.length}`);
 });
@@ -601,7 +602,7 @@ test("F11 the same F2 row that is gone on the re-scan is not a live process", ()
   const { host, spawned } = sequentialHost([cimOk([DETACHED_GRANDCHILD]), cimOk([])], waits);
   const scanner = createWindowsOrphanScanner(host);
   const hits = scanner(scanQuery());
-  assert.deepEqual(hits, []);
+  assert.deepEqual(hits, writerOrphanScanResult([]));
   assert.ok(spawned() >= 2, `expected a re-scan, spawned=${spawned()}`);
 });
 
@@ -644,7 +645,7 @@ test("F11 executeRun with a persisting F2 row withholds the PRODUCTION_WRITER le
     wait: async (ms) => {
       waits.push(ms);
     },
-    scanOrphans: () => [DETACHED_GRANDCHILD],
+    scanOrphans: () => writerOrphanScanResult([DETACHED_GRANDCHILD]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-f11" } },
   });
   assert.equal(result.ok, false, result.reason);
@@ -704,7 +705,7 @@ test("F1 executeRun with a broker-named nonce-bearing leftover still withholds t
     killTree: (pid) => {
       killed.push(pid);
     },
-    scanOrphans: () => [leftover],
+    scanOrphans: () => writerOrphanScanResult([leftover]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-f1b" } },
   });
   assert.equal(result.ok, false, result.reason);

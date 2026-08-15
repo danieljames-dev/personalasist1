@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { createFixedClock } from "../src/bounded-log.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import type { LeaseV1 } from "../src/leases.js";
-import type { ExecutorProcessIdentityV1, ProcessObservationV1 } from "../src/process-identity.js";
+import { writerOrphanScanResult, type ExecutorProcessIdentityV1, type ProcessObservationV1 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import { modulesReachableFrom } from "../src/src-reachability.js";
 import {
@@ -530,7 +530,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
         },
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: exe },
         discoveryFs: {
           isFile: (path) => path === exe,
@@ -694,7 +694,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       },
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [{ pid: 7777, runNonce: nonce, creationDate: t0 }],
+      scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: nonce, creationDate: t0 }]),
       discoveryEnv: { AION_GROK_PATH: exe, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
       discoveryFs: {
         isFile: (path) => path === exe || path === "C:\\Tools\\claude.exe",

@@ -117,6 +117,8 @@ import {
   OrphanScanUnavailableError,
   parentlessRowTiedToThisRun,
   processRowCouldBelongToThisRun,
+  writerOrphanScanResult,
+  type WriterOrphanScanResultV1,
   resolveWindowsSystemExecutable,
   rememberSampledDescendantPids,
   rowHasPositiveRunIdentity,
@@ -294,7 +296,7 @@ export interface RunManagerDepsV1 {
     holderPid?: number;
     holderExitedAt?: string;
     observedPids?: readonly number[];
-  }) => readonly OrphanSightingV1[];
+  }) => WriterOrphanScanResultV1;
   /**
    * Optional test hook. When omitted and `scanOrphans` is also omitted,
    * production uses {@link createWindowsAncestrySampler}. A failed sample
@@ -2949,7 +2951,10 @@ async function collectWriterOrphans(input: {
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids: [...observedPids],
     };
-    const scanOnce = (): OrphanSightingV1[] => [...resolveOrphanScanner(input.scanOrphans)(query)];
+    const scanOnce = (): WriterOrphanScanResultV1 => {
+      const scanned = resolveOrphanScanner(input.scanOrphans)(query);
+      return writerOrphanScanResult([...scanned.snapshot], [...scanned.killable]);
+    };
     const ctxFor = (rows: readonly OrphanSightingV1[]) => ({
       runNonce: input.runNonce,
       createdNotBefore,
@@ -2958,7 +2963,8 @@ async function collectWriterOrphans(input: {
       observedPids,
       rows,
     });
-    let sightings = scanOnce();
+    let scanned = scanOnce();
+    let sightings = [...scanned.snapshot];
     let plausibility = ctxFor(sightings);
     let undecidable = undecidableRowsOf(sightings, plausibility);
     if (undecidable.length > 0) {
@@ -2966,7 +2972,7 @@ async function collectWriterOrphans(input: {
       let clean: readonly OrphanSightingV1[] | null = null;
       for (let attempt = 1; attempt < UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS; attempt++) {
         await waitWithCeiling(wait, UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
-        let next: OrphanSightingV1[];
+        let next: WriterOrphanScanResultV1;
         try {
           next = scanOnce();
         } catch {
@@ -2977,22 +2983,23 @@ async function collectWriterOrphans(input: {
             undecidable: sightingsAsOrphans(undecidable),
           };
         }
-        const decision = nextUndecidablePersistenceDecision(undecidable, next, ctxFor(next));
+        const nextRows = [...next.snapshot];
+        const decision = nextUndecidablePersistenceDecision(undecidable, nextRows, ctxFor(nextRows));
         if (decision.action === "unavailable") {
           return {
             performed: false,
-            sightings: next,
+            sightings: nextRows,
             liveSightings: [],
-            undecidable: sightingsAsOrphans(undecidableRowsOf(next, ctxFor(next))),
+            undecidable: sightingsAsOrphans(undecidableRowsOf(nextRows, ctxFor(nextRows))),
           };
         }
         if (decision.action === "scan-clean") {
-          clean = next;
+          clean = nextRows;
           break;
         }
         undecidable = decision.undecidable;
-        sightings = next;
-        plausibility = ctxFor(next);
+        sightings = nextRows;
+        plausibility = ctxFor(nextRows);
       }
       if (clean === null) {
         return {
@@ -3114,9 +3121,9 @@ function killNonceBearingLeftovers(input: {
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids: [...observedPids],
   };
-  let leftovers: readonly OrphanSightingV1[];
+  let scanned: WriterOrphanScanResultV1;
   try {
-    leftovers = resolveOrphanScanner(input.scanOrphans)(query);
+    scanned = resolveOrphanScanner(input.scanOrphans)(query);
   } catch (error) {
     // UNKNOWN never authorises a kill. Surface the blocking rows so
     // leftoverRemaining can see what the kill list deleted.
@@ -3129,12 +3136,20 @@ function killNonceBearingLeftovers(input: {
     }
     return { confirmed: false, remaining: [], killed: false };
   }
-  rememberInTreePids(observedPids, leftovers, input.runNonce, holderPid ?? undefined, input.holderExitedAt, createdNotBefore);
-  const tree = { holderPid, rows: leftovers };
+  const snapshot = scanned.snapshot;
+  const leftovers = scanned.killable;
+  rememberInTreePids(observedPids, snapshot, input.runNonce, holderPid ?? undefined, input.holderExitedAt, createdNotBefore);
+  const membershipTree = {
+    holderPid,
+    rows: snapshot,
+    createdNotBefore,
+    ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+    observedPids,
+  };
   let killed = false;
   for (const leftover of leftovers) {
     if (leftover.pid === input.childPid) continue;
-    if (!writerSightingNotProvenAbsent(leftover, input.runNonce, tree)) continue;
+    if (!writerSightingNotProvenAbsent(leftover, input.runNonce, membershipTree)) continue;
     if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
     // Same "is this process mine?" answer the reporting filter uses.
     // An in-snapshot ParentProcessId chain is not a stale historical PID.
@@ -3144,7 +3159,7 @@ function killNonceBearingLeftovers(input: {
       ...(isUsablePid(holderPid) ? { holderPid } : {}),
       ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
       observedPids,
-      rows: leftovers,
+      rows: snapshot,
     };
     if (!rowHasPositiveRunIdentity(leftover, leftoverCtx)) continue;
     try {
@@ -3161,10 +3176,10 @@ function killNonceBearingLeftovers(input: {
       ...query,
       observedPids: [...observedPids],
     });
-    remaining = after.filter((sighting) => writerSightingNotProvenAbsent(
+    remaining = after.snapshot.filter((sighting) => writerSightingNotProvenAbsent(
       sighting,
       input.runNonce,
-      { holderPid, rows: after },
+      { holderPid, rows: after.snapshot },
     ));
   } catch {
     return { confirmed: false, remaining: [], killed };

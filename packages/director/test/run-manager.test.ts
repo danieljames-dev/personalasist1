@@ -30,6 +30,7 @@ import {
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
   type ProcessObservationV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import {
   answersAfterReboot,
@@ -490,7 +491,7 @@ async function runWith(
     wait: over.wait ?? (over.neverWait ? (() => new Promise(() => {})) : async () => undefined),
     killTree: over.killTree ?? (() => undefined),
     ...(over.askWriterLiveness !== undefined ? { askWriterLiveness: over.askWriterLiveness } : {}),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: over.resolveArtifactPath ?? ((absolutePath) => absolutePath),
     ...matchingDiscovery(),
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
@@ -735,7 +736,7 @@ test("UNKNOWN liveness with a landed production-writer release is not an exit pr
       { outcome: "UNAVAILABLE", reason: "access-denied" },
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
@@ -757,7 +758,7 @@ test("a liveness answer about a different identity does not produce an exit proo
       foundObservation(RECORDED),
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     askWriterLiveness: () => ({
       subject: OTHER_IDENTITY,
       observation: { outcome: "NOT_FOUND", reason: "gone" },
@@ -783,7 +784,7 @@ test("a production-writer lease release is evidence only after a constructed exi
       foundObservation(RECORDED),
       { outcome: "NOT_FOUND", reason: "exited" },
     ]),
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
   const proof = proveWriterExit(writerProofInput());
@@ -868,7 +869,7 @@ test("DEAD_CONFIRMED does not set the writer-release fact for a non-writer lease
         { outcome: "NOT_FOUND", reason: "gone" },
       ]),
       request: { lease },
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
     });
     assert.equal(
       result.productionWriterLeaseReleasedByThisRun,
@@ -965,7 +966,7 @@ test("a production writer that ignores kill and survives killTree does not relea
     },
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [{ pid: hung.pid, runNonce: NONCE, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: hung.pid, runNonce: NONCE, creationDate: T0 }]),
   });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
@@ -996,7 +997,7 @@ test("a clean parent exit with a live nonce-bearing child is not writer-release 
       foundObservation(RECORDED),
       { outcome: "NOT_FOUND", reason: "parent gone" },
     ]),
-    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.ok(
@@ -1027,7 +1028,7 @@ test("FOUND without executablePath does not produce an exit proof", async () => 
       },
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
@@ -1063,7 +1064,7 @@ test("a mismatched runNonce does not produce an exit proof", async () => {
       },
     ]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-1" } },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.equal(
@@ -1100,7 +1101,7 @@ test("a throwing liveness probe denies the field and still writes a durable resu
         throw new Error("RPC server unavailable");
       },
     },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
@@ -1125,7 +1126,7 @@ test("a padded request nonce still identifies a live grandchild as an orphan", a
       foundObservation(RECORDED),
       { outcome: "NOT_FOUND", reason: "parent gone" },
     ]),
-    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.ok(
@@ -1252,7 +1253,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
     leases,
     wait: () => new Promise(() => {}),
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     ...matchingDiscovery(),
   });
 
@@ -1284,7 +1285,7 @@ test("a process death between spawn and its record refuses a same-runId restart"
     leases: memoryLeases(leases.list()),
     wait: async () => undefined,
     killTree: () => undefined,
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     ...matchingDiscovery(),
   });
 
@@ -1356,7 +1357,7 @@ test("a real node process is spawned with shell false and its exit is collected"
         leases: memoryLeases(),
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         ...matchingDiscovery(process.execPath),
       },
     );
@@ -1408,7 +1409,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
         leases,
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         ...matchingDiscovery(process.execPath),
       },
     );
@@ -1522,7 +1523,7 @@ test("a live same-nonce grandchild with parent UNAVAILABLE withholds the writer 
       foundObservation(RECORDED),
       { outcome: "UNAVAILABLE", reason: "access-denied" },
     ]),
-    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
     killTree: (pid) => {
       killed.push(pid);
     },
@@ -1552,7 +1553,7 @@ test("an ALIVE probe of the recorded holder leaves the production-writer lease h
       foundObservation(RECORDED),
       foundObservation(RECORDED),
     ]),
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
@@ -1617,7 +1618,7 @@ test("a dropped lease save is not a released lease and does not mint an exit pro
       foundObservation(RECORDED),
       { outcome: "NOT_FOUND", reason: "exited" },
     ]),
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   assert.ok(
@@ -1659,7 +1660,7 @@ test("a hanging handle plus a NOT_FOUND probe does not release the production-wr
       foundObservation(RECORDED),
       { outcome: "NOT_FOUND", reason: "gone after ladder" },
     ]),
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.exitCode, null);
@@ -1775,7 +1776,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         leases,
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         ...matchingDiscovery(process.execPath),
       },
     );
@@ -1812,7 +1813,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
         leases,
         wait: createNodeWait(),
         killTree: killProcessTreeStandIn,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         ...matchingDiscovery(process.execPath),
       },
     );
@@ -1854,7 +1855,7 @@ test("recorded holder ALIVE leaves the lease in the store for every lease kind",
       leases,
       request: { lease },
       probe: sequentialProbe([foundObservation(RECORDED), foundObservation(RECORDED)]),
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
     });
     assert.equal(result.spawned, true, `${lease.kind}: ${result.reason}`);
     assert.ok(
@@ -1877,7 +1878,7 @@ test("a child that survives SOFT+HARD leaves the lease held for every lease kind
       request: { lease, timeoutMs: 1 },
       wait: async () => undefined,
       probe: sequentialProbe([foundObservation(RECORDED), foundObservation(RECORDED)]),
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
     });
     assert.equal(result.spawned, true, `${lease.kind}: ${result.reason}`);
     assert.equal(result.cancel.timedOut, true, lease.kind);
@@ -1897,7 +1898,7 @@ test("clean exit, holder NOT_FOUND, empty scan releases every lease kind", async
       leases,
       request: { lease },
       probe: sequentialProbe([foundObservation(RECORDED), HOLDER_GONE]),
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
     });
     assert.equal(result.spawned, true, `${lease.kind}: ${result.reason}`);
     assert.equal(
@@ -2093,7 +2094,7 @@ test("injected dependency throws do not leak capacity or block a later run", asy
         leases,
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         resolveArtifactPath: (absolutePath) => absolutePath,
         ...matchingDiscovery(),
       };
@@ -2285,7 +2286,7 @@ test("fast-exit before identity capture still releases the production-writer lea
     leases,
     spawn: trackingSpawn(() => alreadyExitedProcess()),
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-fast" } },
   });
   assert.equal(result.spawned, true, result.reason);
@@ -2329,7 +2330,7 @@ test("a child gone on the host before Node delivers exit still releases the prod
         return { outcome: "NOT_FOUND", reason: "host slot empty" };
       },
     },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-loop" } },
   });
   assert.equal(result.ok, true, result.reason);
@@ -2348,7 +2349,7 @@ test("a real instant-exit production writer releases its own lease", async () =>
       }),
       spawn: realNodeSpawn("process.exit(0)"),
       probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       wait: createNodeWait(),
       leases,
       request: {
@@ -2400,7 +2401,7 @@ test("UNAVAILABLE probe while the handle has not exited withholds the lease", as
     },
     wait: async () => undefined,
     probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "cim down" }) },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
@@ -2437,7 +2438,7 @@ test("a live descendant with a scrubbed nonce withholds the lease", async () => 
     neverWait: true,
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-anc" } },
-    scanOrphans: () => [{ pid: 7777, parentPid: RECORDED.pid, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: 7777, parentPid: RECORDED.pid, creationDate: T0 }]),
   });
   assert.equal(proveWriterExit(writerProofInput({
     liveSightings: [{ pid: 7777, parentPid: RECORDED.pid }],
@@ -2453,7 +2454,7 @@ test("a foreign process with a different nonce and no ancestry does not block re
     neverWait: true,
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-foreign" } },
-    scanOrphans: () => [{ pid: 42, runNonce: "nonce-other", parentPid: 1, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: 42, runNonce: "nonce-other", parentPid: 1, creationDate: T0 }]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-foreign"), false);
@@ -2567,7 +2568,7 @@ test("unreadable descendants make the orphan scan unperformed and deny the proof
 test("exit 0 with a live same-nonce descendant fails executorTreeIsGone", async () => {
   const result = await runWith({
     neverWait: true,
-    scanOrphans: () => [{ pid: 7777, runNonce: NONCE, creationDate: T0 }],
+    scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: NONCE, creationDate: T0 }]),
   });
   assert.equal(result.ok, false);
   assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"));
@@ -2693,7 +2694,7 @@ test("launchRun discovery failure does not clobber a completed result.json", asy
       leases: memoryLeases(),
       wait: async () => undefined,
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       resolveArtifactPath: (absolutePath) => absolutePath,
       discoveryEnv: {},
       discoveryFs: { isFile: () => false, readDir: () => [] },
@@ -2790,7 +2791,7 @@ test("launchRun ADVERSARIAL_REVIEW argv cannot write", async () => {
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
         discoveryFs: { isFile: (path) => path === "C:\\Tools\\grok.exe", readDir: () => [] },
       },
@@ -2846,7 +2847,7 @@ test("launchRun without a role uses the implementer permission list", async () =
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
         discoveryFs: { isFile: (path) => path === "C:\\Tools\\claude.exe", readDir: () => [] },
       },
@@ -2888,7 +2889,7 @@ test("a run longer than LEASE_TTL_MS keeps the lease unexpired via heartbeat", a
         nowMs += ms;
       },
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       resolveArtifactPath: (absolutePath) => absolutePath,
       ...matchingDiscovery(),
     },
@@ -2938,7 +2939,7 @@ test("unreadable system rows with live parents do not withhold a writer lease", 
     neverWait: true,
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-live" } },
-    scanOrphans: () => [
+    scanOrphans: () => writerOrphanScanResult([
       {
         pid: 4,
         parentPid: 0,
@@ -2953,7 +2954,7 @@ test("unreadable system rows with live parents do not withhold a writer lease", 
         nonceReadable: false,
         parentPresent: true,
       },
-    ],
+    ]),
   });
   // D2: a nonce that could not be read is UNKNOWN, not "not ours". UNKNOWN withholds.
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
@@ -3025,11 +3026,11 @@ test("without a captured identity the kill sweep still keeps the spawn floor and
     neverWait: true,
     spawn: trackingSpawn(() => exitingProcess({ pid: childPid })),
     probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access-denied" }) },
-    scanOrphans: () => [
+    scanOrphans: () => writerOrphanScanResult([
       { pid: 1234, parentPid: childPid, creationDate: "2023-01-01T00:00:00.000Z" },
       { pid: 1238, parentPid: childPid, creationDate: T0, runNonce: "nonce-other-run" },
       { pid: 1239, parentPid: 1, creationDate: T0, runNonce: "nonce-other-run" },
-    ],
+    ]),
     killTree: (pid) => {
       killed.push(pid);
     },
@@ -3153,7 +3154,7 @@ test("UNAVAILABLE identity capture still records a reclaimable runToken on the l
     leases,
     spawn: trackingSpawn(() => exitingProcess()),
     probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-token" } },
   });
   const held = leases.list().find((item) => item.leaseId === "lease-pw-token");
@@ -3211,12 +3212,12 @@ test("executeRun retains the writer lease when a descendant carries a foreign no
     neverWait: true,
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-desc-nonce" } },
-    scanOrphans: () => [{
+    scanOrphans: () => writerOrphanScanResult([{
       pid: 33776,
       runNonce: "nonce-some-other-run",
       parentPid: RECORDED.pid,
       creationDate: T0,
-    }],
+    }]),
   });
   assert.equal(result.ok, false, result.reason);
   assert.ok(leases.list().some((item) => item.leaseId === "lease-pw-desc-nonce"));
@@ -3227,7 +3228,7 @@ test("UNAVAILABLE capture does not report the executor tree gone", async () => {
     neverWait: true,
     spawn: trackingSpawn(() => exitingProcess()),
     probe: { observe: () => ({ outcome: "UNAVAILABLE", reason: "access denied" }) },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
   });
   assert.equal(finding(result, "executorTreeIsGone").ok, false);
   assert.equal(result.ok, false, result.reason);
@@ -3241,7 +3242,7 @@ test("NOT_FOUND capture with a settled owned handle still reports the tree gone"
     leases,
     spawn: trackingSpawn(() => alreadyExitedProcess()),
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "already gone" }) },
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-fast-ok" } },
   });
   assert.equal(result.ok, true, result.reason);
@@ -3437,14 +3438,14 @@ test("a flood past RUN_LOG_BYTES fails the run and runs the kill ladder", async 
 test("a parentless other-nonce row after the floor fails executorTreeIsGone", async () => {
   const result = await runWith({
     neverWait: true,
-    scanOrphans: () => [{
+    scanOrphans: () => writerOrphanScanResult([{
       pid: 460,
       parentPid: RECORDED.pid,
       parentPresent: false,
       nonceReadable: true,
       runNonce: "other",
       creationDate: T0,
-    }],
+    }]),
   });
   assert.equal(finding(result, "executorTreeIsGone").ok, false);
   assert.equal(result.ok, false, result.reason);
@@ -3488,7 +3489,7 @@ test("launchRun refuses a reviewer role on the implementer executor", async () =
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
         discoveryFs: { isFile: (path) => path === "C:\\Tools\\claude.exe", readDir: () => [] },
       },
@@ -3557,7 +3558,7 @@ test("a spawned run persists the resolved role on the intent", async () => {
         leases: memoryLeases(),
         wait: async () => undefined,
         killTree: () => undefined,
-        scanOrphans: () => [],
+        scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
         discoveryFs: { isFile: (path) => path === "C:\\Tools\\grok.exe", readDir: () => [] },
       },

@@ -45,6 +45,7 @@ import {
   processRowMakesScanUndecidable,
   type ExecutorProcessIdentityV1,
   type ProcessObservationV1,
+  writerOrphanScanResult,
 } from "../src/process-identity.js";
 import { requireSpawnPermit } from "../src/run-intent.js";
 import {
@@ -366,7 +367,7 @@ async function runWith(
     leases: over.leases ?? memoryLeases(),
     wait: over.neverWait === true ? (() => new Promise(() => {})) : async () => undefined,
     killTree: over.killTree ?? (() => undefined),
-    scanOrphans: over.scanOrphans ?? (() => []),
+    scanOrphans: over.scanOrphans ?? (() => writerOrphanScanResult([])),
     resolveArtifactPath: (absolutePath) => absolutePath,
     ...matchingDiscovery(),
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
@@ -435,7 +436,7 @@ test("A adopted PRODUCTION_WRITER with a live nonce-bearing descendant retains t
     leases,
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
-    scanOrphans: () => [LIVE_GRANDCHILD],
+    scanOrphans: () => writerOrphanScanResult([LIVE_GRANDCHILD]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
   });
   assert.equal(result.spawned, false);
@@ -453,7 +454,7 @@ test("A adopted WORKTREE with a live descendant is retained and a second run is 
     leases,
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
-    scanOrphans: () => [LIVE_GRANDCHILD],
+    scanOrphans: () => writerOrphanScanResult([LIVE_GRANDCHILD]),
     request: { lease: { kind: "WORKTREE", resource: CWD, leaseId: "lease-wt-CRASHED" } },
   });
   assert.equal(first.spawned, false);
@@ -496,7 +497,7 @@ test("A liveness: adopted NOT_FOUND holder with a clean scan releases the writer
     leases,
     probe: { observe: () => ({ outcome: "NOT_FOUND", reason: "gone" }) },
     fs: memoryFs({ files: { [join(RUN_ROOT, "intent.json")]: recordedSpawnIntent() } }),
-    scanOrphans: () => [],
+    scanOrphans: () => writerOrphanScanResult([]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-CRASHED" } },
   });
   assert.equal(result.spawned, false);
@@ -785,7 +786,7 @@ test("D executeRun with a self-minted WmiPrvSE.exe row does not succeed or relea
   const leases = memoryLeases();
   const result = await runWith({
     leases,
-    scanOrphans: () => [{ ...wmiSelfRow, creationDate: NOW }],
+    scanOrphans: () => writerOrphanScanResult([{ ...wmiSelfRow, creationDate: NOW }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-d" } },
   });
   // Class 1a: a self-minted WmiPrvSE.exe leftover is UNDECIDABLE, so the
@@ -821,7 +822,7 @@ test("E HARD killTree throw still reaches ORPHAN and sweeps a nonce-bearing left
       if (pid === 4812) throw new Error("ACCESS DENIED (TerminateProcess 5)");
       if (pid === 5140) leftoverGone = true;
     },
-    scanOrphans: () => (leftoverGone ? [] : [leftover]),
+    scanOrphans: () => writerOrphanScanResult(leftoverGone ? [] : [leftover]),
   });
   assert.equal(result.cancel.stages.includes("ORPHAN"), true, `stages=${result.cancel.stages.join(",")}`);
   assert.equal(killed.includes(5140), true, `killed=${killed.join(",")}`);
@@ -1035,7 +1036,7 @@ test("H1 a real executeRun with file sinks redacts a key in the file image", asy
         setTimeout(resolve, Math.min(ms, 25));
       }),
       killTree: () => undefined,
-      scanOrphans: () => [],
+      scanOrphans: () => writerOrphanScanResult([]),
       resolveArtifactPath: (absolutePath) => absolutePath,
       logSinks: {
         stdout: createFileLogSink(stdoutPath),

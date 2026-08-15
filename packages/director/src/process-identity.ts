@@ -197,6 +197,24 @@ export type OrphanScanInterpretationV1 =
 
 export type OrphanKindV1 = "NONCE_MISMATCH" | "EXECUTABLE_MISMATCH" | "DEAD_PARENT_LIVE_CHILD";
 
+/**
+ * One scanner contract. `snapshot` is every interpreted CIM row the
+ * membership predicate is allowed to see. `killable` is the nonce-or-
+ * descendant subset. Spreading this object does not yield either list.
+ */
+export interface WriterOrphanScanResultV1 {
+  readonly snapshot: readonly NonceBearingProcessV1[];
+  readonly killable: readonly NonceBearingProcessV1[];
+}
+
+/** Test doubles and empty production fallbacks share this constructor. */
+export function writerOrphanScanResult(
+  snapshot: readonly NonceBearingProcessV1[],
+  killable: readonly NonceBearingProcessV1[] = snapshot,
+): WriterOrphanScanResultV1 {
+  return { snapshot, killable };
+}
+
 export interface OrphanVerdictV1 {
   readonly orphan: boolean;
   readonly kind: OrphanKindV1 | null;
@@ -796,7 +814,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   readonly holderExitedAt?: string;
   /** Pids earlier scans of this run already judged in-tree. */
   readonly observedPids?: readonly number[];
-}) => readonly NonceBearingProcessV1[] {
+}) => WriterOrphanScanResultV1 {
   const spawn = host?.spawnSync ?? spawnSync;
   const waitSync = host?.waitSync ?? sleepSync;
   return (query) => {
@@ -928,10 +946,6 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       rows = clean;
     }
 
-    // Return the snapshot that was interpreted, plus the killable subset
-    // as an own property. Spreading or iterating the array still yields
-    // only the kill list (nonce match or live holder chain) so existing
-    // callers do not start killing UNKNOWN rows.
     const killable = rows.filter((sighting) => orphanRowIsKillable(
       sighting,
       runNonce,
@@ -940,14 +954,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       query.createdNotBefore,
       holderExitedAt,
     ));
-    // Own properties are non-enumerable so deepEqual(hits, []) still
-    // holds for an empty kill list. The snapshot is the emit set.
-    Object.defineProperties(killable, {
-      snapshot: { value: rows, enumerable: false },
-      killable: { value: killable, enumerable: false },
-      undecidable: { value: [] as readonly NonceBearingProcessV1[], enumerable: false },
-    });
-    return killable;
+    return writerOrphanScanResult(rows, killable);
   };
 }
 
