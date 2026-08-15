@@ -3,7 +3,7 @@
  * after the property repair. Helpers are local.
  */
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -703,21 +703,38 @@ test("F4 liveness: Authorization: and Bearer still hold, and ordinary long lines
 // F5 — pemOverflow never emits known key body
 // ---------------------------------------------------------------------------
 
+/** Last 64-column line sits inside the retained SECRET_TAIL_BYTES (4 KiB). */
+const PEM_TAIL_SENTINEL = "TAILSECRETMATERIAL";
+
+function overflowingPemBodyWithTailSentinel(sentinel: string): string {
+  const line = `MIIEow${"K".repeat(58)}`;
+  const last = `${sentinel}${"K".repeat(64 - sentinel.length)}`;
+  return `${`${line}\n`.repeat(1299)}${last}\n`;
+}
+
+function assertPemTailNotEmitted(
+  log: ReturnType<typeof createBoundedLog>,
+  stdout: ReturnType<typeof createMemoryLogSink>,
+  sentinel: string,
+): void {
+  const file = stdout.contents().toString("utf8");
+  const tail = log.liveTail("stdout").toString("utf8");
+  assert.equal(file.includes(sentinel), false, `file sink leaked retained PEM tail: ${file.slice(-240)}`);
+  assert.equal(tail.includes(sentinel), false, `liveTail leaked retained PEM tail: ${tail.slice(-240)}`);
+  assert.ok(log.report().stdout.droppedLiveBytes > 0);
+}
+
 test("F5 overflowing PEM with END and no trailing newline drops the body", () => {
   const stdout = createMemoryLogSink();
   const log = createBoundedLog({
     clock: createFixedClock(NOW),
     sinks: { stdout, stderr: createMemoryLogSink() },
   });
-  const body = `MIIEowIBAAKCAQEAsecretkeymaterial${"K".repeat(MAX_TOKEN_HOLD)}`;
+  const body = overflowingPemBodyWithTailSentinel(PEM_TAIL_SENTINEL);
   log.write("stdout", `-----BEGIN RSA PRIVATE KEY-----\n${body}`);
   log.write("stdout", "-----END RSA PRIVATE KEY-----");
   log.flush();
-  const file = stdout.contents().toString("utf8");
-  const tail = log.liveTail("stdout").toString("utf8");
-  assert.equal(file.includes("secretkeymaterial"), false);
-  assert.equal(tail.includes("secretkeymaterial"), false);
-  assert.ok(log.report().stdout.droppedLiveBytes > 0);
+  assertPemTailNotEmitted(log, stdout, PEM_TAIL_SENTINEL);
 });
 
 test("F5 overflowing PEM followed by a second BEGIN drops the first key body", () => {
@@ -726,14 +743,32 @@ test("F5 overflowing PEM followed by a second BEGIN drops the first key body", (
     clock: createFixedClock(NOW),
     sinks: { stdout, stderr: createMemoryLogSink() },
   });
-  const body = `MIIEowIBAAKCAQEAsecretkeymaterial${"K".repeat(MAX_TOKEN_HOLD)}`;
+  const body = overflowingPemBodyWithTailSentinel(PEM_TAIL_SENTINEL);
   log.write("stdout", `-----BEGIN RSA PRIVATE KEY-----\n${body}`);
   log.write("stdout", "-----BEGIN EC PRIVATE KEY-----\nsecond-body\n-----END EC PRIVATE KEY-----\n");
   log.flush();
+  assertPemTailNotEmitted(log, stdout, PEM_TAIL_SENTINEL);
+});
+
+test("F5 liveness: overflowing PEM with END and a trailing newline redacts and does not leak", () => {
+  const stdout = createMemoryLogSink();
+  const log = createBoundedLog({
+    clock: createFixedClock(NOW),
+    sinks: { stdout, stderr: createMemoryLogSink() },
+  });
+  const body = overflowingPemBodyWithTailSentinel(PEM_TAIL_SENTINEL);
+  log.write("stdout", `-----BEGIN RSA PRIVATE KEY-----\n${body}`);
+  log.write("stdout", "-----END RSA PRIVATE KEY-----\n");
+  log.flush();
   const file = stdout.contents().toString("utf8");
   const tail = log.liveTail("stdout").toString("utf8");
-  assert.equal(file.includes("secretkeymaterial"), false);
-  assert.equal(tail.includes("secretkeymaterial"), false);
+  assert.equal(file.includes(PEM_TAIL_SENTINEL), false);
+  assert.equal(tail.includes(PEM_TAIL_SENTINEL), false);
+  assert.match(file, /\[REDACTED\]/);
+  assert.match(tail, /\[REDACTED\]/);
+  assert.match(file, /-----END RSA PRIVATE KEY-----/);
+  assert.match(tail, /-----END RSA PRIVATE KEY-----/);
+  assert.ok(log.report().stdout.droppedLiveBytes > 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -933,8 +968,14 @@ test("F9 taskkillConfirmedStopped is false for a non-zero or error spawnSync res
 });
 
 test("F9 no src spawn/spawnSync call site passes a bare powershell.exe or taskkill.exe", () => {
-  const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  // Compiled tests live in dist-test/test/; TypeScript src/ is two levels up.
+  const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src");
+  assert.ok(existsSync(srcRoot), `TypeScript src/ is missing at ${srcRoot}`);
   const files = readdirSync(srcRoot).filter((name) => name.endsWith(".ts"));
+  assert.ok(files.length >= 15, `src scan was vacuous: ${files.length} .ts files under ${srcRoot}`);
+  assert.ok(files.includes("process-identity.ts"), `process-identity.ts not among ${files.join(",")}`);
+  const identity = readFileSync(join(srcRoot, "process-identity.ts"), "utf8");
+  assert.match(identity, /resolveWindowsSystemExecutable\(/);
   const bare = /spawn(?:Sync)?\(\s*["'](?:powershell|taskkill)\.exe["']/;
   const hits: string[] = [];
   for (const name of files) {

@@ -200,6 +200,12 @@ export function firstUnterminatedPemBegin(pending: string): number {
   return -1;
 }
 
+/** First BEGIN, whether the following block is closed or still open. */
+function firstPemBegin(pending: string): number {
+  const match = new RegExp(PRIVATE_KEY_BEGIN_LINE.source).exec(pending);
+  return match === null ? -1 : match.index;
+}
+
 export function redactLogText(text: string): string {
   const closedBlock = new RegExp(
     `${PRIVATE_KEY_BEGIN_LINE.source}[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
@@ -485,7 +491,9 @@ function fileImageOf(state: StreamState): Buffer {
  */
 function splitHoldback(state: StreamState): { emit: string; hold: string; droppedBytes: number } {
   const pending = state.pending;
-  const begin = firstUnterminatedPemBegin(pending);
+  // pemOverflow: any BEGIN starts a new block. firstUnterminatedPemBegin
+  // skips a closed second key and would emit the retained first-key tail.
+  const begin = state.pemOverflow ? firstPemBegin(pending) : firstUnterminatedPemBegin(pending);
   if (begin >= 0) {
     const held = pending.slice(begin);
     if (state.pemOverflow) {
@@ -503,6 +511,9 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
         };
       }
       state.pemOverflow = false;
+      if (privateKeyBlockIsClosed(held)) {
+        return { emit: held, hold: "", droppedBytes };
+      }
       return { emit: "", hold: held, droppedBytes };
     }
     if (held.length > MAX_PEM_HOLD) {
