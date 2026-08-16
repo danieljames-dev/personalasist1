@@ -1013,6 +1013,9 @@ export function interpretWindowsOrphanScanOutput(input: {
     const creationDate = normalisedCreationDate(row.creationDate);
     const parentPid = isUsablePid(row.parentPid) ? row.parentPid : undefined;
     const nonceReadable = typeof row.nonceReadable === "boolean" ? row.nonceReadable : undefined;
+    if (row.parentPresent !== undefined && typeof row.parentPresent !== "boolean") {
+      return { outcome: "UNAVAILABLE", reason: "scan parentPresent is not a usable boolean" };
+    }
     const parentPresent = typeof row.parentPresent === "boolean" ? row.parentPresent : undefined;
     const parentName = asUsableToken(row.parentName) ?? undefined;
     const name = asUsableToken(row.name) ?? undefined;
@@ -1320,7 +1323,7 @@ function isInHolderTree(
 
 export type HolderChainBoundsV1 = {
   readonly holderExitedAt?: string;
-  /** Spawn floor. The exit ceiling is applied only when it is strictly after this instant. */
+  /** Spawn floor. A placeable exit is a ceiling even when it equals this instant. */
   readonly createdNotBefore?: string;
 };
 
@@ -1336,11 +1339,18 @@ function holderChainBounds(
 }
 
 /**
- * The exit ceiling is a proof test. A degenerate ceiling (missing, or not
- * strictly after the spawn floor) proves nothing, so the edge stays ours.
+ * The exit ceiling is a proof test. A missing or unplaceable exit proves
+ * nothing. A placeable exit is usable even when it equals the spawn floor:
+ * same-millisecond spawn/exit is the production CLI clock, not "no ceiling".
+ * An exit proven strictly before the floor is nonsensical and stays unusable.
  */
 function holderExitedAtCeilingIsUsable(bounds?: HolderChainBoundsV1): boolean {
-  return provenCreatedStrictlyAfter(bounds?.holderExitedAt, bounds?.createdNotBefore);
+  const exit = asUsableToken(bounds?.holderExitedAt);
+  if (exit === null) return false;
+  if (placeableInstantMicros(exit) === null) return false;
+  const floor = asUsableToken(bounds?.createdNotBefore);
+  if (floor === null) return true;
+  return !provenCreatedStrictlyBefore(exit, floor);
 }
 
 type ChainRowV1 = {
@@ -1388,9 +1398,10 @@ export function descendantPidsOf(
  * live intermediate, not from the holder.
  *
  * - Edge out of `holderPid`: drop only when the exit ceiling is
- *   strictly after the spawn floor *and* the child is *proven*
- *   created strictly after `holderExitedAt`. A degenerate ceiling
- *   (equal to the floor, missing, or unplaceable) proves nothing.
+ *   usable (placeable, not strictly before the spawn floor) *and*
+ *   the child is *proven* created strictly after `holderExitedAt`
+ *   at microsecond resolution. A missing or unplaceable ceiling
+ *   proves nothing.
  * - Edge out of a snapshot parent: drop only when the child is *proven*
  *   created strictly before that parent's `creationDate`.
  * Missing or unplaceable dates keep the edge.
@@ -1643,6 +1654,12 @@ export function isPlaceableInstant(value: string): boolean {
 export function placeableInstantMs(value: string): number | null {
   if (!timestampHasExplicitZone(value)) return null;
   return parseProcessTimestamp(value);
+}
+
+/** Microseconds since epoch, or null when the token is not a placeable instant. */
+function placeableInstantMicros(value: string): number | null {
+  if (!timestampHasExplicitZone(value)) return null;
+  return parseProcessTimestampMicros(value);
 }
 
 /**
@@ -2019,11 +2036,11 @@ function rowIsExcludedByInteractiveSession(
  * ceiling. The ceiling therefore proves nothing once the intermediate
  * has left the snapshot.
  *
- * - `parentPresent === false` (or unknown): no live explanation. Nothing
- *   in the snapshot says when the parent died. The floor is applied by
- *   {@link processRowCouldBelongToThisRun}; this function does not
- *   consult `holderExitedAt`. The row is tied → UNKNOWN, never "proven
- *   absent".
+ * - `parentPresent === false` or unknown (omitted): no live explanation.
+ *   Nothing in the snapshot says when the parent died. The floor is
+ *   applied by {@link processRowCouldBelongToThisRun}; this function
+ *   does not consult `holderExitedAt`. The row is tied → UNKNOWN, never
+ *   "proven absent" and never host noise.
  * - `parentPresent === true` and the occupant is proven created at or
  *   before the row, and is not in this run's chain / `observedPids`:
  *   that occupant *is* a live explanation. Host noise. Do not tie on
@@ -2104,9 +2121,9 @@ export function parentlessRowTiedToThisRun(
     return true;
   }
 
-  // parentPresent was not recorded. That is not "parent gone" and not
-  // a live explanation. Do not invent a tie from the interval.
-  return false;
+  // parentPresent was not recorded. That is UNKNOWN continuity, not
+  // host noise and not "parent gone". Tie the row.
+  return true;
 }
 
 /**
@@ -2265,12 +2282,12 @@ export function provenCreatedAtOrAfterFloor(
 ): boolean {
   const floorToken = asUsableToken(floor);
   if (floorToken === null) return false;
-  const floorMs = placeableInstantMs(floorToken);
-  if (floorMs === null) return false;
+  const floorUs = placeableInstantMicros(floorToken);
+  if (floorUs === null) return false;
   if (candidate === undefined) return false;
-  const at = placeableInstantMs(candidate);
+  const at = placeableInstantMicros(candidate);
   if (at === null) return false;
-  return at >= floorMs;
+  return at >= floorUs;
 }
 
 /**
@@ -2284,12 +2301,12 @@ export function provenCreatedAtOrBeforeCeiling(
 ): boolean {
   const ceilingToken = asUsableToken(ceiling);
   if (ceilingToken === null) return false;
-  const ceilingMs = placeableInstantMs(ceilingToken);
-  if (ceilingMs === null) return false;
+  const ceilingUs = placeableInstantMicros(ceilingToken);
+  if (ceilingUs === null) return false;
   if (candidate === undefined) return false;
-  const at = placeableInstantMs(candidate);
+  const at = placeableInstantMicros(candidate);
   if (at === null) return false;
-  return at <= ceilingMs;
+  return at <= ceilingUs;
 }
 
 /**
@@ -2314,12 +2331,12 @@ export function provenCreatedStrictlyAfter(
 ): boolean {
   const instantToken = asUsableToken(instant);
   if (instantToken === null) return false;
-  const instantMs = placeableInstantMs(instantToken);
-  if (instantMs === null) return false;
+  const instantUs = placeableInstantMicros(instantToken);
+  if (instantUs === null) return false;
   if (candidate === undefined) return false;
-  const at = placeableInstantMs(candidate);
+  const at = placeableInstantMicros(candidate);
   if (at === null) return false;
-  return at > instantMs;
+  return at > instantUs;
 }
 
 /**
@@ -2332,12 +2349,12 @@ export function provenCreatedStrictlyBefore(
 ): boolean {
   const instantToken = asUsableToken(instant);
   if (instantToken === null) return false;
-  const instantMs = placeableInstantMs(instantToken);
-  if (instantMs === null) return false;
+  const instantUs = placeableInstantMicros(instantToken);
+  if (instantUs === null) return false;
   if (candidate === undefined) return false;
-  const at = placeableInstantMs(candidate);
+  const at = placeableInstantMicros(candidate);
   if (at === null) return false;
-  return at < instantMs;
+  return at < instantUs;
 }
 
 export function compareCreationDates(recorded: string, observed: string): CreationDateComparisonV1 {

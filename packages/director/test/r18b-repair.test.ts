@@ -537,7 +537,7 @@ test("C2 reused holder slot after exit is not in the chain and is not killed", a
   assert.equal(killed.includes(5000), false, `killTree called with ${killed.join(",")}`);
 });
 
-test("C2 a degenerate holderExitedAt on the spawn floor keeps the in-window child", () => {
+test("C2 a degenerate holderExitedAt on the spawn floor still bounds later births", () => {
   const child = { pid: 1238, parentPid: 4812, creationDate: T0 };
   const reused = { pid: 5000, parentPid: 4812, creationDate: "2026-08-13T12:00:30.000Z" };
   const degenerate = plausibility({
@@ -545,8 +545,8 @@ test("C2 a degenerate holderExitedAt on the spawn floor keeps the in-window chil
     holderExitedAt: FLOOR,
     rows: [child, reused],
   });
-  assert.equal(rowIsInHolderChain(child, degenerate), true);
-  assert.equal(rowIsInHolderChain(reused, degenerate), true, "without a usable ceiling the later row stays UNKNOWN-ours");
+  assert.equal(rowIsInHolderChain(child, degenerate), false);
+  assert.equal(rowIsInHolderChain(reused, degenerate), false);
   const usable = plausibility({
     createdNotBefore: FLOOR,
     holderExitedAt: HOLDER_EXIT,

@@ -11,6 +11,7 @@ import {
   directorPermitAuthorizesWrite,
   discoverClaudeExecutor,
   mintDirectorWritePermit,
+  normaliseRunNonce,
   releaseDeveloperAgentWorktreeLease,
 } from "../../packages/director/dist/index.js";
 
@@ -151,10 +152,15 @@ export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {
       if (!held.ok) {
         throw new Error(`developer-agent refused: ${held.reason}`);
       }
+      const runNonce = normaliseRunNonce(acquired.lease.processIdentity?.runToken ?? "");
+      if (runNonce === null) {
+        throw new Error("developer-agent refused: minted run nonce is missing or unusable");
+      }
       return await originalRun({
         ...task,
         directorMintedPermit: permit,
         now,
+        runNonce,
       }, signal);
     } finally {
       const scanOrphans = options.scanOrphans ?? createWindowsOrphanScanner();

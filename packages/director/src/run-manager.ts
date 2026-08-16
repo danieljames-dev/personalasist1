@@ -270,6 +270,7 @@ export interface OrphanSightingV1 {
   readonly nonceReadable?: boolean;
   readonly parentPresent?: boolean;
   readonly parentName?: string;
+  readonly parentCreationDate?: string;
 }
 
 /**
@@ -1266,6 +1267,7 @@ export async function recoverAbandonedRun(
   const parsed = readRunIntent(intentPath, intentStoreFromFs(deps.fs));
   const answers = answersAfterReboot(parsed.ok ? parsed.intent : null);
   const runId = parsed.ok ? parsed.intent.runId : "";
+  const leaseStore = deps.leases ?? createNodeLeaseStore(sandboxDirectorStoreRoot());
   // `answers.started` is a workflow flag written after spawn returns. It
   // is not the physical fact "a process exists". A missing spawn record
   // is UNKNOWN. Recover refusals are not executeRun completions.
@@ -1297,7 +1299,7 @@ export async function recoverAbandonedRun(
     };
     const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, result, false);
     const indexOk = !spawnRecorded
-      || recordIndexedRunCompletion(deps.fs, deps.leases, runId, runRoot);
+      || recordIndexedRunCompletion(deps.fs, leaseStore, runId, runRoot);
     if (write === "failed" || !indexOk) {
       return { ...result, resultPath: write === "failed" ? null : result.resultPath, resultPersisted: "failed" };
     }
@@ -1311,7 +1313,7 @@ export async function recoverAbandonedRun(
     const recorded = parsed.intent.processIdentity;
     let leasePid: number | null = null;
     try {
-      leasePid = holderPidFromLeases(deps.leases, parsed.intent.runId);
+      leasePid = holderPidFromLeases(leaseStore, parsed.intent.runId);
     } catch (error) {
       return finish(
         `recover refused: lease store unreadable; holder pid is UNKNOWN (${errorMessage(error)})`,
@@ -4211,6 +4213,10 @@ function runCompletionDir(leases: LeaseStoreV1 | undefined, runRoot: string): st
   if (leases !== undefined && "root" in leases) {
     const root = (leases as { readonly root?: unknown }).root;
     if (typeof root === "string" && root.trim() !== "") return join(root, "run-completions");
+  }
+  if (leases === undefined) {
+    const fallback = sandboxDirectorStoreRoot();
+    if (typeof fallback === "string" && fallback.trim() !== "") return join(fallback, "run-completions");
   }
   if (typeof runRoot === "string" && runRoot.trim() !== "") return join(dirname(runRoot), ".run-completions");
   return null;

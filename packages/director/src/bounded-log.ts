@@ -238,10 +238,10 @@ function firstPemBegin(pending: string): number {
 const BEARER_WS = String.raw`[\s\u0085\u2028\u2029]`;
 const BEARER_TOKEN_PATTERN_SOURCE = String.raw`Bearer${BEARER_WS}+\S+`;
 const BEARER_TOKEN_REDACTOR = new RegExp(BEARER_TOKEN_PATTERN_SOURCE, "gi");
-const BEARER_WHITESPACE_TAIL = new RegExp(String.raw`(?<![A-Za-z-])bearer${BEARER_WS}*\S*$`, "i");
+const BEARER_WHITESPACE_TAIL = new RegExp(String.raw`bearer${BEARER_WS}*$`, "i");
 const AUTH_HEADER_STARTER = new RegExp(String.raw`(?:proxy-)?authorization"?[^\S\r\n]*:`, "i");
 const AUTH_FOLDED_VALUE = new RegExp(
-  String.raw`((?:Proxy-)?Authorization"?[^\S\r\n]*:)[^\S\r\n]*[\r\n\u0085\u2028\u2029]+[\t \u00a0]*([^\r\n\u0085\u2028\u2029]*)`,
+  String.raw`((?:Proxy-)?Authorization"?[^\S\r\n]*:)[^\S\r\n]*[\r\n\u0085\u2028\u2029]+[^\r\n\u0085\u2028\u2029]*(?:[\r\n\u0085\u2028\u2029]+[\t \u00a0]+[^\r\n\u0085\u2028\u2029]*)*`,
   "gi",
 );
 
@@ -603,6 +603,19 @@ function fileImageOf(state: StreamState): Buffer {
  * newline. Otherwise the entire unterminated last line is held. Incomplete-starter scanning
  * is not a second spelling of "block open".
  */
+function authorizationFoldShouldHold(afterHeader: string): boolean {
+  const trimmed = afterHeader.trim();
+  if (trimmed === "" || /^Bearer$/i.test(trimmed)) return true;
+  const lines = afterHeader.split(/[\r\n\u0085\u2028\u2029]+/);
+  const sameLine = (lines[0] ?? "").trim();
+  if (sameLine !== "" && !/^Bearer$/i.test(sameLine)) return false;
+  const valueLines = lines.slice(1).filter((line, index, all) => !(line === "" && index === all.length - 1));
+  if (valueLines.length === 0) return true;
+  const last = valueLines[valueLines.length - 1] ?? "";
+  if (/^Bearer$/i.test(last.trim())) return true;
+  return /^[\t \u00a0]/.test(last);
+}
+
 function splitHoldback(state: StreamState): { emit: string; hold: string; droppedBytes: number } {
   const pending = state.pending;
   // pemOverflow: any BEGIN starts a new block. firstUnterminatedPemBegin
@@ -679,20 +692,24 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
   // The last-newline split would otherwise emit a `Bearer\n` prefix and
   // leave the token on the next write — the same secret the redactor
   // would have caught had the bytes arrived together.
-  const bearerTail = BEARER_WHITESPACE_TAIL.exec(pending)
-    ?? BEARER_WHITESPACE_TAIL.exec(pending.slice(0, lineStart));
-  if (bearerTail !== null && bearerTail.index < lineStart) {
-    const before = pending.slice(0, bearerTail.index);
-    if (!new RegExp(String.raw`(?:proxy-)?authorization"?[^\S\r\n]*:\s*$`, "i").test(before)) {
-      emit = before;
-      hold = pending.slice(bearerTail.index);
+  const lastCompleteStart = pending.lastIndexOf("\n", Math.max(0, lineStart - 2)) + 1;
+  const lastComplete = pending.slice(lastCompleteStart, lineStart);
+  const bareBearer = /bearer[\s\u0085\u2028\u2029]*$/i.exec(lastComplete);
+  const bearerAlreadyHasToken = /bearer[\s\u0085\u2028\u2029]+\S/i.test(lastComplete);
+  if (bareBearer !== null && !bearerAlreadyHasToken) {
+    const abs = lastCompleteStart + bareBearer.index;
+    if (abs < lineStart) {
+      const before = pending.slice(0, abs);
+      if (!new RegExp(String.raw`(?:proxy-)?authorization"?[^\S\r\n]*:\s*$`, "i").test(before)) {
+        emit = before;
+        hold = pending.slice(abs);
+      }
     }
   }
   const authFold = AUTH_HEADER_STARTER.exec(pending.slice(0, lineStart));
   if (authFold !== null && authFold.index !== undefined && authFold.index < lineStart) {
     const afterHeader = pending.slice(authFold.index + authFold[0].length, lineStart);
-    const foldedBare = afterHeader.trim();
-    if (foldedBare === "" || /^Bearer$/i.test(foldedBare)) {
+    if (authorizationFoldShouldHold(afterHeader)) {
       emit = pending.slice(0, authFold.index);
       hold = pending.slice(authFold.index);
     }

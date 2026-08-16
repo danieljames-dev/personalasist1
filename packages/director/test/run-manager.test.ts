@@ -2479,26 +2479,33 @@ test("a foreign process with a different nonce and no ancestry does not block re
     neverWait: true,
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-foreign" } },
-    scanOrphans: () => writerOrphanScanResult([{ pid: 42, runNonce: "nonce-other", parentPid: 1, creationDate: T0 }]),
+    scanOrphans: () => writerOrphanScanResult([{
+      pid: 42,
+      runNonce: "nonce-other",
+      parentPid: 1,
+      parentPresent: true,
+      parentCreationDate: NOW,
+      creationDate: T0,
+    }]),
   });
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-foreign"), false);
   assert.equal(
     writerSightingNotProvenAbsent(
-      { pid: 42, runNonce: "nonce-other", parentPid: 1 },
+      { pid: 42, runNonce: "nonce-other", parentPid: 1, parentPresent: true, parentCreationDate: NOW, creationDate: T0 },
       NONCE,
-      { holderPid: RECORDED.pid, rows: [{ pid: 42, runNonce: "nonce-other", parentPid: 1 }] },
+      { holderPid: RECORDED.pid, rows: [{ pid: 42, runNonce: "nonce-other", parentPid: 1, parentPresent: true, parentCreationDate: NOW, creationDate: T0 }] },
     ),
     true,
     "incomplete context must fail closed",
   );
   assert.equal(
     writerSightingNotProvenAbsent(
-      { pid: 42, runNonce: "nonce-other", parentPid: 1 },
+      { pid: 42, runNonce: "nonce-other", parentPid: 1, parentPresent: true, parentCreationDate: NOW, creationDate: T0 },
       NONCE,
       {
         holderPid: RECORDED.pid,
-        rows: [{ pid: 42, runNonce: "nonce-other", parentPid: 1 }],
+        rows: [{ pid: 42, runNonce: "nonce-other", parentPid: 1, parentPresent: true, parentCreationDate: NOW, creationDate: T0 }],
         createdNotBefore: NOW,
         observedPids: new Set([RECORDED.pid]),
       },
@@ -2521,7 +2528,7 @@ test("writerSightingNotProvenAbsent treats ancestry as this run's tree", () => {
     true,
   );
   assert.equal(
-    writerSightingNotProvenAbsent({ pid: 9, runNonce: "other", parentPid: 1 }, NONCE, {
+    writerSightingNotProvenAbsent({ pid: 9, runNonce: "other", parentPid: 1, parentPresent: true, parentCreationDate: NOW }, NONCE, {
       holderPid: RECORDED.pid,
       rows,
     }),
@@ -2529,7 +2536,7 @@ test("writerSightingNotProvenAbsent treats ancestry as this run's tree", () => {
     "incomplete context must fail closed",
   );
   assert.equal(
-    writerSightingNotProvenAbsent({ pid: 9, runNonce: "other", parentPid: 1 }, NONCE, {
+    writerSightingNotProvenAbsent({ pid: 9, runNonce: "other", parentPid: 1, parentPresent: true, parentCreationDate: NOW }, NONCE, {
       holderPid: RECORDED.pid,
       rows,
       createdNotBefore: NOW,
@@ -3079,7 +3086,7 @@ test("without a captured identity the kill sweep still keeps the spawn floor and
     scanOrphans: () => writerOrphanScanResult([
       { pid: 1234, parentPid: childPid, creationDate: "2023-01-01T00:00:00.000Z" },
       { pid: 1238, parentPid: childPid, creationDate: T0, runNonce: "nonce-other-run" },
-      { pid: 1239, parentPid: 1, creationDate: T0, runNonce: "nonce-other-run" },
+      { pid: 1239, parentPid: 1, parentPresent: true, parentCreationDate: NOW, creationDate: T0, runNonce: "nonce-other-run" },
     ]),
     killTree: (pid) => {
       killed.push(pid);

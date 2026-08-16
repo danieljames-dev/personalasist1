@@ -334,6 +334,7 @@ async function runWith(
     handoff?: Record<string, unknown> | null;
     logSinks?: RunManagerDepsV1["logSinks"];
     neverWait?: boolean;
+    clock?: RunManagerDepsV1["clock"];
   } = {},
 ) {
   const runRoot = over.request?.runRoot ?? RUN_ROOT;
@@ -358,7 +359,7 @@ async function runWith(
   }
   if ("files" in fs && fs.files instanceof Map) fs.files.delete(handoffPath);
   const deps: RunManagerDepsV1 = {
-    clock: createFixedClock(NOW),
+    clock: over.clock ?? createFixedClock(NOW),
     fs,
     spawn: (executable, argv, options, permit) => {
       if (handoffText !== null) {
@@ -567,6 +568,16 @@ function threeGenerationHost(opts: { keepGrandchildOnRescan: boolean }) {
   };
 }
 
+function holderLifetimeClock(): { now: () => string } {
+  let ticks = 0;
+  return {
+    now() {
+      ticks += 1;
+      return ticks <= 10 ? NOW : LATER;
+    },
+  };
+}
+
 test("B executeRun scan-kill-rescan of a scrubbed grandchild kills the in-chain descendant", async () => {
   // R16 F7: parentPid chain in the same snapshot is positive identity, so
   // 5140 is killed. The old assertion (lease withheld while 5140 stayed
@@ -576,6 +587,7 @@ test("B executeRun scan-kill-rescan of a scrubbed grandchild kills the in-chain 
   const leases = memoryLeases();
   const result = await runWith({
     leases,
+    clock: holderLifetimeClock(),
     scanOrphans: host.scanner,
     killTree: (pid) => {
       killed.push(pid);
@@ -591,10 +603,12 @@ test("B liveness: grandchild absent from the re-scan releases the writer lease",
   const leases = memoryLeases();
   const result = await runWith({
     leases,
+    clock: holderLifetimeClock(),
     scanOrphans: host.scanner,
     killTree: host.killTree,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-b-live" } },
   });
+  assert.equal(result.spawned, true, result.reason);
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-b-live"), false);

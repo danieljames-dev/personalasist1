@@ -769,7 +769,12 @@ function developerAgentHolderIdentity(
 ): { pid: number; startedAt?: string } {
   try {
     const observation = probe.observe(pid);
-    if (observation.outcome === "FOUND" && typeof observation.creationDate === "string" && observation.creationDate !== "") {
+    if (
+      observation.outcome === "FOUND"
+      && observationIsAboutPid(observation, pid)
+      && typeof observation.creationDate === "string"
+      && observation.creationDate !== ""
+    ) {
       return { pid, startedAt: observation.creationDate };
     }
   } catch {
@@ -874,7 +879,10 @@ export function releaseDeveloperAgentWorktreeLease(
       });
       const live = scan.snapshot.filter((row) => processRowCouldBelongToThisRun(row, ctx));
       const undecidable = undecidableRowsOf(scan.snapshot, ctx);
-      if (live.length > 0 || undecidable.length > 0) {
+      const killableLeftovers = Array.isArray(scan.killable) ? scan.killable.length : 0;
+      const namedLive = scan.liveSightings?.length ?? 0;
+      const namedUndecidable = Array.isArray(scan.undecidable) ? scan.undecidable.length : 0;
+      if (live.length > 0 || undecidable.length > 0 || killableLeftovers > 0 || namedLive > 0 || namedUndecidable > 0) {
         return {
           ok: false,
           reason: "developer-agent tree is not gone; WORKTREE lease retained",

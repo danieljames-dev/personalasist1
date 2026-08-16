@@ -15,6 +15,8 @@ type DeveloperAgentRunTaskV1 = {
   directorMintedPermit?: { readonly leaseId: string };
   /** Instant used to re-check lease expiry. Omitted means wall clock. */
   now?: string;
+  /** Director-minted run nonce delivered as AION_RUN_NONCE on the child. */
+  runNonce?: string;
 };
 
 const OUTPUT_LIMIT = 1024 * 1024;
@@ -51,9 +53,15 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
   /** Only the executable's file name is ever reported; a full local path identifies the owner. */
   protected get executableName(): string { return basename(this.executable); }
 
-  protected invoke(args: readonly string[], options: { input?: string; signal?: AbortSignal; timeoutMs: number }): Promise<ProcessResultV1> {
+  protected invoke(args: readonly string[], options: { input?: string; signal?: AbortSignal; timeoutMs: number; env?: NodeJS.ProcessEnv }): Promise<ProcessResultV1> {
     return new Promise((resolveResult, reject) => {
-      const child = spawn(this.executable, [...args], { cwd: this.approvedRepositoryRoot, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(this.executable, [...args], {
+        cwd: this.approvedRepositoryRoot,
+        windowsHide: true,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(options.env !== undefined ? { env: options.env } : {}),
+      });
       let stdout = ""; let stderr = ""; let timedOut = false; let settled = false;
       const append = (current: string, chunk: Buffer) => (current + chunk.toString("utf8")).slice(-OUTPUT_LIMIT);
       child.stdout.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
@@ -144,7 +152,14 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
       });
       if (!verdict.ok) throw new Error(verdict.reason);
     }
-    const result = await this.invoke(argv, { input: `${instruction}\n`, signal, timeoutMs: TASK_TIMEOUT_MS });
+    const result = await this.invoke(argv, {
+      input: `${instruction}\n`,
+      signal,
+      timeoutMs: TASK_TIMEOUT_MS,
+      ...(usableRunNonce(task.runNonce) !== null
+        ? { env: childEnvWithRunNonce(usableRunNonce(task.runNonce)!) }
+        : {}),
+    });
     if (result.timedOut) throw new Error("Developer-agent task exceeded its timeout and was stopped.");
     return { exitCode: result.exitCode, summary: (result.stdout || result.stderr || `${this.displayName} returned no output.`).slice(-SUMMARY_LIMIT) };
   }
@@ -156,6 +171,21 @@ const ACCOUNT_DETAIL: Record<DeveloperAgentStatusV1["account"], string> = {
   "signed-out": "The executable is installed but no account is signed in, so a task would fail. Sign in with the vendor's own CLI first.",
   unknown: "The account check did not return a usable answer, so sign-in state is unknown. Treat the bridge as unproven.",
 };
+
+function usableRunNonce(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function childEnvWithRunNonce(runNonce: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  env.AION_RUN_NONCE = runNonce;
+  return env;
+}
 
 /** A short, non-identifying first line: a version banner, never an account value or a local path. */
 function version(output: string): string | null {
