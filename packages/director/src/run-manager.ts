@@ -87,6 +87,7 @@ import {
   type HandoffParseV1,
 } from "./handoff.js";
 import { canonicalizeHostPath, isResolvedHostPath } from "./host-path.js";
+import { DIRECTOR_ROOT_ENV } from "./contracts.js";
 import {
   createNodeLeaseStore,
   isHostWideLeaseKind,
@@ -113,6 +114,7 @@ import {
   createWindowsAncestrySampler,
   createWindowsOrphanScanner,
   descendantPidsOf,
+  descendantPidsOfPositiveIdentity,
   detectOrphan,
   holderLiveness,
   hostWideTreeEvidenceFromScan,
@@ -130,6 +132,7 @@ import {
   type WriterOrphanScanResultV1,
   resolveWindowsSystemExecutable,
   holderExitedAtCeilingIsUsable,
+  occupantIsProvenDifferentProcess,
   rememberSampledDescendantPids,
   undecidableMembershipConfirmSteps,
   undecidableRowsOf,
@@ -1740,6 +1743,7 @@ export async function executeRun(
   let exitProof: WriterExitProofV1 | null = null;
   let captureTimeIdentityNotFound = false;
   const seenInTreePids = new Set<number>();
+  const seenInTreeIdentities = new Map<number, string>();
 
   const interruptedAfterSpawn = (timedOutFlag: boolean): SuccessConjunctionV1 =>
     evaluateSuccessConjunction({
@@ -2691,6 +2695,7 @@ export async function executeRun(
           spawnedAtFloor ?? deps.clock.now(),
           attemptCeiling,
           seenInTreePids,
+          seenInTreeIdentities,
         );
         stillRunning = cancelled.stillRunning;
         if (!cancelled.stillRunning) holderExitedAt = deps.clock.now();
@@ -2704,6 +2709,7 @@ export async function executeRun(
         holderPid: childPid,
         createdNotBefore: spawnedAtFloor ?? "",
         observedPids: seenInTreePids,
+        observedPidIdentities: seenInTreeIdentities,
         wait: deps.wait,
         holderExitedAt: attemptCeiling,
       });
@@ -2802,7 +2808,7 @@ export async function executeRun(
           rememberSampledDescendantPids(seenInTreePids, childPid, rows, {
             ...(spawnedAtFloor !== null ? { createdNotBefore: spawnedAtFloor } : {}),
             ...(holderExitedAt !== null ? { holderExitedAt } : {}),
-          });
+          }, seenInTreeIdentities);
         } catch {
           // A failed sample is not a scan.
         }
@@ -2821,10 +2827,14 @@ export async function executeRun(
           child,
           holderPid: childPid,
           observedPids: seenInTreePids,
+          observedPidIdentities: seenInTreeIdentities,
           wait: deps.wait,
           sampleAncestry: resolveAncestrySampler(deps),
           clock: deps.clock,
           createdNotBefore: spawnedAtFloor,
+          holderCreationDate: processIdentity?.creationDate ?? null,
+          holderExitedAt,
+          holderAlreadyGone: captureTimeIdentityNotFound,
         });
       }
       const raced = await Promise.race([
@@ -2850,6 +2860,7 @@ export async function executeRun(
           spawnedAtFloor ?? "",
           holderExitedAt,
           seenInTreePids,
+          seenInTreeIdentities,
         );
         stillRunning = cancelled.stillRunning;
         exitCode = cancelled.exitCode;
@@ -2876,6 +2887,7 @@ export async function executeRun(
         spawnedAtFloor ?? "",
         holderExitedAt,
         seenInTreePids,
+        seenInTreeIdentities,
       );
       stillRunning = cancelled.stillRunning;
       if (cancelled.exitCode !== null) exitCode = cancelled.exitCode;
@@ -2902,6 +2914,7 @@ export async function executeRun(
         holderPid: processIdentity?.pid ?? childPid,
         createdNotBefore: spawnedAtFloor ?? "",
         observedPids: seenInTreePids,
+        observedPidIdentities: seenInTreeIdentities,
         holderExitedAt: sweepCeiling,
       });
     } catch {
@@ -2959,6 +2972,7 @@ export async function executeRun(
       holderPid: processIdentity?.pid ?? childPid,
       createdNotBefore: spawnedAtFloor ?? "",
       observedPids: seenInTreePids,
+      observedPidIdentities: seenInTreeIdentities,
       wait: deps.wait,
       // Same sound ceiling as the leftover sweep. The live path must
       // answer "is this row ours?" identically to the adopted path.
@@ -3083,6 +3097,7 @@ export async function executeRun(
           spawnedAtFloor ?? deps.clock.now(),
           holderExitedAt,
           seenInTreePids,
+          seenInTreeIdentities,
         );
         stillRunning = cancelled.stillRunning;
       } catch {
@@ -3356,19 +3371,43 @@ async function sampleAncestryWhileChildAlive(input: {
   readonly child: SpawnHandleV1;
   readonly holderPid: number;
   readonly observedPids: Set<number>;
+  readonly observedPidIdentities: Map<number, string>;
   readonly wait: (ms: number) => Promise<void>;
   readonly sampleAncestry: NonNullable<RunManagerDepsV1["sampleAncestry"]>;
   readonly clock: ClockV1;
   readonly createdNotBefore: string | null;
+  readonly holderCreationDate?: string | null;
+  readonly holderExitedAt?: string | null;
+  readonly holderAlreadyGone?: boolean;
 }): Promise<void> {
   let samples = 0;
   while (!input.child.exited && samples < ANCESTRY_SAMPLE_MAX_PER_RUN) {
     try {
       const rows = input.sampleAncestry({ holderPid: input.holderPid });
-      rememberSampledDescendantPids(input.observedPids, input.holderPid, rows, {
-        ...(input.createdNotBefore !== null ? { createdNotBefore: input.createdNotBefore } : {}),
-        ...(input.child.exited ? { holderExitedAt: input.clock.now() } : {}),
-      });
+      const holderRow = rows.find((row) => row.pid === input.holderPid);
+      const holderRecycled = holderRow !== undefined
+        && input.holderCreationDate !== undefined
+        && input.holderCreationDate !== null
+        && occupantIsProvenDifferentProcess(
+          { pid: input.holderPid, creationDate: input.holderCreationDate },
+          holderRow,
+        );
+      const holderConfirmablyPresent = holderRow !== undefined && !holderRecycled;
+      // Capture is a blocking CIM probe: child.exited can stay false after
+      // the OS process is gone. Do not copy a post-exit recycled tree into
+      // observedPids just because the handle has not settled (R29 persist F1).
+      const holderGone = input.holderAlreadyGone === true
+        || input.child.exited
+        || !holderConfirmablyPresent;
+      if (isUsablePid(input.holderPid)) input.observedPids.add(input.holderPid);
+      if (!holderGone) {
+        rememberSampledDescendantPids(input.observedPids, input.holderPid, rows, {
+          ...(input.createdNotBefore !== null ? { createdNotBefore: input.createdNotBefore } : {}),
+          ...(input.holderExitedAt !== null && input.holderExitedAt !== undefined
+            ? { holderExitedAt: input.holderExitedAt }
+            : {}),
+        }, input.observedPidIdentities);
+      }
     } catch {
       // A failed sample is not a scan. Do not treat it as "no descendants".
     }
@@ -3424,6 +3463,7 @@ async function collectWriterOrphans(input: {
   readonly createdNotBefore: string;
   readonly holderExitedAt?: string;
   readonly observedPids?: Set<number>;
+  readonly observedPidIdentities?: Map<number, string>;
   readonly wait?: (ms: number) => Promise<void>;
 }): Promise<WriterOrphanScanV1> {
   try {
@@ -3455,6 +3495,9 @@ async function collectWriterOrphans(input: {
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(sessionId !== undefined ? { directorSessionId: sessionId } : {}),
       observedPids,
+      ...(input.observedPidIdentities !== undefined
+        ? { observedPidIdentities: [...input.observedPidIdentities.entries()] }
+        : {}),
       apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
       rows,
     });
@@ -3514,13 +3557,24 @@ async function collectWriterOrphans(input: {
       sightings = [...clean];
       plausibility = ctxFor(sightings, directorSessionId);
     }
-    rememberInTreePids(observedPids, sightings, input.runNonce, holderPid, holderExitedAt, createdNotBefore);
+    rememberInTreePids(
+      observedPids,
+      sightings,
+      input.runNonce,
+      holderPid,
+      holderExitedAt,
+      createdNotBefore,
+      input.observedPidIdentities,
+    );
     const membershipTree = {
       holderPid: holderPid ?? null,
       rows: sightings,
       createdNotBefore,
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids,
+      ...(input.observedPidIdentities !== undefined
+        ? { observedPidIdentities: input.observedPidIdentities }
+        : {}),
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
       apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
     };
@@ -3571,6 +3625,7 @@ export function writerSightingNotProvenAbsent(
     readonly createdNotBefore?: string;
     readonly holderExitedAt?: string;
     readonly observedPids?: ReadonlySet<number>;
+    readonly observedPidIdentities?: ReadonlyMap<number, string>;
     readonly directorSessionId?: number;
     readonly apparatusPids?: Iterable<MeasurementApparatusInputV1>;
   } = {
@@ -3590,6 +3645,9 @@ export function writerSightingNotProvenAbsent(
     ...(tree.holderExitedAt !== undefined ? { holderExitedAt: tree.holderExitedAt } : {}),
     ...(tree.directorSessionId !== undefined ? { directorSessionId: tree.directorSessionId } : {}),
     observedPids: tree.observedPids,
+    ...(tree.observedPidIdentities !== undefined
+      ? { observedPidIdentities: [...tree.observedPidIdentities.entries()] }
+      : {}),
     apparatusPids: tree.apparatusPids ?? measurementApparatusIdentitiesOfThisProcess(),
     rows: tree.rows,
   });
@@ -3612,10 +3670,12 @@ function killNonceBearingLeftovers(input: {
   readonly createdNotBefore: string;
   readonly holderExitedAt?: string;
   readonly observedPids?: Set<number>;
+  readonly observedPidIdentities?: Map<number, string>;
 }): LeftoverSweepV1 {
   const createdNotBefore = input.createdNotBefore;
   const holderPid = input.holderPid ?? input.recorded?.pid ?? null;
   const observedPids = input.observedPids ?? new Set<number>();
+  const observedPidIdentities = input.observedPidIdentities ?? new Map<number, string>();
   if (isUsablePid(holderPid)) observedPids.add(holderPid);
   const query = {
     runNonce: input.runNonce,
@@ -3643,13 +3703,22 @@ function killNonceBearingLeftovers(input: {
     return { confirmed: false, remaining: [], killed: false };
   }
   const snapshot = scanned.snapshot;
-  rememberInTreePids(observedPids, snapshot, input.runNonce, holderPid ?? undefined, input.holderExitedAt, createdNotBefore);
+  rememberInTreePids(
+    observedPids,
+    snapshot,
+    input.runNonce,
+    holderPid ?? undefined,
+    input.holderExitedAt,
+    createdNotBefore,
+    observedPidIdentities,
+  );
   const membershipTree = {
     holderPid,
     rows: snapshot,
     createdNotBefore,
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids,
+    observedPidIdentities,
     apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
   };
   let killed = false;
@@ -3659,13 +3728,25 @@ function killNonceBearingLeftovers(input: {
     ...(isUsablePid(holderPid) ? { holderPid } : {}),
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids,
+    observedPidIdentities: [...observedPidIdentities.entries()],
     apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
     rows: snapshot,
   });
-  // One "is this process mine?" answer. The killer's set is the same
-  // set that blocks executorTreeIsGone: processRowCouldBelongToThisRun.
-  // A nonce-matching leftover before the spawn floor is ours.
-  const leftovers = snapshot.filter((sighting) => processRowCouldBelongToThisRun(sighting, leftoverCtx));
+  const chainBounds = {
+    createdNotBefore,
+    ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+  };
+  const leftovers = snapshot.filter((sighting) => {
+    if (!processRowCouldBelongToThisRun(sighting, leftoverCtx)) return false;
+    if (
+      isUsablePid(holderPid)
+      && descendantPidsOf(holderPid, snapshot, chainBounds).has(sighting.pid)
+      && !descendantPidsOfPositiveIdentity(holderPid, snapshot, chainBounds).has(sighting.pid)
+    ) {
+      return false;
+    }
+    return true;
+  });
   for (const leftover of leftovers) {
     if (leftover.pid === input.childPid) continue;
     try {
@@ -3698,6 +3779,7 @@ function killNonceBearingLeftovers(input: {
         observedPids,
         ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
         ...(after.directorSessionId !== undefined ? { directorSessionId: after.directorSessionId } : {}),
+        observedPidIdentities,
       },
     ));
   } catch {
@@ -3773,6 +3855,7 @@ async function cancelLadder(
   createdNotBefore: string,
   holderExitedAt?: string | null,
   observedPids?: Set<number>,
+  observedPidIdentities?: Map<number, string>,
 ): Promise<{ stillRunning: boolean; exitCode: number | null; exitSignal?: string | null }> {
   // HARD first: taskkill /T while the root is still the CIM parent.
   // TerminateProcess of the root first is what creates orphans on Windows.
@@ -3812,6 +3895,7 @@ async function cancelLadder(
       holderPid: recorded?.pid ?? child.pid,
       createdNotBefore,
       ...(observedPids !== undefined ? { observedPids } : {}),
+      ...(observedPidIdentities !== undefined ? { observedPidIdentities } : {}),
       holderExitedAt: leftoverCeiling,
     });
     if (leftoverSweep.killed && !stages.includes("ORPHAN")) stages.push("ORPHAN");
@@ -4019,6 +4103,17 @@ function recordedIdentityFromHeldLease(
   };
 }
 
+function recordWalkedPidIdentity(
+  identities: Map<number, string> | undefined,
+  pid: number,
+  creationDate: string | undefined,
+): void {
+  if (identities === undefined || !isUsablePid(pid) || identities.has(pid)) return;
+  const date = normalisedCreationDate(creationDate);
+  if (date === null) return;
+  identities.set(pid, date);
+}
+
 function rememberInTreePids(
   seen: Set<number>,
   sightings: readonly OrphanSightingV1[],
@@ -4026,6 +4121,7 @@ function rememberInTreePids(
   holderPid: number | undefined,
   holderExitedAt?: string,
   createdNotBefore?: string,
+  identities?: Map<number, string>,
 ): void {
   if (isUsablePid(holderPid)) seen.add(holderPid);
   const bounds = {
@@ -4035,12 +4131,16 @@ function rememberInTreePids(
   const ceilingUsable = holderExitedAtCeilingIsUsable(bounds);
   for (const sighting of sightings) {
     const nonce = normaliseRunNonce(sighting.runNonce);
-    if (nonce !== null && nonce === runNonce) seen.add(sighting.pid);
+    if (nonce !== null && nonce === runNonce) {
+      seen.add(sighting.pid);
+      recordWalkedPidIdentity(identities, sighting.pid, sighting.creationDate);
+    }
     if (
       isUsablePid(holderPid)
-      && descendantPidsOf(holderPid, sightings, bounds).has(sighting.pid)
+      && descendantPidsOfPositiveIdentity(holderPid, sightings, bounds).has(sighting.pid)
     ) {
       seen.add(sighting.pid);
+      recordWalkedPidIdentity(identities, sighting.pid, sighting.creationDate);
     }
     if (sighting.parentPid !== undefined && seen.has(sighting.parentPid)) {
       const parentIsHolder = isUsablePid(holderPid) && sighting.parentPid === holderPid;
@@ -4058,7 +4158,23 @@ function rememberInTreePids(
       ) {
         continue;
       }
+      const walkedParent = identities?.get(sighting.parentPid);
+      if (
+        walkedParent !== undefined
+        && occupantIsProvenDifferentProcess(
+          { pid: sighting.parentPid, creationDate: walkedParent },
+          {
+            pid: sighting.parentPid,
+            ...(sighting.parentCreationDate !== undefined
+              ? { creationDate: sighting.parentCreationDate }
+              : {}),
+          },
+        )
+      ) {
+        continue;
+      }
       seen.add(sighting.pid);
+      recordWalkedPidIdentity(identities, sighting.pid, sighting.creationDate);
     }
   }
 }
@@ -4225,16 +4341,36 @@ function resultRecordsSpawn(parsed: Record<string, unknown>): boolean {
   return false;
 }
 
+const NO_ROOT_COMPLETION_MARKER = ".run-completions-bound";
 const noRootStoreCompletionDirs = new WeakMap<object, string>();
 
+function storeHasUsableRoot(leases: LeaseStoreV1 | undefined): boolean {
+  if (leases === undefined || !("root" in leases)) return false;
+  const root = (leases as { readonly root?: unknown }).root;
+  return typeof root === "string" && root.trim() !== "";
+}
+
+function directorRootEnvIsSet(): boolean {
+  const override = process.env[DIRECTOR_ROOT_ENV];
+  return typeof override === "string" && override.trim() !== "";
+}
+
+function noRootCompletionMarkerPath(): string | null {
+  const fallback = sandboxDirectorStoreRoot();
+  if (typeof fallback !== "string" || fallback.trim() === "") return null;
+  return join(fallback, NO_ROOT_COMPLETION_MARKER);
+}
+
 function runCompletionDir(leases: LeaseStoreV1 | undefined, _runRoot: string): string | null {
-  if (leases !== undefined && "root" in leases) {
+  if (storeHasUsableRoot(leases)) {
     const root = (leases as { readonly root?: unknown }).root;
-    if (typeof root === "string" && root.trim() !== "") return join(root, "run-completions");
+    return join(String(root).trim(), "run-completions");
   }
   const fallback = sandboxDirectorStoreRoot();
   if (typeof fallback !== "string" || fallback.trim() === "") return null;
-  if (leases === undefined) return join(fallback, "run-completions");
+  if (leases === undefined || directorRootEnvIsSet()) {
+    return join(fallback, "run-completions");
+  }
   const existing = noRootStoreCompletionDirs.get(leases);
   if (existing !== undefined) return existing;
   const dir = join(fallback, "unowned-store-completions", randomUUID(), "run-completions");
@@ -4256,6 +4392,22 @@ function existingIndexedRunCompletion(
 ): "none" | "spawned" | "unreadable" {
   const dir = runCompletionDir(leases, runRoot);
   if (dir === null) return "unreadable";
+  let dirPresent = false;
+  try {
+    dirPresent = fs.isDirectory(dir);
+  } catch {
+    return "unreadable";
+  }
+  if (!dirPresent && !storeHasUsableRoot(leases) && directorRootEnvIsSet()) {
+    const marker = noRootCompletionMarkerPath();
+    if (marker !== null) {
+      try {
+        if (fs.isFile(marker)) return "unreadable";
+      } catch {
+        return "unreadable";
+      }
+    }
+  }
   const path = runCompletionPath(dir, runId);
   let present = false;
   try {
@@ -4296,6 +4448,10 @@ function recordIndexedRunCompletion(
       spawned: true,
       runRoot,
     })}\n`);
+    if (!storeHasUsableRoot(leases) && directorRootEnvIsSet()) {
+      const marker = noRootCompletionMarkerPath();
+      if (marker !== null) fs.writeDurable(marker, "bound\n");
+    }
     return true;
   } catch {
     return false;

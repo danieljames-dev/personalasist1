@@ -1405,6 +1405,9 @@ export function descendantPidsOf(
  * - Edge out of a snapshot parent: drop only when the child is *proven*
  *   created strictly before that parent's `creationDate`.
  * Missing or unplaceable dates keep the edge.
+ *
+ * Positive-identity walks use {@link holderChainEdgeIsPositiveIdentity}:
+ * a missing date on a holder edge is not proof of descent.
  */
 function holderChainEdgeIsPossible(
   holderPid: number,
@@ -1433,6 +1436,55 @@ function holderChainEdgeIsPossible(
     return false;
   }
   return true;
+}
+
+/**
+ * Same walk as {@link descendantPidsOf}, except a missing/unplaceable
+ * holder-child date cannot mint positive identity once the exit ceiling
+ * is usable (R29 persist F3).
+ */
+function holderChainEdgeIsPositiveIdentity(
+  holderPid: number,
+  parentPid: number,
+  child: ChainRowV1,
+  parentRow: ChainRowV1 | undefined,
+  bounds?: HolderChainBoundsV1,
+): boolean {
+  if (parentPid === holderPid && holderExitedAtCeilingIsUsable(bounds)) {
+    const childDate = asUsableToken(child.creationDate);
+    if (childDate === null || placeableInstantMicros(childDate) === null) {
+      return false;
+    }
+  }
+  return holderChainEdgeIsPossible(holderPid, parentPid, child, parentRow, bounds);
+}
+
+export function descendantPidsOfPositiveIdentity(
+  holderPid: number,
+  rows: readonly ChainRowV1[],
+  bounds?: HolderChainBoundsV1,
+): Set<number> {
+  const children = new Map<number, ChainRowV1[]>();
+  const byPid = new Map<number, ChainRowV1>();
+  for (const row of rows) {
+    byPid.set(row.pid, row);
+    if (row.parentPid === undefined) continue;
+    const list = children.get(row.parentPid) ?? [];
+    list.push(row);
+    children.set(row.parentPid, list);
+  }
+  const out = new Set<number>();
+  const stack = [holderPid];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const child of children.get(current) ?? []) {
+      if (out.has(child.pid)) continue;
+      if (!holderChainEdgeIsPositiveIdentity(holderPid, current, child, byPid.get(current), bounds)) continue;
+      out.add(child.pid);
+      stack.push(child.pid);
+    }
+  }
+  return out;
 }
 
 /**
@@ -1479,12 +1531,27 @@ export function rememberSampledDescendantPids(
   holderPid: number,
   rows: readonly AncestrySampleRowV1[],
   bounds?: HolderChainBoundsV1,
+  identities?: Map<number, string>,
 ): void {
   if (!isUsablePid(holderPid)) return;
   seen.add(holderPid);
-  for (const pid of descendantPidsOf(holderPid, rows, bounds)) {
+  for (const pid of descendantPidsOfPositiveIdentity(holderPid, rows, bounds)) {
     seen.add(pid);
+    const row = rows.find((item) => item.pid === pid);
+    recordObservedPidIdentity(identities, pid, row?.creationDate);
   }
+}
+
+/** First-seen creationDate for a walked pid. Later occupants of the slot do not overwrite. */
+function recordObservedPidIdentity(
+  identities: Map<number, string> | undefined,
+  pid: number,
+  creationDate: string | undefined,
+): void {
+  if (identities === undefined || !isUsablePid(pid) || identities.has(pid)) return;
+  const date = normalisedCreationDate(creationDate);
+  if (date === null) return;
+  identities.set(pid, date);
 }
 
 /**
@@ -1787,6 +1854,12 @@ export type ProcessRowPlausibilityContextV1 = {
    */
   readonly holderExitedAt?: string;
   readonly observedPids: ReadonlySet<number>;
+  /**
+   * CreationDate this Director recorded when it first walked each
+   * `observedPids` slot. A later occupant of the same number is not
+   * the process we walked. Missing: pid membership alone (R29 persist F2).
+   */
+  readonly observedPidIdentities?: ReadonlyMap<number, string>;
   readonly rows: readonly {
     readonly pid: number;
     readonly parentPid?: number;
@@ -1826,6 +1899,7 @@ export type ProcessRowPlausibilityContextInputV1 = {
   readonly holderPid?: number;
   readonly holderExitedAt?: string;
   readonly observedPids?: Iterable<number>;
+  readonly observedPidIdentities?: Iterable<readonly [number, string]>;
   readonly rows: readonly {
     readonly pid: number;
     readonly parentPid?: number;
@@ -1851,6 +1925,12 @@ export function processRowPlausibilityContext(
     }
   }
   if (isUsablePid(input.holderPid)) observedPids.add(input.holderPid);
+  const observedPidIdentities = new Map<number, string>();
+  if (input.observedPidIdentities !== undefined) {
+    for (const [pid, creationDate] of input.observedPidIdentities) {
+      recordObservedPidIdentity(observedPidIdentities, pid, creationDate);
+    }
+  }
   const apparatusIdentities: MeasurementApparatusIdentityV1[] = [];
   if (input.apparatusPids !== undefined) {
     for (const item of input.apparatusPids) {
@@ -1872,6 +1952,7 @@ export function processRowPlausibilityContext(
     ...(directorSessionId !== undefined ? { directorSessionId } : {}),
     ...(directorPid !== undefined ? { directorPid } : {}),
     observedPids,
+    ...(observedPidIdentities.size > 0 ? { observedPidIdentities } : {}),
     apparatusIdentities,
     apparatusPids,
     rows: input.rows,
@@ -2088,7 +2169,26 @@ export function parentlessRowTiedToThisRun(
     ) {
       // fall through
     } else {
-      return true;
+      // A non-holder pid is also a slot. If we recorded the occupant we
+      // walked, a later parentCreationDate is a different process — not
+      // a parent this Director observed (R29 persist F2).
+      const walkedParent = ctx.observedPidIdentities?.get(sighting.parentPid);
+      if (
+        walkedParent !== undefined
+        && occupantIsProvenDifferentProcess(
+          { pid: sighting.parentPid, creationDate: walkedParent },
+          {
+            pid: sighting.parentPid,
+            ...(sighting.parentCreationDate !== undefined
+              ? { creationDate: sighting.parentCreationDate }
+              : {}),
+          },
+        )
+      ) {
+        // fall through
+      } else {
+        return true;
+      }
     }
   }
   if (parentOccupantIsInHolderChain(sighting, ctx)) return true;

@@ -832,7 +832,38 @@ function reclaimDeveloperAgentStaleHolder(input: {
 function leftoverFieldLength(value: unknown): "absent" | "unreadable" | number {
   if (value === undefined) return "absent";
   if (!Array.isArray(value)) return "unreadable";
-  return value.length;
+  let reported: unknown;
+  try {
+    reported = value.length;
+  } catch {
+    return "unreadable";
+  }
+  if (typeof reported !== "number" || !Number.isFinite(reported) || reported < 0) {
+    return "unreadable";
+  }
+  if (reported > 0) return reported;
+  try {
+    if (value[0] !== undefined) return "unreadable";
+    if (Object.keys(value).some((key) => /^\d+$/.test(key))) return "unreadable";
+  } catch {
+    return "unreadable";
+  }
+  return 0;
+}
+
+function snapshotCarriesLeftoverEvidence(snapshot: unknown): boolean {
+  if (snapshot === undefined || snapshot === null) return false;
+  if (Array.isArray(snapshot)) return false;
+  if (typeof snapshot !== "object") return false;
+  const rec = snapshot as Record<string, unknown>;
+  const length = rec.length;
+  if (typeof length === "number" && length > 0) return true;
+  try {
+    if (rec[0] !== undefined) return true;
+    return Object.keys(rec).some((key) => /^\d+$/.test(key));
+  } catch {
+    return true;
+  }
 }
 
 function namedDeveloperAgentLeftovers(scan: {
@@ -894,6 +925,9 @@ export function releaseDeveloperAgentWorktreeLease(
     });
     const namedLeftovers = namedDeveloperAgentLeftovers(scan);
     if (namedLeftovers !== null) return namedLeftovers;
+    if (snapshotCarriesLeftoverEvidence(scan.snapshot)) {
+      return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
+    }
     if (Array.isArray(scan.snapshot)) {
       const ctx = processRowPlausibilityContext({
         runNonce: nonce,

@@ -384,6 +384,8 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     }
     if (state.pending.length === 0) return;
     if (force) {
+      dropHeldAuthFolds(state);
+      if (state.pending.length === 0) return;
       // pemOverflow means we are between a consumed BEGIN and its END.
       // Flush must not ship the held body as plaintext just because the
       // block never terminated. Drop when there is neither a BEGIN nor
@@ -477,6 +479,7 @@ export function createBoundedLog(deps: BoundedLogDepsV1): BoundedLogV1 {
     const state = streams[stream];
     state.pending += state.decoder.end();
     state.decoder = new StringDecoder("utf8");
+    dropHeldAuthFolds(state);
     if (state.pending.length === 0) return;
     const openPem = state.pemOverflow || firstUnterminatedPemBegin(state.pending) >= 0;
     const secretAt = secretHoldStart(state.pending);
@@ -617,21 +620,57 @@ function fileImageOf(state: StreamState): Buffer {
  * newline. Otherwise the entire unterminated last line is held. Incomplete-starter scanning
  * is not a second spelling of "block open".
  */
-function consumeLeadingAuthFolds(pending: string): number | null {
+const AUTH_LINE_BREAK = /[\r\n\u0085\u2028\u2029]/;
+
+function nextAuthLineBreak(text: string, from: number): { start: number; end: number } | null {
+  const rel = text.slice(from).search(AUTH_LINE_BREAK);
+  if (rel < 0) return null;
+  const start = from + rel;
+  if (text[start] === "\r" && text[start + 1] === "\n") return { start, end: start + 2 };
+  return { start, end: start + 1 };
+}
+
+function isObsFoldPrefix(text: string): boolean {
+  return /^[\t \u00a0]/.test(text);
+}
+
+/**
+ * Consume obs-fold continuations after a completed Authorization first-value
+ * line. Line breaks match the redactor (CRLF / LF / CR / NEL / LS / PS).
+ * `dropUnterminated` is for flush/seal: a last child chunk has no trailing LF.
+ */
+function consumeLeadingAuthFolds(pending: string, dropUnterminated = false): number | null {
   let offset = 0;
   while (offset < pending.length) {
-    const nl = pending.indexOf("\n", offset);
-    if (nl < 0) {
-      const rest = pending.slice(offset);
-      if (rest.length === 0) return offset;
-      if (offset > 0 || /^[\t \u00a0]/.test(rest)) return null;
-      return 0;
+    const br = nextAuthLineBreak(pending, offset);
+    if (br !== null && br.start === offset) {
+      offset = br.end;
+      continue;
     }
-    const line = pending.slice(offset, nl + 1);
-    if (!/^[\t \u00a0]/.test(line)) return offset;
-    offset = nl + 1;
+    const rest = pending.slice(offset);
+    if (!isObsFoldPrefix(rest)) return offset;
+    if (br === null) {
+      return dropUnterminated ? pending.length : null;
+    }
+    offset = br.end;
   }
   return offset;
+}
+
+function dropHeldAuthFolds(state: StreamState): void {
+  if (!state.authFoldsMayFollow || state.pending.length === 0) return;
+  const end = consumeLeadingAuthFolds(state.pending, true);
+  if (end === null) {
+    if (isObsFoldPrefix(state.pending) || AUTH_LINE_BREAK.test(state.pending[0] ?? "")) {
+      state.pending = "";
+      state.authFoldsMayFollow = false;
+    }
+    return;
+  }
+  if (end > 0) state.pending = state.pending.slice(end);
+  if (state.pending.length === 0 || !isObsFoldPrefix(state.pending)) {
+    state.authFoldsMayFollow = false;
+  }
 }
 
 function authorizationFoldShouldHold(afterHeader: string): boolean {
