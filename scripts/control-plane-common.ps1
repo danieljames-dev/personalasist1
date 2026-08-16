@@ -126,15 +126,20 @@ function Invoke-AionTrustedVector {
     if(@($Vector).Count -lt 1){throw 'Trusted command vector is empty'}
     $resolved=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
     $previous=(Get-Location).Path
+    $previousErrorActionPreference=$ErrorActionPreference
     try {
         Set-Location -LiteralPath $resolved -ErrorAction Stop
         $exe=[string]$Vector[0]
         $args=@($Vector | Select-Object -Skip 1)
-        $output=& $exe @args 2>&1
+        $command=Get-Command $exe -CommandType Application -ErrorAction Stop|Select-Object -First 1
+        $ErrorActionPreference='Continue'
+        $output=& $command.Source @args 2>&1
         $code=$LASTEXITCODE
+        if($null -eq $code){throw "Trusted command did not report a native exit code: $exe"}
         return [pscustomobject]@{ ExitCode=$code; Output=@($output); Cwd=$resolved }
     }
     finally {
+        $ErrorActionPreference=$previousErrorActionPreference
         Set-Location -LiteralPath $previous
     }
 }
