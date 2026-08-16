@@ -85,7 +85,7 @@ function matchingDiscovery(exe = EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "
   return {
     discoveryEnv: { AION_GROK_PATH: EXE, AION_CLAUDE_CODE_PATH: claude },
     discoveryFs: {
-      isFile: (path) => path === EXE || path === claude || path === exe,
+      isFile: (path) => (path === EXE || path === claude || path === exe) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };
@@ -883,7 +883,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: EXE },
-        discoveryFs: { isFile: (path) => path === EXE, readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === EXE) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
 
@@ -936,7 +936,7 @@ test("B4 two launchRun writers with AION_DIRECTOR_STORE unset share the host sto
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: EXE },
-        discoveryFs: { isFile: (path) => path === EXE, readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === EXE) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
     assert.equal(second.spawned, false, second.reason);

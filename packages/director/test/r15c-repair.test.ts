@@ -92,7 +92,7 @@ function matchingDiscovery(exe = EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "
   return {
     discoveryEnv: { AION_GROK_PATH: exe, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
     discoveryFs: {
-      isFile: (path) => path === exe || path === "C:\\Tools\\claude.exe",
+      isFile: (path) => (path === exe || path === "C:\\Tools\\claude.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };

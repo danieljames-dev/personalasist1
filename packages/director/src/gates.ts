@@ -114,13 +114,15 @@ export function openGate(input: {
 export const UNOBSERVED_FROZEN_FACT = "UNOBSERVED" as const;
 
 /**
- * Every key supplied is written. Absence and empty string are UNOBSERVED,
- * not omitted: an empty frozen object would skip every comparison.
+ * Observed facts are written. Absence, empty string, and the UNOBSERVED
+ * sentinel are omitted: a sentinel is not a world the Owner can consent to.
  */
 export function frozenFactsFrom(input: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const frozen: Record<string, string> = {};
   for (const [key, value] of Object.entries(input)) {
-    frozen[key] = value !== undefined && value !== "" ? value : UNOBSERVED_FROZEN_FACT;
+    if (value !== undefined && value !== "" && value !== UNOBSERVED_FROZEN_FACT) {
+      frozen[key] = value;
+    }
   }
   return frozen;
 }

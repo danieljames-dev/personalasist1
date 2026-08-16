@@ -114,7 +114,7 @@ function matchingDiscovery(): Pick<RunManagerDepsV1, "discoveryEnv" | "discovery
   return {
     discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
     discoveryFs: {
-      isFile: (path) => path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe",
+      isFile: (path) => (path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };
@@ -987,7 +987,7 @@ test("C7 liveness: a review-role stand-in still writes handoff.json", async () =
       scanOrphans: () => writerOrphanScanResult([]),
       discoveryEnv: { AION_GROK_PATH: process.execPath, AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
       discoveryFs: {
-        isFile: (path) => path === process.execPath || path === CLAUDE_EXE,
+        isFile: (path) => (path === process.execPath || path === CLAUDE_EXE) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
         readDir: () => [],
       },
     });

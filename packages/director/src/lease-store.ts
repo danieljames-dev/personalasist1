@@ -35,7 +35,6 @@ import { canonicalizeHostPath, isResolvedHostPath, namesReservedDevice, pathIsIn
 import {
   acquireLease,
   LEASE_SCHEMA_V1,
-  livenessFromHolderObservation,
   reclaimStaleLease,
   releaseLease,
   type LeaseV1,
@@ -794,13 +793,24 @@ function reclaimDeveloperAgentStaleHolder(input: {
   } catch {
     observation = { outcome: "UNAVAILABLE", reason: "probe threw", pid: recordedPid };
   }
+  const recordedIdentity = {
+    pid: recordedPid,
+    creationDate: input.heldBy?.processIdentity?.startedAt ?? "",
+    runNonce: input.heldBy?.processIdentity?.runToken ?? "",
+  };
   const result = reclaimStaleLease({
     existing: input.existing,
     kind: "WORKTREE",
     resource: input.resource,
-    holderLiveness: livenessFromHolderObservation(observation),
+    holderLiveness: holderLiveness(
+      recordedIdentity,
+      isUsablePid(observation.pid) ? observation : { ...observation, pid: recordedPid },
+    ),
     now: input.now,
-    holderObservation: { outcome: observation.outcome, pid: recordedPid },
+    holderObservation: {
+      outcome: observation.outcome,
+      pid: isUsablePid(observation.pid) ? observation.pid : recordedPid,
+    },
     ...(observation.outcome === "FOUND"
       ? {
         observedIdentity: {
@@ -817,11 +827,39 @@ function reclaimDeveloperAgentStaleHolder(input: {
 export function releaseDeveloperAgentWorktreeLease(
   store: NodeLeaseStoreV1,
   lease: LeaseV1,
-): void {
+  options?: {
+    readonly scanOrphans?: (input: {
+      readonly runNonce: string;
+      readonly holderPid: number | null;
+      readonly createdNotBefore: string;
+    }) => { readonly liveSightings?: readonly { readonly pid: number }[]; readonly undecidable?: readonly unknown[] };
+  },
+): { ok: boolean; reason: string } {
+  const nonce = normaliseRunNonce(lease.processIdentity?.runToken ?? "");
+  if (options?.scanOrphans !== undefined && nonce !== null) {
+    try {
+      const scan = options.scanOrphans({
+        runNonce: nonce,
+        holderPid: isUsablePid(lease.pid) ? lease.pid : null,
+        createdNotBefore: lease.processIdentity?.startedAt ?? lease.acquiredAt,
+      });
+      const live = scan.liveSightings ?? [];
+      const undecidable = scan.undecidable ?? [];
+      if (live.length > 0 || undecidable.length > 0) {
+        return {
+          ok: false,
+          reason: "developer-agent tree is not gone; WORKTREE lease retained",
+        };
+      }
+    } catch {
+      return { ok: false, reason: "developer-agent tree scan failed; WORKTREE lease retained" };
+    }
+  }
   try {
     store.save(releaseLease(store.list(), lease));
+    return { ok: true, reason: "released" };
   } catch {
-    // Best-effort release. An unlistable store is not a successful release.
+    return { ok: false, reason: "lease store unreadable; not a successful release" };
   }
 }
 

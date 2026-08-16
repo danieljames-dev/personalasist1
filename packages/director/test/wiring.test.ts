@@ -173,7 +173,6 @@ test("every exported src function reachable from the run path has a non-test cal
 
     ["killProcessTreeStandIn", "cannot have a call-site: wired as a function value on deps.killTree"],
     ["measurementApparatusPidsOfThisProcess", "derived pid-number view; production exclusion uses measurementApparatusIdentitiesOfThisProcess"],
-    ["parentIsProvenCapableCreator", "live-explanation half of parentlessRowTiedToThisRun; PowerShell emit keeps its own $parentProvenCapable so nonce-bearing leftovers are still emitted"],
     ["isSafePathSegment", "cannot have a production caller: used via validatePathSegment"],
     ["validateMissionId", "cannot have a production caller: alias of validatePathSegment"],
     ["validateRunId", "cannot have a production caller: alias of validatePathSegment"],
@@ -735,7 +734,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: exe },
         discoveryFs: {
-          isFile: (path) => path === exe,
+          isFile: (path) => (path === exe) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
           readDir: () => [],
         },
       },
@@ -839,7 +838,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       clock: createFixedClock(now),
       fs: {
         isDirectory: (path) => dirs.has(path),
-        isFile: (path) => files.has(path),
+        isFile: (path) => (files.has(path)) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
         readUtf8(path) {
           const value = files.get(path);
           if (value === undefined) {
@@ -906,7 +905,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
       scanOrphans: () => writerOrphanScanResult([{ pid: 7777, runNonce: nonce, creationDate: t0 }]),
       discoveryEnv: { AION_GROK_PATH: exe, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
       discoveryFs: {
-        isFile: (path) => path === exe || path === "C:\\Tools\\claude.exe",
+        isFile: (path) => (path === exe || path === "C:\\Tools\\claude.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
         readDir: () => [],
       },
     },

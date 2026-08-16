@@ -228,7 +228,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
           resolveArtifactPath: (absolutePath) => absolutePath,
           discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
           discoveryFs: {
-            isFile: (path) => path === "C:\\Tools\\grok.exe" || path === "C:\\Tools\\claude.exe",
+            isFile: (path) => (path === "C:\\Tools\\grok.exe" || path === "C:\\Tools\\claude.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
             readDir: () => [],
           },
         },

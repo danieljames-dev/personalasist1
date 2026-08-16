@@ -113,6 +113,7 @@ export interface ExecutorHandoffV1 {
   executor: string;
   missionId: OpaqueId;
   runId: OpaqueId;
+  workItemId?: string;
   branch: string;
   headBefore: string;
   headAfter: string;
@@ -525,6 +526,10 @@ export function parseHandoff(raw: string | unknown, options: HandoffParseOptions
   const executor = requireString("executor");
   const missionId = requireString("missionId");
   const runId = requireString("runId");
+  const workItemRaw = value.workItemId;
+  const workItemId = typeof workItemRaw === "string" && workItemRaw.trim() !== ""
+    ? workItemRaw.trim()
+    : undefined;
   const branch = requireString("branch");
 
   // A handoff is bound to the run it claims to be for. A report from a different run would
@@ -714,6 +719,7 @@ export function parseHandoff(raw: string | unknown, options: HandoffParseOptions
       executor,
       missionId,
       runId,
+      ...(workItemId !== undefined ? { workItemId } : {}),
       branch,
       headBefore,
       headAfter,

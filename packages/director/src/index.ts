@@ -27,6 +27,7 @@ export {
   CANCEL_SOFT_MS,
   CANCEL_HARD_MS,
   launchRun,
+  createInProcessCapacityGate,
   recoverAbandonedRun,
   proveWriterExit,
   writerReleaseEvidence,

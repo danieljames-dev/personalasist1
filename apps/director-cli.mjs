@@ -193,14 +193,7 @@ export async function runDirectorCli(argv, io = console, env = process.env, host
     spawn: director.createNodeSpawner(),
     git: director.createNodeGitRunner({ worktreePath: required(values, "worktree") }),
     probe: director.createWindowsProcessProbe(),
-    capacity: {
-      tryAcquire() {
-        return { ok: true, reason: "cli-capacity" };
-      },
-      release() {
-        // unused
-      },
-    },
+    capacity: director.createInProcessCapacityGate(),
     leases: director.createNodeLeaseStore(storeRoot),
     wait: director.createNodeWait(),
     killTree: director.killProcessTreeStandIn,

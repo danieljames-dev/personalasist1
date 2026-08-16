@@ -110,7 +110,7 @@ function matchingDiscovery(): Pick<RunManagerDepsV1, "discoveryEnv" | "discovery
   return {
     discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
     discoveryFs: {
-      isFile: (path) => path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe",
+      isFile: (path) => (path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };
@@ -1203,7 +1203,7 @@ test("R8 launchRun refuses a relative runRoot", async () => {
     scanOrphans: () => writerOrphanScanResult([]),
     discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
     discoveryFs: {
-      isFile: (path) => path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe",
+      isFile: (path) => (path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   });

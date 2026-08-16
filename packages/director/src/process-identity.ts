@@ -287,14 +287,19 @@ export function captureProcessIdentity(
   if (observation.outcome === "UNAVAILABLE") {
     return { ok: false, identity: null, observation, reason: `probe could not answer: ${observation.reason}` };
   }
+  if (!observationIsAboutPid(observation, input.pid)) {
+    return {
+      ok: false,
+      identity: null,
+      observation,
+      reason: "observation is about a different pid than the one just spawned",
+    };
+  }
   if (observation.outcome === "NOT_FOUND") {
     return { ok: false, identity: null, observation, reason: "the process was gone before its identity could be recorded" };
   }
   if (!isUsablePid(observation.pid)) {
     return { ok: false, identity: null, observation, reason: "observation did not name a pid" };
-  }
-  if (observation.pid !== input.pid) {
-    return { ok: false, identity: null, observation, reason: "observation is about a different pid than the one just spawned" };
   }
   const creationDate = normalisedCreationDate(observation.creationDate);
   if (creationDate === null) {
@@ -464,9 +469,9 @@ export function occupantIsProvenDifferentProcess(
  * death or of a different process. Only a strictly later observed instant is.
  */
 export function observedCreationIsStrictlyLater(recorded: string, observed: string): boolean {
-  const recordedMs = parseProcessTimestamp(recorded);
-  const observedMs = parseProcessTimestamp(observed);
-  return recordedMs !== null && observedMs !== null && observedMs > recordedMs;
+  const recordedUs = parseProcessTimestampMicros(recorded);
+  const observedUs = parseProcessTimestampMicros(observed);
+  return recordedUs !== null && observedUs !== null && observedUs > recordedUs;
 }
 
 /**
@@ -2071,10 +2076,15 @@ export function parentlessRowTiedToThisRun(
   if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
 
   if (sighting.parentPresent === true) {
-    // A live parent outside this run's tree is a live explanation.
-    // parentIsProvenCapableCreator is that explanation; it is not
-    // required here because the present-parent branch ties only on
-    // the two facts above.
+    // A live parent is a live explanation when it could have created this
+    // child, or when capability is UNKNOWN (missing parentCreationDate) —
+    // that last case is the R24 1B host-noise known limit.
+    // A parent proven created *after* the child is a recycled slot, not
+    // a live explanation. That is the R25 pid-reuse leftover.
+    if (parentIsProvenCapableCreator(sighting, ctx)) return false;
+    if (provenCreatedStrictlyAfter(sighting.parentCreationDate, sighting.creationDate)) {
+      return true;
+    }
     return false;
   }
 
@@ -2324,8 +2334,8 @@ export function compareCreationDates(recorded: string, observed: string): Creati
   if (!timestampHasExplicitZone(recorded) || !timestampHasExplicitZone(observed)) {
     return "UNCOMPARABLE";
   }
-  const a = parseProcessTimestamp(recorded);
-  const b = parseProcessTimestamp(observed);
+  const a = parseProcessTimestampMicros(recorded);
+  const b = parseProcessTimestampMicros(observed);
   if (a !== null && b !== null) return a === b ? "SAME" : "DIFFERENT";
   if (recorded === observed) return "SAME";
   return "UNCOMPARABLE";
@@ -2363,14 +2373,30 @@ function utcFromNamedCalendar(
 }
 
 function parseProcessTimestamp(value: string): number | null {
+  const micros = parseProcessTimestampMicros(value);
+  if (micros === null) return null;
+  return Math.trunc(micros / 1000);
+}
+
+/**
+ * Full-precision placeable instant in microseconds since Unix epoch.
+ * Millisecond truncation is how same-slot reuse inside 1 ms compared MATCH.
+ */
+function parseProcessTimestampMicros(value: string): number | null {
   const trimmed = value.trim();
   if (trimmed === "") return null;
-  const dmtf = parseDmtfDatetime(trimmed);
+  const dmtf = parseDmtfDatetimeMicros(trimmed);
   if (dmtf !== null) return dmtf;
-  return parseIso8601Instant(trimmed);
+  return parseIso8601InstantMicros(trimmed);
 }
 
 function parseIso8601Instant(value: string): number | null {
+  const micros = parseIso8601InstantMicros(value);
+  if (micros === null) return null;
+  return Math.trunc(micros / 1000);
+}
+
+function parseIso8601InstantMicros(value: string): number | null {
   const match = ISO_INSTANT.exec(value);
   if (match === null) return null;
   const year = Number(match[1]);
@@ -2380,19 +2406,27 @@ function parseIso8601Instant(value: string): number | null {
   const minute = Number(match[5]);
   const second = Number(match[6]);
   const fraction = match[7] ?? "";
-  const ms = fraction === "" ? 0 : Number(fraction.padEnd(3, "0").slice(0, 3));
-  const asUtc = utcFromNamedCalendar(year, month, day, hour, minute, second, ms);
-  if (asUtc === null) return null;
-  if (/Z$/i.test(value)) return asUtc;
+  const fracMicros = Number((fraction + "000000").slice(0, 6));
+  if (!Number.isFinite(fracMicros)) return null;
+  const asUtcMs = utcFromNamedCalendar(year, month, day, hour, minute, second, 0);
+  if (asUtcMs === null) return null;
+  let utcMicros = asUtcMs * 1000 + fracMicros;
+  if (/Z$/i.test(value)) return utcMicros;
   if (match[8] === undefined) return null;
   const offsetHours = Number(match[9]);
   const offsetMinutes = Number(match[10]);
   if (offsetHours > 23 || offsetMinutes > 59) return null;
-  const offsetMs = (offsetHours * 60 + offsetMinutes) * 60 * 1000;
-  return match[8] === "+" ? asUtc - offsetMs : asUtc + offsetMs;
+  const offsetUs = (offsetHours * 60 + offsetMinutes) * 60 * 1000 * 1000;
+  return match[8] === "+" ? utcMicros - offsetUs : utcMicros + offsetUs;
 }
 
 function parseDmtfDatetime(value: string): number | null {
+  const micros = parseDmtfDatetimeMicros(value);
+  if (micros === null) return null;
+  return Math.trunc(micros / 1000);
+}
+
+function parseDmtfDatetimeMicros(value: string): number | null {
   const match = DMTF_DATETIME.exec(value);
   if (match === null) return null;
   const year = Number(match[1]);
@@ -2404,21 +2438,14 @@ function parseDmtfDatetime(value: string): number | null {
   const micro = Number(match[7]);
   const sign = match[8];
   const offsetMinutes = Number(match[9]);
-  const asUtc = utcFromNamedCalendar(
-    year,
-    month,
-    day,
-    hour,
-    minute,
-    second,
-    Math.floor(micro / 1000),
-  );
-  if (asUtc === null) return null;
+  const asUtcMs = utcFromNamedCalendar(year, month, day, hour, minute, second, 0);
+  if (asUtcMs === null) return null;
   // DMTF/WMI UTC offset is minutes, documented maximum ±720 (14 hours).
   // A value outside that range is not a placeable instant.
   if (offsetMinutes > 720) return null;
-  const offsetMs = offsetMinutes * 60 * 1000;
-  return sign === "+" ? asUtc - offsetMs : asUtc + offsetMs;
+  const utcMicros = asUtcMs * 1000 + micro;
+  const offsetUs = offsetMinutes * 60 * 1000 * 1000;
+  return sign === "+" ? utcMicros - offsetUs : utcMicros + offsetUs;
 }
 
 export function normalisedCreationDate(value: unknown): string | null {
@@ -2695,7 +2722,11 @@ function windowsOrphanScanScript(
     "  $isBroker = $false;",
     "  if ($parentName) { foreach ($b in $brokerNames) { if ($parentName -ieq $b) { $isBroker = $true } } };",
     "  $parentInChain = $false;",
-    "  if ($holderPid -gt 0 -and (($ppid -eq $holderPid) -or $desc.Contains($ppid))) { $parentInChain = $true };",
+    "  if ($holderPid -gt 0 -and (($ppid -eq $holderPid) -or $desc.Contains($ppid))) {",
+    "    $ceilingUsable = ($exitUtc -ne $null -and $exitUtc -gt $floorUtc);",
+    "    if ($ppid -eq $holderPid -and $ceilingUsable -and $childUtc -ne $null -and $childUtc -gt $exitUtc) { $parentInChain = $false }",
+    "    else { $parentInChain = $true }",
+    "  };",
     "  $parentBeforeChild = $false;",
     "  if ($parentUtc -ne $null -and $childUtc -ne $null -and $parentUtc -le $childUtc) { $parentBeforeChild = $true };",
     "  $parentProvenCapable = [bool]($parentPresent -and $parentInChain -and $parentBeforeChild);",

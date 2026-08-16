@@ -93,7 +93,7 @@ function matchingDiscovery(): Pick<RunManagerDepsV1, "discoveryEnv" | "discovery
   return {
     discoveryEnv: { AION_GROK_PATH: GROK_EXE, AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
     discoveryFs: {
-      isFile: (path) => path === GROK_EXE || path === CLAUDE_EXE,
+      isFile: (path) => (path === GROK_EXE || path === CLAUDE_EXE) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };
@@ -1000,7 +1000,7 @@ test("4 executeRun with the real node spawner and a large Claude stdin still wri
         resolveArtifactPath: (absolutePath) => absolutePath,
         discoveryEnv: { AION_CLAUDE_CODE_PATH: process.execPath },
         discoveryFs: {
-          isFile: (path) => path === process.execPath || existsSync(path),
+          isFile: (path) => (path === process.execPath || existsSync(path)) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
           readDir: () => [],
         },
       },

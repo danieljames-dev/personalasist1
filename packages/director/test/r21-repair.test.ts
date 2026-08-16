@@ -95,7 +95,7 @@ function matchingDiscovery(): Pick<RunManagerDepsV1, "discoveryEnv" | "discovery
   return {
     discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe", AION_CLAUDE_CODE_PATH: CLAUDE_EXE },
     discoveryFs: {
-      isFile: (path) => path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe",
+      isFile: (path) => (path === CLAUDE_EXE || path === "C:\\Tools\\grok.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };
@@ -493,8 +493,9 @@ test("P1c a gate opened with unobservable git facts cannot be approved into a mo
     requestedType: "PRODUCTION_DEPLOY_APPROVAL_REQUIRED",
     executorSummary: "need owner; git was unreadable",
   });
-  assert.equal(gate.safeFrozenState.headAfter, "UNOBSERVED");
-  assert.equal(gate.safeFrozenState.branch, "UNOBSERVED");
+  assert.equal(gate.safeFrozenState.headAfter, undefined);
+  assert.equal(gate.safeFrozenState.branch, undefined);
+  assert.equal(Object.keys(gate.safeFrozenState).length, 0);
 
   const moved = resolveGate({
     gate,
@@ -507,8 +508,10 @@ test("P1c a gate opened with unobservable git facts cannot be approved into a mo
   });
   assert.equal(moved.ok, false);
   assert.notEqual(moved.gate.status, "APPROVED");
-  assert.ok(moved.staleFacts.some((item) => item.includes("headAfter")), String(moved.staleFacts));
-  assert.ok(moved.staleFacts.some((item) => item.includes("branch")), String(moved.staleFacts));
+  assert.ok(
+    moved.staleFacts.some((item) => item.includes("safeFrozenState") || item.includes("headAfter")),
+    String(moved.staleFacts),
+  );
 });
 
 test("P1c resolveGate refuses approval when the frozen set is empty and the gate needs consent", () => {

@@ -179,7 +179,7 @@ function matchingDiscovery(exe = CLAUDE_EXE): Pick<RunManagerDepsV1, "discoveryE
   return {
     discoveryEnv: { AION_GROK_PATH: EXE, AION_CLAUDE_CODE_PATH: exe === EXE ? CLAUDE_EXE : exe },
     discoveryFs: {
-      isFile: (path) => path === EXE || path === CLAUDE_EXE || path === exe,
+      isFile: (path) => (path === EXE || path === CLAUDE_EXE || path === exe) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };
@@ -660,15 +660,13 @@ test("a timeout escalates soft terminate of the root to a hard tree kill", async
   });
   assert.equal(result.ok, false);
   assert.equal(result.cancel.timedOut, true);
-  assert.ok(result.cancel.stages.includes("SOFT"), String(result.cancel.stages));
   assert.ok(result.cancel.stages.includes("HARD"), String(result.cancel.stages));
-  assert.ok(hung.softKills >= 1, "SOFT must terminate the tracked root");
   assert.deepEqual(killed, [RECORDED.pid]);
-  assert.ok(waits.includes(CANCEL_SOFT_MS), `soft wait missing: ${waits.join(",")}`);
   assert.ok(waits.includes(CANCEL_HARD_MS), `hard wait missing: ${waits.join(",")}`);
   const softAt = result.cancel.stages.indexOf("SOFT");
   const hardAt = result.cancel.stages.indexOf("HARD");
-  assert.ok(softAt >= 0 && hardAt > softAt, "HARD must follow SOFT");
+  assert.ok(hardAt === 0, "HARD must run first so the tree is killed while the root is still the CIM parent");
+  if (softAt >= 0) assert.ok(softAt > hardAt, "SOFT if needed follows HARD");
 });
 
 // ---------------------------------------------------------------------------
@@ -2824,7 +2822,7 @@ test("launchRun ADVERSARIAL_REVIEW argv cannot write", async () => {
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
-        discoveryFs: { isFile: (path) => path === "C:\\Tools\\grok.exe", readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === "C:\\Tools\\grok.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
     assert.equal(result.spawned, true, result.reason);
@@ -2880,7 +2878,7 @@ test("launchRun without a role uses the implementer permission list", async () =
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
-        discoveryFs: { isFile: (path) => path === "C:\\Tools\\claude.exe", readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === "C:\\Tools\\claude.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
     assert.equal(result.spawned, true, result.reason);
@@ -3306,7 +3304,7 @@ test("executeRun reclaims an expired writer whose holder is NOT_FOUND", async ()
     leases,
     probe: {
       observe(pid) {
-        if (pid === stalePid) return { outcome: "NOT_FOUND", reason: "gone", pid: 4812 };
+        if (pid === stalePid) return { outcome: "NOT_FOUND", reason: "gone", pid: stalePid };
         return foundObservation(RECORDED);
       },
     },
@@ -3524,7 +3522,7 @@ test("launchRun refuses a reviewer role on the implementer executor", async () =
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
-        discoveryFs: { isFile: (path) => path === "C:\\Tools\\claude.exe", readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === "C:\\Tools\\claude.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
     assert.equal(result.spawned, false, result.reason);
@@ -3593,7 +3591,7 @@ test("a spawned run persists the resolved role on the intent", async () => {
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: "C:\\Tools\\grok.exe" },
-        discoveryFs: { isFile: (path) => path === "C:\\Tools\\grok.exe", readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === "C:\\Tools\\grok.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
     assert.equal(result.spawned, true, result.reason);

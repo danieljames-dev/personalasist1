@@ -7,6 +7,7 @@ import {
 import {
   acquireDeveloperAgentWorktreeLease,
   createNodeFileSystemProbe,
+  createWindowsOrphanScanner,
   directorPermitAuthorizesWrite,
   discoverClaudeExecutor,
   mintDirectorWritePermit,
@@ -156,7 +157,8 @@ export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {
         now,
       }, signal);
     } finally {
-      releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease);
+      const scanOrphans = options.scanOrphans ?? createWindowsOrphanScanner();
+      releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease, { scanOrphans });
     }
   };
   return bridge;

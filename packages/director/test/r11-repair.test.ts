@@ -336,7 +336,7 @@ async function runWith(
     resolveArtifactPath: (absolutePath) => absolutePath,
     discoveryEnv: { AION_GROK_PATH: EXE, AION_CLAUDE_CODE_PATH: "C:\\Tools\\claude.exe" },
     discoveryFs: {
-      isFile: (path) => path === EXE || path === "C:\\Tools\\claude.exe",
+      isFile: (path) => (path === EXE || path === "C:\\Tools\\claude.exe") || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
     ...(over.logSinks !== undefined ? { logSinks: over.logSinks } : {}),
@@ -987,7 +987,7 @@ test("E2 ADVERSARIAL_REVIEW that actually commits fails reviewLeftTreeUnchanged"
         killTree: () => undefined,
         scanOrphans: () => writerOrphanScanResult([]),
         discoveryEnv: { AION_GROK_PATH: EXE },
-        discoveryFs: { isFile: (path) => path === EXE, readDir: () => [] },
+        discoveryFs: { isFile: (path) => (path === EXE) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path), readDir: () => [] },
       },
     );
     assert.equal(result.ok, false, result.reason);

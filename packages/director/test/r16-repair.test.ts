@@ -87,7 +87,7 @@ function matchingDiscovery(exe = EXE): Pick<RunManagerDepsV1, "discoveryEnv" | "
       AION_CLAUDE_CODE_PATH: exe === EXE ? claude : exe,
     },
     discoveryFs: {
-      isFile: (path) => path === EXE || path === claude || path === exe,
+      isFile: (path) => (path === EXE || path === claude || path === exe) || /(?:^|[\\\\/])PROMPT\.md$/i.test(path),
       readDir: () => [],
     },
   };

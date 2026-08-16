@@ -98,7 +98,7 @@ import {
   foreignWorktreeOccupiesDirectory,
   heartbeat,
   LEASE_TTL_MS,
-  livenessFromHolderObservation,
+
   reclaimStaleLease,
   releaseLease,
   type LeaseKindV1,
@@ -157,7 +157,7 @@ import {
   type RunIntentV1,
   type SpawnPermitV1,
 } from "./run-intent.js";
-import { CONTROL_BYTES } from "./control-bytes.js";
+import { CONTROL_BYTES, asUsableToken } from "./control-bytes.js";
 
 export const RUN_RESULT_SCHEMA_V1 = "aion.director.run-result.v1" as const;
 
@@ -809,13 +809,18 @@ export function evaluateSuccessConjunction(input: {
     && input.exitSignal !== undefined
     && input.exitSignal !== "";
 
-  const exitOk = !input.stillRunning
+  const runningUnknown = input.stillRunning !== false;
+  const neverCreated = input.processWasCreated === false;
+  const exitOk = !neverCreated
+    && input.stillRunning === false
     && input.exitCode !== null
     && !signalled
     && known.includes(input.exitCode)
     && (classified === null || classified.kind === "COMPLETED");
 
-  const exitReason = input.stillRunning
+  const exitReason = neverCreated
+    ? "no process was created; success is not claimed for an invocation that never ran"
+    : runningUnknown
     ? "the process is still running"
     : signalled
       ? `process exited on signal ${input.exitSignal}; a signalled exit is not a clean completion`
@@ -829,7 +834,6 @@ export function evaluateSuccessConjunction(input: {
 
   const parsed = input.parsed;
   const handoff = parsed.ok ? parsed.handoff : null;
-  const reportedWorkItem = input.reportedWorkItemId;
 
   const observedBranch = input.gitAfter !== null && input.gitAfter.branch.outcome === "ATTACHED"
     ? input.gitAfter.branch.name
@@ -905,11 +909,14 @@ export function evaluateSuccessConjunction(input: {
     handoffParsedReason = "handoff parsed";
   }
 
+  const parsedWorkItem = handoff !== null && handoff.workItemId !== undefined
+    ? handoff.workItemId
+    : null;
   const identitiesOk = handoff !== null
     && handoff.missionId === input.expectedMissionId
     && handoff.runId === input.expectedRunId
-    && reportedWorkItem !== null
-    && reportedWorkItem === input.expectedWorkItemId;
+    && parsedWorkItem !== null
+    && parsedWorkItem === input.expectedWorkItemId;
 
   let identitiesReason = "mission id, run id and work item match what was dispatched";
   if (handoff === null) {
@@ -918,10 +925,10 @@ export function evaluateSuccessConjunction(input: {
     identitiesReason = `missionId ${handoff.missionId} is not the dispatched ${input.expectedMissionId}`;
   } else if (handoff.runId !== input.expectedRunId) {
     identitiesReason = `runId ${handoff.runId} is not the dispatched ${input.expectedRunId}`;
-  } else if (reportedWorkItem === null) {
+  } else if (parsedWorkItem === null) {
     identitiesReason = "handoff does not name the dispatched work item";
-  } else if (reportedWorkItem !== input.expectedWorkItemId) {
-    identitiesReason = `workItemId ${reportedWorkItem} is not the dispatched ${input.expectedWorkItemId}`;
+  } else if (parsedWorkItem !== input.expectedWorkItemId) {
+    identitiesReason = `workItemId ${parsedWorkItem} is not the dispatched ${input.expectedWorkItemId}`;
   }
 
   const artifactsOk = input.declaredArtifactsInsideRunRoot === true;
@@ -940,8 +947,16 @@ export function evaluateSuccessConjunction(input: {
   } else if (gitContradiction !== undefined) {
     gitReason = gitContradiction.detail;
   } else {
-    gitOk = true;
-    gitReason = "Director Git observation agrees with the handoff";
+    const observedHead = observedHeadSha(input.gitAfter);
+    if (observedHead === null || observedHead !== handoff.headAfter) {
+      gitOk = false;
+      gitReason = observedHead === null
+        ? "Git HEAD was not observed; absence is not agreement with the handoff"
+        : `observed HEAD ${observedHead} is not the handoff headAfter ${handoff.headAfter}`;
+    } else {
+      gitOk = true;
+      gitReason = "Director Git observation agrees with the handoff";
+    }
   }
   if (input.expectedWorktree !== undefined) {
     const expected = canonicalizeHostPath(input.expectedWorktree);
@@ -1257,12 +1272,15 @@ export async function recoverAbandonedRun(
     outcome: RecoverOutcomeV1,
     spawned: boolean,
   ): RunResultV1 => {
+    const spawnRecorded = spawned
+      || (answers.started && (isUsablePid(answers.spawnPid)
+        || (parsed.ok && parsed.intent.processIdentity !== null)));
     const result: RunResultV1 = {
       schema: RUN_RESULT_SCHEMA_V1,
       resultPath,
       runId,
       ok: false,
-      spawned,
+      spawned: spawnRecorded,
       reason,
       recoverOutcome: outcome,
       conjunction: emptyRefusalConjunction(runRoot, reason),
@@ -1470,6 +1488,26 @@ function argvEquals(left: readonly string[], right: readonly string[]): boolean 
  * discoverExecutor + the adapter would produce. A file-URL import of
  * executeRun with an arbitrary command is refused before anything is acquired.
  */
+function promptPathExistsOnLaunch(promptPath: string, deps: RunManagerDepsV1): boolean {
+  try {
+    if (deps.fs.isFile(promptPath)) return true;
+  } catch {
+    // continue
+  }
+  if (deps.discoveryFs !== undefined) {
+    try {
+      if (deps.discoveryFs.isFile(promptPath)) return true;
+    } catch {
+      // continue
+    }
+  }
+  try {
+    return statSync(promptPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function launchPathMatchesDiscoveredAdapter(
   request: ExecuteRunRequestV1,
   deps: RunManagerDepsV1,
@@ -1497,6 +1535,9 @@ function launchPathMatchesDiscoveredAdapter(
       ok: false,
       reason: "launch path refused: promptPath is required to verify the adapter argv",
     };
+  }
+  if (!promptPathExistsOnLaunch(promptPath, deps)) {
+    return { ok: false, reason: "executor adapter: prompt path does not name an existing file" };
   }
   const expected = executorArgvFor(request.executor, {
     promptPath,
@@ -1633,6 +1674,9 @@ export async function executeRun(
       gitBefore: partial.gitBefore ?? null,
     };
     const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, drafted, partial.spawned === true);
+    if (partial.spawned === true) {
+      recordIndexedRunCompletion(deps.fs, leaseStore, request.runId, runRoot);
+    }
     if (write === "failed") {
       return { ...drafted, resultPath: null, resultPersisted: "failed" };
     }
@@ -2028,6 +2072,41 @@ export async function executeRun(
     }
 
     // Refuse-before-acquire: a run that will not spawn must not enter the store.
+    const indexed = existingIndexedRunCompletion(deps.fs, leaseStore, request.runId, runRoot);
+    if (indexed === "spawned") {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "a recorded completion already exists; refusing to overwrite it",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    if (indexed === "unreadable") {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "an existing run-id completion record is unreadable; refusing to overwrite it",
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
     const completion = existingCompletionOn(deps.fs, resultPath, request.runId);
     if (completion === "spawned") {
       return finish({
@@ -2653,7 +2732,8 @@ export async function executeRun(
     captureTimeIdentityNotFound =
       !captured.ok
       && captured.observation !== null
-      && captured.observation.outcome === "NOT_FOUND";
+      && captured.observation.outcome === "NOT_FOUND"
+      && observationIsAboutPid(captured.observation, childPid);
     processIdentity = captured.ok ? captured.identity : null;
     if (captured.reason === "the occupant of this pid carries another run's nonce") {
       const withoutIdentity: LeaseV1 = { ...heldLease, pid: childPid };
@@ -2830,7 +2910,9 @@ export async function executeRun(
       ? { ok: false, handoff: null, problems: ["no handoff text"] }
       : parseHandoff(handoffRaw, { artifactRoot: runRoot });
     const handoff = parsed.ok ? parsed.handoff : null;
-    const reportedWorkItemId = workItemIdFrom(handoffRaw === null ? null : extractJsonObject(handoffRaw));
+    const reportedWorkItemId = handoff !== null && handoff.workItemId !== undefined
+      ? handoff.workItemId
+      : null;
 
     const beforeHead = observedHeadSha(gitBefore);
     const afterHead = observedHeadSha(gitAfter);
@@ -2972,12 +3054,29 @@ export async function executeRun(
       log: logReport,
     });
   } catch (error) {
+    if (spawnOccurred && spawnedChild !== null && !spawnedChild.exited) {
+      try {
+        const cancelled = await cancelLadder(
+          spawnedChild,
+          deps,
+          processIdentity,
+          request.runNonce,
+          cancelStages,
+          spawnedAtFloor ?? deps.clock.now(),
+          holderExitedAt,
+          seenInTreePids,
+        );
+        stillRunning = cancelled.stillRunning;
+      } catch {
+        stillRunning = true;
+      }
+    }
     return finish({
       ok: false,
       spawned: spawnOccurred,
       reason: `run failed: ${errorMessage(error)}`,
       conjunction: spawnOccurred ? interruptedAfterSpawn(timedOut) : emptyConjunction,
-      exitCode: null,
+      exitCode: spawnedChild !== null && spawnedChild.exited ? (await spawnedChild.exit).code : null,
       processIdentity,
       intent: null,
       handoff: null,
@@ -3652,20 +3751,8 @@ async function cancelLadder(
   holderExitedAt?: string | null,
   observedPids?: Set<number>,
 ): Promise<{ stillRunning: boolean; exitCode: number | null; exitSignal?: string | null }> {
-  // SOFT: terminate the tracked root only. child.kill() is TerminateProcess on this PID.
-  try {
-    child.kill();
-  } catch {
-    // Already gone.
-  }
-  if (!stages.includes("SOFT")) stages.push("SOFT");
-  await deps.wait(CANCEL_SOFT_MS);
-  if (child.exited) {
-    const ended = await child.exit;
-    return { stillRunning: false, exitCode: ended.code, exitSignal: ended.signal };
-  }
-
-  // HARD: record the attempt before the call that may throw.
+  // HARD first: taskkill /T while the root is still the CIM parent.
+  // TerminateProcess of the root first is what creates orphans on Windows.
   if (!stages.includes("HARD")) stages.push("HARD");
   try {
     deps.killTree(child.pid);
@@ -3673,6 +3760,17 @@ async function cancelLadder(
     // A failed kill is not a confirmed stop.
   }
   await deps.wait(CANCEL_HARD_MS);
+
+  if (!child.exited) {
+    try {
+      child.kill();
+    } catch {
+      // Already gone.
+    }
+    if (!stages.includes("SOFT")) stages.push("SOFT");
+    await deps.wait(CANCEL_SOFT_MS);
+  }
+
   const stillAfterHard = !child.exited;
 
   // ORPHAN: after cancel, scan by AION_RUN_NONCE and spawn floor; kill leftovers.
@@ -3790,9 +3888,11 @@ function readHandoffText(fs: RunFileSystemV1, handoffPath: string, stdout: strin
   if (present) {
     try {
       const text = fs.readUtf8(handoffPath);
-      if (text.trim() !== "") return text;
+      if (text.trim() === "") return null;
+      return text;
     } catch {
-      // Fall through to stdout.
+      // A present unreadable file is UNKNOWN, not a licence to parse stdout.
+      return null;
     }
   }
   if (stdout.trim() === "") return null;
@@ -4082,6 +4182,7 @@ function existingCompletionOn(
   // created for this runId and was last seen present.
   if ((recoverOutcome === "REFUSED_UNKNOWN" || recoverOutcome === "REFUSED_ALIVE")
     && parsed.spawned !== true) {
+    if (resultRecordsSpawn(parsed)) return "spawned";
     return "none";
   }
   if (parsed.spawned === true) {
@@ -4091,6 +4192,102 @@ function existingCompletionOn(
   }
   if (parsed.spawned === false) return "unstarted";
   return "unreadable";
+}
+
+function resultRecordsSpawn(parsed: Record<string, unknown>): boolean {
+  if (parsed.processIdentity !== undefined && parsed.processIdentity !== null) return true;
+  const intent = parsed.intent;
+  if (!isPlainObject(intent)) return false;
+  if (intent.spawnPid !== undefined && intent.spawnPid !== null) return true;
+  if (typeof intent.spawnAttemptedAt === "string" && intent.spawnAttemptedAt.trim() !== "") return true;
+  if (intent.processIdentity !== undefined && intent.processIdentity !== null) return true;
+  return false;
+}
+
+function runCompletionDir(leases: LeaseStoreV1 | undefined, runRoot: string): string | null {
+  if (leases !== undefined && "root" in leases) {
+    const root = (leases as { readonly root?: unknown }).root;
+    if (typeof root === "string" && root.trim() !== "") return join(root, "run-completions");
+  }
+  if (typeof runRoot === "string" && runRoot.trim() !== "") return join(dirname(runRoot), ".run-completions");
+  return null;
+}
+
+function runCompletionPath(dir: string, runId: string): string {
+  const token = asUsableToken(runId);
+  const name = token === null ? "invalid-run-id" : encodeURIComponent(token);
+  return join(dir, `${name}.json`);
+}
+
+function existingIndexedRunCompletion(
+  fs: RunFileSystemV1,
+  leases: LeaseStoreV1 | undefined,
+  runId: string,
+  runRoot: string,
+): "none" | "spawned" | "unreadable" {
+  const dir = runCompletionDir(leases, runRoot);
+  if (dir === null) return "none";
+  const path = runCompletionPath(dir, runId);
+  let present = false;
+  try {
+    present = fs.isFile(path);
+  } catch {
+    return "unreadable";
+  }
+  if (!present) return "none";
+  let raw: string;
+  try {
+    raw = fs.readUtf8(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return "none";
+    return "unreadable";
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainObject(parsed)) return "unreadable";
+    if (parsed.runId === runId && parsed.spawned === true) return "spawned";
+    return "unreadable";
+  } catch {
+    return "unreadable";
+  }
+}
+
+function recordIndexedRunCompletion(
+  fs: RunFileSystemV1,
+  leases: LeaseStoreV1 | undefined,
+  runId: string,
+  runRoot: string,
+): void {
+  const dir = runCompletionDir(leases, runRoot);
+  if (dir === null) return;
+  try {
+    fs.mkdirp(dir);
+    fs.writeDurable(runCompletionPath(dir, runId), `${JSON.stringify({
+      runId,
+      spawned: true,
+      runRoot,
+    })}\n`);
+  } catch {
+    // The run-root result is still the primary record. A failed index write
+    // is not a second spawn permit.
+  }
+}
+
+export function createInProcessCapacityGate(limit = 1): CapacityGateV1 {
+  const held = new Map<string, number>();
+  return {
+    tryAcquire(executor: string) {
+      const n = held.get(executor) ?? 0;
+      if (n >= limit) return { ok: false, reason: "executor capacity exhausted" };
+      held.set(executor, n + 1);
+      return { ok: true, reason: "capacity-acquired" };
+    },
+    release(executor: string) {
+      const n = held.get(executor) ?? 0;
+      if (n <= 1) held.delete(executor);
+      else held.set(executor, n - 1);
+    },
+  };
 }
 
 function mayPromoteRecoverRecord(
@@ -4183,7 +4380,16 @@ async function reclaimExpiredHolder(input: {
     observation = { outcome: "UNAVAILABLE", reason: "probe threw", pid: recordedPid };
   }
 
-  const liveness = livenessFromHolderObservation(observation);
+  const heldIdentity = input.heldBy?.processIdentity;
+  const recordedIdentity: ExecutorProcessIdentityV1 = {
+    pid: recordedPid,
+    creationDate: heldIdentity?.startedAt ?? "",
+    runNonce: heldIdentity?.runToken ?? "",
+  };
+  const subjectObservation: ProcessObservationV1 = isUsablePid(observation.pid)
+    ? observation
+    : { ...observation, pid: recordedPid };
+  const liveness = holderLiveness(recordedIdentity, subjectObservation);
 
   const observedIdentity = leaseIdentityFromProbe(observation);
   const result = reclaimStaleLease({
@@ -4192,7 +4398,7 @@ async function reclaimExpiredHolder(input: {
     resource: input.resource,
     holderLiveness: liveness,
     now: input.now,
-    holderObservation: { outcome: observation.outcome, pid: recordedPid },
+    holderObservation: { outcome: subjectObservation.outcome, pid: subjectObservation.pid },
     ...(observedIdentity !== undefined ? { observedIdentity } : {}),
   });
   if (result.ok) input.store.save(result.remaining);

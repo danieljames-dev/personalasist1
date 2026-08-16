@@ -262,10 +262,10 @@ export function redactLogText(text: string): string {
     ) => `${head}${openQuote ?? ""}${scheme ?? ""}${space ?? ""}${REDACTED}${closeQuote ?? ""}`,
   );
   out = out.replace(BEARER_TOKEN_REDACTOR, `Bearer ${REDACTED}`);
-  out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{8,}/g, REDACTED);
-  out = out.replace(/\bghp_[A-Za-z0-9_]{8,}/g, REDACTED);
-  out = out.replace(/\bAKIA[0-9A-Z]{16}\b/g, REDACTED);
-  out = out.replace(/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{10,}/g, REDACTED);
+  out = out.replace(/github_pat_[A-Za-z0-9_]{8,}/g, REDACTED);
+  out = out.replace(/ghp_[A-Za-z0-9_]{8,}/g, REDACTED);
+  out = out.replace(/AKIA[0-9A-Z]{16}/g, REDACTED);
+  out = out.replace(/sk-[A-Za-z0-9_-]{10,}/g, REDACTED);
   out = out.replace(/tskey-[A-Za-z0-9_-]+/g, REDACTED);
   return out;
 }
@@ -743,11 +743,22 @@ const SECRET_STARTER_MAX = Math.max(...SECRET_STARTERS.map((item) => item.length
 function longestSecretStarterPrefixSuffix(hold: string): number {
   const folded = hold.toLowerCase();
   const limit = Math.min(SECRET_STARTER_MAX, folded.length);
-  for (let n = limit; n >= 1; n -= 1) {
+  // Hold 2+ chars of token families (ghp_/sk-/bearer). Do not hold
+  // one- or two-letter prefixes of authorization/akia/proxy-authorization:
+  // those glue onto a later ghp_/sk- and defeat a word-boundary redactor.
+  for (let n = limit; n >= 2; n -= 1) {
     const suffix = folded.slice(folded.length - n);
-    if (SECRET_STARTERS.some((starter) => starter.startsWith(suffix) && suffix.length < starter.length)) {
-      return hold.length - n;
-    }
+    const matches = SECRET_STARTERS.some((starter) => {
+      if (!starter.startsWith(suffix) || suffix.length >= starter.length) return false;
+      if (n >= 3) return true;
+      return starter === "ghp_"
+        || starter === "sk-"
+        || starter === "bearer "
+        || starter.startsWith("github")
+        || starter.startsWith("tskey")
+        || starter.startsWith("-----");
+    });
+    if (matches) return hold.length - n;
   }
   return -1;
 }
