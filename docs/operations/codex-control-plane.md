@@ -34,6 +34,32 @@ verification, commit/push/backup authority, stop conditions, handoff requirement
 prohibition. Keep it pending. To supersede a pending directive, preserve its text in an appropriate
 local record, mark it `SUPERSEDED`, then install a new pending directive; never silently reuse an ID.
 
+## Broken-baseline repair
+
+Broken-baseline repair is a Founder-only exceptional path for repairing a mandatory repository
+verification gate that is already red at the exact baseline. Normal directives are unchanged and
+still require full repository `npm run verify` before authorization.
+
+A repair directive may declare `Authorization-Class: BROKEN_BASELINE_REPAIR` and one trusted
+`Known-Failing-Gate`. The directive must not contain executable commands, shell text, regexes, or
+script paths. Trusted control-plane code maps each gate ID to its exact command, expected failure
+signature, maximum exact repair paths, protected files, and targeted typecheck.
+
+The directive may omit `Allowed-Repair-Files`, inheriting the trusted gate allowlist, or may request
+a strict subset. It can never broaden trusted scope. For
+`LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY`, the maximum repair path is exactly
+`packages/local-assistant/src/developer-bridge.ts`; the architecture-boundary test is protected.
+
+Repair authorization only proves that the known failure exists at the baseline. It grants no
+certification, deployment, production, Funnel, spending, R31, or general milestone authority.
+
+Repair closure is separate and local-before-push. The repair must be committed locally first. The
+closure script validates changed paths against the authorized trusted scope, verifies protected
+files are unchanged, runs the targeted gate, targeted typecheck, and full `npm run verify`, verifies
+Director tree equivalence when inheriting D2 evidence, writes
+`.aion-local/repair-closures/<Directive-ID>/<SHA>.json`, and changes the repair directive to
+`CLOSED`. Controlled push of a repair result must validate that PASS receipt first.
+
 ## Exact authorization and execution
 
 In VS Code select:

@@ -7,6 +7,10 @@ Prepared-Date: <UTC timestamp>
 Prepared-By: CTO
 Repository-Baseline: <expected commit>
 Required-Authorization-Phrase: <exact phrase>
+# Optional repair-only metadata:
+# Authorization-Class: NORMAL | BROKEN_BASELINE_REPAIR
+# Known-Failing-Gate: <allowlisted gate id, no commands>
+# Allowed-Repair-Files: <optional semicolon-separated exact repo-relative subset>
 
 ## Goal
 
@@ -33,4 +37,5 @@ Required-Authorization-Phrase: <exact phrase>
 ## Next-Phase Prohibition
 
 Allowed statuses are `PENDING_OWNER_AUTHORIZATION`, `AUTHORIZED`, `RUNNING`,
-`AWAITING_CTO_REVIEW`, `BLOCKED`, `FAILED`, and `SUPERSEDED`. Codex must never authorize itself.
+`AWAITING_CTO_REVIEW`, `BLOCKED`, `FAILED`, `SUPERSEDED`, and repair-only `CLOSED`.
+Codex must never authorize itself.

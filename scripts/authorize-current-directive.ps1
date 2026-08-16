@@ -49,9 +49,23 @@ try {
     if(-not(Test-AionAuthorizationPhrase -Expected $requiredPhrase -Actual $AuthorizationInput)){
         throw 'Authorization phrase did not match exactly. This is not a Windows/login password and not a password you invent. Copy the Required-Authorization-Phrase from CURRENT.md exactly.'
     }
-    if($SkipRepositoryChecks -and -not $TestMode){throw 'SkipRepositoryChecks is permitted only in TestMode'}
+    if($SkipRepositoryChecks){
+        if(-not $TestMode){throw 'SkipRepositoryChecks is permitted only in TestMode'}
+        $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        $full=[IO.Path]::GetFullPath($root)
+        if(-not $full.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'SkipRepositoryChecks is restricted to synthetic temp test repositories'
+        }
+    }
     if(-not $SkipRepositoryChecks){
-        Assert-AionRepositoryGate -Root $root -ExpectedHead $directive.Fields.'Repository-Baseline' -RunVerification
+        $class=Get-AionDirectiveFieldOrDefault $directive 'Authorization-Class' 'NORMAL'
+        if($class -ceq 'NORMAL'){
+            Assert-AionRepositoryGate -Root $root -ExpectedHead $directive.Fields.'Repository-Baseline' -RunVerification
+        } elseif($class -ceq 'BROKEN_BASELINE_REPAIR'){
+            Assert-AionBrokenBaselineRepairGate -Root $root -Directive $directive
+        } else {
+            throw "Unsupported Authorization-Class: $class"
+        }
     }
     Set-AionDirectiveStatus -Path $DirectivePath -From 'PENDING_OWNER_AUTHORIZATION' -To 'AUTHORIZED' -RecordAuthorization
     Write-Host 'Directive authorized locally. It was not staged, committed, or executed.'
