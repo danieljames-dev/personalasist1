@@ -127,6 +127,8 @@ import {
   observationIsAboutPid,
   OrphanScanUnavailableError,
   processRowPlausibilityContext,
+  compareCreationDates,
+  nonceMatchesRun,
   processRowCouldBelongToThisRun,
   writerOrphanScanResult,
   type WriterOrphanScanResultV1,
@@ -3385,14 +3387,21 @@ async function sampleAncestryWhileChildAlive(input: {
     try {
       const rows = input.sampleAncestry({ holderPid: input.holderPid });
       const holderRow = rows.find((row) => row.pid === input.holderPid);
+      const recordedHolderDate = typeof input.holderCreationDate === "string"
+        ? input.holderCreationDate
+        : null;
       const holderRecycled = holderRow !== undefined
-        && input.holderCreationDate !== undefined
-        && input.holderCreationDate !== null
+        && recordedHolderDate !== null
         && occupantIsProvenDifferentProcess(
-          { pid: input.holderPid, creationDate: input.holderCreationDate },
+          { pid: input.holderPid, creationDate: recordedHolderDate },
           holderRow,
         );
-      const holderConfirmablyPresent = holderRow !== undefined && !holderRecycled;
+      // A holder row without a recorded creationDate is a slot number, not
+      // identity. Capture UNAVAILABLE / FOUND-without-date must not treat a
+      // later occupant as the original process (R30 persist F1).
+      const holderConfirmablyPresent = holderRow !== undefined
+        && recordedHolderDate !== null
+        && !holderRecycled;
       // Capture is a blocking CIM probe: child.exited can stay false after
       // the OS process is gone. Do not copy a post-exit recycled tree into
       // observedPids just because the handle has not settled (R29 persist F1).
@@ -3455,6 +3464,61 @@ function waitWithCeiling(wait: (ms: number) => Promise<void>, ms: number): Promi
   });
 }
 
+/**
+ * Copy scan rows without `[...array]`, which honors a lying `length` and
+ * drops indexed leftovers (R30 wiring F4). Functions and unexpected
+ * callables are not empty evidence.
+ */
+function materializeIndexedScanRows<T extends object>(value: unknown): T[] {
+  if (value === undefined || value === null) return [];
+  if (typeof value === "function") {
+    throw new Error("orphan scan snapshot is not a usable array");
+  }
+  if (typeof value !== "object") return [];
+  const rec = value as Record<string, unknown>;
+  const out: T[] = [];
+  const seen = new Set<number>();
+  const take = (index: number): void => {
+    if (seen.has(index)) return;
+    let item: unknown;
+    try {
+      item = rec[index];
+    } catch {
+      throw new Error("orphan scan snapshot is unreadable");
+    }
+    if (item === undefined || item === null || typeof item !== "object") return;
+    seen.add(index);
+    out.push(item as T);
+  };
+  let names: string[] = [];
+  try {
+    names = Object.getOwnPropertyNames(rec);
+  } catch {
+    throw new Error("orphan scan snapshot is unreadable");
+  }
+  for (const key of names) {
+    if (/^\d+$/.test(key)) take(Number(key));
+  }
+  let reported = 0;
+  try {
+    const length = rec.length;
+    if (typeof length === "number" && Number.isFinite(length) && length > 0) {
+      reported = Math.min(Math.floor(length), 64);
+    }
+  } catch {
+    reported = 0;
+  }
+  const maxProbe = Math.max(reported, 8);
+  for (let index = 0; index < maxProbe; index += 1) {
+    try {
+      if (index in rec) take(index);
+    } catch {
+      throw new Error("orphan scan snapshot is unreadable");
+    }
+  }
+  return out;
+}
+
 async function collectWriterOrphans(input: {
   readonly scanOrphans: RunManagerDepsV1["scanOrphans"];
   readonly recorded: ExecutorProcessIdentityV1 | null;
@@ -3483,8 +3547,8 @@ async function collectWriterOrphans(input: {
     const scanOnce = (): WriterOrphanScanResultV1 => {
       const scanned = resolveOrphanScanner(input.scanOrphans)(query);
       return writerOrphanScanResult(
-        [...scanned.snapshot],
-        [...scanned.killable],
+        materializeIndexedScanRows(scanned.snapshot),
+        materializeIndexedScanRows(scanned.killable),
         scanned.directorSessionId !== undefined ? { directorSessionId: scanned.directorSessionId } : undefined,
       );
     };
@@ -3702,7 +3766,7 @@ function killNonceBearingLeftovers(input: {
     }
     return { confirmed: false, remaining: [], killed: false };
   }
-  const snapshot = scanned.snapshot;
+  const snapshot = materializeIndexedScanRows<OrphanSightingV1>(scanned.snapshot);
   rememberInTreePids(
     observedPids,
     snapshot,
@@ -3738,12 +3802,25 @@ function killNonceBearingLeftovers(input: {
   };
   const leftovers = snapshot.filter((sighting) => {
     if (!processRowCouldBelongToThisRun(sighting, leftoverCtx)) return false;
+    if (nonceMatchesRun(sighting, leftoverCtx.runNonce)) return true;
     if (
       isUsablePid(holderPid)
       && descendantPidsOf(holderPid, snapshot, chainBounds).has(sighting.pid)
       && !descendantPidsOfPositiveIdentity(holderPid, snapshot, chainBounds).has(sighting.pid)
     ) {
       return false;
+    }
+    if (
+      sighting.parentPid !== undefined
+      && leftoverCtx.holderPid !== sighting.parentPid
+      && leftoverCtx.observedPids.has(sighting.parentPid)
+      && !(isUsablePid(holderPid) && descendantPidsOf(holderPid, snapshot, chainBounds).has(sighting.pid))
+    ) {
+      const walked = leftoverCtx.observedPidIdentities?.get(sighting.parentPid);
+      const sameOccupant = walked !== undefined
+        && sighting.parentCreationDate !== undefined
+        && compareCreationDates(walked, sighting.parentCreationDate) === "SAME";
+      if (!sameOccupant) return false;
     }
     return true;
   });
@@ -3769,7 +3846,7 @@ function killNonceBearingLeftovers(input: {
     // the pre-filtered-kill-list catch-all and must not see the host
     // snapshot. killable is nonceMatch || descendant and is not this
     // filter — UNKNOWN stays visible and never authorises a kill.
-    remaining = after.snapshot.filter((sighting) => writerSightingNotProvenAbsent(
+    remaining = materializeIndexedScanRows<OrphanSightingV1>(after.snapshot).filter((sighting) => writerSightingNotProvenAbsent(
       sighting,
       input.runNonce,
       {

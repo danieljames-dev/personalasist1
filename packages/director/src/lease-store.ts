@@ -841,29 +841,39 @@ function leftoverFieldLength(value: unknown): "absent" | "unreadable" | number {
   if (typeof reported !== "number" || !Number.isFinite(reported) || reported < 0) {
     return "unreadable";
   }
+  if (indexedLeftoverPresent(value, reported)) return "unreadable";
   if (reported > 0) return reported;
-  try {
-    if (value[0] !== undefined) return "unreadable";
-    if (Object.keys(value).some((key) => /^\d+$/.test(key))) return "unreadable";
-  } catch {
-    return "unreadable";
-  }
   return 0;
+}
+
+function indexedLeftoverPresent(value: object, reportedLength = 0): boolean {
+  try {
+    const rec = value as Record<string, unknown>;
+    const names = Object.getOwnPropertyNames(value);
+    for (const key of names) {
+      if (!/^\d+$/.test(key) || rec[key] === undefined) continue;
+      if (Number(key) >= reportedLength) return true;
+    }
+    for (let index = 0; index < 32; index += 1) {
+      if (index in rec && rec[index] !== undefined && index >= reportedLength) return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
 }
 
 function snapshotCarriesLeftoverEvidence(snapshot: unknown): boolean {
   if (snapshot === undefined || snapshot === null) return false;
-  if (Array.isArray(snapshot)) return false;
+  if (typeof snapshot === "function") return true;
+  if (Array.isArray(snapshot)) {
+    return leftoverFieldLength(snapshot) === "unreadable";
+  }
   if (typeof snapshot !== "object") return false;
   const rec = snapshot as Record<string, unknown>;
   const length = rec.length;
   if (typeof length === "number" && length > 0) return true;
-  try {
-    if (rec[0] !== undefined) return true;
-    return Object.keys(rec).some((key) => /^\d+$/.test(key));
-  } catch {
-    return true;
-  }
+  return indexedLeftoverPresent(rec, typeof length === "number" ? length : 0);
 }
 
 function namedDeveloperAgentLeftovers(scan: {

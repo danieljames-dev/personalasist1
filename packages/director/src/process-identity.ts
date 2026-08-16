@@ -2149,6 +2149,39 @@ function rowIsExcludedByInteractiveSession(
  * kill-on-close, breakaway denied). That primitive is not implemented.
  * It is an Owner decision.
  */
+/**
+ * True only when this Director recorded the parent's creationDate *and*
+ * the leftover names the same occupant. Missing either date is UNKNOWN,
+ * not "same process" (R30 persist F2).
+ */
+function observedParentOccupantIsProvenSame(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (sighting.parentPid === undefined || !isUsablePid(sighting.parentPid)) return false;
+  const walked = ctx.observedPidIdentities?.get(sighting.parentPid);
+  if (walked === undefined || sighting.parentCreationDate === undefined) return false;
+  return compareCreationDates(walked, sighting.parentCreationDate) === "SAME";
+}
+
+function observedParentOccupantIsProvenDifferent(
+  sighting: ProcessRowPlausibilityV1,
+  ctx: ProcessRowPlausibilityContextV1,
+): boolean {
+  if (sighting.parentPid === undefined || !isUsablePid(sighting.parentPid)) return false;
+  const walked = ctx.observedPidIdentities?.get(sighting.parentPid);
+  if (walked === undefined) return false;
+  return occupantIsProvenDifferentProcess(
+    { pid: sighting.parentPid, creationDate: walked },
+    {
+      pid: sighting.parentPid,
+      ...(sighting.parentCreationDate !== undefined
+        ? { creationDate: sighting.parentCreationDate }
+        : {}),
+    },
+  );
+}
+
 export function parentlessRowTiedToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
@@ -2172,19 +2205,7 @@ export function parentlessRowTiedToThisRun(
       // A non-holder pid is also a slot. If we recorded the occupant we
       // walked, a later parentCreationDate is a different process — not
       // a parent this Director observed (R29 persist F2).
-      const walkedParent = ctx.observedPidIdentities?.get(sighting.parentPid);
-      if (
-        walkedParent !== undefined
-        && occupantIsProvenDifferentProcess(
-          { pid: sighting.parentPid, creationDate: walkedParent },
-          {
-            pid: sighting.parentPid,
-            ...(sighting.parentCreationDate !== undefined
-              ? { creationDate: sighting.parentCreationDate }
-              : {}),
-          },
-        )
-      ) {
+      if (observedParentOccupantIsProvenDifferent(sighting, ctx)) {
         // fall through
       } else {
         return true;
