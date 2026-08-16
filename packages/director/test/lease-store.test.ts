@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { writerOrphanScanResult } from "../src/process-identity.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -145,6 +145,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
       return child();
     };
     const fs = createNodeRunFileSystem();
+    writeFileSync(join(wt, "PROMPT.md"), "prompt\n");
     const handoffFor = (runId: string) => ({
       schema: HANDOFF_SCHEMA_V1,
       executor: "grok",

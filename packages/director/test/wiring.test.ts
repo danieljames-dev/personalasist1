@@ -779,7 +779,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
     runNonce: recorded.runNonce,
   };
   let observeIndex = 0;
-  const files = new Map<string, string>();
+  const files = new Map<string, string>([[`${cwd}\\PROMPT.md`, "prompt\n"]]);
   const plantedHandoff = JSON.stringify({
     schema: HANDOFF_SCHEMA_V1,
     executor: "grok",

@@ -211,6 +211,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, RUN_ROOT]);
   return {
     files,
@@ -1168,9 +1169,12 @@ test("a failed spawn-attempt record after a live spawn kills the child and fails
   const killed: number[] = [];
   const spawn = trackingSpawn(() => hung);
   const result = await runWith({
-    neverWait: true,
     fs,
     spawn,
+    wait: async (ms) => {
+      if (ms === CANCEL_HARD_MS || ms === CANCEL_SOFT_MS) return;
+      return new Promise(() => {});
+    },
     probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "killed after failed record", pid }) },
     killTree: (pid) => {
       killed.push(pid);
@@ -1214,9 +1218,12 @@ test("a child that survives kill and killTree after a failed record is still run
   };
   const hung = hangingProcess();
   const result = await runWith({
-    neverWait: true,
     fs,
     spawn: trackingSpawn(() => hung),
+    wait: async (ms) => {
+      if (ms === CANCEL_HARD_MS || ms === CANCEL_SOFT_MS) return;
+      return new Promise(() => {});
+    },
     probe: { observe: () => foundObservation(RECORDED) },
     killTree: () => {
       throw new Error("Access is denied");
@@ -1338,6 +1345,7 @@ test("a real node process is spawned with shell false and its exit is collected"
       }));
     };
     const promptPath = join(dir, "PROMPT.md");
+    writeFileSync(promptPath, "prompt\n");
     const result = await executeRun(
       request({
         cwd: dir,
@@ -1392,6 +1400,7 @@ test("a real child exit, NOT_FOUND, empty orphan scan, and an explicit release p
     };
     const leases = memoryLeases();
     const promptPath = join(dir, "PROMPT.md");
+    writeFileSync(promptPath, "prompt\n");
     const result = await executeRun(
       request({
         cwd: dir,
@@ -1734,7 +1743,14 @@ test("a swapped intent.json between spawn and its record does not adopt the swap
     }, null, 2)}\n`);
     return exitingProcess();
   };
-  const result = await runWith({ fs, spawn, neverWait: true });
+  const result = await runWith({
+    fs,
+    spawn,
+    wait: async (ms) => {
+      if (ms === CANCEL_HARD_MS || ms === CANCEL_SOFT_MS) return;
+      return new Promise(() => {});
+    },
+  });
   assert.equal(result.spawned, true, result.reason);
   assert.equal(result.ok, false, "a swapped command must not be recorded as a successful run");
   assert.equal(result.intent?.executablePath, CLAUDE_EXE);
@@ -1759,6 +1775,7 @@ test("a real child exit, a real orphan scan, and an explicit release free the wr
   try {
     const leases = memoryLeases();
     const promptPath = join(dir, "PROMPT.md");
+    writeFileSync(promptPath, "prompt\n");
     const first = await executeRun(
       request({
         cwd: dir,
@@ -2350,7 +2367,10 @@ test("a real instant-exit production writer releases its own lease", async () =>
     const result = await runWith({
       fs: memoryFs({
         dirs: [dir, join(dir, "run")],
-        files: { [join(dir, "run", "handoff.json")]: JSON.stringify(goodHandoff()) },
+        files: {
+          [join(dir, "PROMPT.md")]: "prompt\n",
+          [join(dir, "run", "handoff.json")]: JSON.stringify(goodHandoff()),
+        },
       }),
       spawn: realNodeSpawn("process.exit(0)"),
       probe: { observe: (pid) => ({ outcome: "NOT_FOUND", reason: "already gone", pid }) },
@@ -2985,10 +3005,10 @@ test("unreadable system rows with live parents do not withhold a writer lease", 
       },
     ]),
   });
-  // Live parents are a live explanation (R24 1B). Pre-floor parentless
-  // rows are excluded by the floor. Neither row is a leftover of this run.
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), false);
+  // Missing parentCreationDate on a live parent is UNKNOWN continuity,
+  // not host noise. The scan is undecidable; the writer lease stays.
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), true);
 });
 
 test("a timeout with exit code 0 fails runCompletedWithinBudget", async () => {
@@ -3138,7 +3158,10 @@ test("an R&D worktree path in argv still spawns and completes", async () => {
   const rd = "C:\\Work\\R&D\\repo";
   const fs = memoryFs({
     dirs: [rd, RUN_ROOT],
-    files: { [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()) },
+    files: {
+      [`${rd}\\PROMPT.md`]: "prompt\n",
+      [join(RUN_ROOT, "handoff.json")]: JSON.stringify(goodHandoff()),
+    },
   });
   const result = await runWith({
     neverWait: true,

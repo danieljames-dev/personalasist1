@@ -155,6 +155,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, RUN_ROOT, RUN_ROOT_9]);
   return {
     files,
@@ -752,6 +753,7 @@ const wmiSelfRow = {
   parentPid: 1612,
   parentName: "dllhost.exe",
   parentPresent: true,
+  parentCreationDate: "2026-01-01T00:00:00.000Z",
   nonceReadable: false,
   creationDate: "2026-08-14T21:32:15.336Z",
 };

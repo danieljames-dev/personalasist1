@@ -713,7 +713,10 @@ export function acquireDeveloperAgentWorktreeLease(input: {
     return { ok: false, reason: "a PRODUCTION_WRITER lease is held in this store" };
   }
   const invocation = nextDeveloperAgentInvocationId();
-  const processIdentity = developerAgentHolderIdentity(probe, process.pid);
+  const processIdentity = {
+    ...developerAgentHolderIdentity(probe, process.pid),
+    runToken: invocation,
+  };
   const mint = (rows: readonly LeaseV1[]) => acquireLease({
     existing: rows,
     leaseId: invocation,
@@ -802,14 +805,11 @@ function reclaimDeveloperAgentStaleHolder(input: {
     existing: input.existing,
     kind: "WORKTREE",
     resource: input.resource,
-    holderLiveness: holderLiveness(
-      recordedIdentity,
-      isUsablePid(observation.pid) ? observation : { ...observation, pid: recordedPid },
-    ),
+    holderLiveness: holderLiveness(recordedIdentity, observation),
     now: input.now,
     holderObservation: {
       outcome: observation.outcome,
-      pid: isUsablePid(observation.pid) ? observation.pid : recordedPid,
+      pid: observation.pid,
     },
     ...(observation.outcome === "FOUND"
       ? {
@@ -832,17 +832,55 @@ export function releaseDeveloperAgentWorktreeLease(
       readonly runNonce: string;
       readonly holderPid: number | null;
       readonly createdNotBefore: string;
-    }) => { readonly liveSightings?: readonly { readonly pid: number }[]; readonly undecidable?: readonly unknown[] };
+    }) => {
+      readonly snapshot?: readonly {
+        readonly pid?: number;
+        readonly parentPid?: number;
+        readonly parentPresent?: boolean;
+        readonly parentName?: string;
+        readonly parentCreationDate?: string;
+        readonly creationDate?: string;
+        readonly runNonce?: string | null;
+        readonly nonceReadable?: boolean;
+      }[];
+      readonly killable?: readonly unknown[];
+      readonly liveSightings?: readonly { readonly pid: number }[];
+      readonly undecidable?: readonly unknown[];
+    };
   },
 ): { ok: boolean; reason: string } {
   const nonce = normaliseRunNonce(lease.processIdentity?.runToken ?? "");
-  if (options?.scanOrphans !== undefined && nonce !== null) {
-    try {
-      const scan = options.scanOrphans({
+  if (options?.scanOrphans === undefined) {
+    return { ok: false, reason: "developer-agent tree scan was not provided; WORKTREE lease retained" };
+  }
+  if (nonce === null) {
+    return { ok: false, reason: "developer-agent lease has no run nonce; WORKTREE lease retained" };
+  }
+  try {
+    const createdNotBefore = lease.processIdentity?.startedAt ?? lease.acquiredAt;
+    const holderPid = isUsablePid(lease.pid) ? lease.pid : null;
+    const scan = options.scanOrphans({
+      runNonce: nonce,
+      holderPid,
+      createdNotBefore,
+    });
+    if (Array.isArray(scan.snapshot)) {
+      const ctx = processRowPlausibilityContext({
         runNonce: nonce,
-        holderPid: isUsablePid(lease.pid) ? lease.pid : null,
-        createdNotBefore: lease.processIdentity?.startedAt ?? lease.acquiredAt,
+        createdNotBefore,
+        ...(holderPid !== null ? { holderPid } : {}),
+        observedPids: holderPid !== null ? new Set([holderPid]) : new Set(),
+        rows: scan.snapshot,
       });
+      const live = scan.snapshot.filter((row) => processRowCouldBelongToThisRun(row, ctx));
+      const undecidable = undecidableRowsOf(scan.snapshot, ctx);
+      if (live.length > 0 || undecidable.length > 0) {
+        return {
+          ok: false,
+          reason: "developer-agent tree is not gone; WORKTREE lease retained",
+        };
+      }
+    } else if (scan.liveSightings !== undefined || scan.undecidable !== undefined) {
       const live = scan.liveSightings ?? [];
       const undecidable = scan.undecidable ?? [];
       if (live.length > 0 || undecidable.length > 0) {
@@ -851,9 +889,11 @@ export function releaseDeveloperAgentWorktreeLease(
           reason: "developer-agent tree is not gone; WORKTREE lease retained",
         };
       }
-    } catch {
-      return { ok: false, reason: "developer-agent tree scan failed; WORKTREE lease retained" };
+    } else {
+      return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
     }
+  } catch {
+    return { ok: false, reason: "developer-agent tree scan failed; WORKTREE lease retained" };
   }
   try {
     store.save(releaseLease(store.list(), lease));

@@ -160,6 +160,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, OTHER, ELSEWHERE, RUN_ROOT]);
   return {
     files,

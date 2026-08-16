@@ -150,6 +150,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, RUN_ROOT]);
   return {
     files,
@@ -432,7 +433,7 @@ test("C1 the same row created before the floor stays SCANNED when the parent was
 });
 
 test("C1 the same row with a live parent stays SCANNED", () => {
-  const row = { ...SCRUBBED_GRANDCHILD, parentPresent: true };
+  const row = { ...SCRUBBED_GRANDCHILD, parentPresent: true, parentCreationDate: FLOOR };
   const ctx = plausibility({
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: GRANDCHILD_PID, parentPid: LAUNCHER_PID }],

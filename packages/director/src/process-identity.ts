@@ -2076,11 +2076,21 @@ export function parentlessRowTiedToThisRun(
   if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
 
   if (sighting.parentPresent === true) {
-    // A live parent is a live explanation when it could have created this
-    // child, or when capability is UNKNOWN (missing parentCreationDate) —
-    // that last case is the R24 1B host-noise known limit.
-    // A parent proven created *after* the child is a recycled slot, not
-    // a live explanation. That is the R25 pid-reuse leftover.
+    // A child proven created after this holder exited cannot have this
+    // holder as parent, even if the slot is occupied again.
+    if (
+      sighting.parentPid === ctx.holderPid
+      && holderExitedAtCeilingIsUsable(holderChainBounds(ctx.createdNotBefore, ctx.holderExitedAt))
+      && provenCreatedStrictlyAfter(sighting.creationDate, ctx.holderExitedAt)
+    ) {
+      return false;
+    }
+    // A live parent is a live explanation only when it is proven capable
+    // of creating this child. Missing or unplaceable parentCreationDate
+    // is UNKNOWN continuity, not host noise.
+    if (sighting.parentCreationDate === undefined || placeableInstantMs(sighting.parentCreationDate) === null) {
+      return true;
+    }
     if (parentIsProvenCapableCreator(sighting, ctx)) return false;
     if (provenCreatedStrictlyAfter(sighting.parentCreationDate, sighting.creationDate)) {
       return true;
@@ -2451,9 +2461,25 @@ function parseDmtfDatetimeMicros(value: string): number | null {
 export function normalisedCreationDate(value: unknown): string | null {
   const token = asUsableToken(value);
   if (token === null || !timestampHasExplicitZone(token)) return null;
-  const ms = parseProcessTimestamp(token);
-  if (ms === null) return null;
-  return new Date(ms).toISOString();
+  const micros = parseProcessTimestampMicros(token);
+  if (micros === null) return null;
+  return formatUtcMicrosIso(micros);
+}
+
+/**
+ * Persist the full placeable instant. Millisecond ISO is how a 7-digit
+ * CIM token compared DIFFERENT to the record that came from it.
+ * Exact-millisecond instants stay `.mmmZ` so existing millisecond records
+ * keep their spelling.
+ */
+function formatUtcMicrosIso(utcMicros: number): string {
+  const ms = Math.trunc(utcMicros / 1000);
+  const rem = ((utcMicros % 1000) + 1000) % 1000;
+  const iso = new Date(ms).toISOString();
+  if (rem === 0) return iso;
+  const dot = iso.lastIndexOf(".");
+  if (dot < 0) return iso;
+  return `${iso.slice(0, dot + 1)}${iso.slice(dot + 1, iso.length - 1)}${String(rem).padStart(3, "0")}Z`;
 }
 
 function sameExecutable(recorded: string, observed: string): boolean {

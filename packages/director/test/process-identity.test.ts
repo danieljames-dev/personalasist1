@@ -624,7 +624,7 @@ test("a real-shaped zoned CIM instant still produces a recorded identity", () =>
     runNonce: NONCE_A,
   });
   assert.equal(read.ok, true, read.ok ? "" : read.reason);
-  assert.equal(read.identity?.creationDate, "2026-08-14T14:41:20.886Z");
+  assert.equal(read.identity?.creationDate, "2026-08-14T14:41:20.886759Z");
 
   const observed = interpretWindowsProbeOutput({ askedPid: 4812,
     status: 0,
@@ -638,7 +638,7 @@ test("a real-shaped zoned CIM instant still produces a recorded identity", () =>
   });
   assert.equal(observed.outcome, "FOUND");
   if (observed.outcome === "FOUND") {
-    assert.equal(observed.creationDate, "2026-08-14T14:41:20.886Z");
+    assert.equal(observed.creationDate, "2026-08-14T14:41:20.886759Z");
   }
 });
 

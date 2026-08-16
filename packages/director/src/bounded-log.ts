@@ -231,14 +231,19 @@ function firstPemBegin(pending: string): number {
 }
 
 /**
- * One Bearer-token spelling. The redactor matches a complete
- * `Bearer` + whitespace + token. The holdback is the same source with
- * an optional/incomplete token (`\S*$`) so a split cannot emit the
- * prefix. Do not copy a third spelling.
+ * One Bearer-token spelling. No lookbehind: a held `aut`/`aki`/`pro`
+ * prefix must not glue onto Bearer and defeat the redactor.
+ * NEL / line separators count as Bearer whitespace.
  */
-const BEARER_TOKEN_PATTERN_SOURCE = String.raw`(?<![A-Za-z-])Bearer\s+\S+`;
-const BEARER_TOKEN_REDACTOR = new RegExp(BEARER_TOKEN_PATTERN_SOURCE, "g");
-const BEARER_WHITESPACE_TAIL = new RegExp(String.raw`(?<![A-Za-z-])bearer\s*\S*\r?$`, "i");
+const BEARER_WS = String.raw`[\s\u0085\u2028\u2029]`;
+const BEARER_TOKEN_PATTERN_SOURCE = String.raw`Bearer${BEARER_WS}+\S+`;
+const BEARER_TOKEN_REDACTOR = new RegExp(BEARER_TOKEN_PATTERN_SOURCE, "gi");
+const BEARER_WHITESPACE_TAIL = new RegExp(String.raw`(?<![A-Za-z-])bearer${BEARER_WS}*\S*$`, "i");
+const AUTH_HEADER_STARTER = new RegExp(String.raw`(?:proxy-)?authorization"?[^\S\r\n]*:`, "i");
+const AUTH_FOLDED_VALUE = new RegExp(
+  String.raw`((?:Proxy-)?Authorization"?[^\S\r\n]*:)[^\S\r\n]*[\r\n\u0085\u2028\u2029]+[\t \u00a0]*([^\r\n\u0085\u2028\u2029]*)`,
+  "gi",
+);
 
 export function redactLogText(text: string): string {
   const closedBlock = new RegExp(
@@ -248,6 +253,10 @@ export function redactLogText(text: string): string {
   let out = text.replace(
     closedBlock,
     `-----BEGIN $1-----\n${REDACTED}\n-----END $1-----`,
+  );
+  out = out.replace(
+    AUTH_FOLDED_VALUE,
+    (_m, head: string) => `${head}${REDACTED}`,
   );
   out = out.replace(
     /((?:Proxy-)?Authorization"?[^\S\r\n]*:[^\S\r\n]*)("?)(?:(Bearer|Basic|Digest|Negotiate|NTLM|Token|ApiKey)(\s+))?([^\s\r\n"]*)("?)/gi,
@@ -673,8 +682,20 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
   const bearerTail = BEARER_WHITESPACE_TAIL.exec(pending)
     ?? BEARER_WHITESPACE_TAIL.exec(pending.slice(0, lineStart));
   if (bearerTail !== null && bearerTail.index < lineStart) {
-    emit = pending.slice(0, bearerTail.index);
-    hold = pending.slice(bearerTail.index);
+    const before = pending.slice(0, bearerTail.index);
+    if (!new RegExp(String.raw`(?:proxy-)?authorization"?[^\S\r\n]*:\s*$`, "i").test(before)) {
+      emit = before;
+      hold = pending.slice(bearerTail.index);
+    }
+  }
+  const authFold = AUTH_HEADER_STARTER.exec(pending.slice(0, lineStart));
+  if (authFold !== null && authFold.index !== undefined && authFold.index < lineStart) {
+    const afterHeader = pending.slice(authFold.index + authFold[0].length, lineStart);
+    const foldedBare = afterHeader.trim();
+    if (foldedBare === "" || /^Bearer$/i.test(foldedBare)) {
+      emit = pending.slice(0, authFold.index);
+      hold = pending.slice(authFold.index);
+    }
   }
   if (hold.length > MAX_TOKEN_HOLD) {
     const keepFrom = secretHoldStart(hold);
@@ -703,7 +724,7 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
 function secretAnchorKeepLength(hold: string): number {
   const auth = /^(?:proxy-)?authorization"?[^\S\r\n]*:/i.exec(hold);
   if (auth !== null) return Math.min(auth[0].length, 64);
-  const bearer = /^(?:.*?)((?<![A-Za-z-])bearer\s*)/i.exec(hold);
+  const bearer = /^(?:.*?)(bearer[\s\u0085\u2028\u2029]*)/i.exec(hold);
   if (bearer !== null && bearer[1] !== undefined) {
     return Math.min((bearer.index ?? 0) + bearer[1].length, 64);
   }
@@ -767,7 +788,7 @@ function secretHoldStart(hold: string): number {
   const head = hold.slice(0, Math.min(hold.length, SECRET_STARTER_MAX + 16));
   const auth = /(?:proxy-)?authorization"?[^\S\r\n]*:/i.exec(head);
   if (auth !== null) return auth.index;
-  const bearer = /(?<![A-Za-z-])bearer/i.exec(head);
+  const bearer = /bearer/i.exec(head);
   if (bearer !== null) return bearer.index;
   const windowStart = Math.max(0, hold.length - SECRET_TAIL_BYTES - 32);
   const window = hold.slice(windowStart);
@@ -784,7 +805,7 @@ function secretHoldStart(hold: string): number {
   // that still contains `Bearer\n` + token + trailing text would miss
   // `\S*$`. The emit-candidate check in splitHoldback is the twin of
   // this search.
-  const bearerInHold = /(?<![A-Za-z-])bearer\s/i.exec(hold);
+  const bearerInHold = /bearer[\s\u0085\u2028\u2029]/i.exec(hold);
   const bearerTail = BEARER_WHITESPACE_TAIL.exec(hold) ?? bearerInHold;
   if (bearerTail !== null) {
     const abs = bearerTail.index;

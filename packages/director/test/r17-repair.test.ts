@@ -163,6 +163,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, RUN_ROOT]);
   return {
     files,
@@ -413,6 +414,7 @@ function parentlessInWindow(over: {
   nonceReadable?: boolean;
   creationDate?: string;
   parentPresent?: boolean;
+  parentCreationDate?: string;
   name?: string;
   parentName?: string;
 } = {}) {
@@ -429,6 +431,7 @@ function parentlessInWindow(over: {
     // those rows via the incomplete catch-alls.
     creationDate: over.creationDate ?? HOLDER_EXIT,
     ...(over.parentName !== undefined ? { parentName: over.parentName } : {}),
+    ...(over.parentCreationDate !== undefined ? { parentCreationDate: over.parentCreationDate } : {}),
   };
 }
 
@@ -532,6 +535,7 @@ test("F1 liveness: foreign-nonce rows before the floor stay SCANNED; after-exit 
     nonceReadable: true,
     runNonce: "not-your-nonce",
     parentPresent: true,
+    parentCreationDate: LONG_AGO,
   });
   const brokerNamed = parentlessInWindow({
     nonceReadable: true,

@@ -1141,10 +1141,12 @@ export function evaluateSuccessConjunction(input: {
     },
     {
       name: "runCompletedWithinBudget",
-      ok: input.timedOut !== true,
+      ok: input.timedOut === false,
       reason: input.timedOut === true
         ? "the Director cancelled the run for exceeding its budget"
-        : "the run completed within its budget",
+        : input.timedOut === false
+          ? "the run completed within its budget"
+          : "timeout state is UNKNOWN; a missing timedOut is not a completed-within-budget fact",
     },
     {
       name: "logStayedWithinBudget",
@@ -1272,9 +1274,7 @@ export async function recoverAbandonedRun(
     outcome: RecoverOutcomeV1,
     spawned: boolean,
   ): RunResultV1 => {
-    const spawnRecorded = spawned
-      || (answers.started && (isUsablePid(answers.spawnPid)
-        || (parsed.ok && parsed.intent.processIdentity !== null)));
+    const spawnRecorded = spawned || answers.started;
     const result: RunResultV1 = {
       schema: RUN_RESULT_SCHEMA_V1,
       resultPath,
@@ -1296,7 +1296,11 @@ export async function recoverAbandonedRun(
       log: null,
     };
     const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, result, false);
-    if (write === "failed") return { ...result, resultPath: null, resultPersisted: "failed" };
+    const indexOk = !spawnRecorded
+      || recordIndexedRunCompletion(deps.fs, deps.leases, runId, runRoot);
+    if (write === "failed" || !indexOk) {
+      return { ...result, resultPath: write === "failed" ? null : result.resultPath, resultPersisted: "failed" };
+    }
     if (write === "skipped") return { ...result, resultPath: null, resultPersisted: "skipped" };
     return { ...result, resultPersisted: "written" };
   };
@@ -1362,6 +1366,13 @@ export async function recoverAbandonedRun(
           true,
         );
       }
+      if (!observationIsAboutPid(observation, probePid)) {
+        return finish(
+          `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+          "REFUSED_UNKNOWN",
+          false,
+        );
+      }
       if (observation.outcome === "FOUND") {
         return finish(
           `recover refused: holder pid ${probePid} is still present`,
@@ -1376,10 +1387,17 @@ export async function recoverAbandonedRun(
           false,
         );
       }
+      if (observation.outcome === "NOT_FOUND") {
+        return finish(
+          `recover recorded a terminal result; holder pid ${probePid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
+          "TERMINAL",
+          true,
+        );
+      }
       return finish(
-        `recover recorded a terminal result; holder pid ${probePid} is NOT_FOUND. D2 CHILD_TREE remains unmet.`,
-        "TERMINAL",
-        true,
+        `recover refused: holder pid ${probePid} liveness is UNKNOWN`,
+        "REFUSED_UNKNOWN",
+        false,
       );
     }
     // Started (a spawn was recorded) but no holder pid is known. That is
@@ -1488,21 +1506,30 @@ function argvEquals(left: readonly string[], right: readonly string[]): boolean 
  * discoverExecutor + the adapter would produce. A file-URL import of
  * executeRun with an arbitrary command is refused before anything is acquired.
  */
+function promptPathReadableNonempty(read: () => string): boolean {
+  try {
+    return read().trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Prompt existence is a host/run-fs fact. Discovery `isFile` answers
+ * "is this the executor binary?" and must not authorize a prompt path.
+ * An empty or unreadable file is not a prompt.
+ */
 function promptPathExistsOnLaunch(promptPath: string, deps: RunManagerDepsV1): boolean {
   try {
-    if (deps.fs.isFile(promptPath)) return true;
-  } catch {
-    // continue
-  }
-  if (deps.discoveryFs !== undefined) {
-    try {
-      if (deps.discoveryFs.isFile(promptPath)) return true;
-    } catch {
-      // continue
+    if (deps.fs.isFile(promptPath)) {
+      return promptPathReadableNonempty(() => deps.fs.readUtf8(promptPath));
     }
+  } catch {
+    // continue to host stat
   }
   try {
-    return statSync(promptPath).isFile();
+    if (!statSync(promptPath).isFile()) return false;
+    return promptPathReadableNonempty(() => readFileSync(promptPath, "utf8"));
   } catch {
     return false;
   }
@@ -1674,11 +1701,10 @@ export async function executeRun(
       gitBefore: partial.gitBefore ?? null,
     };
     const write = writeResultIfPermitted(deps.fs, runRoot, resultPath, drafted, partial.spawned === true);
-    if (partial.spawned === true) {
-      recordIndexedRunCompletion(deps.fs, leaseStore, request.runId, runRoot);
-    }
-    if (write === "failed") {
-      return { ...drafted, resultPath: null, resultPersisted: "failed" };
+    const indexOk = partial.spawned !== true
+      || recordIndexedRunCompletion(deps.fs, leaseStore, request.runId, runRoot);
+    if (write === "failed" || !indexOk) {
+      return { ...drafted, resultPath: write === "failed" ? null : drafted.resultPath, resultPersisted: "failed" };
     }
     if (write === "skipped") {
       return { ...drafted, resultPath: null, resultPersisted: "skipped" };
@@ -2644,43 +2670,22 @@ export async function executeRun(
       store: intentStore,
     });
     if (!attempted.ok || attempted.permit === null) {
-      try {
-        child.kill();
-      } catch {
-        // Best effort. killTree is the follow-up.
-      }
-      try {
-        deps.killTree(childPid);
-      } catch {
-        // A failed kill is not a confirmed stop.
-      }
-      let observation: ProcessObservationV1;
-      try {
-        observation = deps.probe.observe(childPid);
-      } catch (error) {
-        observation = { outcome: "UNAVAILABLE", reason: `probe threw: ${errorMessage(error)}`, pid: childPid };
-      }
-      const confirmedStopped = observation.outcome === "NOT_FOUND";
-      stillRunning = !confirmedStopped;
-      if (confirmedStopped) holderExitedAt = deps.clock.now();
-      // Ceiling is the known exit instant, or now if the holder may still
-      // be running. A missing ceiling would turn in-window rows into
-      // "not ours" instead of undecidable.
       const attemptCeiling = holderExitedAt ?? deps.clock.now();
       try {
-        killNonceBearingLeftovers({
-          scanOrphans: deps.scanOrphans,
-          killTree: deps.killTree,
-          childPid,
-          recorded: null,
+        const cancelled = await cancelLadder(
+          child,
+          deps,
+          processIdentity,
           runNonce,
-          holderPid: childPid,
-          createdNotBefore: spawnedAtFloor ?? "",
-          observedPids: seenInTreePids,
-          holderExitedAt: attemptCeiling,
-        });
+          cancelStages,
+          spawnedAtFloor ?? deps.clock.now(),
+          attemptCeiling,
+          seenInTreePids,
+        );
+        stillRunning = cancelled.stillRunning;
+        if (!cancelled.stillRunning) holderExitedAt = deps.clock.now();
       } catch {
-        // A failed leftover kill is not a confirmed absence.
+        stillRunning = true;
       }
       orphanScan = await collectWriterOrphans({
         scanOrphans: deps.scanOrphans,
@@ -2700,7 +2705,7 @@ export async function executeRun(
         stderrAborted: stderrDrainAborted,
       });
       log.flush();
-      const reason = confirmedStopped
+      const reason = !stillRunning
         ? `spawn returned but the attempt could not be recorded; child was stopped: ${attempted.reason}`
         : `spawn returned but the attempt could not be recorded; stillRunning: true; pid ${child.pid}: ${attempted.reason}`;
       return finish({
@@ -3054,7 +3059,7 @@ export async function executeRun(
       log: logReport,
     });
   } catch (error) {
-    if (spawnOccurred && spawnedChild !== null && !spawnedChild.exited) {
+    if (spawnOccurred && spawnedChild !== null) {
       try {
         const cancelled = await cancelLadder(
           spawnedChild,
@@ -3759,6 +3764,7 @@ async function cancelLadder(
   } catch {
     // A failed kill is not a confirmed stop.
   }
+  // The owned handle reporting exited is not tree termination.
   await deps.wait(CANCEL_HARD_MS);
 
   if (!child.exited) {
@@ -3895,8 +3901,8 @@ function readHandoffText(fs: RunFileSystemV1, handoffPath: string, stdout: strin
       return null;
     }
   }
-  if (stdout.trim() === "") return null;
-  return stdout;
+  // Missing durable handoff is not a licence to parse stdout into PASS.
+  return null;
 }
 
 function intentStoreFromFs(fs: RunFileSystemV1): IntentStoreV1 {
@@ -4176,14 +4182,10 @@ function existingCompletionOn(
     return "unreadable";
   }
   if (!isPlainObject(parsed)) return "unreadable";
-  const recoverOutcome = parsed.recoverOutcome;
-  // This gate reads the recorded spawn, not the recovery label.
-  // REFUSED_ALIVE with spawned:true is a record that a process was
-  // created for this runId and was last seen present.
-  if ((recoverOutcome === "REFUSED_UNKNOWN" || recoverOutcome === "REFUSED_ALIVE")
-    && parsed.spawned !== true) {
-    if (resultRecordsSpawn(parsed)) return "spawned";
-    return "none";
+  if (resultRecordsSpawn(parsed)) {
+    const recordedRunId = parsed.runId;
+    if (typeof recordedRunId === "string" && recordedRunId !== runId) return "unreadable";
+    return "spawned";
   }
   if (parsed.spawned === true) {
     const recordedRunId = parsed.runId;
@@ -4200,6 +4202,7 @@ function resultRecordsSpawn(parsed: Record<string, unknown>): boolean {
   if (!isPlainObject(intent)) return false;
   if (intent.spawnPid !== undefined && intent.spawnPid !== null) return true;
   if (typeof intent.spawnAttemptedAt === "string" && intent.spawnAttemptedAt.trim() !== "") return true;
+  if (typeof intent.spawnObservedAt === "string" && intent.spawnObservedAt.trim() !== "") return true;
   if (intent.processIdentity !== undefined && intent.processIdentity !== null) return true;
   return false;
 }
@@ -4257,9 +4260,9 @@ function recordIndexedRunCompletion(
   leases: LeaseStoreV1 | undefined,
   runId: string,
   runRoot: string,
-): void {
+): boolean {
   const dir = runCompletionDir(leases, runRoot);
-  if (dir === null) return;
+  if (dir === null) return false;
   try {
     fs.mkdirp(dir);
     fs.writeDurable(runCompletionPath(dir, runId), `${JSON.stringify({
@@ -4267,9 +4270,9 @@ function recordIndexedRunCompletion(
       spawned: true,
       runRoot,
     })}\n`);
+    return true;
   } catch {
-    // The run-root result is still the primary record. A failed index write
-    // is not a second spawn permit.
+    return false;
   }
 }
 
@@ -4386,10 +4389,7 @@ async function reclaimExpiredHolder(input: {
     creationDate: heldIdentity?.startedAt ?? "",
     runNonce: heldIdentity?.runToken ?? "",
   };
-  const subjectObservation: ProcessObservationV1 = isUsablePid(observation.pid)
-    ? observation
-    : { ...observation, pid: recordedPid };
-  const liveness = holderLiveness(recordedIdentity, subjectObservation);
+  const liveness = holderLiveness(recordedIdentity, observation);
 
   const observedIdentity = leaseIdentityFromProbe(observation);
   const result = reclaimStaleLease({
@@ -4398,7 +4398,7 @@ async function reclaimExpiredHolder(input: {
     resource: input.resource,
     holderLiveness: liveness,
     now: input.now,
-    holderObservation: { outcome: subjectObservation.outcome, pid: subjectObservation.pid },
+    holderObservation: { outcome: observation.outcome, pid: observation.pid },
     ...(observedIdentity !== undefined ? { observedIdentity } : {}),
   });
   if (result.ok) input.store.save(result.remaining);

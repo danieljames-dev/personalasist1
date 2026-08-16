@@ -153,6 +153,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, RUN_ROOT]);
   return {
     files,
@@ -355,14 +356,14 @@ test("P1a recoverAbandonedRun on spawnAttemptedAt with pid 0 is REFUSED_UNKNOWN,
     },
   });
   assert.equal((result as { recoverOutcome?: string }).recoverOutcome, "REFUSED_UNKNOWN");
-  assert.equal(result.spawned, false);
+  assert.equal(result.spawned, true);
   assert.notEqual((result as { recoverOutcome?: string }).recoverOutcome, "TERMINAL");
   const onDisk = JSON.parse(fs.readUtf8(join(RUN_ROOT, "result.json"))) as {
     recoverOutcome?: string;
     spawned?: boolean;
   };
   assert.notEqual(onDisk.recoverOutcome, "TERMINAL");
-  assert.equal(onDisk.spawned, false);
+  assert.equal(onDisk.spawned, true);
   assert.equal(result.schema, RUN_RESULT_SCHEMA_V1);
   void probeCalls;
 });
@@ -864,7 +865,9 @@ test("P5a releasing A does not delete B's row", () => {
     assert.equal(a.ok, true);
     assert.equal(b.ok, true);
     if (!a.ok || !b.ok) return;
-    releaseDeveloperAgentWorktreeLease(store, a.lease);
+    releaseDeveloperAgentWorktreeLease(store, a.lease, {
+      scanOrphans: () => ({ snapshot: [], killable: [], liveSightings: [], undecidable: [] }),
+    });
     const left = store.list();
     assert.equal(left.some((row) => row.leaseId === b.lease.leaseId), true);
     assert.equal(left.some((row) => row.leaseId === a.lease.leaseId), false);
@@ -937,7 +940,7 @@ test("P6 recoverAbandonedRun returns RunResultV1 when leases.list throws", async
   assert.equal(result.schema, RUN_RESULT_SCHEMA_V1);
   assert.equal((result as { recoverOutcome?: string }).recoverOutcome, "REFUSED_UNKNOWN");
   assert.notEqual((result as { recoverOutcome?: string }).recoverOutcome, "TERMINAL");
-  assert.equal(result.spawned, false);
+  assert.equal(result.spawned, true);
   assert.ok(fs.isFile(join(RUN_ROOT, "result.json")));
 });
 

@@ -143,6 +143,7 @@ function memoryFs(seed: { files?: Record<string, string>; dirs?: string[] } = {}
   files: Map<string, string>;
 } {
   const files = new Map(Object.entries(seed.files ?? {}));
+  if (!files.has(PROMPT)) files.set(PROMPT, "prompt\n");
   const dirs = new Set(seed.dirs ?? [CWD, RUN_ROOT]);
   return {
     files,
@@ -517,6 +518,7 @@ test("B1 crash window with pid-null lease and recorded spawnPid keeps the lock f
     const store = createNodeLeaseStore(join(dir, "store"));
     const worktree = join(dir, "wt");
     mkdirSync(worktree);
+    writeFileSync(join(worktree, "PROMPT.md"), "prompt\n");
     const acquired = acquireLease({
       existing: [],
       leaseId: "lease-wt-crash",
@@ -601,6 +603,7 @@ test("B2 a broker-parented no-nonce row with a live parent is host noise", () =>
         parentPid: 36320,
         parentPresent: true,
         parentName: "WmiPrvSE.exe",
+        parentCreationDate: "2026-08-14T13:00:00.000Z",
         nonceReadable: true,
         runNonce: null,
         creationDate: "2026-08-14T14:00:05.000Z",
