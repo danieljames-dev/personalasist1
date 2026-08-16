@@ -244,6 +244,10 @@ const AUTH_FOLDED_VALUE = new RegExp(
   String.raw`((?:Proxy-)?Authorization"?[^\S\r\n]*:)[^\S\r\n]*[\r\n\u0085\u2028\u2029]+[^\r\n\u0085\u2028\u2029]*(?:[\r\n\u0085\u2028\u2029]+[\t \u00a0]+[^\r\n\u0085\u2028\u2029]*)*`,
   "gi",
 );
+const AUTH_SAMELINE_WITH_FOLDS = new RegExp(
+  String.raw`((?:Proxy-)?Authorization"?[^\S\r\n]*:)[^\S\r\n]*[^\r\n\u0085\u2028\u2029]+(?:[\r\n\u0085\u2028\u2029]+[\t \u00a0]+[^\r\n\u0085\u2028\u2029]*)+`,
+  "gi",
+);
 
 export function redactLogText(text: string): string {
   const closedBlock = new RegExp(
@@ -256,6 +260,10 @@ export function redactLogText(text: string): string {
   );
   out = out.replace(
     AUTH_FOLDED_VALUE,
+    (_m, head: string) => `${head}${REDACTED}`,
+  );
+  out = out.replace(
+    AUTH_SAMELINE_WITH_FOLDS,
     (_m, head: string) => `${head}${REDACTED}`,
   );
   out = out.replace(
@@ -567,6 +575,11 @@ interface StreamState {
   pemOverflow: boolean;
   /** Held secret-body bytes already counted as dropped so flush+seal do not double-count. */
   holdbackAccountedBytes: number;
+  /**
+   * True after a complete Authorization first-value line was emitted.
+   * Immediately following obs-fold lines are still that header.
+   */
+  authFoldsMayFollow: boolean;
 }
 
 function emptyStream(): StreamState {
@@ -582,6 +595,7 @@ function emptyStream(): StreamState {
     truncatedAt: null,
     pemOverflow: false,
     holdbackAccountedBytes: 0,
+    authFoldsMayFollow: false,
   };
 }
 
@@ -603,6 +617,23 @@ function fileImageOf(state: StreamState): Buffer {
  * newline. Otherwise the entire unterminated last line is held. Incomplete-starter scanning
  * is not a second spelling of "block open".
  */
+function consumeLeadingAuthFolds(pending: string): number | null {
+  let offset = 0;
+  while (offset < pending.length) {
+    const nl = pending.indexOf("\n", offset);
+    if (nl < 0) {
+      const rest = pending.slice(offset);
+      if (rest.length === 0) return offset;
+      if (offset > 0 || /^[\t \u00a0]/.test(rest)) return null;
+      return 0;
+    }
+    const line = pending.slice(offset, nl + 1);
+    if (!/^[\t \u00a0]/.test(line)) return offset;
+    offset = nl + 1;
+  }
+  return offset;
+}
+
 function authorizationFoldShouldHold(afterHeader: string): boolean {
   const trimmed = afterHeader.trim();
   if (trimmed === "" || /^Bearer$/i.test(trimmed)) return true;
@@ -684,6 +715,23 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
     return { emit: "", hold: pending, droppedBytes: 0 };
   }
 
+  if (state.authFoldsMayFollow) {
+    const foldEnd = consumeLeadingAuthFolds(pending);
+    if (foldEnd === null) {
+      return { emit: "", hold: pending, droppedBytes: 0 };
+    }
+    if (foldEnd > 0) {
+      const rest = pending.slice(foldEnd);
+      if (rest.length === 0) {
+        return { emit: "", hold: "", droppedBytes: 0 };
+      }
+      state.pending = rest;
+      state.authFoldsMayFollow = false;
+      return splitHoldback(state);
+    }
+    state.authFoldsMayFollow = false;
+  }
+
   const lastNl = pending.lastIndexOf("\n");
   const lineStart = lastNl + 1;
   let emit = pending.slice(0, lineStart);
@@ -712,6 +760,8 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
     if (authorizationFoldShouldHold(afterHeader)) {
       emit = pending.slice(0, authFold.index);
       hold = pending.slice(authFold.index);
+    } else {
+      state.authFoldsMayFollow = true;
     }
   }
   if (hold.length > MAX_TOKEN_HOLD) {

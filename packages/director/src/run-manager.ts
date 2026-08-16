@@ -30,6 +30,7 @@
  * are injected. The module is testable without launching a process. One wiring test launches
  * a real one.
  */
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -128,6 +129,7 @@ import {
   writerOrphanScanResult,
   type WriterOrphanScanResultV1,
   resolveWindowsSystemExecutable,
+  holderExitedAtCeilingIsUsable,
   rememberSampledDescendantPids,
   undecidableMembershipConfirmSteps,
   undecidableRowsOf,
@@ -259,6 +261,12 @@ export interface CapacityGateV1 {
 export interface LeaseStoreV1 {
   list(): readonly LeaseV1[];
   save(leases: readonly LeaseV1[]): void;
+  /**
+   * Durable store root used for the run-completion index. Missing or
+   * blank is not a licence to invent a second namespace under the run
+   * parent; callers without a root share {@link sandboxDirectorStoreRoot}.
+   */
+  readonly root?: string;
 }
 
 export interface OrphanSightingV1 {
@@ -2784,15 +2792,17 @@ export async function executeRun(
 
     const exitWon = child.exited;
     if (exitWon) {
-      // The child has already settled. Still take one synchronous
-      // ancestry sample so a short-lived intermediate can land in
-      // observedPids. A failed sample is ignored, same as the live
-      // branch. Skipping this used to leave observedPids as only the
-      // holder and (maybe) the already-exited child.
+      // The child has already settled. Stamp the exit ceiling before the
+      // ancestry sample so a post-exit occupant of this pid slot and its
+      // children are not copied into observedPids.
+      if (holderExitedAt === null) holderExitedAt = deps.clock.now();
       if (deps.sampleAncestry !== undefined || deps.scanOrphans === undefined) {
         try {
           const rows = resolveAncestrySampler(deps)({ holderPid: childPid });
-          rememberSampledDescendantPids(seenInTreePids, childPid, rows);
+          rememberSampledDescendantPids(seenInTreePids, childPid, rows, {
+            ...(spawnedAtFloor !== null ? { createdNotBefore: spawnedAtFloor } : {}),
+            ...(holderExitedAt !== null ? { holderExitedAt } : {}),
+          });
         } catch {
           // A failed sample is not a scan.
         }
@@ -2800,7 +2810,6 @@ export async function executeRun(
       const ended = await child.exit;
       exitCode = ended.code;
       exitSignal = ended.signal;
-      holderExitedAt = deps.clock.now();
     } else {
       // First sample is synchronous so a short-lived launcher can still
       // land in observedPids before the exit race. Failures are ignored.
@@ -2814,6 +2823,8 @@ export async function executeRun(
           observedPids: seenInTreePids,
           wait: deps.wait,
           sampleAncestry: resolveAncestrySampler(deps),
+          clock: deps.clock,
+          createdNotBefore: spawnedAtFloor,
         });
       }
       const raced = await Promise.race([
@@ -3347,12 +3358,17 @@ async function sampleAncestryWhileChildAlive(input: {
   readonly observedPids: Set<number>;
   readonly wait: (ms: number) => Promise<void>;
   readonly sampleAncestry: NonNullable<RunManagerDepsV1["sampleAncestry"]>;
+  readonly clock: ClockV1;
+  readonly createdNotBefore: string | null;
 }): Promise<void> {
   let samples = 0;
   while (!input.child.exited && samples < ANCESTRY_SAMPLE_MAX_PER_RUN) {
     try {
       const rows = input.sampleAncestry({ holderPid: input.holderPid });
-      rememberSampledDescendantPids(input.observedPids, input.holderPid, rows);
+      rememberSampledDescendantPids(input.observedPids, input.holderPid, rows, {
+        ...(input.createdNotBefore !== null ? { createdNotBefore: input.createdNotBefore } : {}),
+        ...(input.child.exited ? { holderExitedAt: input.clock.now() } : {}),
+      });
     } catch {
       // A failed sample is not a scan. Do not treat it as "no descendants".
     }
@@ -4016,7 +4032,7 @@ function rememberInTreePids(
     ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
     ...(createdNotBefore !== undefined ? { createdNotBefore } : {}),
   };
-  const ceilingUsable = provenCreatedStrictlyAfter(holderExitedAt, createdNotBefore);
+  const ceilingUsable = holderExitedAtCeilingIsUsable(bounds);
   for (const sighting of sightings) {
     const nonce = normaliseRunNonce(sighting.runNonce);
     if (nonce !== null && nonce === runNonce) seen.add(sighting.pid);
@@ -4209,17 +4225,21 @@ function resultRecordsSpawn(parsed: Record<string, unknown>): boolean {
   return false;
 }
 
-function runCompletionDir(leases: LeaseStoreV1 | undefined, runRoot: string): string | null {
+const noRootStoreCompletionDirs = new WeakMap<object, string>();
+
+function runCompletionDir(leases: LeaseStoreV1 | undefined, _runRoot: string): string | null {
   if (leases !== undefined && "root" in leases) {
     const root = (leases as { readonly root?: unknown }).root;
     if (typeof root === "string" && root.trim() !== "") return join(root, "run-completions");
   }
-  if (leases === undefined) {
-    const fallback = sandboxDirectorStoreRoot();
-    if (typeof fallback === "string" && fallback.trim() !== "") return join(fallback, "run-completions");
-  }
-  if (typeof runRoot === "string" && runRoot.trim() !== "") return join(dirname(runRoot), ".run-completions");
-  return null;
+  const fallback = sandboxDirectorStoreRoot();
+  if (typeof fallback !== "string" || fallback.trim() === "") return null;
+  if (leases === undefined) return join(fallback, "run-completions");
+  const existing = noRootStoreCompletionDirs.get(leases);
+  if (existing !== undefined) return existing;
+  const dir = join(fallback, "unowned-store-completions", randomUUID(), "run-completions");
+  noRootStoreCompletionDirs.set(leases, dir);
+  return dir;
 }
 
 function runCompletionPath(dir: string, runId: string): string {
@@ -4235,7 +4255,7 @@ function existingIndexedRunCompletion(
   runRoot: string,
 ): "none" | "spawned" | "unreadable" {
   const dir = runCompletionDir(leases, runRoot);
-  if (dir === null) return "none";
+  if (dir === null) return "unreadable";
   const path = runCompletionPath(dir, runId);
   let present = false;
   try {

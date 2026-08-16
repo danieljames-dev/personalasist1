@@ -1344,7 +1344,7 @@ function holderChainBounds(
  * same-millisecond spawn/exit is the production CLI clock, not "no ceiling".
  * An exit proven strictly before the floor is nonsensical and stays unusable.
  */
-function holderExitedAtCeilingIsUsable(bounds?: HolderChainBoundsV1): boolean {
+export function holderExitedAtCeilingIsUsable(bounds?: HolderChainBoundsV1): boolean {
   const exit = asUsableToken(bounds?.holderExitedAt);
   if (exit === null) return false;
   if (placeableInstantMicros(exit) === null) return false;
@@ -1477,11 +1477,12 @@ export type AncestrySampleRowV1 = {
 export function rememberSampledDescendantPids(
   seen: Set<number>,
   holderPid: number,
-  rows: readonly { readonly pid: number; readonly parentPid?: number }[],
+  rows: readonly AncestrySampleRowV1[],
+  bounds?: HolderChainBoundsV1,
 ): void {
   if (!isUsablePid(holderPid)) return;
   seen.add(holderPid);
-  for (const pid of descendantPidsOf(holderPid, rows)) {
+  for (const pid of descendantPidsOf(holderPid, rows, bounds)) {
     seen.add(pid);
   }
 }
