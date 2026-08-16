@@ -597,6 +597,37 @@ export function conflicts(a: { kind: LeaseKindV1; resource: string }, b: { kind:
   return canonicalResource(a.kind, a.resource) === canonicalResource(b.kind, b.resource);
 }
 
+/**
+ * Physical fact: which directory does this lease occupy? Only a
+ * WORKTREE lease occupies a directory. The kind string the caller
+ * supplied for *this* run is not that fact.
+ */
+export function leaseOccupiesDirectory(
+  lease: { readonly kind: LeaseKindV1; readonly resource: string },
+  directory: string,
+): boolean {
+  if (lease.kind !== "WORKTREE") return false;
+  return conflicts(lease, { kind: "WORKTREE", resource: directory });
+}
+
+/**
+ * A live unexpired WORKTREE lease held by another runId on `cwd`.
+ * Exclusive occupancy of a directory is decided by the directory,
+ * never by the kind string this run declared.
+ */
+export function foreignWorktreeOccupiesDirectory(input: {
+  readonly existing: readonly LeaseV1[];
+  readonly cwd: string;
+  readonly runId: string;
+  readonly now: string;
+}): LeaseV1 | undefined {
+  return input.existing.find((item) =>
+    item.runId !== input.runId
+    && !leaseHasExpired(item, input.now)
+    && leaseOccupiesDirectory(item, input.cwd),
+  );
+}
+
 const MINTED_DIRECTOR_PERMITS = new WeakMap<object, { readonly store: { list(): readonly LeaseV1[] } }>();
 
 export type DirectorMintedPermitV1 = {
@@ -654,7 +685,7 @@ export function directorPermitAuthorizesWrite(input: {
   if (held.kind !== "WORKTREE") {
     return { ok: false, reason: "Director-minted permit is not a WORKTREE lease" };
   }
-  if (canonicalResource("WORKTREE", held.resource) !== canonicalResource("WORKTREE", input.repositoryRoot)) {
+  if (!leaseOccupiesDirectory(held, input.repositoryRoot)) {
     return { ok: false, reason: "Director-minted permit is not held on this repository root" };
   }
   if (leaseHasExpired(held, input.now)) {

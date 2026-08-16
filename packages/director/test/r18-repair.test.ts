@@ -213,7 +213,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
       if (key === "symbolic-ref -q --short HEAD") {
         return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
       }
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.includes("--porcelain")) {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -842,8 +842,8 @@ test("2 liveness: honest claude IMPLEMENT and grok INDEPENDENT_ACCEPTANCE still 
       upstream: { outcome: "NO_UPSTREAM" },
       status: { outcome: "CLEAN" as const, porcelain: "" as const },
     },
-    treeIncludingIgnored: { outcome: "CLEAN" as const, porcelain: "" as const },
-    treeIncludingIgnoredBefore: { outcome: "CLEAN" as const, porcelain: "" as const },
+    treeIncludingIgnored: { outcome: "CLEAN" as const, porcelain: "" as const, listedContent: { outcome: "DIGESTED", digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", fileCount: 0, totalBytes: 0 } },
+    treeIncludingIgnoredBefore: { outcome: "CLEAN" as const, porcelain: "" as const, listedContent: { outcome: "DIGESTED", digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", fileCount: 0, totalBytes: 0 } },
   }));
   assert.equal(review.ok, true, review.failedConjuncts.join(","));
 });

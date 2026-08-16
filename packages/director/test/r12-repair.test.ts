@@ -213,7 +213,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -590,7 +590,7 @@ test("B1 crash window with pid-null lease and recorded spawnPid keeps the lock f
 // B2 / D1
 // ---------------------------------------------------------------------------
 
-test("B2 a broker-parented no-nonce row after the floor makes the scan UNAVAILABLE", () => {
+test("B2 a broker-parented no-nonce row with a live parent is host noise", () => {
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({
@@ -612,8 +612,7 @@ test("B2 a broker-parented no-nonce row after the floor makes the scan UNAVAILAB
     holderPid: 4812,
     holderExitedAt: "2026-08-14T14:00:10.000Z",
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
-  assert.match(interpreted.reason, /undecidable/);
+  assert.equal(interpreted.outcome, "SCANNED", interpreted.reason);
 });
 
 test("D1 a parentless post-floor row whose dead parent is the holder is in the holder chain", () => {
@@ -760,7 +759,7 @@ test("B2/D1 processRowMakesScanUndecidable is the one plausibility gate", () => 
       parentName: "WmiPrvSE.exe",
       creationDate: "2026-08-14T14:00:05.000Z",
     }, ctx),
-    true,
+    false,
   );
 });
 

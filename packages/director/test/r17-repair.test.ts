@@ -235,7 +235,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
       if (key === "status --porcelain") return gitResult(argv, { stdout: "" });
-      if (key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.some((item) => String(item).startsWith("--ignored"))) {
         ignoredCalls += 1;
         const stdout = ignoredCalls === 1 ? "" : (opts.ignored ?? "");
         return gitResult(argv, { stdout });
@@ -473,7 +473,7 @@ test("F1 executeRun withholds the writer lease for a live foreign-nonce parentle
   assert.ok(result.conjunction.failedConjuncts.includes("executorTreeIsGone"), String(result.conjunction.failedConjuncts));
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-f1"), true);
-  assert.equal(killed.includes(7777), false);
+  assert.equal(killed.includes(7777), true, `parentless leftover is a kill target; saw ${killed.join(",")}`);
 });
 
 test("F1 identity-absent and identity-present proveWriterExit agree on an unreadable foreign-nonce sighting", () => {
@@ -541,8 +541,9 @@ test("F1 liveness: foreign-nonce rows before the floor stay SCANNED; after-exit 
   assert.equal(processRowMakesScanUndecidable(beforeFloor, PARENTLESS_CTX), false);
   // An absent parent after the observed holder exit is not proven absent.
   assert.equal(processRowMakesScanUndecidable(afterExit, PARENTLESS_CTX), true);
-  // A live non-capable parent and a broker self-name are not negative facts.
-  assert.equal(processRowMakesScanUndecidable(liveParent, PARENTLESS_CTX), true);
+  // A live parent is a live explanation (R24 1B). A broker self-name
+  // on a parentless row is not a negative fact.
+  assert.equal(processRowMakesScanUndecidable(liveParent, PARENTLESS_CTX), false);
   assert.equal(processRowMakesScanUndecidable(brokerNamed, PARENTLESS_CTX), true);
 });
 

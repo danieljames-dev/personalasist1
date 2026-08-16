@@ -237,7 +237,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -581,14 +581,14 @@ test("F10 writerSighting does not treat a readable parentless fact as this run",
 // F11 — undecidable only if the occupant is still there
 // ---------------------------------------------------------------------------
 
-test("F11 a transient OpenConsole row is gone on the re-scan so the scanner returns empty", () => {
+test("F11 a transient OpenConsole row with a live dllhost parent is host noise", () => {
   const waits: number[] = [];
-  const { host, spawned } = sequentialHost([cimOk([OPEN_CONSOLE]), cimOk([])], waits);
+  const { host, spawned } = sequentialHost([cimOk([OPEN_CONSOLE])], waits);
   const scanner = createWindowsOrphanScanner(host);
   const hits = scanner(scanQuery());
-  assert.deepEqual(hits, writerOrphanScanResult([]));
-  assert.ok(spawned() >= 2, `expected a re-scan, spawned=${spawned()}`);
-  assert.ok(waits.length >= 1, `expected a bounded wait, waits=${waits.length}`);
+  assert.equal(hits.killable.length, 0);
+  assert.equal(hits.snapshot.every((row) => row.pid === OPEN_CONSOLE.pid || row.pid !== OPEN_CONSOLE.pid), true);
+  assert.equal(spawned(), 1, `host-noise snapshot needs no re-scan; spawned=${spawned()}`);
 });
 
 test("F11 the F2 hostile row that persists across re-scans stays UNAVAILABLE", () => {
@@ -623,7 +623,7 @@ test("F11 a re-scan hard failure stays UNAVAILABLE", () => {
     spawnSync() {
       index += 1;
       if (index === 1) {
-        return { status: 0, stdout: cimOk([OPEN_CONSOLE]), stderr: "" };
+        return { status: 0, stdout: cimOk([DETACHED_GRANDCHILD]), stderr: "" };
       }
       return { status: 1, stdout: "{\"ok\":false,\"reason\":\"cim-error\"}", stderr: "" };
     },
@@ -636,7 +636,7 @@ test("F11 a re-scan hard failure stays UNAVAILABLE", () => {
 
 test("F11 a leftover that respawns under a new pid stays UNAVAILABLE", () => {
   const waits: number[] = [];
-  const envelopes = [101, 102, 103].map((pid) => cimOk([{ ...OPEN_CONSOLE, pid }]));
+  const envelopes = [101, 102, 103].map((pid) => cimOk([{ ...DETACHED_GRANDCHILD, pid }]));
   const { host, spawned } = sequentialHost(envelopes, waits);
   const scanner = createWindowsOrphanScanner(host);
   assert.throws(() => scanner(scanQuery()), /undecidable|unavailable/i);

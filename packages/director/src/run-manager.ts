@@ -74,6 +74,9 @@ import {
   type GitRunner,
   type GitStatusObservationV1,
   type GitVerdictV1,
+  type ListedTreeContentV1,
+  REVIEW_TREE_DIGEST_MAX_BYTES,
+  REVIEW_TREE_DIGEST_MAX_FILES,
 } from "./git-truth.js";
 import {
   artifactPathWithinRoot,
@@ -92,6 +95,7 @@ import {
   acquireLease,
   canonicalResource,
   conflicts,
+  foreignWorktreeOccupiesDirectory,
   heartbeat,
   LEASE_TTL_MS,
   livenessFromHolderObservation,
@@ -107,17 +111,17 @@ import {
   captureProcessIdentity,
   createWindowsAncestrySampler,
   createWindowsOrphanScanner,
-  createdBeforeFloor,
   descendantPidsOf,
   detectOrphan,
   holderLiveness,
   hostWideTreeEvidenceFromScan,
   identityFromObservation,
   isUsablePid,
-  measurementApparatusPidsOfThisProcess,
+  measurementApparatusIdentitiesOfThisProcess,
   normaliseRunNonce,
   normalisedCreationDate,
   nextUndecidablePersistenceDecision,
+  observationIsAboutPid,
   OrphanScanUnavailableError,
   processRowPlausibilityContext,
   processRowCouldBelongToThisRun,
@@ -125,9 +129,8 @@ import {
   type WriterOrphanScanResultV1,
   resolveWindowsSystemExecutable,
   rememberSampledDescendantPids,
-  rowHasPositiveRunIdentity,
+  undecidableMembershipConfirmSteps,
   undecidableRowsOf,
-  UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS,
   UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS,
   placeableInstantMs,
   provenCreatedStrictlyAfter,
@@ -135,6 +138,7 @@ import {
   type AncestrySampleRowV1,
   type ExecutorProcessIdentityV1,
   type HostProcessProbe,
+  type MeasurementApparatusInputV1,
   type OrphanVerdictV1,
   type ProcessObservationV1,
 } from "./process-identity.js";
@@ -301,7 +305,7 @@ export interface RunManagerDepsV1 {
     holderPid?: number;
     holderExitedAt?: string;
     observedPids?: readonly number[];
-    apparatusPids?: readonly number[];
+    apparatusPids?: readonly MeasurementApparatusInputV1[];
   }) => WriterOrphanScanResultV1;
   /**
    * Optional test hook. When omitted and `scanOrphans` is also omitted,
@@ -555,7 +559,8 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
         input.observation !== null
         && input.observation.outcome === "NOT_FOUND"
         && input.probedPid !== null
-        && isUsablePid(input.probedPid);
+        && isUsablePid(input.probedPid)
+        && observationIsAboutPid(input.observation, input.probedPid);
       if (!ownedSettled && !adoptedSlotGone) return null;
       const nonce = normaliseRunNonce(input.runNonce ?? "");
       // Pass the normalised value through even when it is null. Omitted,
@@ -577,9 +582,6 @@ export function proveWriterExit(input: WriterExitProofInputV1): WriterExitProofV
 
     if (input.observation === null) return null;
     if (input.probedPid === null) return null;
-    if (input.observation.pid !== input.recordedIdentity.pid) return null;
-    if (input.probedPid !== input.recordedIdentity.pid) return null;
-
     if (!observationIsAboutRecorded(input.recordedIdentity, input.probedPid, input.observation)) {
       return null;
     }
@@ -659,10 +661,9 @@ function observationIsAboutRecorded(
   probedPid: number,
   observation: ProcessObservationV1,
 ): boolean {
-  // One subject: the observation names the pid it is about. probedPid is
-  // a second belt, not a substitute for the observation's own pid.
-  if (observation.pid !== recorded.pid) return false;
-  if (probedPid !== recorded.pid) return false;
+  // One subject check. Do not write a second observation.pid === …
+  if (!observationIsAboutPid(observation, recorded.pid)) return false;
+  if (!observationIsAboutPid(observation, probedPid)) return false;
   if (observation.outcome !== "FOUND") return true;
   const observedNonce = normaliseRunNonce(observation.runNonce);
   if (observedNonce !== null && observedNonce !== recorded.runNonce) return false;
@@ -682,6 +683,51 @@ function porcelainLineSetsEqual(left: ReadonlySet<string>, right: ReadonlySet<st
     if (!right.has(line)) return false;
   }
   return true;
+}
+
+function listedContentOf(observation: GitStatusObservationV1): ListedTreeContentV1 | undefined {
+  if (observation.outcome === "UNAVAILABLE") return undefined;
+  return observation.listedContent;
+}
+
+function compareListedTreeContent(
+  before: ListedTreeContentV1 | undefined,
+  after: ListedTreeContentV1 | undefined,
+  role: string,
+): { readonly ok: boolean; readonly reason: string } {
+  if (before === undefined || after === undefined) {
+    return {
+      ok: false,
+      reason: `${role} listed-tree content digest was not collected before and after; UNKNOWN does not license a review verdict`,
+    };
+  }
+  if (before.outcome === "BUDGET_EXCEEDED" || after.outcome === "BUDGET_EXCEEDED") {
+    const which = before.outcome === "BUDGET_EXCEEDED"
+      ? before
+      : after.outcome === "BUDGET_EXCEEDED" ? after : before;
+    const budgetReason = which.outcome === "BUDGET_EXCEEDED" ? which.reason : "budget exceeded";
+    return {
+      ok: false,
+      reason: `${role} listed-tree content digest exceeded budget (${budgetReason}; REVIEW_TREE_DIGEST_MAX_FILES=${REVIEW_TREE_DIGEST_MAX_FILES}, REVIEW_TREE_DIGEST_MAX_BYTES=${REVIEW_TREE_DIGEST_MAX_BYTES})`,
+    };
+  }
+  if (before.outcome === "UNAVAILABLE" || after.outcome === "UNAVAILABLE") {
+    const which = before.outcome === "UNAVAILABLE"
+      ? before
+      : after.outcome === "UNAVAILABLE" ? after : before;
+    const unavailableReason = which.outcome === "UNAVAILABLE" ? which.reason : "unavailable";
+    return {
+      ok: false,
+      reason: `${role} listed-tree content digest is UNAVAILABLE (${unavailableReason}); UNKNOWN does not license a review verdict`,
+    };
+  }
+  if (before.digest !== after.digest || before.fileCount !== after.fileCount || before.totalBytes !== after.totalBytes) {
+    return {
+      ok: false,
+      reason: `${role} changed listed-tree content (digest/fileCount/bytes)`,
+    };
+  }
+  return { ok: true, reason: `${role} left the tree unchanged` };
 }
 
 export function evaluateSuccessConjunction(input: {
@@ -992,7 +1038,15 @@ export function evaluateSuccessConjunction(input: {
           reviewOk = false;
           reviewReason = `${role} left the worktree dirty (including ignored files)`;
         } else {
-          reviewReason = `${role} left the tree unchanged`;
+          const beforeContent = listedContentOf(before);
+          const afterContent = listedContentOf(after);
+          const digestVerdict = compareListedTreeContent(beforeContent, afterContent, role);
+          if (!digestVerdict.ok) {
+            reviewOk = false;
+            reviewReason = digestVerdict.reason;
+          } else {
+            reviewReason = `${role} left the tree unchanged`;
+          }
         }
       }
     }
@@ -1799,6 +1853,52 @@ export async function executeRun(
       }
     }
 
+    // Directory occupancy is the directory, not the kind string this
+    // run declared. Check before argv/adapter so a PREVIEW label cannot
+    // walk past a live WORKTREE holder.
+    try {
+      const listedEarly = leaseStore.list();
+      const occupiedEarly = foreignWorktreeOccupiesDirectory({
+        existing: listedEarly,
+        cwd: request.cwd,
+        runId: request.runId,
+        now: deps.clock.now(),
+      });
+      if (occupiedEarly !== undefined) {
+        return finish({
+          ok: false,
+          spawned: false,
+          reason: "lease refused: another run holds this directory",
+          conjunction: emptyConjunction,
+          exitCode: null,
+          processIdentity: null,
+          intent: null,
+          handoff: null,
+          gitAfter: null,
+          lease: null,
+          productionWriterLeaseReleasedByThisRun: false,
+          cancel: emptyCancel,
+          log: null,
+        });
+      }
+    } catch (error) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: `lease store unreadable: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+
     if (LOCAL_ROLES.has(role)) {
       return finish({
         ok: false,
@@ -1973,6 +2073,29 @@ export async function executeRun(
         ok: false,
         spawned: false,
         reason: `lease store unreadable: ${errorMessage(error)}`,
+        conjunction: emptyConjunction,
+        exitCode: null,
+        processIdentity: null,
+        intent: null,
+        handoff: null,
+        gitAfter: null,
+        lease: null,
+        productionWriterLeaseReleasedByThisRun: false,
+        cancel: emptyCancel,
+        log: null,
+      });
+    }
+    const occupiedByForeignWorktree = foreignWorktreeOccupiesDirectory({
+      existing: listedLeases,
+      cwd: request.cwd,
+      runId: request.runId,
+      now: deps.clock.now(),
+    });
+    if (occupiedByForeignWorktree !== undefined) {
+      return finish({
+        ok: false,
+        spawned: false,
+        reason: "lease refused: another run holds this directory",
         conjunction: emptyConjunction,
         exitCode: null,
         processIdentity: null,
@@ -3193,7 +3316,7 @@ async function collectWriterOrphans(input: {
       ...(holderPid !== undefined ? { holderPid } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids: [...observedPids],
-      apparatusPids: [...measurementApparatusPidsOfThisProcess()],
+      apparatusPids: [...measurementApparatusIdentitiesOfThisProcess()],
     };
     const scanOnce = (): WriterOrphanScanResultV1 => {
       const scanned = resolveOrphanScanner(input.scanOrphans)(query);
@@ -3210,7 +3333,7 @@ async function collectWriterOrphans(input: {
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(sessionId !== undefined ? { directorSessionId: sessionId } : {}),
       observedPids,
-      apparatusPids: measurementApparatusPidsOfThisProcess(),
+      apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
       rows,
     });
     let scanned = scanOnce();
@@ -3221,7 +3344,8 @@ async function collectWriterOrphans(input: {
     if (undecidable.length > 0) {
       const wait = input.wait ?? (async () => undefined);
       let clean: readonly OrphanSightingV1[] | null = null;
-      for (let attempt = 1; attempt < UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS; attempt++) {
+      const confirmSteps = undecidableMembershipConfirmSteps();
+      for (let step = 0; step < confirmSteps; step++) {
         await waitWithCeiling(wait, UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
         let next: WriterOrphanScanResultV1;
         try {
@@ -3248,8 +3372,10 @@ async function collectWriterOrphans(input: {
         }
         if (decision.action === "scan-clean") {
           clean = nextRows;
-          break;
+          undecidable = [];
+          continue;
         }
+        clean = null;
         undecidable = decision.undecidable;
         sightings = nextRows;
         plausibility = ctxFor(nextRows, directorSessionId);
@@ -3274,7 +3400,7 @@ async function collectWriterOrphans(input: {
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       observedPids,
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
-      apparatusPids: measurementApparatusPidsOfThisProcess(),
+      apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
     };
     const liveSightings = sightings.filter((sighting) =>
       processRowCouldBelongToThisRun(sighting, plausibility)
@@ -3324,7 +3450,7 @@ export function writerSightingNotProvenAbsent(
     readonly holderExitedAt?: string;
     readonly observedPids?: ReadonlySet<number>;
     readonly directorSessionId?: number;
-    readonly apparatusPids?: ReadonlySet<number>;
+    readonly apparatusPids?: Iterable<MeasurementApparatusInputV1>;
   } = {
     holderPid: null,
     rows: [],
@@ -3342,7 +3468,7 @@ export function writerSightingNotProvenAbsent(
     ...(tree.holderExitedAt !== undefined ? { holderExitedAt: tree.holderExitedAt } : {}),
     ...(tree.directorSessionId !== undefined ? { directorSessionId: tree.directorSessionId } : {}),
     observedPids: tree.observedPids,
-    apparatusPids: tree.apparatusPids ?? measurementApparatusPidsOfThisProcess(),
+    apparatusPids: tree.apparatusPids ?? measurementApparatusIdentitiesOfThisProcess(),
     rows: tree.rows,
   });
   return processRowCouldBelongToThisRun(sighting, ctx);
@@ -3375,7 +3501,7 @@ function killNonceBearingLeftovers(input: {
     ...(holderPid !== null ? { holderPid } : {}),
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids: [...observedPids],
-    apparatusPids: [...measurementApparatusPidsOfThisProcess()],
+    apparatusPids: [...measurementApparatusIdentitiesOfThisProcess()],
   };
   let scanned: WriterOrphanScanResultV1;
   try {
@@ -3395,7 +3521,6 @@ function killNonceBearingLeftovers(input: {
     return { confirmed: false, remaining: [], killed: false };
   }
   const snapshot = scanned.snapshot;
-  const leftovers = scanned.killable;
   rememberInTreePids(observedPids, snapshot, input.runNonce, holderPid ?? undefined, input.holderExitedAt, createdNotBefore);
   const membershipTree = {
     holderPid,
@@ -3403,25 +3528,24 @@ function killNonceBearingLeftovers(input: {
     createdNotBefore,
     ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
     observedPids,
-    apparatusPids: measurementApparatusPidsOfThisProcess(),
+    apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
   };
   let killed = false;
+  const leftoverCtx = processRowPlausibilityContext({
+    runNonce: input.runNonce,
+    createdNotBefore,
+    ...(isUsablePid(holderPid) ? { holderPid } : {}),
+    ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
+    observedPids,
+    apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
+    rows: snapshot,
+  });
+  // One "is this process mine?" answer. The killer's set is the same
+  // set that blocks executorTreeIsGone: processRowCouldBelongToThisRun.
+  // A nonce-matching leftover before the spawn floor is ours.
+  const leftovers = snapshot.filter((sighting) => processRowCouldBelongToThisRun(sighting, leftoverCtx));
   for (const leftover of leftovers) {
     if (leftover.pid === input.childPid) continue;
-    if (!writerSightingNotProvenAbsent(leftover, input.runNonce, membershipTree)) continue;
-    if (createdBeforeFloor(leftover.creationDate, createdNotBefore)) continue;
-    // Same "is this process mine?" answer the reporting filter uses.
-    // An in-snapshot ParentProcessId chain is not a stale historical PID.
-    const leftoverCtx = processRowPlausibilityContext({
-      runNonce: input.runNonce,
-      createdNotBefore,
-      ...(isUsablePid(holderPid) ? { holderPid } : {}),
-      ...(input.holderExitedAt !== undefined ? { holderExitedAt: input.holderExitedAt } : {}),
-      observedPids,
-      apparatusPids: measurementApparatusPidsOfThisProcess(),
-      rows: snapshot,
-    });
-    if (!rowHasPositiveRunIdentity(leftover, leftoverCtx)) continue;
     try {
       input.killTree(leftover.pid);
     } catch {

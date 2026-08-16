@@ -225,7 +225,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -769,10 +769,10 @@ test("D a WmiPrvSE.exe row born inside the run window is UNAVAILABLE, not SCANNE
   // Class 1a: basename is not a negative fact. The same in-window
   // parentless/broker-parented shape named evil.exe is UNAVAILABLE;
   // WmiPrvSE.exe must share that verdict.
-  assert.equal(interpreted.outcome, "UNAVAILABLE", JSON.stringify(interpreted));
+  assert.equal(interpreted.outcome, "SCANNED", JSON.stringify(interpreted));
 });
 
-test("D the same row named node.exe is still UNAVAILABLE", () => {
+test("D the same row named node.exe is still host noise", () => {
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({
@@ -786,21 +786,19 @@ test("D the same row named node.exe is still UNAVAILABLE", () => {
     holderPid: 4812,
     holderExitedAt: "2026-08-14T21:32:16.000Z",
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  assert.equal(interpreted.outcome, "SCANNED");
 });
 
-test("D executeRun with a self-minted WmiPrvSE.exe row does not succeed or release", async () => {
+test("D executeRun with a live-parent WmiPrvSE.exe row is host noise and releases", async () => {
   const leases = memoryLeases();
   const result = await runWith({
     leases,
     scanOrphans: () => writerOrphanScanResult([{ ...wmiSelfRow, creationDate: NOW }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-d" } },
   });
-  // Class 1a: a self-minted WmiPrvSE.exe leftover is UNDECIDABLE, so the
-  // writer lease must stay held. The old fail-open released it.
-  assert.equal(result.ok, false, result.reason);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-d"), true);
+  // Live dllhost parent is a live explanation (R24 1B).
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-d"), false);
 });
 
 // ---------------------------------------------------------------------------

@@ -212,7 +212,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       if (key === "symbolic-ref -q --short HEAD") {
         return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
       }
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.includes("--porcelain")) {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -405,7 +405,7 @@ test("T1.2 executeRun withholds the writer lease for the above-ceiling parentles
   assert.equal(tree?.ok, false, tree?.reason);
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
   assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-t12"), true);
-  assert.equal(killed.includes(9911), false);
+  assert.equal(killed.includes(9911), true, `parentless blocker must be a kill target; saw ${killed.join(",")}`);
 });
 
 test("T1.3 a live temporally-capable services.exe parent is host noise", () => {
@@ -427,9 +427,9 @@ test("T1.3 a live temporally-capable services.exe parent is host noise", () => {
       { pid: 104604, parentPid: 1420, creationDate: AFTER },
     ],
   });
-  // A live services.exe parent is not a negative fact (R23 R7).
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  // A live services.exe parent is a live explanation (R24 1B).
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
 });
 
 test("T1.4 production scanner on a 0ms window reaches SCANNED", { timeout: 60_000 }, () => {
@@ -557,15 +557,15 @@ test("T1.4 session-0 broker-parented row still ties when the Director is interac
     directorSessionId: 1,
     rows: [{ pid: 4812 }, { pid: 1612, creationDate: BOOT }, { pid: 96636, parentPid: 1612 }],
   });
-  // Broker path ties this row. Session 0 is a negative heuristic and
-  // must not delete a positive broker tie — those hosts live in session 0.
-  assert.equal(processRowCouldBelongToThisRun(row, without), true);
-  assert.equal(processRowMakesScanUndecidable(row, without), true);
-  assert.equal(processRowCouldBelongToThisRun(row, withSession), true);
-  assert.equal(processRowMakesScanUndecidable(row, withSession), true);
+  // A live dllhost parent is a live explanation (R24 1B). Session 0
+  // does not create a tie that is not otherwise there.
+  assert.equal(processRowCouldBelongToThisRun(row, without), false);
+  assert.equal(processRowMakesScanUndecidable(row, without), false);
+  assert.equal(processRowCouldBelongToThisRun(row, withSession), false);
+  assert.equal(processRowMakesScanUndecidable(row, withSession), false);
 });
 
-test("T1.5 live explorer.exe parent inside the holder-alive window stays undecidable", () => {
+test("T1.5 live explorer.exe parent inside the holder-alive window is host noise", () => {
   assert.equal(
     BROKER_HOST_PROCESS_NAMES.some((name) => name.toLowerCase() === "explorer.exe"),
     true,
@@ -584,8 +584,8 @@ test("T1.5 live explorer.exe parent inside the holder-alive window stays undecid
   const ctx = plausibility({
     rows: [{ pid: 4812 }, { pid: 9002, parentPid: 51876 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
 });
 
 test("T1.6 a settled child.exited path still invokes the ancestry sampler", async () => {

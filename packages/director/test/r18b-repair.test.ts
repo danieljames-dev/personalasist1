@@ -232,7 +232,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
       if (key === "symbolic-ref -q --short HEAD") {
         return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
       }
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.includes("--porcelain")) {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -406,7 +406,7 @@ test("C1 rename-the-leftover: six names share the UNDECIDABLE verdict and keep t
   assert.deepEqual(verdicts, Array(6).fill("UNAVAILABLE"));
 });
 
-test("C1 ShellExecute explorer parent is UNDECIDABLE and retains the writer lease", async () => {
+test("C1 ShellExecute explorer parent is host noise and does not retain the writer lease", async () => {
   const row = leftoverRow({
     pid: 9002,
     name: "wscript.exe",
@@ -415,19 +415,18 @@ test("C1 ShellExecute explorer parent is UNDECIDABLE and retains the writer leas
     parentName: "explorer.exe",
   });
   const ctx = plausibility({ rows: [{ pid: 4812 }, { pid: 9002, parentPid: 51876 }] });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
-  assert.equal(interpretRows([row]).outcome, "UNAVAILABLE");
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
+  assert.equal(interpretRows([row]).outcome, "SCANNED");
   const leases = memoryLeases();
   const result = await runWith({
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-shell" } },
     scanOrphans: () => writerOrphanScanResult([row as never]),
   });
-  assert.equal(result.ok, false, result.reason);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
   const tree = result.conjunction.findings.find((item) => item.name === "executorTreeIsGone");
-  assert.equal(tree?.ok, false);
+  assert.equal(tree?.ok, true, tree?.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
 });
 
 test("C1 a proven-capable live parent still excludes the ordinary child", () => {
@@ -446,11 +445,10 @@ test("C1 a proven-capable live parent still excludes the ordinary child", () => 
       { pid: 5001, parentPid: 4812, creationDate: AFTER },
     ],
   });
-  // The holder itself is a capable parent (not only its descendants).
-  // That excludes the parentless branch. The same row is still ours
-  // via the holder chain — do not assert both rules as one verdict.
+  // The holder itself is a capable parent. The row is also tied by
+  // the holder chain / observedPids — a Director-established fact.
   assert.equal(parentIsProvenCapableCreator(row, ctx), true);
-  assert.equal(parentlessRowTiedToThisRun(row, ctx), false);
+  assert.equal(parentlessRowTiedToThisRun(row, ctx), true);
   assert.equal(rowIsInHolderChain(row, ctx), true);
   assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
   assert.equal(processRowMakesScanUndecidable(row, ctx), false);

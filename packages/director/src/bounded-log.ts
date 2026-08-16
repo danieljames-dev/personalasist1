@@ -266,6 +266,7 @@ export function redactLogText(text: string): string {
   out = out.replace(/\bghp_[A-Za-z0-9_]{8,}/g, REDACTED);
   out = out.replace(/\bAKIA[0-9A-Z]{16}\b/g, REDACTED);
   out = out.replace(/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{10,}/g, REDACTED);
+  out = out.replace(/tskey-[A-Za-z0-9_-]+/g, REDACTED);
   return out;
 }
 
@@ -669,7 +670,8 @@ function splitHoldback(state: StreamState): { emit: string; hold: string; droppe
   // The last-newline split would otherwise emit a `Bearer\n` prefix and
   // leave the token on the next write — the same secret the redactor
   // would have caught had the bytes arrived together.
-  const bearerTail = BEARER_WHITESPACE_TAIL.exec(pending);
+  const bearerTail = BEARER_WHITESPACE_TAIL.exec(pending)
+    ?? BEARER_WHITESPACE_TAIL.exec(pending.slice(0, lineStart));
   if (bearerTail !== null && bearerTail.index < lineStart) {
     emit = pending.slice(0, bearerTail.index);
     hold = pending.slice(bearerTail.index);
@@ -730,6 +732,7 @@ const SECRET_STARTERS = [
   "github_pat_",
   "sk-",
   "akia",
+  "tskey-",
   "bearer ",
   "authorization",
   "proxy-authorization",
@@ -765,7 +768,13 @@ function secretHoldStart(hold: string): number {
     const abs = windowStart + at;
     if (earliest < 0 || abs < earliest) earliest = abs;
   }
-  const bearerTail = BEARER_WHITESPACE_TAIL.exec(hold);
+  // $ on the hold is correct when the hold is the tail we will keep.
+  // Also search the hold without the end-anchor: a proper-prefix hold
+  // that still contains `Bearer\n` + token + trailing text would miss
+  // `\S*$`. The emit-candidate check in splitHoldback is the twin of
+  // this search.
+  const bearerInHold = /(?<![A-Za-z-])bearer\s/i.exec(hold);
+  const bearerTail = BEARER_WHITESPACE_TAIL.exec(hold) ?? bearerInHold;
   if (bearerTail !== null) {
     const abs = bearerTail.index;
     if (earliest < 0 || abs < earliest) earliest = abs;

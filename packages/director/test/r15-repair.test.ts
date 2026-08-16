@@ -221,7 +221,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -583,8 +583,8 @@ test("F2 the same row with a live parent stays SCANNED", () => {
     holderExitedAt: HOLDER_EXIT,
     rows: [{ pid: 4812 }, { pid: 7777, parentPid: 6666 }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({ ok: true, unreadable: 0, processes: [row] }),
@@ -595,7 +595,7 @@ test("F2 the same row with a live parent stays SCANNED", () => {
     observedPids: [4812],
     holderExitedAt: HOLDER_EXIT,
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  assert.equal(interpreted.outcome, "SCANNED");
 });
 
 test("F2 the same row created before the floor stays SCANNED", () => {

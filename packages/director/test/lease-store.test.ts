@@ -203,7 +203,7 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
               if (key === "symbolic-ref -q --short HEAD") {
                 return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
               }
-              if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+              if (argv[0] === "status" && argv.includes("--porcelain")) {
                 return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
               }
               if (argv[0] === "merge-base" && argv[1] === "--is-ancestor") {

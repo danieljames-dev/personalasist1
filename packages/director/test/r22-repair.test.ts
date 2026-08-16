@@ -228,7 +228,7 @@ function matchingGit(head = HEAD_AFTER, ignoredPorcelain = ""): GitRunner {
       if (key === "status --porcelain") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
-      if (key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.some((item) => String(item).startsWith("--ignored"))) {
         return { argv: [...argv], status: 0, stdout: ignoredPorcelain, stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
@@ -581,15 +581,15 @@ test("R1 liveness: NOT_FOUND about the recorded holder's own pid still reaches T
 // R2 — a negative heuristic must never delete a positive tie
 // ---------------------------------------------------------------------------
 
-test("R2 every broker-host name, session-0, created after holderExitedAt, still ties", () => {
+test("R2 every broker-host name, session-0, created after holderExitedAt, with a live parent is host noise", () => {
   const ctx = ctxAfterExit();
   assert.ok(BROKER_HOST_PROCESS_NAMES.length > 0);
   for (const host of BROKER_HOST_PROCESS_NAMES) {
     const row = brokerAfterExitRow(host);
     const could = processRowCouldBelongToThisRun(row, ctx);
     const undecidable = processRowMakesScanUndecidable(row, ctx);
-    assert.equal(could, true, `${host} after-ceiling session-0 row must still belong`);
-    assert.equal(undecidable, true, `${host} after-ceiling session-0 row must stay undecidable`);
+    assert.equal(could, false, `${host} live after-ceiling parent is host noise`);
+    assert.equal(undecidable, false, `${host} live after-ceiling parent is not undecidable`);
   }
 });
 
@@ -621,7 +621,7 @@ test("R2 session-0 row whose parentPid is in observedPids still belongs", () => 
   assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
 });
 
-test("R2 interpretWindowsOrphanScanOutput over the production envelope with directorSessionId 1 stays UNAVAILABLE", () => {
+test("R2 interpretWindowsOrphanScanOutput over a live after-exit broker parent is SCANNED", () => {
   const envelope = {
     ok: true,
     processes: [leftoverAfterExit({ parentName: "dllhost.exe" })],
@@ -638,11 +638,10 @@ test("R2 interpretWindowsOrphanScanOutput over the production envelope with dire
     holderExitedAt: HOLDER_EXIT,
     observedPids: [4812],
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE", interpreted.reason);
-  assert.match(interpreted.reason, /undecidable process-tree membership/);
+  assert.equal(interpreted.outcome, "SCANNED", interpreted.reason);
 });
 
-test("R2 executeRun with session-0 leftover after holder exit keeps the PRODUCTION_WRITER lease", async () => {
+test("R2 executeRun with a live session-0 after-exit broker parent releases the writer lease", async () => {
   const leases = memoryLeases();
   const row = leftoverAfterExit({ parentName: "dllhost.exe", sessionId: 0 });
   const result = await runWith({
@@ -654,9 +653,8 @@ test("R2 executeRun with session-0 leftover after holder exit keeps the PRODUCTI
     }),
   });
   const tree = result.conjunction.findings.find((item) => item.name === "executorTreeIsGone");
-  assert.equal(tree?.ok, false, tree?.reason);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-r2"), true);
+  assert.equal(tree?.ok, true, tree?.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
 });
 
 test("R2 liveness: a parentless session-0 row with no positive tie is still excluded", () => {
@@ -1227,6 +1225,7 @@ const PREEXISTING_DIRT: GitStatusObservationV1 = {
   outcome: "DIRTY",
   porcelain: "!! dist/",
   dirtyPaths: ["dist/"],
+  listedContent: { outcome: "DIGESTED", digest: "preexisting-ignored-dirt", fileCount: 1, totalBytes: 1 },
 };
 
 test("R9 pre-existing ignored dirt, identical before and after, review role passes", () => {

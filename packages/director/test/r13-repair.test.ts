@@ -43,9 +43,8 @@ const hostNoiseCtx = {
 };
 
 test("R13 a live older non-broker parent is host noise and the scan is SCANNED", () => {
-  // A live older non-broker parent is still a complete explanation.
-  // Broker parents are not provenance (R20 P1c); this case uses services.exe.
-  assert.equal(processRowMakesScanUndecidable(hostNoiseNonBrokerRow, hostNoiseCtx), true);
+  // A live older non-broker parent is a live explanation (R24 1B).
+  assert.equal(processRowMakesScanUndecidable(hostNoiseNonBrokerRow, hostNoiseCtx), false);
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
     stdout: JSON.stringify({
@@ -58,16 +57,16 @@ test("R13 a live older non-broker parent is host noise and the scan is SCANNED",
     runNonce: NONCE,
     holderPid: 4812,
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  assert.equal(interpreted.outcome, "SCANNED");
 });
 
-test("R13 a broker-parented row created after observed holder exit is not proven absent", () => {
+test("R13 a broker-parented row created after observed holder exit is host noise when the parent is live", () => {
   assert.equal(
     processRowMakesScanUndecidable(afterCeilingBrokerRow, {
       ...hostNoiseCtx,
       holderExitedAt: HOLDER_EXIT,
     }),
-    true,
+    false,
   );
   const interpreted = interpretWindowsOrphanScanOutput({
     status: 0,
@@ -82,5 +81,5 @@ test("R13 a broker-parented row created after observed holder exit is not proven
     holderPid: 4812,
     holderExitedAt: HOLDER_EXIT,
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  assert.equal(interpreted.outcome, "SCANNED");
 });

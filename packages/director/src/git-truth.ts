@@ -37,6 +37,9 @@
  * blocking.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { IsoTimestamp } from "./contracts.js";
 import { rememberMeasurementApparatusPid } from "./process-identity.js";
 
@@ -749,10 +752,64 @@ export type GitUpstreamObservationV1 =
   | { readonly outcome: "NOT_APPLICABLE"; readonly reason: "DETACHED_HEAD" }
   | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
 
+/**
+ * Content digest of the paths `git status` listed. Status lines are a
+ * correlate; bytes are the fact. mtime and size are writable by the
+ * thing being audited and are not used as a content proxy — size is
+ * consulted only to enforce {@link REVIEW_TREE_DIGEST_MAX_BYTES}.
+ */
+export type ListedTreeContentV1 =
+  | {
+      readonly outcome: "DIGESTED";
+      readonly digest: string;
+      readonly fileCount: number;
+      readonly totalBytes: number;
+    }
+  | {
+      readonly outcome: "BUDGET_EXCEEDED";
+      readonly reason: string;
+      readonly fileCount: number;
+      readonly totalBytes: number;
+    }
+  | { readonly outcome: "UNAVAILABLE"; readonly reason: string };
+
 export type GitStatusObservationV1 =
-  | { readonly outcome: "CLEAN"; readonly porcelain: "" }
-  | { readonly outcome: "DIRTY"; readonly porcelain: string; readonly dirtyPaths: readonly string[] }
+  | {
+      readonly outcome: "CLEAN";
+      readonly porcelain: "";
+      readonly listedContent?: ListedTreeContentV1;
+    }
+  | {
+      readonly outcome: "DIRTY";
+      readonly porcelain: string;
+      readonly dirtyPaths: readonly string[];
+      readonly listedContent?: ListedTreeContentV1;
+    }
   | { readonly outcome: "UNAVAILABLE"; readonly reason: string; readonly command: GitCommandResultV1 };
+
+/**
+ * `--ignored=traditional --untracked-files=all` lists each ignored file
+ * instead of collapsing an ignored directory to one line. Measured on
+ * this repo as affordable (thousands of lines in well under a second).
+ */
+export const GIT_STATUS_INCLUDING_IGNORED_ARGV = [
+  "status",
+  "--porcelain",
+  "--ignored=traditional",
+  "--untracked-files=all",
+] as const;
+
+/**
+ * Budget for the review-tree content digest. Overflow is UNKNOWN and
+ * never passes. Do not widen these to whatever happens to fit a host.
+ */
+export const REVIEW_TREE_DIGEST_MAX_FILES = 10_000;
+export const REVIEW_TREE_DIGEST_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Digest of an empty listed-path set. Tests and CLEAN observations share it. */
+export function emptyListedTreeContent(): ListedTreeContentV1 {
+  return { outcome: "DIGESTED", digest: createHash("sha256").digest("hex"), fileCount: 0, totalBytes: 0 };
+}
 
 export type GitBranchHeadObservationV1 =
   | { readonly outcome: "FOUND"; readonly sha: string }
@@ -794,13 +851,108 @@ export interface CollectGitTruthInputV1 {
  * plausible empty success.
  */
 /**
- * `git status --porcelain --ignored`. `--ignored` reports *state*, not
- * delta: `!! path` means the path is ignored and present, not that this
- * run created it. A claim about what this run changed requires two
- * readings compared as sets of lines.
+ * `git status --porcelain --ignored=traditional --untracked-files=all`.
+ * `--ignored` reports *state*, not delta: `!! path` means the path is
+ * ignored and present, not that this run created it. A claim about
+ * what this run changed requires two readings compared as content
+ * digests of the listed paths, not as sets of status lines. Status
+ * lines cannot see a content rewrite of an already-listed ignored file.
  */
 export function collectGitStatusIncludingIgnored(runner: GitRunner): GitStatusObservationV1 {
-  return observeStatus(invokeGit(runner, ["status", "--porcelain", "--ignored"]));
+  const status = observeStatus(invokeGit(runner, [...GIT_STATUS_INCLUDING_IGNORED_ARGV]));
+  return attachListedTreeContent(status, runner.inspectedWorktree);
+}
+
+export function attachListedTreeContent(
+  status: GitStatusObservationV1,
+  worktreePath: string | undefined,
+): GitStatusObservationV1 {
+  if (status.outcome === "UNAVAILABLE") return status;
+  const paths = status.outcome === "CLEAN" ? [] : status.dirtyPaths;
+  const listedContent = digestListedGitStatusPaths(worktreePath ?? "", paths);
+  if (status.outcome === "CLEAN") {
+    return { outcome: "CLEAN", porcelain: "", listedContent };
+  }
+  return {
+    outcome: "DIRTY",
+    porcelain: status.porcelain,
+    dirtyPaths: status.dirtyPaths,
+    listedContent,
+  };
+}
+
+/**
+ * Stream-hash each listed path. Directories contribute only their
+ * relative path (the flags above should have expanded them to files).
+ * A missing worktree or an unreadable file is UNAVAILABLE, never a
+ * silent empty digest.
+ */
+export function digestListedGitStatusPaths(
+  worktreePath: string,
+  relativePaths: readonly string[],
+): ListedTreeContentV1 {
+  const hash = createHash("sha256");
+  let fileCount = 0;
+  let totalBytes = 0;
+  const sorted = [...relativePaths].map((path) => path.replace(/\\/g, "/")).sort();
+  if (sorted.length === 0) {
+    return emptyListedTreeContent();
+  }
+  const root = typeof worktreePath === "string" ? worktreePath.trim() : "";
+  if (root === "") {
+    return { outcome: "UNAVAILABLE", reason: "listed-tree digest has no worktree path" };
+  }
+  for (const rel of sorted) {
+    if (rel === "") continue;
+    if (fileCount + 1 > REVIEW_TREE_DIGEST_MAX_FILES) {
+      return {
+        outcome: "BUDGET_EXCEEDED",
+        reason: `listed-tree digest exceeded REVIEW_TREE_DIGEST_MAX_FILES=${REVIEW_TREE_DIGEST_MAX_FILES} (fileCount=${fileCount + 1})`,
+        fileCount: fileCount + 1,
+        totalBytes,
+      };
+    }
+    const abs = join(root, rel);
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(abs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { outcome: "UNAVAILABLE", reason: `listed-tree path unreadable: ${rel}: ${message}` };
+    }
+    hash.update(rel);
+    hash.update("\0");
+    if (st.isDirectory()) {
+      hash.update("DIR\n");
+      fileCount += 1;
+      continue;
+    }
+    if (!st.isFile()) {
+      hash.update("OTHER\n");
+      fileCount += 1;
+      continue;
+    }
+    if (totalBytes + st.size > REVIEW_TREE_DIGEST_MAX_BYTES) {
+      return {
+        outcome: "BUDGET_EXCEEDED",
+        reason: `listed-tree digest exceeded REVIEW_TREE_DIGEST_MAX_BYTES=${REVIEW_TREE_DIGEST_MAX_BYTES} (totalBytes=${totalBytes + st.size})`,
+        fileCount: fileCount + 1,
+        totalBytes: totalBytes + st.size,
+      };
+    }
+    let buf: Buffer;
+    try {
+      buf = readFileSync(abs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { outcome: "UNAVAILABLE", reason: `listed-tree file unreadable: ${rel}: ${message}` };
+    }
+    hash.update(buf);
+    hash.update("\n");
+    fileCount += 1;
+    totalBytes += buf.length;
+  }
+  return { outcome: "DIGESTED", digest: hash.digest("hex"), fileCount, totalBytes };
 }
 
 export function collectGitTruth(input: CollectGitTruthInputV1): GitCollectResultV1 {
@@ -882,6 +1034,7 @@ export function createNodeGitRunner(input: {
       }
       let result: ReturnType<typeof spawnSync>;
       try {
+        const creationNotBefore = new Date().toISOString();
         result = spawnSync(exe, argv.slice(), {
           cwd,
           encoding: "utf8",
@@ -889,7 +1042,10 @@ export function createNodeGitRunner(input: {
           windowsHide: true,
           shell: false,
         });
-        rememberMeasurementApparatusPid(result.pid);
+        rememberMeasurementApparatusPid(result.pid, {
+          creationNotBefore,
+          creationNotAfter: new Date().toISOString(),
+        });
       } catch (error) {
         return {
           argv: argv.slice(),

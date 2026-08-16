@@ -914,6 +914,11 @@ function errorCode(error: unknown): string | null {
 
 function containsSecret(text: string): boolean {
   if (redactLogText(text) !== text) return true;
-  return /tskey-[A-Za-z0-9_-]+/.test(text)
-    || /(api[_-]?key|token)\s*[:=]\s*\S+/i.test(text);
+  // tskey- is also in redactLogText / SECRET_STARTERS (R24). The
+  // assignment-shaped (api[_-]?key|token)\s*[:=]\s*\S+ pattern stays
+  // here only: it is an intent-field detector for "this looks like a
+  // credential assignment". Applying it to stdout would redact every
+  // "token: <word>" in ordinary executor prose. That is remaining
+  // class-(c) drift, declared, not silently closed.
+  return /(api[_-]?key|token)\s*[:=]\s*\S+/i.test(text);
 }

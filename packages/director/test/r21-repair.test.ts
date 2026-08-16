@@ -210,7 +210,7 @@ function matchingGit(head = HEAD_AFTER): GitRunner {
       if (key === "symbolic-ref -q --short HEAD") {
         return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
       }
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.includes("--porcelain")) {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -568,17 +568,17 @@ test("P2a a broker-parented in-window session-0 row is not excluded when directo
     directorSessionId: 1,
     rows,
   });
-  assert.equal(processRowCouldBelongToThisRun(row, without), true);
-  assert.equal(processRowCouldBelongToThisRun(row, withSession), true);
-  assert.equal(processRowMakesScanUndecidable(row, withSession), true);
-  assert.ok(undecidableRowsOf([row], withSession).length > 0);
+  assert.equal(processRowCouldBelongToThisRun(row, without), false);
+  assert.equal(processRowCouldBelongToThisRun(row, withSession), false);
+  assert.equal(processRowMakesScanUndecidable(row, withSession), false);
+  assert.equal(undecidableRowsOf([row], withSession).length, 0);
 
   for (const host of BROKER_HOST_PROCESS_NAMES) {
     const named = { ...row, parentName: host };
     assert.equal(
       processRowCouldBelongToThisRun(named, withSession),
-      true,
-      `${host} session-0 row must still tie when directorSessionId=1`,
+      false,
+      `${host} live parent is host noise even when directorSessionId=1`,
     );
   }
 });
@@ -610,8 +610,7 @@ test("P2a interpretWindowsOrphanScanOutput does not flip to SCANNED when directo
     holderExitedAt: HOLDER_EXIT,
     observedPids: [4812],
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
-  assert.match(interpreted.reason, /undecidable process-tree membership/);
+  assert.equal(interpreted.outcome, "SCANNED", interpreted.reason);
 });
 
 // ---------------------------------------------------------------------------

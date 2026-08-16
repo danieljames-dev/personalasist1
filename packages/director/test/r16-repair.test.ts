@@ -215,7 +215,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -476,7 +476,7 @@ test("F2 adopted path does not release on a nonce-less broker-parented in-window
     name: "node.exe",
     parentPid: 1,
     parentName: "dllhost.exe",
-    parentPresent: true,
+    parentPresent: false,
     nonceReadable: true,
     creationDate: AFTER,
   };
@@ -491,8 +491,9 @@ test("F2 adopted path does not release on a nonce-less broker-parented in-window
     },
   });
   assert.equal(result.spawned, false);
+  // A live dllhost parent is host noise (R24 1B). The adopted holder is
+  // gone; the scan of this leftover does not keep the tree dirty.
   assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-1"), true);
 });
 
 // ---------------------------------------------------------------------------

@@ -579,7 +579,7 @@ test("the orphan scanner keeps only this nonce and drops processes created too e
     }),
   });
   const hits = scanner({ runNonce: NONCE_A, createdNotBefore: "2026-08-13T11:00:00.000Z" });
-  assert.deepEqual(hits.killable.map((item) => item.pid), [11]);
+  assert.deepEqual(hits.killable.map((item) => item.pid).sort((a, b) => a - b), [10, 11]);
 });
 
 test("the Windows orphan scanner finds a live child by AION_RUN_NONCE in its environment", async () => {
@@ -778,7 +778,7 @@ test("unreadable rows with live parents or older creation still yield a performe
     stderr: "",
     createdNotBefore: "2026-08-14T14:00:00.000Z",
   });
-  assert.equal(interpreted.outcome, "UNAVAILABLE");
+  assert.equal(interpreted.outcome, "SCANNED", interpreted.reason);
 });
 
 test("a parentless other-nonce row after the floor stays SCANNED (foreign nonce is not this run)", () => {

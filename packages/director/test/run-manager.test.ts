@@ -302,7 +302,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean; read
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -2987,9 +2987,10 @@ test("unreadable system rows with live parents do not withhold a writer lease", 
       },
     ]),
   });
-  // D2: a nonce that could not be read is UNKNOWN, not "not ours". UNKNOWN withholds.
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
-  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), true);
+  // Live parents are a live explanation (R24 1B). Pre-floor parentless
+  // rows are excluded by the floor. Neither row is a leftover of this run.
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
+  assert.equal(leases.list().some((item) => item.leaseId === "lease-pw-live"), false);
 });
 
 test("a timeout with exit code 0 fails runCompletedWithinBudget", async () => {

@@ -226,7 +226,7 @@ function matchingGit(
       if (key === "status --porcelain") {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
-      if (key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.some((item) => String(item).startsWith("--ignored"))) {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && typeof argv[1] === "string" && argv[1].startsWith("refs/heads/")) {
@@ -1234,8 +1234,27 @@ test("R6 the production emit predicate emits a dateless non-descendant row", asy
 // R7 — a parent's image basename is not a negative fact
 // ---------------------------------------------------------------------------
 
-test("R7 executeRun with a live svchost-parented leftover withholds the writer and names pid 7100", async () => {
+test("R7 a live svchost-parented row is host noise; the Job Object is the declared R7 closure", async () => {
   const row = svchostSpoofRow();
+  const ctx = processRowPlausibilityContext({
+    runNonce: NONCE,
+    createdNotBefore: FLOOR,
+    holderPid: 4812,
+    holderExitedAt: HOLDER_EXIT,
+    observedPids: [4812],
+    directorSessionId: 1,
+    rows: [
+      { pid: 4812, creationDate: T0 },
+      { pid: 1500, creationDate: BOOT },
+      { pid: 7100, parentPid: 1500, creationDate: AFTER_CEILING },
+    ],
+  });
+  // R24 CLASS 1B: a live unrelated parent is a live explanation, not a
+  // tie. The forged-parent spoof is a named KNOWN LIMIT, not closed by
+  // treating the whole host as ours.
+  assert.equal(parentlessRowTiedToThisRun(row, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
   const leases = memoryLeases();
   const result = await runWith({
     leases,
@@ -1243,13 +1262,11 @@ test("R7 executeRun with a live svchost-parented leftover withholds the writer a
     scanOrphans: () => writerOrphanScanResult([row]),
   });
   const tree = treeFinding(result);
-  assert.equal(result.ok, false, result.reason);
-  assert.equal(tree?.ok, false, tree?.reason);
-  assert.match(tree?.reason ?? result.reason, /7100/);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false, result.reason);
+  assert.equal(tree?.ok, true, tree?.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true, result.reason);
 });
 
-test("R7 the same row parented by Code.exe is also undecidable", async () => {
+test("R7 the same row parented by Code.exe is also host noise", async () => {
   const row = svchostSpoofRow({ parentName: "Code.exe" });
   const ctx = processRowPlausibilityContext({
     runNonce: NONCE,
@@ -1264,16 +1281,16 @@ test("R7 the same row parented by Code.exe is also undecidable", async () => {
       { pid: 7100, parentPid: 1500, creationDate: AFTER_CEILING },
     ],
   });
-  assert.equal(parentlessRowTiedToThisRun(row, ctx), true);
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
+  assert.equal(parentlessRowTiedToThisRun(row, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
   const leases = memoryLeases();
   const result = await runWith({
     leases,
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "aion-production", leaseId: "lease-pw-r7c" } },
     scanOrphans: () => writerOrphanScanResult([row]),
   });
-  assert.equal(treeFinding(result)?.ok, false, treeFinding(result)?.reason);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(treeFinding(result)?.ok, true, treeFinding(result)?.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
 });
 
 test("R7 liveness: genuine holder descendants stay tied; pre-floor noise stays excluded; session-0 stays excluded", () => {
@@ -1395,6 +1412,10 @@ function apparatusConhostRow(over: Record<string, unknown> = {}) {
   };
 }
 
+function apparatusId(pid: number, at = AFTER_CEILING) {
+  return { pid, creationNotBefore: at, creationNotAfter: at, creationDate: at };
+}
+
 function apparatusCtx(over: Parameters<typeof processRowPlausibilityContext>[0] extends infer T ? Partial<T> : never = {}) {
   return processRowPlausibilityContext({
     runNonce: NONCE,
@@ -1416,35 +1437,42 @@ function apparatusCtx(over: Parameters<typeof processRowPlausibilityContext>[0] 
   });
 }
 
-test("R23b a live parented host row is still tied when it is not apparatus (R7 safety kept)", () => {
+test("R23b a live parented host row is not apparatus and is not tied (R24 1B; R7 is a named limit)", () => {
   const row = svchostSpoofRow();
-  const ctx = apparatusCtx({ apparatusPids: [36996] });
+  const ctx = apparatusCtx({ apparatusPids: [apparatusId(36996)] });
   assert.equal(rowIsMeasurementApparatus(row, ctx), false);
-  assert.equal(parentlessRowTiedToThisRun(row, ctx), true);
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  assert.equal(parentlessRowTiedToThisRun(row, ctx), false);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
   const codeRow = svchostSpoofRow({ parentName: "Code.exe" });
-  assert.equal(processRowCouldBelongToThisRun(codeRow, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(codeRow, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(codeRow, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(codeRow, ctx), false);
 });
 
-test("R23b scanner powershell and its conhost are excluded by the spawn pid, not by parentName", () => {
+test("R23b scanner powershell and its conhost are excluded by creation identity, not by parentName", () => {
   const scanner = apparatusScannerRow();
   const conhost = apparatusConhostRow();
+  const orphanedConhost = apparatusConhostRow({ parentPresent: false });
   const without = apparatusCtx();
-  assert.equal(processRowCouldBelongToThisRun(scanner, without), true);
-  assert.equal(processRowCouldBelongToThisRun(conhost, without), true);
-  assert.equal(undecidableRowsOf([scanner, conhost], without).map((row) => row.pid).join(","), "36996,109544");
+  // Live-parent scanner/conhost are host noise after R24 1B.
+  assert.equal(processRowCouldBelongToThisRun(scanner, without), false);
+  assert.equal(processRowCouldBelongToThisRun(conhost, without), false);
+  // A conhost whose parent (the scanner) has left the snapshot is tied
+  // until the creation identity excludes it — that is the R23b liveness win.
+  assert.equal(processRowCouldBelongToThisRun(orphanedConhost, without), true);
+  assert.equal(undecidableRowsOf([orphanedConhost], without).map((row) => row.pid).join(","), "109544");
 
-  const withApparatus = apparatusCtx({ apparatusPids: [36996] });
+  const withApparatus = apparatusCtx({ apparatusPids: [apparatusId(36996)] });
   assert.equal(rowIsMeasurementApparatus(scanner, withApparatus), true);
   assert.equal(rowIsMeasurementApparatus(conhost, withApparatus), true);
+  assert.equal(rowIsMeasurementApparatus(orphanedConhost, withApparatus), true);
   assert.equal(processRowCouldBelongToThisRun(scanner, withApparatus), false);
   assert.equal(processRowCouldBelongToThisRun(conhost, withApparatus), false);
-  assert.equal(undecidableRowsOf([scanner, conhost, svchostSpoofRow()], withApparatus).map((row) => row.pid).join(","), "7100");
+  assert.equal(processRowCouldBelongToThisRun(orphanedConhost, withApparatus), false);
+  assert.equal(undecidableRowsOf([scanner, conhost, orphanedConhost, svchostSpoofRow()], withApparatus).map((row) => row.pid).join(","), "");
 });
 
-test("R23b a leftover parented by the Director pid is not excluded (R7 spoof surface)", () => {
+test("R23b a leftover parented by the Director pid is not apparatus (R7 spoof is a named limit)", () => {
   const spoof = {
     pid: 7100,
     name: "node.exe",
@@ -1456,10 +1484,10 @@ test("R23b a leftover parented by the Director pid is not excluded (R7 spoof sur
     nonceReadable: true,
     sessionId: 1,
   };
-  const ctx = apparatusCtx({ apparatusPids: [36996], directorPid: 1234 });
+  const ctx = apparatusCtx({ apparatusPids: [apparatusId(36996)], directorPid: 1234 });
   assert.equal(rowIsMeasurementApparatus(spoof, ctx), false);
-  assert.equal(processRowCouldBelongToThisRun(spoof, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(spoof, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(spoof, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(spoof, ctx), false);
 });
 
 test("R23b interpret drops apparatus rows so the scan is SCANNED", () => {
@@ -1489,7 +1517,7 @@ test("R23b interpret drops apparatus rows so the scan is SCANNED", () => {
     holderExitedAt: HOLDER_EXIT,
     observedPids: [4812],
     directorPid: 1234,
-    apparatusPids: [36996],
+    apparatusPids: [apparatusId(36996)],
   });
   assert.equal(withApparatus.outcome, "SCANNED", withApparatus.reason);
 });
@@ -1508,6 +1536,7 @@ test("R23b the envelope scannerPid is excluded even when spawnSync.pid is a wrap
         unreadable: 0,
         directorSessionId: 1,
         scannerPid: 144916,
+        scannerCreationDate: AFTER_CEILING,
       }),
       stderr: "",
     }),
@@ -1528,16 +1557,16 @@ test("R23b the envelope scannerPid is excluded even when spawnSync.pid is a wrap
     holderExitedAt: HOLDER_EXIT,
     observedPids: [4812],
     directorPid: 1234,
-    apparatusPids: [144916],
+    apparatusPids: [apparatusId(144916)],
     rows: [...result.snapshot, leftover],
   });
   assert.equal(processRowCouldBelongToThisRun(scannerRow, ctx), false);
   assert.equal(processRowCouldBelongToThisRun(conhostRow, ctx), false);
-  assert.equal(processRowCouldBelongToThisRun(leftover, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(leftover, ctx), false);
 });
 
-test("R23b the scan script widens $scannerPid to a set and does not skip on parentName", () => {
-  rememberMeasurementApparatusPid(36996);
+test("R23b the scan script seeds creation identities and skips only after the PEB read", () => {
+  rememberMeasurementApparatusPid(36996, { creationNotBefore: AFTER_CEILING, creationNotAfter: AFTER_CEILING, creationDate: AFTER_CEILING });
   let script = "";
   const scanner = createWindowsOrphanScanner({
     spawnSync: (_cmd, args) => {
@@ -1551,17 +1580,18 @@ test("R23b the scan script widens $scannerPid to a set and does not skip on pare
     createdNotBefore: FLOOR,
     holderPid: 4812,
     holderExitedAt: HOLDER_EXIT,
-    apparatusPids: [36996],
+    apparatusPids: [apparatusId(36996)],
   });
-  assert.match(script, /HashSet\[int\]/);
-  assert.match(script, /\$scannerPid\.Contains/);
+  assert.match(script, /\$scannerIdent/);
   assert.match(script, /36996/);
   assert.match(script, /scannerPid = \[int\]\$PID/);
-  const skipAt = script.indexOf("$scannerPid.Contains");
-  assert.ok(skipAt >= 0, "widened $scannerPid skip must exist");
-  const skipLine = script.slice(skipAt, script.indexOf("\n", skipAt));
-  assert.doesNotMatch(skipLine, /parentName/);
-  assert.doesNotMatch(script.slice(script.indexOf("$scannerPid ="), script.indexOf("foreach ($c in $candidates)")), /parentName/);
+  assert.match(script, /scannerCreationDate/);
+  assert.match(script, /\$isApparatus/);
+  const pebAt = script.indexOf("[AionPebEnv]::GetNonce");
+  const skipAt = script.indexOf("$isApparatus");
+  assert.ok(pebAt >= 0 && skipAt >= 0 && pebAt < skipAt, "apparatus skip must follow the PEB read");
+  assert.match(script, /-not \[bool\]\$c\.isDesc -and -not \$n/);
+  assert.doesNotMatch(script, /parentName.*continue/);
 });
 
 test("R23b a leftover-sweep throw does not un-mint a later SCANNED empty tree", async () => {

@@ -172,6 +172,8 @@ test("every exported src function reachable from the run path has a non-test cal
     ["needsEngineer", "cannot have a production caller yet: mission-state classifier"],
 
     ["killProcessTreeStandIn", "cannot have a call-site: wired as a function value on deps.killTree"],
+    ["measurementApparatusPidsOfThisProcess", "derived pid-number view; production exclusion uses measurementApparatusIdentitiesOfThisProcess"],
+    ["parentIsProvenCapableCreator", "live-explanation half of parentlessRowTiedToThisRun; PowerShell emit keeps its own $parentProvenCapable so nonce-bearing leftovers are still emitted"],
     ["isSafePathSegment", "cannot have a production caller: used via validatePathSegment"],
     ["validateMissionId", "cannot have a production caller: alias of validatePathSegment"],
     ["validateRunId", "cannot have a production caller: alias of validatePathSegment"],
@@ -184,6 +186,7 @@ test("every exported src function reachable from the run path has a non-test cal
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
     ["src-reachability.ts", "OWNER_DECISION_TEST_HELPER: modulesReachableFrom is a test-only import-graph helper that lives in src/"],
+    ["mission.ts", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: whether mission advance gates the CLI exit contract or remains run-root documentation. The CLI writes mission.json; nothing in the repo reads it."],
   ]);
 
   const orphans: string[] = [];
@@ -272,6 +275,80 @@ test("every exported src function reachable from the run path has a non-test cal
   );
   void productionSources;
 });
+
+test("an exported symbol whose only production call site discards the return is dead or excepted", () => {
+  const files = sourceFiles();
+  const exportFn = /export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\(/g;
+  const appsDir = join(here, "..", "..", "..", "..", "apps");
+  const appSources: string[] = [];
+  try {
+    for (const file of walkCodeFiles(appsDir)) {
+      appSources.push(readFileSync(file, "utf8"));
+    }
+  } catch {
+    // no apps directory in this extract
+  }
+
+  // Named reasons: a call is not consumption when the return is unused.
+  // Void recorders are excepted because their fact is the side effect.
+  const discardedReturnExceptions = new Map<string, string>([
+    ["rememberMeasurementApparatusPid", "void recorder: the fact is the side-effect membership entry"],
+    ["rememberSampledDescendantPids", "void recorder: the fact is the side-effect pid set"],
+    ["rememberInTreePids", "void recorder: the fact is the side-effect pid set"],
+    ["createNewMission", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: CLI ignores a refused mint and still launches"],
+    ["advance", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: CLI writes the verdict to mission.json, which has no reader, and still launches"],
+    ["writeAtomic", "void writer: failure throws; the return is not a fact"],
+    ["artifactPathWithinRoot", "consumed via boolean control flow; heuristic cannot see the use"],
+    ["releaseDeveloperAgentWorktreeLease", "void releaser: the fact is the side-effect unlock"],
+    ["livenessGrants", "consumed via .reclaim property read after the call"],
+    ["resourceIsIdentifiable", "consumed in boolean position; heuristic cannot see the use"],
+    ["isSpawnPermitSpent", "consumed in boolean position; heuristic cannot see the use"],
+  ]);
+
+  const discarded: string[] = [];
+  for (const [file, source] of files) {
+    exportFn.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = exportFn.exec(source)) !== null) {
+      const name = match[1]!;
+      if (discardedReturnExceptions.has(name)) continue;
+      const production = [
+        ...[...files.entries()].filter(([other]) => other !== file).map(([, src]) => src),
+        ...appSources,
+      ];
+      const callSites: string[] = [];
+      for (const src of production) {
+        if (calledIn(src, name)) callSites.push(src);
+      }
+      if (callSites.length === 0) continue;
+      const allDiscarded = callSites.every((src) => returnIsDiscarded(src, name));
+      if (allDiscarded) discarded.push(`${file}:${name}`);
+    }
+  }
+
+  assert.deepEqual(
+    discarded,
+    [],
+    `exported functions whose only production call sites discard the return: ${discarded.join(", ")}`,
+  );
+});
+
+function returnIsDiscarded(source: string, name: string): boolean {
+  const stripped = stripCommentsAndStrings(withoutDeclaration(source, name));
+  const call = new RegExp(String.raw`\b${name}\s*\(`, "g");
+  let match: RegExpExecArray | null;
+  let sawCall = false;
+  let anyConsumed = false;
+  while ((match = call.exec(stripped)) !== null) {
+    sawCall = true;
+    const before = stripped.slice(Math.max(0, match.index - 80), match.index);
+    const consumed = /(?:return|await|if|while|switch|throw|yield|void|=|\(|,|\?|:|&&|\|\||\?\?)\s*$/.test(before)
+      || /(?:const|let|var)\s+[A-Za-z0-9_$]+\s*=\s*$/.test(before)
+      || /\.\s*$/.test(before);
+    if (consumed) anyConsumed = true;
+  }
+  return sawCall && !anyConsumed;
+}
 
 test("every src module is reachable by a transitive import walk from index.ts", () => {
   const files = sourceFiles();
@@ -617,7 +694,7 @@ test("launchRun is the discovery entry: it finds the binary, builds argv, and co
             if (key === "symbolic-ref -q --short HEAD") {
               return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
             }
-            if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+            if (argv[0] === "status" && argv.includes("--porcelain")) {
               return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
             }
             if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -792,7 +869,7 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
           if (key === "symbolic-ref -q --short HEAD") {
             return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
           }
-          if (key === "status --porcelain" || key === "status --porcelain --ignored") return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
+          if (argv[0] === "status" && argv.includes("--porcelain")) return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
           if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
             return { argv: [...argv], status: 128, stdout: "", stderr: "fatal: no upstream configured\n", error: null };
           }

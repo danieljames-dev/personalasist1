@@ -379,6 +379,23 @@ export function compareProcessIdentity(
 }
 
 /**
+ * One subject check: is this observation about the pid we asked about?
+ *
+ * The subject check is total: every observation carries the pid it was
+ * asked about. Every liveness verdict — {@link holderLiveness},
+ * `livenessOfLockHolder`, both branches of `proveWriterExit` — must
+ * call this predicate. Do not write a second `observation.pid === …`
+ * comparison.
+ */
+export function observationIsAboutPid(
+  observation: ProcessObservationV1,
+  pid: number | null | undefined,
+): boolean {
+  if (!isUsablePid(pid)) return false;
+  return observation.pid === pid;
+}
+
+/**
  * Liveness of the *recorded holder*, not of whoever currently occupies the PID slot.
  *
  * `UNAVAILABLE` is `UNKNOWN`. `NOT_FOUND` is `DEAD_CONFIRMED` only when the
@@ -393,7 +410,7 @@ export function holderLiveness(
 ): ProcessLivenessV1 {
   // An answer about another slot is not an answer about the recorded holder.
   // The subject check is total: every observation carries the pid it was asked about.
-  if (observation.pid !== recorded.pid) return "UNKNOWN";
+  if (!observationIsAboutPid(observation, recorded.pid)) return "UNKNOWN";
   if (observation.outcome === "UNAVAILABLE") return "UNKNOWN";
   if (observation.outcome === "NOT_FOUND") return "DEAD_CONFIRMED";
 
@@ -595,55 +612,162 @@ export interface WindowsProbeHostV1 {
 }
 
 /**
- * Pids this Director process created as measurement apparatus: every
- * probe, orphan-scan, and ancestry-sample PowerShell obtained from
- * `spawnSync`. The Director's own pid is *not* stored here.
+ * A pid integer is a slot, not a process. These entries are pids this
+ * Director minted as measurement apparatus (probe / orphan-scan /
+ * ancestry-sample `spawnSync`) together with a creation identity.
  *
- * Opposite polarity of `observedPids`: those are pids this run walked
- * as in-tree. These are pids this process minted for measurement.
- * A pid comes from creation (`spawnSync.pid`), not from a name or a
- * parent-image correlate. `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
- * cannot put a leftover onto one of these slots because the Director
- * already occupies them.
+ * The slot is reusable the moment `spawnSync` returns — the recorded
+ * process has already exited. An exclusion may only be made when a
+ * later row's creationDate is placeable and sits inside the recorded
+ * wall-clock bracket, or `compareCreationDates` reports SAME against
+ * the envelope CreationDate. A missing or unplaceable creationDate is
+ * not apparatus. A positive identity of this run is never overridden
+ * by an exclusion (see {@link processRowCouldBelongToThisRun}).
+ *
+ * The Director's own pid is *not* stored here: that slot cannot recycle
+ * while this process holds it, and is excluded separately as a live
+ * occupant (see {@link rowIsMeasurementApparatus}).
  */
-const measurementApparatusPids = new Set<number>();
+export type MeasurementApparatusIdentityV1 = {
+  readonly pid: number;
+  /** Inclusive wall-clock instant taken immediately before `spawnSync`. */
+  readonly creationNotBefore?: string;
+  /** Inclusive wall-clock instant taken immediately after `spawnSync`. */
+  readonly creationNotAfter?: string;
+  /** Envelope-reported CreationDate of the scanner process itself. */
+  readonly creationDate?: string;
+};
 
-export function rememberMeasurementApparatusPid(pid: unknown): void {
-  if (isUsablePid(pid)) measurementApparatusPids.add(pid);
+export type MeasurementApparatusInputV1 = number | MeasurementApparatusIdentityV1;
+
+const measurementApparatusIdentities: MeasurementApparatusIdentityV1[] = [];
+
+export function asMeasurementApparatusIdentity(
+  value: MeasurementApparatusInputV1 | null | undefined,
+): MeasurementApparatusIdentityV1 | null {
+  if (typeof value === "number") {
+    return isUsablePid(value) ? { pid: value } : null;
+  }
+  if (value === null || value === undefined) return null;
+  if (!isUsablePid(value.pid)) return null;
+  const creationNotBefore = asUsableToken(value.creationNotBefore) ?? undefined;
+  const creationNotAfter = asUsableToken(value.creationNotAfter) ?? undefined;
+  const creationDate = asUsableToken(value.creationDate) ?? undefined;
+  return {
+    pid: value.pid,
+    ...(creationNotBefore !== undefined ? { creationNotBefore } : {}),
+    ...(creationNotAfter !== undefined ? { creationNotAfter } : {}),
+    ...(creationDate !== undefined ? { creationDate } : {}),
+  };
+}
+
+export function rememberMeasurementApparatusPid(
+  pid: unknown,
+  identity?: Omit<MeasurementApparatusIdentityV1, "pid">,
+): void {
+  if (!isUsablePid(pid)) return;
+  const entry = asMeasurementApparatusIdentity({
+    pid,
+    ...(identity ?? {}),
+  });
+  if (entry === null) return;
+  measurementApparatusIdentities.push(entry);
+}
+
+export function measurementApparatusIdentitiesOfThisProcess(): readonly MeasurementApparatusIdentityV1[] {
+  return measurementApparatusIdentities;
 }
 
 export function measurementApparatusPidsOfThisProcess(): ReadonlySet<number> {
-  return measurementApparatusPids;
+  return new Set(measurementApparatusIdentities.map((entry) => entry.pid));
 }
 
-function recordSpawnResultPid(result: { readonly pid?: number } | null | undefined): void {
-  rememberMeasurementApparatusPid(result?.pid);
+function recordSpawnResultPid(
+  result: { readonly pid?: number } | null | undefined,
+  identity?: Omit<MeasurementApparatusIdentityV1, "pid">,
+): void {
+  rememberMeasurementApparatusPid(result?.pid, identity);
 }
 
 /**
  * The pid `spawnSync` returns on this host is not always the PowerShell
  * `$PID` that ran the script (a wrapper or console-host pid). The script
- * we minted already knows `$PID`; the envelope carries that creation fact.
+ * we minted already knows `$PID` and, when it can, its own CreationDate;
+ * the envelope carries that creation fact.
  */
-function recordEnvelopeScannerPid(stdout: string | Buffer | null | undefined): void {
+function recordEnvelopeScannerPid(
+  stdout: string | Buffer | null | undefined,
+  identity?: Omit<MeasurementApparatusIdentityV1, "pid">,
+): void {
   const text = stripBom(String(stdout ?? "")).trim();
   if (text === "") return;
   try {
-    const parsed = JSON.parse(text) as { scannerPid?: unknown };
-    rememberMeasurementApparatusPid(parsed.scannerPid);
+    const parsed = JSON.parse(text) as { scannerPid?: unknown; scannerCreationDate?: unknown };
+    const creationDate = typeof parsed.scannerCreationDate === "string"
+      ? parsed.scannerCreationDate
+      : identity?.creationDate;
+    rememberMeasurementApparatusPid(parsed.scannerPid, {
+      ...(identity ?? {}),
+      ...(creationDate !== undefined ? { creationDate } : {}),
+    });
   } catch {
     // Envelope parse belongs to the caller; a missing scanner pid is not a pid.
   }
 }
 
-function collectApparatusPids(extra?: Iterable<number>): number[] {
-  const collected = new Set<number>(measurementApparatusPids);
+function collectApparatusIdentities(
+  extra?: Iterable<MeasurementApparatusInputV1>,
+): MeasurementApparatusIdentityV1[] {
+  const collected: MeasurementApparatusIdentityV1[] = [...measurementApparatusIdentities];
   if (extra !== undefined) {
-    for (const pid of extra) {
-      if (isUsablePid(pid)) collected.add(pid);
+    for (const item of extra) {
+      const parsed = asMeasurementApparatusIdentity(item);
+      if (parsed !== null) collected.push(parsed);
     }
   }
-  return [...collected];
+  return collected;
+}
+
+function wallClockNowIso(): string {
+  return new Date().toISOString();
+}
+
+function spawnAndRecordApparatus(
+  spawn: WindowsProbeHostV1["spawnSync"],
+  command: string,
+  args: readonly string[],
+  options: { encoding: "utf8"; timeout: number; windowsHide: boolean; shell: false },
+): WindowsProbeSpawnResultV1 {
+  const creationNotBefore = wallClockNowIso();
+  const result = spawn(command, args, options);
+  const creationNotAfter = wallClockNowIso();
+  const bracket = { creationNotBefore, creationNotAfter };
+  recordSpawnResultPid(result, bracket);
+  recordEnvelopeScannerPid(result.stdout, bracket);
+  return result;
+}
+
+/**
+ * Physical fact: `candidate` is the same process this Director minted
+ * as apparatus. A bare pid match is not that fact — the slot recycles
+ * the moment `spawnSync` returns. Missing or unplaceable dates cannot
+ * place the occupant inside the recorded bracket, so they are not
+ * apparatus.
+ */
+export function creationMatchesApparatusIdentity(
+  creationDate: string | undefined,
+  entry: MeasurementApparatusIdentityV1,
+): boolean {
+  if (creationDate === undefined) return false;
+  if (placeableInstantMs(creationDate) === null) return false;
+  if (entry.creationDate !== undefined && compareCreationDates(creationDate, entry.creationDate) === "SAME") {
+    return true;
+  }
+  const t0 = entry.creationNotBefore !== undefined ? placeableInstantMs(entry.creationNotBefore) : null;
+  const t1 = entry.creationNotAfter !== undefined ? placeableInstantMs(entry.creationNotAfter) : null;
+  const at = placeableInstantMs(creationDate);
+  if (t0 === null || t1 === null || at === null) return false;
+  return at >= t0 && at <= t1;
 }
 
 /**
@@ -667,7 +791,9 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
         "try {",
         `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop;`,
         "if (-not $p) { Write-Output '{\"ok\":false,\"reason\":\"not-found\"}'; exit 0 };",
-        "$o = [ordered]@{ ok = $true; pid = [int]$p.ProcessId; name = $p.Name; executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; creationDate = $p.CreationDate.ToString('o'); parentPid = [int]$p.ParentProcessId; scannerPid = [int]$PID };",
+        "$self = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\" -ErrorAction SilentlyContinue;",
+        "$scannerCreationDate = if ($self -and $self.CreationDate) { $self.CreationDate.ToString('o') } else { $null };",
+        "$o = [ordered]@{ ok = $true; pid = [int]$p.ProcessId; name = $p.Name; executablePath = $p.ExecutablePath; commandLine = $p.CommandLine; creationDate = $p.CreationDate.ToString('o'); parentPid = [int]$p.ParentProcessId; scannerPid = [int]$PID; scannerCreationDate = $scannerCreationDate };",
         "$o | ConvertTo-Json -Compress;",
         "exit 0",
         "} catch {",
@@ -679,14 +805,12 @@ export function createWindowsProcessProbe(host?: WindowsProbeHostV1): HostProces
       let result: WindowsProbeSpawnResultV1;
       try {
         const powershell = resolveWindowsSystemExecutable("powershell.exe");
-        result = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        result = spawnAndRecordApparatus(spawn, powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
           encoding: "utf8",
           timeout: 15_000,
           windowsHide: true,
           shell: false,
         });
-        recordSpawnResultPid(result);
-        recordEnvelopeScannerPid(result.stdout);
       } catch (error) {
         return { outcome: "UNAVAILABLE", reason: `probe failed to start: ${errorMessage(error)}`, pid };
       }
@@ -808,10 +932,11 @@ export function interpretWindowsOrphanScanOutput(input: {
    */
   readonly directorSessionId?: number;
   /**
-   * Measurement pids this Director created. Opposite polarity of
-   * `observedPids`. The Director's own pid is not a member.
+   * Measurement apparatus this Director created. Opposite polarity of
+   * `observedPids`. The Director's own pid is not a member. Bare
+   * numbers carry no creation identity and cannot exclude a row.
    */
-  readonly apparatusPids?: readonly number[];
+  readonly apparatusPids?: readonly MeasurementApparatusInputV1[];
   /**
    * Director process id. Used only to skip the Director row itself.
    * A leftover parented by this pid is the R7 spoof and is not skipped.
@@ -956,11 +1081,12 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
   /** Pids earlier scans of this run already judged in-tree. */
   readonly observedPids?: readonly number[];
   /**
-   * Measurement pids this Director created (`spawnSync.pid` of a probe
-   * or scanner). Merged with {@link measurementApparatusPidsOfThisProcess}.
-   * The Director's own pid is not a member.
+   * Measurement apparatus this Director created. Merged with
+   * {@link measurementApparatusIdentitiesOfThisProcess}. The
+   * Director's own pid is not a member. Bare numbers carry no
+   * creation identity and cannot exclude a row.
    */
-  readonly apparatusPids?: readonly number[];
+  readonly apparatusPids?: readonly MeasurementApparatusInputV1[];
 }) => WriterOrphanScanResultV1 {
   const spawn = host?.spawnSync ?? spawnSync;
   const waitSync = host?.waitSync ?? sleepSync;
@@ -979,7 +1105,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     const holderExitedAt = asUsableToken(query.holderExitedAt) ?? undefined;
     const exitMs = holderExitedAt !== undefined ? placeableInstantMs(holderExitedAt) : null;
     const quotedExit = exitMs !== null ? psSingleQuoted(new Date(exitMs).toISOString()) : "''";
-    const apparatusPids = new Set<number>(collectApparatusPids(query.apparatusPids));
+    const apparatusIdentities = collectApparatusIdentities(query.apparatusPids);
     const directorPid = isUsablePid(process.pid) ? process.pid : 0;
     const observedPids = [
       ...(holderPid > 0 ? [holderPid] : []),
@@ -997,7 +1123,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(observedPids.length > 0 ? { observedPids } : {}),
       ...(holderExitedAt !== undefined ? { holderExitedAt } : {}),
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
-      apparatusPids: [...apparatusPids],
+      apparatusPids: apparatusIdentities,
       ...(directorPid > 0 ? { directorPid } : {}),
     });
 
@@ -1009,20 +1135,19 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
         holderPid,
         psSingleQuoted(floorIso),
         quotedExit,
-        [...apparatusPids],
+        apparatusIdentities,
         directorPid,
       );
       let result: WindowsProbeSpawnResultV1;
       try {
         const powershell = resolveWindowsSystemExecutable("powershell.exe");
-        result = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        result = spawnAndRecordApparatus(spawn, powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
           encoding: "utf8",
           timeout: 30_000,
           windowsHide: true,
           shell: false,
         });
-        recordSpawnResultPid(result);
-        if (isUsablePid(result.pid)) apparatusPids.add(result.pid);
+        apparatusIdentities.splice(0, apparatusIdentities.length, ...collectApparatusIdentities(query.apparatusPids));
       } catch (error) {
         return { ok: false, reason: `probe failed to start: ${errorMessage(error)}` };
       }
@@ -1041,13 +1166,11 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
         const envelope = JSON.parse(stripBom(String(result.stdout ?? "")).trim()) as {
           directorSessionId?: unknown;
           scannerPid?: unknown;
+          scannerCreationDate?: unknown;
         };
         const sid = asSessionId(envelope.directorSessionId);
         if (sid !== undefined) directorSessionId = sid;
-        if (isUsablePid(envelope.scannerPid)) {
-          rememberMeasurementApparatusPid(envelope.scannerPid);
-          apparatusPids.add(envelope.scannerPid);
-        }
+        // scannerPid / scannerCreationDate were recorded by spawnAndRecordApparatus.
       } catch {
         // Envelope parse belongs to interpretInput; a missing session is UNKNOWN.
       }
@@ -1074,7 +1197,7 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
       ...(directorSessionId !== undefined ? { directorSessionId } : {}),
       ...(directorPid > 0 ? { directorPid } : {}),
       observedPids: observedPids.filter((pid) => isUsablePid(pid)),
-      apparatusPids,
+      apparatusPids: apparatusIdentities,
       rows,
     });
 
@@ -1082,7 +1205,8 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
     let undecidable = undecidableRowsOf(rows, ctxFor(rows));
     if (undecidable.length > 0) {
       let clean: readonly NonceBearingProcessV1[] | null = null;
-      for (let attempt = 1; attempt < UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS; attempt++) {
+      const confirmSteps = undecidableMembershipConfirmSteps();
+      for (let step = 0; step < confirmSteps; step++) {
         waitSync(UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS);
         const next = snapshot();
         if (!next.ok) {
@@ -1097,8 +1221,10 @@ export function createWindowsOrphanScanner(host?: WindowsProbeHostV1): (query: {
         }
         if (decision.action === "scan-clean") {
           clean = next.rows;
-          break;
+          undecidable = [];
+          continue;
         }
+        clean = null;
         undecidable = decision.undecidable;
         rows = next.rows;
       }
@@ -1148,8 +1274,12 @@ export function orphanRowIsKillable(
       holderChainBounds(createdNotBefore, holderExitedAt),
     );
   if (!nonceMatch && !descendant) return false;
-  if (createdNotBefore === undefined) return true;
-  return sightingCreatedNotBefore(sighting, createdNotBefore);
+  // Positive identity dominates the spawn floor. A leftover that
+  // carries this run's nonce, or that is in the holder's live chain,
+  // is ours even if it predates this attempt's floor (a re-attempt
+  // with the same --run-nonce). The floor is applied by
+  // {@link processRowCouldBelongToThisRun} only after that test.
+  return true;
 }
 
 /**
@@ -1275,6 +1405,12 @@ function holderChainEdgeIsPossible(
     return false;
   }
   if (
+    parentPid === holderPid
+    && provenCreatedStrictlyBefore(child.creationDate, bounds?.createdNotBefore)
+  ) {
+    return false;
+  }
+  if (
     parentRow !== undefined
     && provenCreatedStrictlyBefore(child.creationDate, parentRow.creationDate)
   ) {
@@ -1296,6 +1432,14 @@ export const ANCESTRY_SAMPLE_INTERVAL_MS = 500;
  * on the holder (kill-on-close, breakaway denied, membership queried
  * with `JOBOBJECT_BASIC_PROCESS_ID_LIST`). That is an Owner decision
  * and is not this sampler.
+ *
+ * KNOWN LIMIT — R7 forged-parent spoof (reopened by R24 CLASS 1B).
+ * A leftover created with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+ * pointed at an unrelated long-lived process is indistinguishable from
+ * host noise once a live parent is treated as a live explanation.
+ * Declaring the whole host possibly ours was not a closure — it was a
+ * refusal to run. The Job Object named above is the only sound
+ * closure. It is not implemented. It is an Owner decision.
  */
 export const ANCESTRY_SAMPLE_MAX_PER_RUN = 240;
 
@@ -1349,14 +1493,12 @@ export function createWindowsAncestrySampler(host?: WindowsProbeHostV1): (query:
   return (_query) => {
     let result: WindowsProbeSpawnResultV1;
     try {
-      result = spawn(resolveWindowsSystemExecutable("powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", script], {
+      result = spawnAndRecordApparatus(spawn, resolveWindowsSystemExecutable("powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", script], {
         encoding: "utf8",
         timeout: 15_000,
         windowsHide: true,
         shell: false,
       });
-      recordSpawnResultPid(result);
-      recordEnvelopeScannerPid(result.stdout);
     } catch (error) {
       throw new Error(`ancestry sample unavailable: probe failed to start: ${errorMessage(error)}`);
     }
@@ -1580,6 +1722,29 @@ export const UNDECIDABLE_MEMBERSHIP_CONFIRM_ATTEMPTS = 3;
 export const UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS = 300;
 
 /**
+ * Wall-clock budget for confirming whether an undecidable occupant
+ * persists or disappears. One CIM snapshot is a correlate of emptiness,
+ * not a proof: a leftover present only at the last sample, or gone only
+ * at that sample, would decide the scan. We therefore keep sampling
+ * until this budget expires.
+ *
+ * Persistence is the same pid AND creationDate across two samples
+ * ({@link processRowIdentityEquals}). Disappearance that holds for the
+ * remainder of the window is gone. A leftover that exits and respawns
+ * under a new pid is a new row — if it is still undecidable at the end
+ * of the window the scan stays UNAVAILABLE. The executor cannot set
+ * this value.
+ */
+export const UNDECIDABLE_MEMBERSHIP_CONFIRM_WINDOW_MS = 900;
+
+export function undecidableMembershipConfirmSteps(): number {
+  return Math.max(
+    1,
+    Math.ceil(UNDECIDABLE_MEMBERSHIP_CONFIRM_WINDOW_MS / UNDECIDABLE_MEMBERSHIP_CONFIRM_DELAY_MS),
+  );
+}
+
+/**
  * Cap on PEB environment reads per orphan-scan snapshot. Applied only
  * to rows that still need a PEB after cheap tests (holder-chain
  * descendants skip it). Hitting the cap leaves unread rows UNKNOWN;
@@ -1611,15 +1776,23 @@ export type ProcessRowPlausibilityContextV1 = {
    */
   readonly directorSessionId?: number;
   /**
-   * Pids this Director created as measurement apparatus (probe / scanner
-   * / ancestry-sample PowerShell). Opposite polarity of `observedPids`.
-   * The Director's own pid is not a member: a leftover parented by the
-   * Director is the R7 spoof surface.
+   * Measurement apparatus this Director created (probe / scanner /
+   * ancestry-sample PowerShell), each with a creation identity.
+   * Opposite polarity of `observedPids`. The Director's own pid is
+   * not a member: a leftover parented by the Director is the R7
+   * spoof surface (see the KNOWN LIMIT on the Job Object).
+   */
+  readonly apparatusIdentities?: readonly MeasurementApparatusIdentityV1[];
+  /**
+   * Pid numbers of {@link apparatusIdentities}. Not used for exclusion —
+   * a bare pid is a slot. Kept so existing readers can still list them.
    */
   readonly apparatusPids?: ReadonlySet<number>;
   /**
    * Director process id. Used only to skip the Director row itself.
-   * Missing: {@link processRowCouldBelongToThisRun} uses `process.pid`.
+   * That one bare-pid exclusion is sound because this process holds
+   * the slot: it cannot recycle while we are alive. Missing:
+   * {@link processRowCouldBelongToThisRun} uses `process.pid`.
    */
   readonly directorPid?: number;
 };
@@ -1636,7 +1809,7 @@ export type ProcessRowPlausibilityContextInputV1 = {
     readonly creationDate?: string;
   }[];
   readonly directorSessionId?: number;
-  readonly apparatusPids?: Iterable<number>;
+  readonly apparatusPids?: Iterable<MeasurementApparatusInputV1>;
   readonly directorPid?: number;
 };
 
@@ -1655,12 +1828,14 @@ export function processRowPlausibilityContext(
     }
   }
   if (isUsablePid(input.holderPid)) observedPids.add(input.holderPid);
-  const apparatusPids = new Set<number>();
+  const apparatusIdentities: MeasurementApparatusIdentityV1[] = [];
   if (input.apparatusPids !== undefined) {
-    for (const pid of input.apparatusPids) {
-      if (isUsablePid(pid)) apparatusPids.add(pid);
+    for (const item of input.apparatusPids) {
+      const parsed = asMeasurementApparatusIdentity(item);
+      if (parsed !== null) apparatusIdentities.push(parsed);
     }
   }
+  const apparatusPids = new Set<number>(apparatusIdentities.map((entry) => entry.pid));
   const holderExitedAt = asUsableToken(input.holderExitedAt) ?? undefined;
   const directorSessionId = asSessionId(input.directorSessionId);
   const directorPid = isUsablePid(input.directorPid)
@@ -1674,6 +1849,7 @@ export function processRowPlausibilityContext(
     ...(directorSessionId !== undefined ? { directorSessionId } : {}),
     ...(directorPid !== undefined ? { directorPid } : {}),
     observedPids,
+    apparatusIdentities,
     apparatusPids,
     rows: input.rows,
   };
@@ -1739,12 +1915,21 @@ export function rowHasPositiveRunIdentity(
  * noise.
  */
 /**
- * Physical fact: this Director created this pid as measurement
- * apparatus (`spawnSync.pid`), or this row *is* the Director process.
- * A leftover the run created cannot occupy one of those slots.
+ * Physical fact: this row *is* a process this Director minted as
+ * measurement apparatus at a known instant, or this row *is* the
+ * Director process itself.
  *
- * Parent-pid membership is only the measurement set. The Director's
- * own pid is not a member: `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+ * The Director's own pid is a live occupant of its slot — that slot
+ * cannot recycle while this process holds it. Every other apparatus
+ * pid was minted by a `spawnSync` that has already returned, so the
+ * slot is reusable; those entries match only when the row's
+ * creationDate is placeable and inside the recorded bracket (or SAME
+ * as the envelope CreationDate). A missing or unplaceable
+ * creationDate is not apparatus.
+ *
+ * Parent-pid membership uses the *parent's* creationDate against the
+ * apparatus identity of that parent pid. The Director's own pid is
+ * not a parent-side member: `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
  * onto the Director is the R7 spoof, and the executor is a legitimate
  * child of the Director. An image basename is not read.
  */
@@ -1752,14 +1937,22 @@ export function rowIsMeasurementApparatus(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
-  const apparatus = ctx.apparatusPids;
   if (isUsablePid(sighting.pid)) {
     const directorPid = ctx.directorPid ?? process.pid;
+    // Live occupant: this process holds the slot, so it cannot recycle.
     if (isUsablePid(directorPid) && sighting.pid === directorPid) return true;
-    if (apparatus !== undefined && apparatus.has(sighting.pid)) return true;
+    for (const entry of ctx.apparatusIdentities ?? []) {
+      if (entry.pid === sighting.pid && creationMatchesApparatusIdentity(sighting.creationDate, entry)) {
+        return true;
+      }
+    }
   }
-  if (isUsablePid(sighting.parentPid) && apparatus !== undefined && apparatus.has(sighting.parentPid)) {
-    return true;
+  if (isUsablePid(sighting.parentPid)) {
+    for (const entry of ctx.apparatusIdentities ?? []) {
+      if (entry.pid === sighting.parentPid && creationMatchesApparatusIdentity(sighting.parentCreationDate, entry)) {
+        return true;
+      }
+    }
   }
   return false;
 }
@@ -1768,10 +1961,11 @@ export function processRowCouldBelongToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
-  // Creation fact first. A scanner that inherited AION_RUN_NONCE is
-  // still apparatus, not a leftover of the executor.
-  if (rowIsMeasurementApparatus(sighting, ctx)) return false;
+  // Positive identity dominates every exclusion. A row carrying this
+  // run's nonce, or in the holder's live chain, is ours regardless of
+  // any apparatus set, spawn floor, or parent-image correlate.
   if (rowHasPositiveRunIdentity(sighting, ctx)) return true;
+  if (rowIsMeasurementApparatus(sighting, ctx)) return false;
   // Do not return early on a foreign or unprovenanced nonce. A PEB that
   // contains AION_RUN_NONCE=not-ours, or a CommandLine scrape of one,
   // does not contain this run's nonce. That is the same UNKNOWN as a
@@ -1839,24 +2033,49 @@ function rowIsExcludedByInteractiveSession(
  * remaining gap (an intermediate born and dead between ancestry
  * samples) requires a Windows Job Object on the holder. That is an
  * Owner decision and is not in scope this round.
+ *
+ * KNOWN LIMIT — R7 forged-parent spoof (reopened by R24 CLASS 1B).
+ * A leftover created with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+ * pointed at an unrelated long-lived process (explorer.exe, svchost.exe,
+ * Code.exe, or this Director) is now indistinguishable from host noise:
+ * a live parent is a live explanation, and "we cannot explain this row"
+ * is not a tie. Declaring the whole host possibly ours was not a
+ * closure — it was a refusal to run. The only sound closure is a
+ * Windows Job Object on the holder (`JOBOBJECT_BASIC_PROCESS_ID_LIST`,
+ * kill-on-close, breakaway denied). That primitive is not implemented.
+ * It is an Owner decision.
  */
 export function parentlessRowTiedToThisRun(
   sighting: ProcessRowPlausibilityV1,
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
   if (sighting.parentPid === undefined) return false;
-  // A live parent excludes this branch only when it is proven capable of
-  // being the creator. Occupancy of ParentProcessId is not that proof:
-  // slots recycle and ShellExecute re-parents onto explorer.
-  if (parentIsProvenCapableCreator(sighting, ctx)) return false;
-  if (ctx.observedPids.has(sighting.parentPid)) return true;
+  // A row is tied only by a fact this Director established: a parent
+  // pid this Director walked, or a parent in the holder's live chain.
+  // "We cannot explain this row" is host noise, not a tie.
+  if (ctx.observedPids.has(sighting.parentPid)) {
+    // observedPids is a set of slots this Director walked. The holder's
+    // slot is always a member. After the holder exits that number is
+    // reusable; a child proven created after holderExitedAt cannot have
+    // been parented by the process we walked.
+    if (
+      sighting.parentPid === ctx.holderPid
+      && holderExitedAtCeilingIsUsable(holderChainBounds(ctx.createdNotBefore, ctx.holderExitedAt))
+      && provenCreatedStrictlyAfter(sighting.creationDate, ctx.holderExitedAt)
+    ) {
+      // fall through
+    } else {
+      return true;
+    }
+  }
+  if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
 
   if (sighting.parentPresent === true) {
-    if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
-    // A live parent may exclude this row only via
-    // parentIsProvenCapableCreator (already applied above). An image
-    // basename is not a negative fact.
-    return true;
+    // A live parent outside this run's tree is a live explanation.
+    // parentIsProvenCapableCreator is that explanation; it is not
+    // required here because the present-parent branch ties only on
+    // the two facts above.
+    return false;
   }
 
   if (sighting.parentPresent === false) {
@@ -1871,23 +2090,28 @@ export function parentlessRowTiedToThisRun(
 }
 
 /**
- * A live parent may exclude a row only when both hold:
- * the occupant is proven created at or before the row, and the occupant
- * is the holder itself or a descendant in the holder chain. "Parent
- * existed before the spawn floor" is not used as a standalone exclusion:
- * explorer and notepad satisfy that and are the demonstrated
- * ShellExecute / recycled-slot fail-open. Missing or unplaceable
+ * A live parent is a live explanation when it is proven created at or
+ * before the child. Occupancy of ParentProcessId is not that proof
+ * without a placeable parentCreationDate. Missing or unplaceable
  * parentCreationDate is UNKNOWN → not capable.
+ *
+ * This predicate no longer demands that the parent be in the holder
+ * chain: that conjunct made the exclusion vacuous (it only fired for
+ * rows that were already ours). A parent that *is* the holder or a
+ * holder descendant still ties the row via
+ * {@link rowHasPositiveRunIdentity} / {@link parentOccupantIsInHolderChain},
+ * which {@link processRowCouldBelongToThisRun} consults before any
+ * exclusion.
  */
 export function parentIsProvenCapableCreator(
   sighting: ProcessRowPlausibilityV1,
-  ctx: ProcessRowPlausibilityContextV1,
+  _ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
   if (sighting.parentPresent !== true) return false;
   if (!provenCreatedAtOrBeforeCeiling(sighting.parentCreationDate, sighting.creationDate)) {
     return false;
   }
-  return parentOccupantIsInHolderChain(sighting, ctx);
+  return true;
 }
 
 function parentOccupantIsInHolderChain(
@@ -1896,12 +2120,26 @@ function parentOccupantIsInHolderChain(
 ): boolean {
   if (ctx.holderPid === undefined || ctx.holderPid <= 0) return false;
   if (!isUsablePid(sighting.parentPid)) return false;
-  if (sighting.parentPid === ctx.holderPid) return true;
-  return descendantPidsOf(
-    ctx.holderPid,
-    ctx.rows,
-    holderChainBounds(ctx.createdNotBefore, ctx.holderExitedAt),
-  ).has(sighting.parentPid);
+  const bounds = holderChainBounds(ctx.createdNotBefore, ctx.holderExitedAt);
+  if (sighting.parentPid === ctx.holderPid) {
+    // A pid number is a slot. A child proven created after the holder
+    // exited cannot have *this* holder as its parent — the slot reused.
+    if (
+      holderExitedAtCeilingIsUsable(bounds)
+      && provenCreatedStrictlyAfter(sighting.creationDate, ctx.holderExitedAt)
+    ) {
+      return false;
+    }
+    const holderRow = ctx.rows.find((row) => row.pid === ctx.holderPid);
+    if (
+      holderRow !== undefined
+      && provenCreatedStrictlyBefore(sighting.creationDate, holderRow.creationDate)
+    ) {
+      return false;
+    }
+    return true;
+  }
+  return descendantPidsOf(ctx.holderPid, ctx.rows, bounds).has(sighting.parentPid);
 }
 
 /**
@@ -1988,6 +2226,16 @@ function brokerParentedRowTiedToThisRun(
   ctx: ProcessRowPlausibilityContextV1,
 ): boolean {
   if (!isBrokerHostName(sighting.parentName)) return false;
+  // A live broker parent outside this run's tree is a live explanation
+  // (explorer.exe is on this list and is the demonstrated ShellExecute
+  // host). Treating every in-window explorer child as ours is the 1B
+  // host-noise refusal. The R7 forged-parent / ShellExecute leftover
+  // is the named KNOWN LIMIT, not a reason to refuse the host.
+  if (sighting.parentPresent === true) {
+    if (isUsablePid(sighting.parentPid) && ctx.observedPids.has(sighting.parentPid)) return true;
+    if (parentOccupantIsInHolderChain(sighting, ctx)) return true;
+    return false;
+  }
   return provenCreatedAtOrBeforeCeiling(sighting.creationDate, ctx.holderExitedAt);
 }
 
@@ -2299,7 +2547,9 @@ function windowsAncestrySampleScript(): string {
     "  $cd = if ($p.CreationDate) { $p.CreationDate.ToString('o') } else { $null };",
     "  [void]$hits.Add([ordered]@{ pid = [int]$p.ProcessId; parentPid = [int]$p.ParentProcessId; creationDate = $cd });",
     "}",
-    "[ordered]@{ ok = $true; processes = $hits; scannerPid = [int]$PID } | ConvertTo-Json -Compress -Depth 5;",
+    "$self = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\" -ErrorAction SilentlyContinue;",
+    "$scannerCreationDate = if ($self -and $self.CreationDate) { $self.CreationDate.ToString('o') } else { $null };",
+    "[ordered]@{ ok = $true; processes = $hits; scannerPid = [int]$PID; scannerCreationDate = $scannerCreationDate } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",
     "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",
@@ -2321,12 +2571,18 @@ function windowsOrphanScanScript(
   holderPid: number,
   quotedFloorIso: string,
   quotedHolderExitIso = "''",
-  apparatusPids: readonly number[] = [],
+  apparatus: readonly MeasurementApparatusIdentityV1[] = [],
   directorPid = 0,
 ): string {
-  const seeded = apparatusPids
-    .filter((pid) => isUsablePid(pid))
-    .map((pid) => `[void]$scannerPid.Add(${pid});`)
+  const seeded = apparatus
+    .map((entry) => asMeasurementApparatusIdentity(entry))
+    .filter((entry): entry is MeasurementApparatusIdentityV1 => entry !== null)
+    .map((entry) => {
+      const notBefore = entry.creationNotBefore !== undefined ? psSingleQuoted(entry.creationNotBefore) : "$null";
+      const notAfter = entry.creationNotAfter !== undefined ? psSingleQuoted(entry.creationNotAfter) : "$null";
+      const creationDate = entry.creationDate !== undefined ? psSingleQuoted(entry.creationDate) : "$null";
+      return `[void]$scannerIdent.Add([ordered]@{ pid = ${entry.pid}; notBefore = ${notBefore}; notAfter = ${notAfter}; creationDate = ${creationDate} });`;
+    })
     .join("");
   return [
     "$ProgressPreference = 'SilentlyContinue';",
@@ -2457,12 +2713,13 @@ function windowsOrphanScanScript(
     "$pebCapped = $false;",
     "$hits = New-Object System.Collections.Generic.List[object];",
     "$unreadable = 0;",
-    "$scannerPid = New-Object 'System.Collections.Generic.HashSet[int]';",
-    "[void]$scannerPid.Add([int]$PID);",
+    "$scannerIdent = New-Object System.Collections.Generic.List[object];",
+    "$self = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\" -ErrorAction SilentlyContinue;",
+    "$scannerCreationDate = if ($self -and $self.CreationDate) { $self.CreationDate.ToString('o') } else { $null };",
+    "[void]$scannerIdent.Add([ordered]@{ pid = [int]$PID; notBefore = $null; notAfter = $null; creationDate = $scannerCreationDate });",
     seeded,
     `$directorPid = ${isUsablePid(directorPid) ? directorPid : 0};`,
     "foreach ($c in $candidates) {",
-    "  if ($scannerPid.Contains([int]$c.pid) -or $scannerPid.Contains([int]$c.parentPid)) { continue };",
     "  if ($directorPid -gt 0 -and [int]$c.pid -eq $directorPid) { continue };",
     "  $n = $null;",
     "  $nonceReadable = $false;",
@@ -2481,11 +2738,30 @@ function windowsOrphanScanScript(
     "      }",
     "    }",
     "  };",
+    "  $isApparatus = $false;",
+    "  foreach ($check in @(@{ procId = [int]$c.pid; cd = $c.creationDate }, @{ procId = [int]$c.parentPid; cd = $c.parentCreationDate })) {",
+    "    if ($isApparatus) { break };",
+    "    if ($null -eq $check.cd -or $check.cd -eq '') { continue };",
+    "    $utc = $null; try { $utc = ([datetime]$check.cd).ToUniversalTime() } catch { $utc = $null };",
+    "    if ($null -eq $utc) { continue };",
+    "    foreach ($a in $scannerIdent) {",
+    "      if ([int]$a.pid -ne [int]$check.procId) { continue };",
+    "      if ($a.creationDate) {",
+    "        try { $aUtc = ([datetime]$a.creationDate).ToUniversalTime(); if ($aUtc -eq $utc) { $isApparatus = $true } } catch { }",
+    "      };",
+    "      if ($isApparatus) { break };",
+    "      $t0 = $null; $t1 = $null;",
+    "      if ($a.notBefore) { try { $t0 = ([datetimeoffset]::Parse([string]$a.notBefore)).UtcDateTime } catch { } };",
+    "      if ($a.notAfter) { try { $t1 = ([datetimeoffset]::Parse([string]$a.notAfter)).UtcDateTime } catch { } };",
+    "      if ($t0 -ne $null -and $t1 -ne $null -and $utc -ge $t0 -and $utc -le $t1) { $isApparatus = $true; break };",
+    "    }",
+    "  };",
+    "  if ($isApparatus -and -not [bool]$c.isDesc -and -not $n) { continue };",
     "  if ($needsPeb -and -not $nonceReadable -and -not $n) { $unreadable++ };",
     "  [void]$hits.Add([ordered]@{ pid = $c.pid; name = $c.name; creationDate = $c.creationDate; runNonce = $n; parentPid = $c.parentPid; nonceReadable = [bool]$nonceReadable; parentPresent = $c.parentPresent; parentName = $c.parentName; parentCreationDate = $c.parentCreationDate; executablePath = $c.executablePath; sessionId = $c.sessionId });",
     "}",
     "$directorSessionId = $null; try { $directorSessionId = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId } catch { $directorSessionId = $null };",
-    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable; directorSessionId = $directorSessionId; scannerPid = [int]$PID } | ConvertTo-Json -Compress -Depth 5;",
+    "[ordered]@{ ok = $true; processes = $hits; unreadable = [int]$unreadable; directorSessionId = $directorSessionId; scannerPid = [int]$PID; scannerCreationDate = $scannerCreationDate } | ConvertTo-Json -Compress -Depth 5;",
     "exit 0",
     "} catch {",
     "Write-Output '{\"ok\":false,\"reason\":\"cim-error\"}';",

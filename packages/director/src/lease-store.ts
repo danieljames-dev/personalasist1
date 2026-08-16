@@ -47,7 +47,8 @@ import {
   hostWideTreeEvidenceFromScan,
   isUsablePid,
   livenessGrants,
-  measurementApparatusPidsOfThisProcess,
+  measurementApparatusIdentitiesOfThisProcess,
+  observationIsAboutPid,
   normaliseRunNonce,
   placeableInstantMs,
   processRowCouldBelongToThisRun,
@@ -556,8 +557,16 @@ function livenessOfLockHolder(
   recorded: { readonly pid: number; readonly startedAt?: string; readonly runToken?: string },
   observation: ProcessObservationV1,
 ): "ALIVE" | "DEAD_CONFIRMED" | "UNKNOWN" {
-  if (observation.outcome === "NOT_FOUND") return "DEAD_CONFIRMED";
+  // One subject check. A NOT_FOUND about another pid is not death of
+  // this holder. Do not short-circuit ahead of observationIsAboutPid.
+  if (!observationIsAboutPid(observation, recorded.pid)) return "UNKNOWN";
   if (observation.outcome === "UNAVAILABLE") return "UNKNOWN";
+  // A lock with no recorded startedAt cannot call holderLiveness
+  // (creationDate is required). NOT_FOUND about the recorded pid is
+  // still DEAD_CONFIRMED — the slot is empty — so host-lock reclaim
+  // does not wedge. This path is explicit, not a restored short-circuit
+  // ahead of the subject check.
+  if (observation.outcome === "NOT_FOUND") return "DEAD_CONFIRMED";
   if (recorded.startedAt === undefined) return "UNKNOWN";
   return holderLiveness({
     pid: recorded.pid,
@@ -585,14 +594,14 @@ function defaultHostLockTreeEvidence(holder: {
       runNonce: token,
       createdNotBefore: holder.startedAt ?? "",
       holderPid: holder.pid,
-      apparatusPids: [...measurementApparatusPidsOfThisProcess()],
+      apparatusPids: [...measurementApparatusIdentitiesOfThisProcess()],
     });
     const ctx = processRowPlausibilityContext({
       runNonce: token,
       createdNotBefore: holder.startedAt ?? "",
       holderPid: holder.pid,
       observedPids: [holder.pid],
-      apparatusPids: measurementApparatusPidsOfThisProcess(),
+      apparatusPids: measurementApparatusIdentitiesOfThisProcess(),
       rows: scanned.snapshot,
     });
     if (undecidableRowsOf(scanned.snapshot, ctx).length > 0) {

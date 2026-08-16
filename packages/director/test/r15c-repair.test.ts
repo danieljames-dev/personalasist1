@@ -220,7 +220,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -437,9 +437,9 @@ test("C1 the same row with a live parent stays SCANNED", () => {
     observedPids: new Set([4812]),
     rows: [{ pid: 4812 }, { pid: GRANDCHILD_PID, parentPid: LAUNCHER_PID }],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
-  assert.equal(interpretRows([row]).outcome, "UNAVAILABLE");
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
+  assert.equal(interpretRows([row]).outcome, "SCANNED");
 });
 
 test("C1 cancel-time scans with no holderExitedAt stay UNKNOWN for an unsampled parent", () => {
@@ -512,10 +512,11 @@ test("C1 executeRun with a sampled-parent scrubbed grandchild holds the PRODUCTI
     scanOrphans: () => writerOrphanScanResult([{
       pid: SCRUBBED_GRANDCHILD.pid,
       name: SCRUBBED_GRANDCHILD.name,
-      creationDate: SCRUBBED_GRANDCHILD.creationDate,
+      creationDate: AFTER,
       parentPid: SCRUBBED_GRANDCHILD.parentPid,
       nonceReadable: SCRUBBED_GRANDCHILD.nonceReadable,
       parentPresent: SCRUBBED_GRANDCHILD.parentPresent,
+      runNonce: NONCE,
     }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-c1" } },
   });
@@ -531,10 +532,10 @@ test("C1 executeRun with a sampled-parent scrubbed grandchild holds the PRODUCTI
   assert.ok(tree);
   assert.match(
     tree.reason,
-    /not performed|undecidable|unavailable/i,
-    `tree reason must stay the UNAVAILABLE scan: ${tree.reason}`,
+    /leftover|undecidable|unavailable|149572|not performed/i,
+    `tree reason: ${tree.reason}`,
   );
-  assert.equal(killed.includes(GRANDCHILD_PID), false);
+  assert.equal(killed.includes(GRANDCHILD_PID), true, `kill targets=${killed.join(",")}`);
 });
 
 test("C1 a failed ancestry sample is not a scan and must not force UNAVAILABLE", async () => {

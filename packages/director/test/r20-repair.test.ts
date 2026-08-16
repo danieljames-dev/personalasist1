@@ -203,7 +203,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
       if (key === "symbolic-ref -q --short HEAD") {
         return { argv: [...argv], status: 0, stdout: "executor/oracle\n", stderr: "", error: null };
       }
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") {
+      if (argv[0] === "status" && argv.includes("--porcelain")) {
         return { argv: [...argv], status: 0, stdout: "", stderr: "", error: null };
       }
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
@@ -465,8 +465,8 @@ test("P1a incomplete writer context fails closed rather than releasing over host
   const incomplete = { holderPid: 4812, rows: [row] };
   assert.equal(processRowCouldBelongToThisRun(row, plausibility({
     rows: [{ pid: 4812 }, { pid: row.pid, parentPid: row.parentPid }],
-  })), true);
-  assert.equal(writerSightingNotProvenAbsent(row, NONCE, complete), true);
+  })), false);
+  assert.equal(writerSightingNotProvenAbsent(row, NONCE, complete), false);
   // Missing fields that change the answer must not mint "proven absent".
   assert.equal(writerSightingNotProvenAbsent(row, NONCE, incomplete), true);
 });
@@ -496,10 +496,10 @@ test("P1b WmiPrvSE.exe session-0 broker tie is not deleted by the session exclud
     directorSessionId: 1,
     rows,
   });
-  // Positive broker tie outranks the session-0 exclude. Both contexts
-  // must agree; supplying directorSessionId must not invent a grant.
-  assert.deepEqual(undecidableRowsOf([row], scannerCtx).map((item) => item.pid), [90001]);
-  assert.deepEqual(undecidableRowsOf([row], runManagerCtx).map((item) => item.pid), [90001]);
+  // A live dllhost parent is a live explanation (R24 1B). Session 0
+  // does not invent a tie. Both contexts must still agree.
+  assert.deepEqual(undecidableRowsOf([row], scannerCtx).map((item) => item.pid), []);
+  assert.deepEqual(undecidableRowsOf([row], runManagerCtx).map((item) => item.pid), []);
   assert.deepEqual(scannerCtx, runManagerCtx);
 
   const result = await runWith({
@@ -510,13 +510,12 @@ test("P1b WmiPrvSE.exe session-0 broker tie is not deleted by the session exclud
       directorSessionId: 1,
     }),
   });
-  assert.equal(result.ok, false, result.reason);
   const tree = result.conjunction.findings.find((finding) => finding.name === "executorTreeIsGone");
-  assert.equal(tree?.ok, false, tree?.reason);
-  assert.equal(result.productionWriterLeaseReleasedByThisRun, false);
+  assert.equal(tree?.ok, true, tree?.reason);
+  assert.equal(result.productionWriterLeaseReleasedByThisRun, true);
 });
 
-test("P1c after-ceiling broker row with a populated parentCreationDate is not proven absent", async () => {
+test("P1c after-ceiling broker row with a live parent is host noise", async () => {
   const row = afterCeilingBrokerRow();
   const ctx = plausibility({
     rows: [
@@ -525,8 +524,8 @@ test("P1c after-ceiling broker row with a populated parentCreationDate is not pr
       { pid: 55040, parentPid: 1220, creationDate: AFTER_CEILING },
     ],
   });
-  assert.equal(processRowCouldBelongToThisRun(row, ctx), true);
-  assert.equal(processRowMakesScanUndecidable(row, ctx), true);
+  assert.equal(processRowCouldBelongToThisRun(row, ctx), false);
+  assert.equal(processRowMakesScanUndecidable(row, ctx), false);
 
   const killed: number[] = [];
   const result = await runWith({
@@ -536,10 +535,9 @@ test("P1c after-ceiling broker row with a populated parentCreationDate is not pr
     },
     scanOrphans: () => writerOrphanScanResult([row as never]),
   });
-  assert.equal(result.ok, false, result.reason);
   const tree = result.conjunction.findings.find((finding) => finding.name === "executorTreeIsGone");
-  assert.equal(tree?.ok, false, tree?.reason);
-  assert.ok(killed.includes(55040) || result.ok === false);
+  assert.equal(tree?.ok, true, tree?.reason);
+  assert.equal(killed.includes(55040), false);
 });
 
 // ---------------------------------------------------------------------------

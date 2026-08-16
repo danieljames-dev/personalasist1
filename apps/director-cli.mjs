@@ -150,8 +150,10 @@ export async function runDirectorCli(argv, io = console, env = process.env, host
   }
 
   // Mint is documentation of the mission object under the run root.
-  // It must not change the CLI exit-code contract: a refused id, a
-  // write failure, or an advance refusal still proceeds to launchRun.
+  // mission.json has no reader in this package. advance/createNewMission
+  // do not gate the CLI exit contract. Declared dead by
+  // OWNER_DECISION_D2_MISSION_STATE_MACHINE. A refused id, a write
+  // failure, or an advance refusal still proceeds to launchRun.
   const missionId = values.get("mission-id");
   if (typeof missionId === "string" && missionId.trim() !== "") {
     try {
@@ -243,7 +245,7 @@ export async function runDirectorCli(argv, io = console, env = process.env, host
     reason: result.reason,
     resultPath: result.resultPath,
     resultPersisted: result.resultPersisted,
-    spendUsd: result.handoff?.spendUsd ?? 0,
+    spendUsd: typeof result.handoff?.spendUsd === "number" ? result.handoff.spendUsd : null,
   }));
   if (result.ok) return 0;
   if (result.handoff?.requiresOwner === true) {

@@ -201,7 +201,7 @@ function matchingGit(head = HEAD_AFTER, opts: { readonly advance?: boolean } = {
         return gitResult(argv, { stdout: `${sha}\n` });
       }
       if (key === "symbolic-ref -q --short HEAD") return gitResult(argv, { stdout: "executor/oracle\n" });
-      if (key === "status --porcelain" || key === "status --porcelain --ignored") return gitResult(argv, { stdout: "" });
+      if (argv[0] === "status" && argv.includes("--porcelain")) return gitResult(argv, { stdout: "" });
       if (argv[0] === "rev-parse" && argv.includes("@{upstream}")) {
         return gitResult(argv, { status: 128, stderr: "fatal: no upstream configured\n" });
       }
@@ -868,7 +868,7 @@ test("D2 end-to-end an unreadable-nonce sighting withholds the writer lease", as
       pid: 7777,
       parentPid: 6666,
       nonceReadable: false,
-      parentPresent: true,
+      parentPresent: false,
       creationDate: T0,
     }]),
     request: { lease: { kind: "PRODUCTION_WRITER", resource: "default", leaseId: "lease-pw-d2" } },
@@ -1147,26 +1147,18 @@ test("H director-cli launches at USD 0 against a local stub and returns ok:true"
       ok: boolean;
       reason: string;
       spawned?: boolean;
-      spendUsd?: number;
+      handoff?: { spendUsd?: unknown } | null;
       conjunction?: {
         findings?: ReadonlyArray<{ name: string; ok: boolean; reason: string }>;
       };
     };
-    const tree = result.conjunction?.findings?.find((item) => item.name === "executorTreeIsGone");
+    const spend = result.conjunction?.findings?.find((item) => item.name === "spendIsZero");
     assert.equal(result.spawned, true, result.reason);
-    assert.equal(result.spendUsd === undefined || result.spendUsd === 0, true, String(result.spendUsd));
-    // A live Git-for-Windows sleep.exe parented by sh.exe/git.exe is not
-    // host noise (parent basename is not a negative fact). The CLI still
-    // launched at USD 0; the tree conjunct may name that leftover.
-    if (result.ok !== true) {
-      assert.match(
-        `${result.reason} ${tree?.reason ?? launched.stdout}`,
-        /sleep\.exe/,
-        `${result.reason}${tree !== undefined ? ` tree=${tree.reason}` : ""}`,
-      );
-    } else {
-      assert.equal(launched.status, 0, `${launched.stdout}\n${launched.stderr}`);
-    }
+    assert.equal(result.handoff?.spendUsd, 0, `handoff.spendUsd=${String(result.handoff?.spendUsd)}`);
+    assert.equal(spend?.ok, true, spend?.reason ?? "spendIsZero missing");
+    const treeReason = result.conjunction?.findings?.find((item) => item.name === "executorTreeIsGone")?.reason ?? "";
+    assert.equal(result.ok, true, `${result.reason} tree=${treeReason}${launched.stdout}\n${launched.stderr}`);
+    assert.equal(launched.status, 0, `${launched.stdout}\n${launched.stderr}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(stubDir, { recursive: true, force: true });
