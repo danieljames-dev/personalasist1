@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { basename, isAbsolute, resolve } from "node:path";
+import { env as hostProcessEnv, platform } from "node:process";
 import {
   adapterPermissionModeForRole,
   argvGrantsWritePermission,
@@ -45,7 +46,11 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
   abstract readonly modes: readonly DeveloperAgentModeV1[];
   private cached: { at: number; withAccount: boolean; status: DeveloperAgentStatusV1 } | null = null;
 
-  protected constructor(protected readonly approvedRepositoryRoot: string, protected readonly executable: string) {
+  protected constructor(
+    protected readonly approvedRepositoryRoot: string,
+    protected readonly executable: string,
+    private readonly inheritedEnvironment: NodeJS.ProcessEnv = hostProcessEnv,
+  ) {
     if (!isAbsolute(approvedRepositoryRoot) || resolve(approvedRepositoryRoot) !== approvedRepositoryRoot) throw new Error("Developer-agent repository root must be explicit and normalized.");
     if (!executable.trim() || executable.includes("\0") || CONTROL_CHARACTERS.test(executable) || /[\r\n]/u.test(executable)) throw new Error("Developer-agent executable must be explicit.");
   }
@@ -157,7 +162,7 @@ abstract class LocalCliDeveloperAgentBridgeV1 implements DeveloperAgentBridgeV1 
       signal,
       timeoutMs: TASK_TIMEOUT_MS,
       ...(usableRunNonce(task.runNonce) !== null
-        ? { env: childEnvWithRunNonce(usableRunNonce(task.runNonce)!) }
+        ? { env: childEnvWithRunNonce(usableRunNonce(task.runNonce)!, this.inheritedEnvironment) }
         : {}),
     });
     if (result.timedOut) throw new Error("Developer-agent task exceeded its timeout and was stopped.");
@@ -178,9 +183,9 @@ function usableRunNonce(value: unknown): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
-function childEnvWithRunNonce(runNonce: string): NodeJS.ProcessEnv {
+function childEnvWithRunNonce(runNonce: string, inheritedEnvironment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  for (const [key, value] of Object.entries(inheritedEnvironment)) {
     if (typeof value === "string") env[key] = value;
   }
   env.AION_RUN_NONCE = runNonce;
@@ -201,8 +206,8 @@ export class CodexCliDeveloperAgentBridgeV1 extends LocalCliDeveloperAgentBridge
   readonly id = "codex";
   readonly displayName = "Codex CLI";
   readonly modes: readonly DeveloperAgentModeV1[] = ["read-only", "workspace-write"];
-  constructor(approvedRepositoryRoot: string, executable = process.platform === "win32" ? "codex.exe" : "codex") {
-    super(approvedRepositoryRoot, executable);
+  constructor(approvedRepositoryRoot: string, executable = platform === "win32" ? "codex.exe" : "codex", inheritedEnvironment: NodeJS.ProcessEnv = hostProcessEnv) {
+    super(approvedRepositoryRoot, executable, inheritedEnvironment);
   }
   protected versionArgs(): readonly string[] { return ["--version"]; }
   protected accountArgs(): readonly string[] { return ["login", "status"]; }
@@ -227,8 +232,8 @@ export class ClaudeCodeCliDeveloperAgentBridgeV1 extends LocalCliDeveloperAgentB
   readonly id = "claude-code";
   readonly displayName = "Claude Code CLI";
   readonly modes: readonly DeveloperAgentModeV1[] = ["read-only", "workspace-write"];
-  constructor(approvedRepositoryRoot: string, executable = process.platform === "win32" ? "claude.exe" : "claude") {
-    super(approvedRepositoryRoot, executable);
+  constructor(approvedRepositoryRoot: string, executable = platform === "win32" ? "claude.exe" : "claude", inheritedEnvironment: NodeJS.ProcessEnv = hostProcessEnv) {
+    super(approvedRepositoryRoot, executable, inheritedEnvironment);
   }
   protected versionArgs(): readonly string[] { return ["--version"]; }
   protected accountArgs(): readonly string[] { return ["auth", "status", "--json"]; }
