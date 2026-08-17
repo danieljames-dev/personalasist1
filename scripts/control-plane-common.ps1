@@ -7,6 +7,12 @@ $script:AionAllowedDirectiveStatuses = @(
 $script:AionCanonicalOrigin = 'https://github.com/danieljames-dev/personalasist1.git'
 $script:AionReviewedDirectorSha = '8fba7b6dadba35f479d4d335a35258b6149b70e1'
 $script:AionDirectorRecoveryGateId = 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+$script:AionDirectorRecoveryKnownBrokenBaselineSha = '78425d3923ff06bbc6193165c35232844287efa9'
+$script:AionDirectorRecoverySourceIdentityPaths = @(
+    'packages/director/src/lease-store.ts',
+    'apps/aion/developer-agent.mjs',
+    'packages/director/src/git-truth.ts'
+)
 
 function Resolve-AionGitRoot {
     param([string]$StartPath)
@@ -181,6 +187,33 @@ function Invoke-AionTrustedVectorPass {
     return [pscustomobject]@{ Name=$Name; ExitCode=$result.ExitCode; Result='PASS' }
 }
 
+function Get-AionGitObjectId {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Revision,[Parameter(Mandatory=$true)][string]$Path)
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $object=(& git -C $root rev-parse "$Revision`:$Path" 2>$null)
+    if($LASTEXITCODE -ne 0 -or -not $object){throw "Git object not found: $Revision`:$Path"}
+    return $object.Trim()
+}
+
+function Assert-AionDirectorRecoveryBaselineIdentity {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$CurrentBaseline)
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $known=$script:AionDirectorRecoveryKnownBrokenBaselineSha
+    if([string]::IsNullOrWhiteSpace($known)){throw 'Trusted Director known-broken baseline SHA is empty'}
+    & git -C $root cat-file -e "$known`^{commit}" 2>$null
+    if($LASTEXITCODE -ne 0){throw "Trusted Director known-broken baseline missing: $known"}
+    foreach($path in $script:AionDirectorRecoverySourceIdentityPaths){
+        $knownBlob=Get-AionGitObjectId -Root $root -Revision $known -Path $path
+        $currentBlob=Get-AionGitObjectId -Root $root -Revision $CurrentBaseline -Path $path
+        if($knownBlob -cne $currentBlob){throw "Director known-broken source identity mismatch: $path"}
+    }
+    $knownDirectorTree=Get-AionGitObjectId -Root $root -Revision $known -Path 'packages/director'
+    $currentDirectorTree=Get-AionGitObjectId -Root $root -Revision $CurrentBaseline -Path 'packages/director'
+    if($knownDirectorTree -cne $currentDirectorTree){throw 'Director tree differs from trusted known-broken baseline'}
+    $reviewedDirectorTree=Get-AionGitObjectId -Root $root -Revision $script:AionReviewedDirectorSha -Path 'packages/director'
+    if($currentDirectorTree -cne $reviewedDirectorTree){throw 'Director baseline tree differs from trusted prior reviewed Director tree'}
+}
+
 function Get-AionDirectorStructuredVerifyPlan {
     $workspaceTests=@(
         '@aion/application-preparation',
@@ -318,8 +351,6 @@ function Get-AionRepairGate {
                 Typecheck=@('npm.cmd','run','typecheck','--workspace','@aion/director')
                 ExpectedExitCode=1
                 ExpectedText=@(
-                    'a resolved bridge refuses tasks aimed outside the one approved repository root',
-                    'developer-agent refused: another run holds this',
                     'no tracked text file contains double-encoded \(mojibake\) characters',
                     'packages/director/src/git-truth\.ts:12'
                 )
@@ -363,6 +394,9 @@ function Assert-AionBrokenBaselineRepairGate {
     }
     $gate=Get-AionRepairGate (Get-AionDirectiveFieldOrDefault $Directive 'Known-Failing-Gate')
     [void](Get-AionRepairAllowedPaths $Directive $gate)
+    if($gate.Id -ceq $script:AionDirectorRecoveryGateId){
+        Assert-AionDirectorRecoveryBaselineIdentity -Root $Root -CurrentBaseline $Directive.Fields.'Repository-Baseline'
+    }
     $result=Invoke-AionTrustedVector -Root $Root -Vector $gate.Command
     if($result.ExitCode -ne $gate.ExpectedExitCode){throw "Known failing gate exit mismatch: $($result.ExitCode)"}
     $text=$result.Output -join "`n"

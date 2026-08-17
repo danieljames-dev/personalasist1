@@ -15,6 +15,7 @@ $failed=0
 $complete=$false
 $oldPath=$env:PATH
 $oldReviewedDirectorSha=$script:AionReviewedDirectorSha
+$oldDirectorKnownBrokenBaseline=$script:AionDirectorRecoveryKnownBrokenBaselineSha
 
 function Pass([string]$Name){$script:passed++;Write-Host "PASS $Name"}
 function Fail([string]$Name,[string]$Detail){$script:failed++;Write-Host "FAIL $Name - $Detail" -ForegroundColor Red}
@@ -99,6 +100,7 @@ exit /b 9
 
 :server
 if "%MODE%"=="director-broken" goto directorbroken
+if "%MODE%"=="director-mojibake-only" goto directormojibake
 if "%MODE%"=="wrong-signature" goto wrongtext
 exit /b 0
 
@@ -115,6 +117,12 @@ goto localarch
 echo # Subtest: a resolved bridge refuses tasks aimed outside the one approved repository root
 echo not ok 41 - a resolved bridge refuses tasks aimed outside the one approved repository root
 echo developer-agent refused: another run holds this
+echo # Subtest: no tracked text file contains double-encoded (mojibake) characters
+echo not ok 93 - no tracked text file contains double-encoded (mojibake) characters
+echo packages/director/src/git-truth.ts:12
+exit /b 1
+
+:directormojibake
 echo # Subtest: no tracked text file contains double-encoded (mojibake) characters
 echo not ok 93 - no tracked text file contains double-encoded (mojibake) characters
 echo packages/director/src/git-truth.ts:12
@@ -139,6 +147,13 @@ exit /b 1
     return $scriptPath
 }
 
+function New-FakeNode([string]$Dir){
+    [IO.Directory]::CreateDirectory($Dir)|Out-Null
+    $scriptPath=Join-Path $Dir 'node.cmd'
+    [IO.File]::WriteAllText($scriptPath,"@echo off`r`nexit /b 0`r`n",[Text.ASCIIEncoding]::new())
+    return $scriptPath
+}
+
 function Invoke-AuthorizationFixture([string]$DirectivePath,[string]$Phrase,[switch]$SkipRepositoryChecks,[string]$Root=$repo){
     $out=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.out')
     $err=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.err')
@@ -158,36 +173,16 @@ function Invoke-AuthorizationFixture([string]$DirectivePath,[string]$Phrase,[swi
 
 try {
     $realCurrentBefore=Get-FileHash -LiteralPath $currentPath -Algorithm SHA256
-    New-Item -ItemType Directory -Path $repo -Force|Out-Null
-    & git -C $repo init -b main|Out-Null
+    $baseline=$script:AionDirectorRecoveryKnownBrokenBaselineSha
+    & git clone --no-checkout $realRoot $repo|Out-Null
+    & git -C $repo checkout -q -B main $baseline
     & git -C $repo config user.name 'AION Real Gate Test'
     & git -C $repo config user.email 'real-gate-test@invalid.example'
     & git -C $repo config core.autocrlf false
-    & git -C $repo remote add origin $script:AionCanonicalOrigin
-    [IO.File]::WriteAllText((Join-Path $repo '.gitignore'),".aion-local/`n",[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'README.md'),'synthetic',[Text.UTF8Encoding]::new($false))
-    foreach($dir in @(
-        'apps\aion',
-        'packages\director\src',
-        'packages\director\test',
-        'packages\local-assistant\src',
-        'packages\local-assistant\test',
-        'test\aion'
-    )){[IO.Directory]::CreateDirectory((Join-Path $repo $dir))|Out-Null}
-    [IO.File]::WriteAllText((Join-Path $repo 'apps\aion\developer-agent.mjs'),'// synthetic',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'packages\director\src\lease-store.ts'),'export const lease = 1;',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'packages\director\src\git-truth.ts'),'export const truth = 1;',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'packages\director\test\lease-store.test.ts'),'test',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'packages\director\test\wiring.test.ts'),'test',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\src\developer-bridge.ts'),'export const broken = process.env.AION_TEST;',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\test\architecture-boundary.test.mjs'),'assert boundary policy',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $repo 'test\aion\developer-agent.test.mjs'),'test',[Text.UTF8Encoding]::new($false))
-    & git -C $repo add .
-    & git -C $repo commit -m 'synthetic baseline'|Out-Null
-    $baseline=(& git -C $repo rev-parse HEAD).Trim()
+    & git -C $repo remote set-url origin $script:AionCanonicalOrigin
     & git -C $repo update-ref refs/remotes/origin/main $baseline
-    $script:AionReviewedDirectorSha=$baseline
     $fakeBin=Join-Path $testRoot 'fake-bin'
+    New-FakeNode $fakeBin|Out-Null
     $env:PATH="$fakeBin;$env:PATH"
     $directivePath=Join-Path $repo '.aion-local\directives\CURRENT.md'
     $phrase='AUTHORIZE SYNTHETIC REAL GATE'
@@ -197,6 +192,21 @@ try {
     $repairAuth=Invoke-AuthorizationFixture $directivePath $phrase
     Expect-True '1 BROKEN_BASELINE_REPAIR Director gate authorizes through production script' (($repairAuth.ExitCode -eq 0)-and((Get-AionDirective $directivePath).Fields.Status -ceq 'AUTHORIZED'))
     Expect-True '2 real-gate regression does not invoke root verify on repair preflight' ($repairAuth.Output -notmatch 'run verify|unrelated monolithic verify failure')
+    New-FakeNpm $fakeBin 'director-mojibake-only'|Out-Null
+    New-Directive $directivePath 'PENDING_OWNER_AUTHORIZATION' $baseline $phrase
+    $identityAuth=Invoke-AuthorizationFixture $directivePath $phrase
+    Expect-True '2a Director preflight accepts source identity without historical runtime lease text' (($identityAuth.ExitCode -eq 0)-and((Get-AionDirective $directivePath).Fields.Status -ceq 'AUTHORIZED'))
+    & git -C $repo checkout -q -B main $baseline
+    [IO.File]::WriteAllText((Join-Path $repo 'packages\director\src\lease-store.ts'),'export const lease = 2;',[Text.UTF8Encoding]::new($false))
+    & git -C $repo add packages/director/src/lease-store.ts
+    & git -C $repo commit -m 'synthetic lease drift'|Out-Null
+    $driftHead=(& git -C $repo rev-parse HEAD).Trim()
+    & git -C $repo update-ref refs/remotes/origin/main $driftHead
+    New-Directive $directivePath 'PENDING_OWNER_AUTHORIZATION' $driftHead $phrase
+    $driftAuth=Invoke-AuthorizationFixture $directivePath $phrase
+    Expect-True '2b Director preflight rejects source drift from trusted known-broken baseline' (($driftAuth.ExitCode -ne 0)-and((Get-AionDirective $directivePath).Fields.Status -ceq 'PENDING_OWNER_AUTHORIZATION'))
+    & git -C $repo checkout -q -B main $baseline
+    & git -C $repo update-ref refs/remotes/origin/main $baseline
 
     New-FakeNpm $fakeBin 'fixed'|Out-Null
     try{Invoke-AionDirectorStructuredVerification -Root $repo|Out-Null;Pass '3 structured verification accepts exact isolated known local-assistant failure'}catch{Fail '3 structured verification accepts exact isolated known local-assistant failure' $_.Exception.Message}
@@ -240,6 +250,7 @@ catch {
 finally {
     $env:PATH=$oldPath
     $script:AionReviewedDirectorSha=$oldReviewedDirectorSha
+    $script:AionDirectorRecoveryKnownBrokenBaselineSha=$oldDirectorKnownBrokenBaseline
     if($complete-and(Test-Path $testRoot)){
         $resolved=[IO.Path]::GetFullPath($testRoot);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
         if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw "Unsafe cleanup path: $resolved"}

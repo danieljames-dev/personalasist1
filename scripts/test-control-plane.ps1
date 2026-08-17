@@ -170,6 +170,7 @@ exit /b 0
 
 :server
 if "%MODE%"=="director-broken" goto directorbroken
+if "%MODE%"=="director-mojibake-only" goto directormojibake
 if "%MODE%"=="director-wrong-text" goto wrongtext
 if "%MODE%"=="director-other-exit" exit /b 2
 exit /b 0
@@ -192,6 +193,12 @@ echo # Subtest: no tracked text file contains double-encoded (mojibake) characte
 echo not ok 93 - no tracked text file contains double-encoded (mojibake) characters
 echo packages/director/src/git-truth.ts:12
 echo npm error Lifecycle script `aion:server:test` failed with error: 1>&2
+exit /b 1
+
+:directormojibake
+echo # Subtest: no tracked text file contains double-encoded (mojibake) characters
+echo not ok 93 - no tracked text file contains double-encoded (mojibake) characters
+echo packages/director/src/git-truth.ts:12
 exit /b 1
 
 :architecture
@@ -224,14 +231,25 @@ function Add-RepairBaselineFiles([string]$Root){
     $src=Join-Path $Root 'packages\local-assistant\src'
     $test=Join-Path $Root 'packages\local-assistant\test'
     $director=Join-Path $Root 'packages\director'
+    $app=Join-Path $Root 'apps\aion'
+    $aionTest=Join-Path $Root 'test\aion'
     [IO.Directory]::CreateDirectory($src)|Out-Null
     [IO.Directory]::CreateDirectory($test)|Out-Null
     [IO.Directory]::CreateDirectory($director)|Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $director 'src'))|Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $director 'test'))|Out-Null
+    [IO.Directory]::CreateDirectory($app)|Out-Null
+    [IO.Directory]::CreateDirectory($aionTest)|Out-Null
     [IO.File]::WriteAllText((Join-Path $src 'developer-bridge.ts'),'export const broken = process.env.AION_TEST;',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $test 'architecture-boundary.test.mjs'),'assert boundary policy',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $test 'non-architecture.test.mjs'),'import test from "node:test"; test("synthetic non-architecture", () => {});',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $director 'sentinel.txt'),'director evidence tree',[Text.UTF8Encoding]::new($false))
-    & git -C $Root add packages
+    [IO.File]::WriteAllText((Join-Path $director 'src\lease-store.ts'),'export const lease = "broken";',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $director 'src\git-truth.ts'),'export const truth = "mojibake";',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $director 'test\lease-store.test.ts'),'test',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $director 'test\wiring.test.ts'),'test',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $app 'developer-agent.mjs'),'export const agent = "broken";',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $aionTest 'developer-agent.test.mjs'),'test',[Text.UTF8Encoding]::new($false))
+    & git -C $Root add apps packages test
     & git -C $Root commit -m 'add repair baseline files'|Out-Null
     return (& git -C $Root rev-parse HEAD).Trim()
 }
@@ -408,10 +426,14 @@ try {
         Expect-Throw '46 repair gate enforces origin parity' {Assert-AionBaselineValues $repairBaseline main $repairBaseline $script:AionCanonicalOrigin 1 0 @()}
 
         New-FakeNpm $fakeBin 'director-broken'|Out-Null
+        $oldDirectorKnownBrokenBaseline=$script:AionDirectorRecoveryKnownBrokenBaselineSha
+        $oldReviewedDirectorSha=$script:AionReviewedDirectorSha
+        $script:AionDirectorRecoveryKnownBrokenBaselineSha=$repairBaseline
+        $script:AionReviewedDirectorSha=$repairBaseline
         New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
-        try{Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current);Pass '47 director repair gate accepts exact known failures'}catch{Fail '47 director repair gate accepts exact known failures' $_.Exception.Message}
+        try{Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current);Pass '47 director repair gate accepts deterministic known-broken identity'}catch{Fail '47 director repair gate accepts deterministic known-broken identity' $_.Exception.Message}
         New-FakeNpm $fakeBin 'director-wrong-text'|Out-Null
-        Expect-Throw '48 director repair gate requires expected failure signature' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        Expect-Throw '48 director repair gate requires source-hygiene failure signature' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
         New-FakeNpm $fakeBin 'director-other-exit'|Out-Null
         Expect-Throw '49 director repair gate requires expected failure exit' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
         New-FakeNpm $fakeBin 'director-broken'|Out-Null
@@ -425,6 +447,35 @@ try {
         Expect-True '53 director repair gate protects source hygiene policy test' ($directorGate.ProtectedPaths -contains 'test/aion/source-hygiene.test.mjs')
         Expect-True '54 director repair gate protects local-assistant source and policy test' (($directorGate.ProtectedPaths -contains 'packages/local-assistant/src/developer-bridge.ts')-and($directorGate.ProtectedPaths -contains 'packages/local-assistant/test/architecture-boundary.test.mjs'))
         Expect-True '55 director repair gate protects control-plane registration files' (($directorGate.ProtectedPaths -contains 'scripts/control-plane-common.ps1')-and($directorGate.ProtectedPaths -contains 'scripts/test-control-plane.ps1'))
+        New-FakeNpm $fakeBin 'director-mojibake-only'|Out-Null
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        try{Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current);Pass '55a director preflight does not require historical developer-agent console text'}catch{Fail '55a director preflight does not require historical developer-agent console text' $_.Exception.Message}
+        foreach($case in @(
+            [pscustomobject]@{Name='55b director preflight rejects lease-store source drift';Path='packages\director\src\lease-store.ts';Text='export const lease = "changed";'},
+            [pscustomobject]@{Name='55c director preflight rejects developer-agent source drift';Path='apps\aion\developer-agent.mjs';Text='export const agent = "changed";'},
+            [pscustomobject]@{Name='55d director preflight rejects git-truth source drift';Path='packages\director\src\git-truth.ts';Text='export const truth = "changed";'}
+        )){
+            & git -C $repo checkout -q -B main $repairBaseline
+            & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+            [IO.File]::WriteAllText((Join-Path $repo $case.Path),$case.Text,[Text.UTF8Encoding]::new($false))
+            & git -C $repo add $case.Path
+            & git -C $repo commit -m 'synthetic source drift'|Out-Null
+            $driftHead=(& git -C $repo rev-parse HEAD).Trim()
+            & git -C $repo update-ref refs/remotes/origin/main $driftHead
+            New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $driftHead 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+            Expect-Throw $case.Name {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        }
+        & git -C $repo checkout -q -B main $repairBaseline
+        & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+        $script:AionDirectorRecoveryKnownBrokenBaselineSha='0000000000000000000000000000000000000000'
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        Expect-Throw '55e director preflight rejects wrong trusted known-broken SHA' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        $script:AionDirectorRecoveryKnownBrokenBaselineSha=$repairBaseline
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' 'Trusted-Source-Sha: 0000000000000000000000000000000000000000' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        try{Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current);Pass '55f directive-controlled trusted SHA fields are ignored'}catch{Fail '55f directive-controlled trusted SHA fields are ignored' $_.Exception.Message}
+        Expect-True '55g directive-controlled trusted SHA text is not trusted' ((Get-AionDirectiveFieldOrDefault (Get-AionDirective $current) 'Trusted-Source-Sha') -cne $script:AionDirectorRecoveryKnownBrokenBaselineSha)
+        $script:AionDirectorRecoveryKnownBrokenBaselineSha=$oldDirectorKnownBrokenBaseline
+        $script:AionReviewedDirectorSha=$oldReviewedDirectorSha
 
         New-RepairDirective $current 'AUTHORIZED' $repairBaseline
         Expect-Throw '56 closure requires committed result' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
