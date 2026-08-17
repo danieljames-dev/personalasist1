@@ -90,7 +90,8 @@ function New-RepairDirective(
     [string]$Status,
     [string]$Baseline,
     [string]$Phrase='AUTHORIZE SYNTHETIC REPAIR',
-    [string]$Extra=''
+    [string]$Extra='',
+    [string]$GateId='LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY'
 ){
     $extraText=if([string]::IsNullOrWhiteSpace($Extra)){''}else{"$Extra`r`n"}
     $body=@"
@@ -103,7 +104,7 @@ Prepared-By: CTO
 Repository-Baseline: $Baseline
 Required-Authorization-Phrase: $Phrase
 Authorization-Class: BROKEN_BASELINE_REPAIR
-Known-Failing-Gate: LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY
+Known-Failing-Gate: $GateId
 $extraText
 ## Goal
 Repair a known failing gate only.
@@ -147,6 +148,7 @@ if not "%1"=="run" exit /b 37
 if "%2"=="verify" goto verify
 if "%2"=="test" goto test
 if "%2"=="typecheck" goto typecheck
+if "%2"=="aion:server:test" goto server
 exit /b 37
 
 :verify
@@ -159,6 +161,12 @@ if "%MODE%"=="wrong-text" goto wrongtext
 if "%MODE%"=="other-exit" exit /b 2
 exit /b 0
 
+:server
+if "%MODE%"=="director-broken" goto directorbroken
+if "%MODE%"=="director-wrong-text" goto wrongtext
+if "%MODE%"=="director-other-exit" exit /b 2
+exit /b 0
+
 :broken
 echo developer bridge is the single process boundary and is repository-scoped
 echo packages/local-assistant/src/developer-bridge.ts contains process.env
@@ -167,6 +175,16 @@ exit /b 1
 
 :wrongtext
 echo unrelated failure
+exit /b 1
+
+:directorbroken
+echo # Subtest: a resolved bridge refuses tasks aimed outside the one approved repository root
+echo not ok 41 - a resolved bridge refuses tasks aimed outside the one approved repository root
+echo developer-agent refused: another run holds this
+echo # Subtest: no tracked text file contains double-encoded (mojibake) characters
+echo not ok 93 - no tracked text file contains double-encoded (mojibake) characters
+echo packages/director/src/git-truth.ts:12
+echo npm error Lifecycle script `aion:server:test` failed with error: 1>&2
 exit /b 1
 
 :typecheck
@@ -346,13 +364,32 @@ try {
         Expect-Throw '45 repair gate enforces main branch' {Assert-AionBaselineValues $repairBaseline 'feature/test' $repairBaseline $script:AionCanonicalOrigin 0 0 @()}
         Expect-Throw '46 repair gate enforces origin parity' {Assert-AionBaselineValues $repairBaseline main $repairBaseline $script:AionCanonicalOrigin 1 0 @()}
 
+        New-FakeNpm $fakeBin 'director-broken'|Out-Null
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        try{Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current);Pass '47 director repair gate accepts exact known failures'}catch{Fail '47 director repair gate accepts exact known failures' $_.Exception.Message}
+        New-FakeNpm $fakeBin 'director-wrong-text'|Out-Null
+        Expect-Throw '48 director repair gate requires expected failure signature' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        New-FakeNpm $fakeBin 'director-other-exit'|Out-Null
+        Expect-Throw '49 director repair gate requires expected failure exit' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        New-FakeNpm $fakeBin 'director-broken'|Out-Null
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' 'Allowed-Repair-Files: packages/local-assistant/src/developer-bridge.ts' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        Expect-Throw '50 director repair gate rejects local-assistant repair path' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' 'Allowed-Repair-Files: package.json' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        Expect-Throw '51 director repair gate rejects unauthorized broad path' {Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current)}
+        New-RepairDirective $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' 'Allowed-Repair-Files: apps/aion/developer-agent.mjs;packages/director/src/lease-store.ts' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        try{Assert-AionBrokenBaselineRepairGate -Root $repo -Directive (Get-AionDirective $current);Pass '52 director repair gate accepts strict subset of trusted paths'}catch{Fail '52 director repair gate accepts strict subset of trusted paths' $_.Exception.Message}
+        $directorGate=Get-AionRepairGate 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        Expect-True '53 director repair gate protects source hygiene policy test' ($directorGate.ProtectedPaths -contains 'test/aion/source-hygiene.test.mjs')
+        Expect-True '54 director repair gate protects local-assistant source and policy test' (($directorGate.ProtectedPaths -contains 'packages/local-assistant/src/developer-bridge.ts')-and($directorGate.ProtectedPaths -contains 'packages/local-assistant/test/architecture-boundary.test.mjs'))
+        Expect-True '55 director repair gate protects control-plane registration files' (($directorGate.ProtectedPaths -contains 'scripts/control-plane-common.ps1')-and($directorGate.ProtectedPaths -contains 'scripts/test-control-plane.ps1'))
+
         New-RepairDirective $current 'AUTHORIZED' $repairBaseline
-        Expect-Throw '47 closure requires committed result' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+        Expect-Throw '56 closure requires committed result' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
         [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\test\architecture-boundary.test.mjs'),'weakened policy',[Text.UTF8Encoding]::new($false))
         & git -C $repo add packages/local-assistant/test/architecture-boundary.test.mjs
         & git -C $repo commit -m 'bad protected change'|Out-Null
         New-FakeNpm $fakeBin 'fixed'|Out-Null
-        Expect-Throw '48 closure rejects protected policy change' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+        Expect-Throw '57 closure rejects protected policy change' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
         & git -C $repo checkout -q -B main $repairBaseline
         & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
 
@@ -360,7 +397,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $repo 'package.json'),'{"scripts":{"verify":"exit 0"}}',[Text.UTF8Encoding]::new($false))
         & git -C $repo add package.json
         & git -C $repo commit -m 'bad broad change'|Out-Null
-        Expect-Throw '49 closure rejects unauthorized changed path' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+        Expect-Throw '58 closure rejects unauthorized changed path' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
         & git -C $repo checkout -q -B main $repairBaseline
         & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
 
@@ -371,13 +408,13 @@ try {
         $resultSha=(& git -C $repo rev-parse HEAD).Trim()
         New-FakeNpm $fakeBin 'fixed'|Out-Null
         $receiptPath=Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline
-        Expect-True '50 closure writes PASS receipt and closes directive' ((Test-Path $receiptPath)-and((Get-AionDirective $current).Fields.Status -ceq 'CLOSED'))
-        Expect-Throw '51 CLOSED repair directive cannot close twice' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
-        Expect-Throw '52 push receipt validator rejects missing result receipt' {Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha '0000000000000000000000000000000000000000' -BaselineSha $repairBaseline -ReviewedDirectorSha $repairBaseline}
-        Expect-Throw '53 push receipt validator rejects wrong baseline' {Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha -BaselineSha 'wrong' -ReviewedDirectorSha $repairBaseline}
-        try{Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha -BaselineSha $repairBaseline -ReviewedDirectorSha $repairBaseline;Pass '54 push receipt validator accepts exact closed repair'}catch{Fail '54 push receipt validator accepts exact closed repair' $_.Exception.Message}
+        Expect-True '59 closure writes PASS receipt and closes directive' ((Test-Path $receiptPath)-and((Get-AionDirective $current).Fields.Status -ceq 'CLOSED'))
+        Expect-Throw '60 CLOSED repair directive cannot close twice' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+        Expect-Throw '61 push receipt validator rejects missing result receipt' {Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha '0000000000000000000000000000000000000000' -BaselineSha $repairBaseline -ReviewedDirectorSha $repairBaseline}
+        Expect-Throw '62 push receipt validator rejects wrong baseline' {Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha -BaselineSha 'wrong' -ReviewedDirectorSha $repairBaseline}
+        try{Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha -BaselineSha $repairBaseline -ReviewedDirectorSha $repairBaseline;Pass '63 push receipt validator accepts exact closed repair'}catch{Fail '63 push receipt validator accepts exact closed repair' $_.Exception.Message}
         $receipt=Get-AionRepairClosureReceipt -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha
-        Expect-True '55 closure records Director tree equivalence' ($receipt.directorTreeEquivalence -ceq 'PASS')
+        Expect-True '64 closure records Director tree equivalence' ($receipt.directorTreeEquivalence -ceq 'PASS')
     }
     finally {
         $env:PATH=$oldPath

@@ -161,6 +161,35 @@ function Get-AionRepairGate {
                 ProtectedPaths=@('packages/local-assistant/test/architecture-boundary.test.mjs')
             }
         }
+        'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE' {
+            return [pscustomobject]@{
+                Id='DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+                Command=@('npm.cmd','run','aion:server:test')
+                Typecheck=@('npm.cmd','run','typecheck','--workspace','@aion/director')
+                ExpectedExitCode=1
+                ExpectedText=@(
+                    'a resolved bridge refuses tasks aimed outside the one approved repository root',
+                    'developer-agent refused: another run holds this',
+                    'no tracked text file contains double-encoded \(mojibake\) characters',
+                    'packages/director/src/git-truth\.ts:12'
+                )
+                TrustedAllowedPaths=@(
+                    'apps/aion/developer-agent.mjs',
+                    'packages/director/src/lease-store.ts',
+                    'packages/director/src/git-truth.ts',
+                    'packages/director/test/lease-store.test.ts',
+                    'packages/director/test/wiring.test.ts',
+                    'test/aion/developer-agent.test.mjs'
+                )
+                ProtectedPaths=@(
+                    'test/aion/source-hygiene.test.mjs',
+                    'packages/local-assistant/src/developer-bridge.ts',
+                    'packages/local-assistant/test/architecture-boundary.test.mjs',
+                    'scripts/control-plane-common.ps1',
+                    'scripts/test-control-plane.ps1'
+                )
+            }
+        }
         default { throw "Unknown broken-baseline repair gate: $GateId" }
     }
 }

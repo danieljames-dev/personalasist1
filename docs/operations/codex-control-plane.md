@@ -49,6 +49,12 @@ The directive may omit `Allowed-Repair-Files`, inheriting the trusted gate allow
 a strict subset. It can never broaden trusted scope. For
 `LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY`, the maximum repair path is exactly
 `packages/local-assistant/src/developer-bridge.ts`; the architecture-boundary test is protected.
+For `DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE`, the trusted baseline gate is
+`npm.cmd run aion:server:test` and it binds the Director developer-agent lease-release failure
+and `packages/director/src/git-truth.ts` source-hygiene failure. Its trusted repair paths are
+limited to the developer-agent guard, Director lease release logic, the comment-only `git-truth.ts`
+encoding repair, and exact regression tests for those behaviors. It deliberately does not authorize
+`packages/local-assistant/src/developer-bridge.ts`.
 
 Repair authorization only proves that the known failure exists at the baseline. It grants no
 certification, deployment, production, Funnel, spending, R31, or general milestone authority.
