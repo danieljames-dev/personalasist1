@@ -147,15 +147,22 @@ if not "%1"=="run" shift
 if not "%1"=="run" exit /b 37
 if "%2"=="verify" goto verify
 if "%2"=="test" goto test
+if "%2"=="test:architecture" goto architecture
 if "%2"=="typecheck" goto typecheck
 if "%2"=="aion:server:test" goto server
+if "%2"=="career:test" exit /b 0
+if "%2"=="build" exit /b 0
+if "%2"=="build:test" exit /b 0
 exit /b 37
 
 :verify
 if "%MODE%"=="verify-fail" exit /b 9
+if "%MODE%"=="director-verify-misleading" goto directorverifyfail
+if "%MODE%"=="director-structured-other-fail" goto directorverifyfail
 exit /b 0
 
 :test
+if "%MODE%"=="director-structured-other-fail" exit /b 4
 if "%MODE%"=="broken" goto broken
 if "%MODE%"=="wrong-text" goto wrongtext
 if "%MODE%"=="other-exit" exit /b 2
@@ -187,9 +194,27 @@ echo packages/director/src/git-truth.ts:12
 echo npm error Lifecycle script `aion:server:test` failed with error: 1>&2
 exit /b 1
 
+:architecture
+if "%MODE%"=="director-structured-known-wrong" goto wrongtext
+if "%MODE%"=="director-structured-known-second" goto archsecond
+goto broken
+
 :typecheck
 if "%MODE%"=="typecheck-fail" exit /b 8
 exit /b 0
+
+:directorverifyfail
+echo developer bridge is the single process boundary and is repository-scoped
+echo packages/local-assistant/src/developer-bridge.ts contains process.env
+echo unrelated verification failure
+exit /b 9
+
+:archsecond
+echo developer bridge is the single process boundary and is repository-scoped
+echo packages/local-assistant/src/developer-bridge.ts contains process.env
+echo not ok 99 - unrelated local assistant failure
+exit /b 1
+
 "@
     [IO.File]::WriteAllText($scriptPath,$body,[Text.ASCIIEncoding]::new())
     return $scriptPath
@@ -415,6 +440,78 @@ try {
         try{Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha -BaselineSha $repairBaseline -ReviewedDirectorSha $repairBaseline;Pass '63 push receipt validator accepts exact closed repair'}catch{Fail '63 push receipt validator accepts exact closed repair' $_.Exception.Message}
         $receipt=Get-AionRepairClosureReceipt -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha
         Expect-True '64 closure records Director tree equivalence' ($receipt.directorTreeEquivalence -ceq 'PASS')
+
+        $oldReviewedDirectorSha=$script:AionReviewedDirectorSha
+        try {
+            $script:AionReviewedDirectorSha=$repairBaseline
+            & git -C $repo checkout -q -B main $repairBaseline
+            & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+            New-RepairDirective $current 'AUTHORIZED' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+            [IO.Directory]::CreateDirectory((Join-Path $repo 'packages\director\src'))|Out-Null
+            [IO.File]::WriteAllText((Join-Path $repo 'packages\director\src\lease-store.ts'),'export const repaired = true;',[Text.UTF8Encoding]::new($false))
+            & git -C $repo add packages/director/src/lease-store.ts
+            & git -C $repo commit -m 'director candidate allowed path'|Out-Null
+            $directorCandidate=(& git -C $repo rev-parse HEAD).Trim()
+            New-FakeNpm $fakeBin 'director-verify-misleading'|Out-Null
+            $directorReceiptPath=Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha '0000000000000000000000000000000000000000'
+            $directorReceipt=Get-AionRepairClosureReceipt -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $directorCandidate
+            Expect-True '65 director closure records candidate replacement policy' ($directorReceipt.directorAnchorPolicy -ceq 'CANDIDATE_REPLACEMENT')
+            Expect-True '66 director closure does not self-certify reviewed anchor' (-not($directorReceipt.PSObject.Properties.Name -contains 'reviewed') -and -not($directorReceipt.PSObject.Properties.Name -contains 'certified'))
+            Expect-True '67 director closure treats raw verify failure as audit only' ($directorReceipt.rawFullVerifyResult.Result -ceq 'NONZERO_AUDIT_ONLY')
+            try{Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $directorCandidate -BaselineSha $repairBaseline -ReviewedDirectorSha 'caller-cannot-redefine-anchor';Pass '68 director push validator recomputes and accepts valid candidate facts'}catch{Fail '68 director push validator recomputes and accepts valid candidate facts' $_.Exception.Message}
+            $receiptPath=Join-Path $repo ".aion-local\repair-closures\TEST-REPAIR\$directorCandidate.json"
+            $forged=Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+            $forged.candidateDirectorTree='forged'
+            [IO.File]::WriteAllText($receiptPath,($forged|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+            Expect-Throw '69 forged director receipt is rejected by recomputation' {Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $directorCandidate -BaselineSha $repairBaseline -ReviewedDirectorSha 'ignored'}
+
+            & git -C $repo checkout -q -B main $repairBaseline
+            & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+            New-RepairDirective $current 'AUTHORIZED' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+            [IO.File]::WriteAllText((Join-Path $repo 'packages\director\unauthorized.txt'),'bad',[Text.UTF8Encoding]::new($false))
+            & git -C $repo add packages/director/unauthorized.txt
+            & git -C $repo commit -m 'director unauthorized path'|Out-Null
+            New-FakeNpm $fakeBin 'fixed'|Out-Null
+            Expect-Throw '70 director closure rejects unauthorized Director path' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+
+            & git -C $repo checkout -q -B main $repairBaseline
+            & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+            New-RepairDirective $current 'AUTHORIZED' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+            [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\src\developer-bridge.ts'),'changed local assistant',[Text.UTF8Encoding]::new($false))
+            & git -C $repo add packages/local-assistant/src/developer-bridge.ts
+            & git -C $repo commit -m 'bad local assistant mutation'|Out-Null
+            Expect-Throw '71 director closure rejects local-assistant mutation' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+
+            & git -C $repo checkout -q -B main $repairBaseline
+            [IO.File]::WriteAllText((Join-Path $repo 'packages\director\sentinel.txt'),'changed baseline director',[Text.UTF8Encoding]::new($false))
+            & git -C $repo add packages/director/sentinel.txt
+            & git -C $repo commit -m 'governance baseline accidentally changed director'|Out-Null
+            $badDirectorBaseline=(& git -C $repo rev-parse HEAD).Trim()
+            & git -C $repo update-ref refs/remotes/origin/main $badDirectorBaseline
+            New-RepairDirective $current 'AUTHORIZED' $badDirectorBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+            [IO.Directory]::CreateDirectory((Join-Path $repo 'packages\director\src'))|Out-Null
+            [IO.File]::WriteAllText((Join-Path $repo 'packages\director\src\lease-store.ts'),'export const repaired = true;',[Text.UTF8Encoding]::new($false))
+            & git -C $repo add packages/director/src/lease-store.ts
+            & git -C $repo commit -m 'candidate after bad baseline'|Out-Null
+            Expect-Throw '72 director closure rejects baseline Director tree mismatch' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $badDirectorBaseline}
+
+            & git -C $repo checkout -q -B main $repairBaseline
+            & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+            New-RepairDirective $current 'AUTHORIZED' $repairBaseline 'AUTHORIZE DIRECTOR REPAIR' '' 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+            [IO.Directory]::CreateDirectory((Join-Path $repo 'packages\director\src'))|Out-Null
+            [IO.File]::WriteAllText((Join-Path $repo 'packages\director\src\lease-store.ts'),'export const repaired = true;',[Text.UTF8Encoding]::new($false))
+            & git -C $repo add packages/director/src/lease-store.ts
+            & git -C $repo commit -m 'candidate structured failure'|Out-Null
+            New-FakeNpm $fakeBin 'director-structured-other-fail'|Out-Null
+            Expect-Throw '73 structured component failure rejects despite raw known text' {Assert-AionBrokenBaselineRepairClosure -Root $repo -Directive (Get-AionDirective $current) -ReviewedDirectorSha $repairBaseline}
+            New-FakeNpm $fakeBin 'director-structured-known-wrong'|Out-Null
+            Expect-Throw '74 wrong known local-assistant signature rejects' {Assert-AionDirectorStructuredVerification -Root $repo}
+            New-FakeNpm $fakeBin 'director-structured-known-second'|Out-Null
+            Expect-Throw '75 second local-assistant architecture failure rejects' {Assert-AionDirectorStructuredVerification -Root $repo}
+        }
+        finally {
+            $script:AionReviewedDirectorSha=$oldReviewedDirectorSha
+        }
     }
     finally {
         $env:PATH=$oldPath

@@ -5,6 +5,8 @@ $script:AionAllowedDirectiveStatuses = @(
     'BLOCKED','FAILED','SUPERSEDED','CLOSED'
 )
 $script:AionCanonicalOrigin = 'https://github.com/danieljames-dev/personalasist1.git'
+$script:AionReviewedDirectorSha = '8fba7b6dadba35f479d4d335a35258b6149b70e1'
+$script:AionDirectorRecoveryGateId = 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
 
 function Resolve-AionGitRoot {
     param([string]$StartPath)
@@ -144,6 +146,126 @@ function Invoke-AionTrustedVector {
     }
 }
 
+function Invoke-AionTrustedVectorPass {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][object[]]$Vector,[Parameter(Mandatory=$true)][string]$Name)
+    $result=Invoke-AionTrustedVector -Root $Root -Vector $Vector
+    if($result.ExitCode -ne 0){throw "$Name failed with exit code $($result.ExitCode)"}
+    return [pscustomobject]@{ Name=$Name; ExitCode=$result.ExitCode; Result='PASS' }
+}
+
+function Get-AionDirectorStructuredVerifyPlan {
+    $workspaceTests=@(
+        '@aion/application-preparation',
+        '@aion/career-evidence',
+        '@aion/career-input',
+        '@aion/delegated-operator',
+        '@aion/director',
+        '@aion/identity',
+        '@aion/job-matching',
+        '@aion/job-posting',
+        '@aion/kernel',
+        '@aion/object',
+        '@aion/privacy-boundary'
+    )
+    $components=@([pscustomobject]@{
+        Name='typecheck:workspaces'
+        Vector=@('npm.cmd','run','typecheck','--workspaces','--if-present')
+    })
+    foreach($workspace in $workspaceTests){
+        $components+=[pscustomobject]@{
+            Name="test:$workspace"
+            Vector=@('npm.cmd','run','test','--workspace',$workspace)
+        }
+    }
+    $components+=@(
+        [pscustomobject]@{ Name='career:test'; Vector=@('npm.cmd','run','career:test') },
+        [pscustomobject]@{ Name='aion:server:test'; Vector=@('npm.cmd','run','aion:server:test') }
+    )
+    return [pscustomobject]@{
+        Components=@($components)
+        KnownFailure=[pscustomobject]@{
+            Id='LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY'
+            Name='local-assistant:test:architecture'
+            Vector=@('npm.cmd','run','test:architecture','--workspace','@aion/local-assistant')
+            ExpectedExitCode=1
+            ExpectedText=@(
+                'developer bridge is the single process boundary and is repository-scoped',
+                'process\.env'
+            )
+            ForbiddenText=@(
+                'not ok .* - (?!developer bridge is the single process boundary and is repository-scoped)'
+            )
+        }
+        RawFullVerify=[pscustomobject]@{
+            Name='raw:verify'
+            Vector=@('npm.cmd','run','verify')
+        }
+    }
+}
+
+function Invoke-AionLocalAssistantNonArchitectureVerification {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $results=@()
+    $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector @('npm.cmd','run','build','--workspace','@aion/local-assistant') -Name 'local-assistant:build'
+    $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector @('npm.cmd','run','build:test','--workspace','@aion/local-assistant') -Name 'local-assistant:build:test'
+    $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector @('npm.cmd','run','typecheck','--workspace','@aion/local-assistant') -Name 'local-assistant:typecheck'
+    $testRoots=@(
+        (Join-Path $Root 'packages\local-assistant\dist-test\test'),
+        (Join-Path $Root 'packages\local-assistant\test')
+    )
+    $files=@()
+    foreach($testRoot in $testRoots){
+        if(Test-Path -LiteralPath $testRoot -PathType Container){
+            $files+=@(Get-ChildItem -LiteralPath $testRoot -Recurse -File -Include '*.test.js','*.test.mjs' |
+                Where-Object { $_.Name -cne 'architecture-boundary.test.mjs' } |
+                ForEach-Object { [IO.Path]::GetRelativePath($Root,$_.FullName).Replace('\','/') })
+        }
+    }
+    if(@($files).Count -gt 0){
+        $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector (@('node','--test','--test-reporter=tap') + @($files)) -Name 'local-assistant:non-architecture-tests'
+    } else {
+        $results+=[pscustomobject]@{ Name='local-assistant:non-architecture-tests'; ExitCode=0; Result='PASS'; TestFileCount=0 }
+    }
+    return @($results)
+}
+
+function Invoke-AionDirectorStructuredVerification {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $plan=Get-AionDirectorStructuredVerifyPlan
+    $componentResults=@()
+    foreach($component in $plan.Components){
+        $componentResults+=Invoke-AionTrustedVectorPass -Root $Root -Vector $component.Vector -Name $component.Name
+    }
+    $componentResults+=Invoke-AionLocalAssistantNonArchitectureVerification -Root $Root
+    $known=Invoke-AionTrustedVector -Root $Root -Vector $plan.KnownFailure.Vector
+    if($known.ExitCode -ne $plan.KnownFailure.ExpectedExitCode){
+        throw "Known remaining failure exit mismatch: $($known.ExitCode)"
+    }
+    $knownText=$known.Output -join "`n"
+    foreach($pattern in $plan.KnownFailure.ExpectedText){
+        if($knownText -notmatch $pattern){throw 'Known remaining failure signature mismatch'}
+    }
+    foreach($pattern in $plan.KnownFailure.ForbiddenText){
+        if($knownText -match $pattern){throw 'Unexpected local-assistant architecture failure output'}
+    }
+    $raw=Invoke-AionTrustedVector -Root $Root -Vector $plan.RawFullVerify.Vector
+    return [pscustomobject]@{
+        Result='PASS'
+        Components=@($componentResults)
+        KnownRemainingFailures=@([pscustomobject]@{
+            Id=$plan.KnownFailure.Id
+            Name=$plan.KnownFailure.Name
+            ExitCode=$known.ExitCode
+            Result='EXPECTED_FAILURE'
+        })
+        RawFullVerify=[pscustomobject]@{
+            Name=$plan.RawFullVerify.Name
+            ExitCode=$raw.ExitCode
+            Result=if($raw.ExitCode -eq 0){'PASS'}else{'NONZERO_AUDIT_ONLY'}
+        }
+    }
+}
+
 function Get-AionRepairGate {
     param([string]$GateId)
     switch($GateId){
@@ -240,13 +362,43 @@ function Get-AionRepairClosureReceipt {
 function Assert-AionRepairClosureReceiptForPush {
     param([string]$Root,[string]$DirectiveId,[string]$ResultSha,[string]$BaselineSha,[string]$ReviewedDirectorSha)
     $receipt=Get-AionRepairClosureReceipt -Root $Root -DirectiveId $DirectiveId -ResultSha $ResultSha
+    $anchorPolicy=if($receipt.PSObject.Properties.Name -contains 'directorAnchorPolicy'){$receipt.directorAnchorPolicy}else{'TREE_EQUIVALENCE'}
+    if($anchorPolicy -cne 'CANDIDATE_REPLACEMENT'){
+        if($receipt.closureResult -cne 'PASS'){throw 'Repair closure receipt is not PASS'}
+        if($receipt.resultSha -cne $ResultSha){throw 'Repair closure receipt result SHA mismatch'}
+        if($receipt.baselineSha -cne $BaselineSha){throw 'Repair closure receipt baseline mismatch'}
+        if($receipt.reviewedDirectorSha -cne $ReviewedDirectorSha){throw 'Repair closure receipt reviewed Director SHA mismatch'}
+        if($receipt.fullVerifyResult -cne 'PASS'){throw 'Repair closure receipt lacks full verify PASS'}
+        if($receipt.changedPathScopeResult -cne 'PASS'){throw 'Repair closure receipt lacks changed-path PASS'}
+        if($receipt.directorTreeEquivalence -cne 'PASS'){throw 'Repair closure receipt lacks Director tree equivalence PASS'}
+        return
+    }
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
     if($receipt.closureResult -cne 'PASS'){throw 'Repair closure receipt is not PASS'}
-    if($receipt.resultSha -cne $ResultSha){throw 'Repair closure receipt result SHA mismatch'}
+    if($receipt.candidateSha -cne $ResultSha){throw 'Repair candidate receipt result SHA mismatch'}
     if($receipt.baselineSha -cne $BaselineSha){throw 'Repair closure receipt baseline mismatch'}
-    if($receipt.reviewedDirectorSha -cne $ReviewedDirectorSha){throw 'Repair closure receipt reviewed Director SHA mismatch'}
-    if($receipt.fullVerifyResult -cne 'PASS'){throw 'Repair closure receipt lacks full verify PASS'}
-    if($receipt.changedPathScopeResult -cne 'PASS'){throw 'Repair closure receipt lacks changed-path PASS'}
-    if($receipt.directorTreeEquivalence -cne 'PASS'){throw 'Repair closure receipt lacks Director tree equivalence PASS'}
+    if($receipt.priorReviewedDirectorSha -cne $script:AionReviewedDirectorSha){throw 'Repair candidate receipt prior Director SHA mismatch'}
+    $gate=Get-AionRepairGate $script:AionDirectorRecoveryGateId
+    $changed=@(& git -C $root diff --name-only "$BaselineSha..$ResultSha")
+    foreach($path in $changed){
+        if($gate.TrustedAllowedPaths -notcontains $path){throw "Unauthorized changed path at push: $path"}
+    }
+    $priorDirectorTree=(& git -C $root rev-parse "$($script:AionReviewedDirectorSha):packages/director").Trim()
+    $baselineDirectorTree=(& git -C $root rev-parse "${BaselineSha}:packages/director").Trim()
+    $candidateDirectorTree=(& git -C $root rev-parse "${ResultSha}:packages/director").Trim()
+    if($baselineDirectorTree -cne $priorDirectorTree){throw 'Baseline Director tree does not match trusted prior reviewed tree'}
+    if($receipt.baselineDirectorTree -cne $baselineDirectorTree){throw 'Receipt baseline Director tree mismatch'}
+    if($receipt.candidateDirectorTree -cne $candidateDirectorTree){throw 'Receipt candidate Director tree mismatch'}
+    $baselineLocalAssistantTree=(& git -C $root rev-parse "${BaselineSha}:packages/local-assistant").Trim()
+    $candidateLocalAssistantTree=(& git -C $root rev-parse "${ResultSha}:packages/local-assistant").Trim()
+    if($baselineLocalAssistantTree -cne $candidateLocalAssistantTree){throw 'Local-assistant tree changed at push'}
+    if($receipt.localAssistantBaselineTree -cne $baselineLocalAssistantTree){throw 'Receipt local-assistant baseline tree mismatch'}
+    if($receipt.localAssistantCandidateTree -cne $candidateLocalAssistantTree){throw 'Receipt local-assistant candidate tree mismatch'}
+    if($receipt.localAssistantTreeIntegrity -cne 'PASS'){throw 'Receipt lacks local-assistant tree integrity PASS'}
+    if($receipt.structuredVerificationResult -cne 'PASS'){throw 'Receipt lacks structured verification PASS'}
+    if($receipt.directorTreeDisposition -cne 'REPLACED_BY_AUTHORIZED_CANDIDATE'){throw 'Receipt lacks truthful Director candidate disposition'}
+    if($receipt.PSObject.Properties.Name -contains 'reviewed'){ if($receipt.reviewed){throw 'Candidate receipt must not mark reviewed'} }
+    if($receipt.PSObject.Properties.Name -contains 'certified'){ if($receipt.certified){throw 'Candidate receipt must not mark certified'} }
 }
 
 function Assert-AionBrokenBaselineRepairClosure {
@@ -258,6 +410,9 @@ function Assert-AionBrokenBaselineRepairClosure {
     $head=(& git -C $root rev-parse HEAD).Trim()
     if($head -ceq $baseline){throw 'Repair closure requires committed result SHA'}
     $gate=Get-AionRepairGate (Get-AionDirectiveFieldOrDefault $Directive 'Known-Failing-Gate')
+    if($gate.Id -ceq $script:AionDirectorRecoveryGateId){
+        return Assert-AionDirectorRecoveryRepairClosure -Root $root -Directive $Directive -Gate $gate
+    }
     $allowed=Get-AionRepairAllowedPaths $Directive $gate
     $status=@(& git -C $root status --porcelain=v1 -uall)
     if(@($status).Count -ne 0){throw 'Working tree must be clean at repair closure'}
@@ -305,6 +460,72 @@ function Assert-AionBrokenBaselineRepairClosure {
     $path=Write-AionRepairClosureReceipt -Root $root -Receipt $receipt
     Set-AionDirectiveStatus -Path $Directive.Path -From 'AUTHORIZED' -To 'CLOSED'
     Write-Host "Broken-baseline repair closure PASS: $baseline -> $head"
+    Write-Host "Receipt: $path"
+    return $path
+}
+
+function Assert-AionDirectorRecoveryRepairClosure {
+    param([string]$Root,[object]$Directive,[object]$Gate)
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $baseline=$Directive.Fields.'Repository-Baseline'
+    $head=(& git -C $root rev-parse HEAD).Trim()
+    if($head -ceq $baseline){throw 'Repair closure requires committed result SHA'}
+    $allowed=Get-AionRepairAllowedPaths $Directive $Gate
+    $status=@(& git -C $root status --porcelain=v1 -uall)
+    if(@($status).Count -ne 0){throw 'Working tree must be clean at repair closure'}
+    $changed=@(& git -C $root diff --name-only "$baseline..$head")
+    foreach($path in $changed){
+        if($allowed -notcontains $path){throw "Unauthorized changed path: $path"}
+    }
+    foreach($path in $Gate.ProtectedPaths){
+        if(@(& git -C $root diff --name-only "$baseline..$head" -- $path).Count -ne 0){
+            throw "Protected policy test changed: $path"
+        }
+    }
+    $priorDirectorTree=(& git -C $root rev-parse "$($script:AionReviewedDirectorSha):packages/director").Trim()
+    $baselineDirectorTree=(& git -C $root rev-parse "${baseline}:packages/director").Trim()
+    if($baselineDirectorTree -cne $priorDirectorTree){throw 'Baseline Director tree does not match trusted prior reviewed tree'}
+    $candidateDirectorTree=(& git -C $root rev-parse "${head}:packages/director").Trim()
+    $baselineLocalAssistantTree=(& git -C $root rev-parse "${baseline}:packages/local-assistant").Trim()
+    $candidateLocalAssistantTree=(& git -C $root rev-parse "${head}:packages/local-assistant").Trim()
+    if($baselineLocalAssistantTree -cne $candidateLocalAssistantTree){throw 'Local-assistant tree changed'}
+    $gateResult=Invoke-AionTrustedVector -Root $root -Vector $Gate.Command
+    if($gateResult.ExitCode -ne 0){throw 'Targeted Director repair gate failed'}
+    $typecheckResult=Invoke-AionTrustedVector -Root $root -Vector $Gate.Typecheck
+    if($typecheckResult.ExitCode -ne 0){throw 'Targeted Director typecheck failed'}
+    $structured=Invoke-AionDirectorStructuredVerification -Root $root
+    $receipt=[pscustomobject]@{
+        schemaVersion='aion.directorRecoveryCandidateClosure.v1'
+        directiveId=$Directive.Fields.'Directive-ID'
+        authorizationClass='BROKEN_BASELINE_REPAIR'
+        gateId=$Gate.Id
+        baselineSha=$baseline
+        candidateSha=$head
+        resultSha=$head
+        priorReviewedDirectorSha=$script:AionReviewedDirectorSha
+        baselineDirectorTree=$baselineDirectorTree
+        candidateDirectorTree=$candidateDirectorTree
+        directorAnchorPolicy='CANDIDATE_REPLACEMENT'
+        authorizedRepairPaths=@($allowed)
+        actualChangedPaths=@($changed)
+        localAssistantBaselineTree=$baselineLocalAssistantTree
+        localAssistantCandidateTree=$candidateLocalAssistantTree
+        localAssistantTreeIntegrity='PASS'
+        structuredVerificationResult=$structured.Result
+        structuredVerificationResults=$structured.Components
+        knownRemainingFailureIds=@($structured.KnownRemainingFailures | ForEach-Object { $_.Id })
+        rawFullVerifyResult=$structured.RawFullVerify
+        targetedRepairGateResult='PASS'
+        targetedTypecheckResult='PASS'
+        changedPathScopeResult='PASS'
+        directorTreeDisposition='REPLACED_BY_AUTHORIZED_CANDIDATE'
+        timestampUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        closureResult='PASS'
+    }
+    $path=Write-AionRepairClosureReceipt -Root $root -Receipt $receipt
+    Set-AionDirectiveStatus -Path $Directive.Path -From 'AUTHORIZED' -To 'CLOSED'
+    Write-Host "Director recovery candidate closure PASS: $baseline -> $head"
+    Write-Host "DIRECTOR_REPAIR_CANDIDATE_SHA: $head"
     Write-Host "Receipt: $path"
     return $path
 }
