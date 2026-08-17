@@ -7,7 +7,16 @@ $script:AionAllowedDirectiveStatuses = @(
 $script:AionCanonicalOrigin = 'https://github.com/danieljames-dev/personalasist1.git'
 $script:AionReviewedDirectorSha = '8fba7b6dadba35f479d4d335a35258b6149b70e1'
 $script:AionDirectorRecoveryGateId = 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+$script:AionDirectorPromotionGateId = 'DIRECTOR_D2_REVIEWED_PROMOTION_AND_PUSH'
 $script:AionDirectorRecoveryKnownBrokenBaselineSha = '78425d3923ff06bbc6193165c35232844287efa9'
+$script:AionDirectorPromotionExpectedCandidateSha = '6a4cb1d058fb6375798fa27e7629fd5a2d889ba1'
+$script:AionDirectorPromotionExpectedCandidateBaselineSha = '3938e0b6b7b5452830b47b3ae3ba9d95ed6b4746'
+$script:AionDirectorPromotionClosedDirectiveId = 'D2-DIRECTOR-RECOVERY-LEASE-HYGIENE-CARRYFORWARD-20260817T044618Z'
+$script:AionDirectorPromotionAllowedGovernancePaths = @(
+    'scripts/control-plane-common.ps1',
+    'scripts/promote-reviewed-director.ps1',
+    'scripts/test-control-plane.ps1'
+)
 $script:AionDirectorRecoverySourceIdentityPaths = @(
     'packages/director/src/lease-store.ts',
     'apps/aion/developer-agent.mjs',
@@ -193,6 +202,35 @@ function Get-AionGitObjectId {
     $object=(& git -C $root rev-parse "$Revision`:$Path" 2>$null)
     if($LASTEXITCODE -ne 0 -or -not $object){throw "Git object not found: $Revision`:$Path"}
     return $object.Trim()
+}
+
+function Get-AionFileSha256 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){throw "File missing for SHA-256: $Path"}
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Test-AionGitCommitExists {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Revision)
+    & git -C $Root cat-file -e "$Revision`^{commit}" 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Get-AionGitSingleParent {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Revision)
+    $parents=((& git -C $Root rev-list --parents -n 1 $Revision).Trim() -split '\s+')
+    if(@($parents).Count -ne 2){throw "Expected exactly one parent for $Revision"}
+    return $parents[1]
+}
+
+function Assert-AionExactPathSet {
+    param(
+        [Parameter(Mandatory=$true)][string[]]$Actual,
+        [Parameter(Mandatory=$true)][string[]]$Expected,
+        [Parameter(Mandatory=$true)][string]$Description
+    )
+    $diff=@(Compare-AionCollections -ReferenceObject @($Expected | Sort-Object) -DifferenceObject @($Actual | Sort-Object))
+    if(@($diff).Count -ne 0){throw "$Description path set mismatch"}
 }
 
 function Assert-AionDirectorRecoveryBaselineIdentity {
@@ -391,6 +429,20 @@ function Get-AionRepairGate {
                 )
             }
         }
+        'DIRECTOR_D2_REVIEWED_PROMOTION_AND_PUSH' {
+            return [pscustomobject]@{
+                Id='DIRECTOR_D2_REVIEWED_PROMOTION_AND_PUSH'
+                Command=@('npm.cmd','run','test:architecture','--workspace','@aion/local-assistant')
+                Typecheck=@('npm.cmd','run','typecheck','--workspace','@aion/local-assistant')
+                ExpectedExitCode=1
+                ExpectedText=@(
+                    'developer bridge is the single process boundary and is repository-scoped',
+                    'process\.env'
+                )
+                TrustedAllowedPaths=@()
+                ProtectedPaths=@()
+            }
+        }
         default { throw "Unknown broken-baseline repair gate: $GateId" }
     }
 }
@@ -408,12 +460,16 @@ function Get-AionRepairAllowedPaths {
 
 function Assert-AionBrokenBaselineRepairGate {
     param([string]$Root,[object]$Directive)
-    Assert-AionRepositoryIdentityGate -Root $Root -ExpectedHead $Directive.Fields.'Repository-Baseline'
     if((Get-AionDirectiveFieldOrDefault $Directive 'Authorization-Class') -cne 'BROKEN_BASELINE_REPAIR'){
         throw 'Not a broken-baseline repair directive'
     }
     $gate=Get-AionRepairGate (Get-AionDirectiveFieldOrDefault $Directive 'Known-Failing-Gate')
     [void](Get-AionRepairAllowedPaths $Directive $gate)
+    if($gate.Id -ceq $script:AionDirectorPromotionGateId){
+        [void](Assert-AionReviewedDirectorPromotionPreflight -Root $Root -Directive $Directive)
+        return
+    }
+    Assert-AionRepositoryIdentityGate -Root $Root -ExpectedHead $Directive.Fields.'Repository-Baseline'
     if($gate.Id -ceq $script:AionDirectorRecoveryGateId){
         Assert-AionDirectorRecoveryBaselineIdentity -Root $Root -CurrentBaseline $Directive.Fields.'Repository-Baseline'
     }
@@ -481,6 +537,164 @@ function Assert-AionRepairClosureReceiptForPush {
     if($receipt.directorTreeDisposition -cne 'REPLACED_BY_AUTHORIZED_CANDIDATE'){throw 'Receipt lacks truthful Director candidate disposition'}
     if($receipt.PSObject.Properties.Name -contains 'reviewed'){ if($receipt.reviewed){throw 'Candidate receipt must not mark reviewed'} }
     if($receipt.PSObject.Properties.Name -contains 'certified'){ if($receipt.certified){throw 'Candidate receipt must not mark certified'} }
+}
+
+function Find-AionClosedDirectiveById {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$DirectiveId)
+    $paths=@()
+    $current=Join-Path $Root '.aion-local\directives\CURRENT.md'
+    if(Test-Path -LiteralPath $current -PathType Leaf){$paths+=$current}
+    $archive=Join-Path $Root '.aion-local\directives\archive'
+    if(Test-Path -LiteralPath $archive -PathType Container){
+        $paths+=@(Get-ChildItem -LiteralPath $archive -Filter '*.md' -File | ForEach-Object { $_.FullName })
+    }
+    foreach($path in $paths){
+        try {
+            $directive=Get-AionDirective -Path $path
+            if($directive.Fields.'Directive-ID' -ceq $DirectiveId -and $directive.Fields.Status -ceq 'CLOSED'){
+                return $directive
+            }
+        } catch {}
+    }
+    throw "Closed repair directive not found: $DirectiveId"
+}
+
+function Get-AionDirectorPromotionReview {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$CandidateSha,[object]$Directive)
+    $relative=Get-AionDirectiveFieldOrDefault $Directive 'Review-Artifact-Path' ".aion-local/reviews/director-candidate-$CandidateSha.json"
+    if($relative -match '[\\]|\.\.'){throw "Invalid review artifact path: $relative"}
+    $path=Join-Path $Root ($relative.Replace('/','\'))
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw "Review artifact missing: $path"}
+    $expectedHash=Get-AionDirectiveFieldOrDefault $Directive 'Review-Artifact-Sha256' ''
+    if(-not[string]::IsNullOrWhiteSpace($expectedHash)){
+        $actualHash=Get-AionFileSha256 -Path $path
+        if($actualHash -cne $expectedHash.ToLowerInvariant()){throw 'Review artifact SHA-256 mismatch'}
+    }
+    $review=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    if($review.candidateSha -cne $CandidateSha){throw 'Review artifact candidate SHA mismatch'}
+    if($review.reviewFamily -cne 'Grok'){throw 'Review artifact family mismatch'}
+    if($review.verdict -cne 'PASS'){throw 'Review artifact verdict is not PASS'}
+    if([int]$review.concreteBlockingDefects -ne 0){throw 'Review artifact reports blocking defects'}
+    if($review.focusedTests -cne 'PASS'){throw 'Review artifact focused tests are not PASS'}
+    if($review.falseReleaseCounterexample -cne 'NO'){throw 'Review artifact false-release result mismatch'}
+    if($review.falseRetentionCounterexample -cne 'NO'){throw 'Review artifact false-retention result mismatch'}
+    if($review.oneWriterSafety -cne 'PASS'){throw 'Review artifact one-writer safety mismatch'}
+    if($review.foreignHolderSafety -cne 'PASS'){throw 'Review artifact foreign-holder safety mismatch'}
+    if($review.filesChanged -cne 'NONE'){throw 'Review artifact must report no file changes'}
+    return [pscustomobject]@{ Path=$path; Review=$review }
+}
+
+function Assert-AionReviewedDirectorPromotionPreflight {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][object]$Directive)
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $head=(& git -C $root rev-parse HEAD).Trim()
+    if($head -cne $Directive.Fields.'Repository-Baseline'){throw 'Promotion directive baseline must equal current G7 HEAD'}
+    $candidate=Get-AionGitSingleParent -Root $root -Revision $head
+    if($candidate -cne $script:AionDirectorPromotionExpectedCandidateSha){throw 'Promotion candidate is not the exact reviewed candidate'}
+    $candidateBaseline=Get-AionGitSingleParent -Root $root -Revision $candidate
+    if($candidateBaseline -cne $script:AionDirectorPromotionExpectedCandidateBaselineSha){throw 'Promotion candidate parent is not the expected origin baseline'}
+    $originMain=(& git -C $root rev-parse origin/main).Trim()
+    if($originMain -cne $candidateBaseline){throw 'origin/main moved before promotion'}
+    $branch=(& git -C $root branch --show-current).Trim()
+    if($branch -cne 'main'){throw "Expected branch main; observed $branch"}
+    $status=@(& git -C $root status --porcelain=v1 -uall)
+    if(@($status).Count -ne 0){throw 'Working tree must be clean for promotion'}
+    $candidateChanged=@(& git -C $root diff --name-only "$candidateBaseline..$candidate")
+    $candidateAllowed=(Get-AionRepairGate $script:AionDirectorRecoveryGateId).TrustedAllowedPaths
+    Assert-AionExactPathSet -Actual @($candidateChanged) -Expected @($candidateAllowed) -Description 'Candidate'
+    $g7Changed=@(& git -C $root diff --name-only "$candidate..$head")
+    foreach($path in $g7Changed){
+        if($script:AionDirectorPromotionAllowedGovernancePaths -notcontains $path){throw "G7 contains non-governance change: $path"}
+    }
+    if(@($g7Changed).Count -eq 0){throw 'G7 governance diff is empty'}
+    [void](Find-AionClosedDirectiveById -Root $root -DirectiveId $script:AionDirectorPromotionClosedDirectiveId)
+    $receipt=Get-AionRepairClosureReceipt -Root $root -DirectiveId $script:AionDirectorPromotionClosedDirectiveId -ResultSha $candidate
+    if($receipt.closureResult -cne 'PASS'){throw 'Director candidate closure is not PASS'}
+    if($receipt.candidateSha -cne $candidate){throw 'Director closure receipt candidate mismatch'}
+    if($receipt.baselineSha -cne $candidateBaseline){throw 'Director closure receipt baseline mismatch'}
+    if($receipt.directorAnchorPolicy -cne 'CANDIDATE_REPLACEMENT'){throw 'Director closure receipt is not candidate replacement'}
+    $baselineDirectorTree=Get-AionGitObjectId -Root $root -Revision $candidateBaseline -Path 'packages/director'
+    $candidateDirectorTree=Get-AionGitObjectId -Root $root -Revision $candidate -Path 'packages/director'
+    if($receipt.baselineDirectorTree -cne $baselineDirectorTree){throw 'Recomputed baseline Director tree mismatches receipt'}
+    if($receipt.candidateDirectorTree -cne $candidateDirectorTree){throw 'Recomputed candidate Director tree mismatches receipt'}
+    $baselineLocalAssistantTree=Get-AionGitObjectId -Root $root -Revision $candidateBaseline -Path 'packages/local-assistant'
+    $candidateLocalAssistantTree=Get-AionGitObjectId -Root $root -Revision $candidate -Path 'packages/local-assistant'
+    if($baselineLocalAssistantTree -cne $candidateLocalAssistantTree){throw 'Local-assistant tree changed in candidate'}
+    if($receipt.localAssistantBaselineTree -cne $baselineLocalAssistantTree){throw 'Receipt baseline local-assistant tree mismatch'}
+    if($receipt.localAssistantCandidateTree -cne $candidateLocalAssistantTree){throw 'Receipt candidate local-assistant tree mismatch'}
+    if($receipt.structuredVerificationResult -cne 'PASS'){throw 'Closure receipt lacks structured verification PASS'}
+    $knownIds=@($receipt.knownRemainingFailureIds)
+    if(@($knownIds).Count -ne 1 -or $knownIds[0] -cne 'LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY'){
+        throw 'Closure receipt known remaining failure mismatch'
+    }
+    [void](Get-AionDirectorPromotionReview -Root $root -CandidateSha $candidate -Directive $Directive)
+    $structured=Invoke-AionDirectorStructuredVerification -Root $root
+    if($structured.Result -cne 'PASS'){throw 'Structured promotion preflight failed'}
+    return [pscustomobject]@{
+        Result='PASS'
+        Head=$head
+        CandidateSha=$candidate
+        CandidateBaselineSha=$candidateBaseline
+        OriginMain=$originMain
+        CandidateChangedPaths=@($candidateChanged)
+        GovernanceChangedPaths=@($g7Changed)
+        StructuredVerification=$structured
+    }
+}
+
+function Invoke-AionReviewedDirectorPromotion {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][object]$Directive,
+        [switch]$DryRun
+    )
+    if($Directive.Fields.Status -cne 'AUTHORIZED'){throw 'Promotion requires AUTHORIZED directive'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Authorization-Class') -cne 'BROKEN_BASELINE_REPAIR'){throw 'Promotion directive must use BROKEN_BASELINE_REPAIR'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Known-Failing-Gate') -cne $script:AionDirectorPromotionGateId){throw 'Promotion directive gate mismatch'}
+    if($PSBoundParameters.ContainsKey('SkipRepositoryChecks')){throw 'SkipRepositoryChecks is not supported for promotion'}
+    $preflight=Assert-AionReviewedDirectorPromotionPreflight -Root $Root -Directive $Directive
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $remoteBefore=(& git -C $root rev-parse origin/main).Trim()
+    if($remoteBefore -cne $preflight.CandidateBaselineSha){throw 'origin/main moved before controlled push'}
+    $pushResult='DRY_RUN'
+    if(-not $DryRun){
+        & git -C $root push origin main
+        if($LASTEXITCODE -ne 0){throw "controlled promotion push failed with exit code $LASTEXITCODE"}
+        & git -C $root fetch origin main
+        if($LASTEXITCODE -ne 0){throw "post-push fetch failed with exit code $LASTEXITCODE"}
+        $remoteAfter=(& git -C $root rev-parse origin/main).Trim()
+        if($remoteAfter -cne $preflight.Head){throw 'origin/main did not advance to G7'}
+        $pushResult='PASS'
+    } else {
+        $remoteAfter=$remoteBefore
+    }
+    $receipt=[pscustomobject]@{
+        schemaVersion='aion.directorReviewedPromotion.v1'
+        directiveId=$Directive.Fields.'Directive-ID'
+        g7Sha=$preflight.Head
+        candidateSha=$preflight.CandidateSha
+        candidateBaselineSha=$preflight.CandidateBaselineSha
+        closedRepairDirectiveId=$script:AionDirectorPromotionClosedDirectiveId
+        closureResult='PASS'
+        reviewShaBinding='EXACT'
+        reviewVerdict='PASS'
+        concreteBlockingDefects=0
+        candidateChangedPaths=@($preflight.CandidateChangedPaths)
+        governanceChangedPaths=@($preflight.GovernanceChangedPaths)
+        localAssistantTreeIntegrity='PASS'
+        promotionResult='PASS'
+        shaAPrime=$preflight.CandidateSha
+        remoteBeforePush=$remoteBefore
+        remoteAfterPush=$remoteAfter
+        pushResult=$pushResult
+        d2Certification='NOT_GRANTED'
+        timestampUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $dir=Join-Path $root ".aion-local\promotions\$($Directive.Fields.'Directive-ID')"
+    [IO.Directory]::CreateDirectory($dir)|Out-Null
+    $path=Join-Path $dir "$($preflight.Head).json"
+    [IO.File]::WriteAllText($path,($receipt|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+    return [pscustomobject]@{ ReceiptPath=$path; Receipt=$receipt }
 }
 
 function Assert-AionBrokenBaselineRepairClosure {

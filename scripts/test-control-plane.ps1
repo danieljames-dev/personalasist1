@@ -136,6 +136,56 @@ No next phase.
     [IO.File]::WriteAllText($Path,$body,[Text.UTF8Encoding]::new($false))
 }
 
+function New-PromotionDirective(
+    [string]$Path,
+    [string]$Status,
+    [string]$Baseline,
+    [string]$ReviewHash,
+    [string]$Phrase='AUTHORIZE SYNTHETIC PROMOTION'
+){
+    $body=@"
+# AION Current Directive
+Directive-ID: TEST-PROMOTION
+Status: $Status
+Title: Synthetic Director Promotion
+Prepared-Date: 2026-08-17T00:00:00Z
+Prepared-By: CTO
+Repository-Baseline: $Baseline
+Required-Authorization-Phrase: $Phrase
+Authorization-Class: BROKEN_BASELINE_REPAIR
+Known-Failing-Gate: DIRECTOR_D2_REVIEWED_PROMOTION_AND_PUSH
+Review-Artifact-Path: .aion-local/reviews/director-candidate-$($script:AionDirectorPromotionExpectedCandidateSha).json
+Review-Artifact-Sha256: $ReviewHash
+
+## Goal
+Promote an exact reviewed Director candidate.
+## Authorized Scope
+- exact parent candidate promotion only
+## Prohibited Scope
+- certification
+## Required Inputs
+- synthetic
+## Baseline Checks
+- synthetic
+## Required Work
+- none
+## Verification
+- promotion preflight
+## Commit and Push Authorization
+Controlled promotion push only.
+## Backup Authorization
+None.
+## Stop Conditions
+Stop on failure.
+## Required Handoff
+Synthetic.
+## Next-Phase Prohibition
+No certification.
+"@
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Path))|Out-Null
+    [IO.File]::WriteAllText($Path,$body,[Text.UTF8Encoding]::new($false))
+}
+
 function New-FakeNpm([string]$Dir,[string]$Mode){
     [IO.Directory]::CreateDirectory($Dir)|Out-Null
     $scriptPath=Join-Path $Dir 'npm.cmd'
@@ -256,6 +306,121 @@ function Add-RepairBaselineFiles([string]$Root){
     & git -C $Root add apps packages test
     & git -C $Root commit -m 'add repair baseline files'|Out-Null
     return (& git -C $Root rev-parse HEAD).Trim()
+}
+
+function Write-ClosedRepairDirectiveFixture([string]$Root,[string]$DirectiveId,[string]$Baseline){
+    $archive=Join-Path $Root '.aion-local\directives\archive'
+    [IO.Directory]::CreateDirectory($archive)|Out-Null
+    $path=Join-Path $archive "$DirectiveId-CLOSED.md"
+    $body=@"
+# AION Current Directive
+Directive-ID: $DirectiveId
+Status: CLOSED
+Title: Synthetic Closed Director Repair
+Prepared-Date: 2026-08-17T00:00:00Z
+Prepared-By: CTO
+Repository-Baseline: $Baseline
+Required-Authorization-Phrase: AUTHORIZE CLOSED
+
+## Goal
+Closed synthetic repair.
+## Authorized Scope
+- synthetic
+## Prohibited Scope
+- synthetic
+## Required Inputs
+- synthetic
+## Baseline Checks
+- synthetic
+## Required Work
+- synthetic
+## Verification
+- synthetic
+## Commit and Push Authorization
+None.
+## Backup Authorization
+None.
+## Stop Conditions
+Stop.
+## Required Handoff
+Synthetic.
+## Next-Phase Prohibition
+No certification.
+"@
+    [IO.File]::WriteAllText($path,$body,[Text.UTF8Encoding]::new($false))
+}
+
+function Write-DirectorClosureReceiptFixture(
+    [string]$Root,
+    [string]$DirectiveId,
+    [string]$Baseline,
+    [string]$Candidate,
+    [string]$ClosureResult='PASS'
+){
+    $dir=Join-Path $Root ".aion-local\repair-closures\$DirectiveId"
+    [IO.Directory]::CreateDirectory($dir)|Out-Null
+    $baselineDirectorTree=(& git -C $Root rev-parse "${Baseline}:packages/director").Trim()
+    $candidateDirectorTree=(& git -C $Root rev-parse "${Candidate}:packages/director").Trim()
+    $baselineLocalAssistantTree=(& git -C $Root rev-parse "${Baseline}:packages/local-assistant").Trim()
+    $candidateLocalAssistantTree=(& git -C $Root rev-parse "${Candidate}:packages/local-assistant").Trim()
+    $changed=@(& git -C $Root diff --name-only "$Baseline..$Candidate")
+    $receipt=[pscustomobject]@{
+        schemaVersion='aion.directorRecoveryCandidateClosure.v1'
+        directiveId=$DirectiveId
+        authorizationClass='BROKEN_BASELINE_REPAIR'
+        gateId='DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE'
+        baselineSha=$Baseline
+        candidateSha=$Candidate
+        resultSha=$Candidate
+        priorReviewedDirectorSha=$Baseline
+        baselineDirectorTree=$baselineDirectorTree
+        candidateDirectorTree=$candidateDirectorTree
+        directorAnchorPolicy='CANDIDATE_REPLACEMENT'
+        authorizedRepairPaths=@((Get-AionRepairGate 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE').TrustedAllowedPaths)
+        actualChangedPaths=@($changed)
+        localAssistantBaselineTree=$baselineLocalAssistantTree
+        localAssistantCandidateTree=$candidateLocalAssistantTree
+        localAssistantTreeIntegrity='PASS'
+        structuredVerificationResult='PASS'
+        structuredVerificationResults=@([pscustomobject]@{Name='test:@aion/director';ExitCode=0;Result='PASS'})
+        knownRemainingFailureIds=@('LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY')
+        rawFullVerifyResult=[pscustomobject]@{Name='raw:verify';ExitCode=1;Result='NONZERO_AUDIT_ONLY'}
+        targetedRepairGateResult='PASS'
+        targetedTypecheckResult='PASS'
+        changedPathScopeResult='PASS'
+        directorTreeDisposition='REPLACED_BY_AUTHORIZED_CANDIDATE'
+        timestampUtc='2026-08-17T00:00:00Z'
+        closureResult=$ClosureResult
+    }
+    [IO.File]::WriteAllText((Join-Path $dir "$Candidate.json"),($receipt|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+}
+
+function Write-ReviewArtifactFixture(
+    [string]$Root,
+    [string]$Candidate,
+    [string]$Verdict='PASS',
+    [int]$Blocking=0,
+    [string]$Focused='PASS'
+){
+    $dir=Join-Path $Root '.aion-local\reviews'
+    [IO.Directory]::CreateDirectory($dir)|Out-Null
+    $path=Join-Path $dir "director-candidate-$Candidate.json"
+    $review=[pscustomobject]@{
+        candidateSha=$Candidate
+        reviewFamily='Grok'
+        verdict=$Verdict
+        concreteBlockingDefects=$Blocking
+        focusedTests=$Focused
+        falseReleaseCounterexample='NO'
+        falseRetentionCounterexample='NO'
+        cleanupErrorHandlingSafe='YES'
+        oneWriterSafety='PASS'
+        foreignHolderSafety='PASS'
+        filesChanged='NONE'
+        timestampUtc='2026-08-17T00:00:00Z'
+    }
+    [IO.File]::WriteAllText($path,($review|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+    return (Get-AionFileSha256 -Path $path)
 }
 
 try {
@@ -605,9 +770,118 @@ try {
             Expect-Throw '74 wrong known local-assistant signature rejects' {Assert-AionDirectorStructuredVerification -Root $repo}
             New-FakeNpm $fakeBin 'director-structured-known-second'|Out-Null
             Expect-Throw '75 second local-assistant architecture failure rejects' {Assert-AionDirectorStructuredVerification -Root $repo}
+
+            function Reset-PromotionFixture([string]$Mode='valid'){
+                New-FakeNpm $fakeBin 'director-verify-misleading'|Out-Null
+                if(Test-Path -LiteralPath $local){Remove-Item -LiteralPath $local -Recurse -Force}
+                & git -C $repo checkout -q -B main $repairBaseline
+                & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+                $promotionBaseline=$repairBaseline
+                if($Mode -ceq 'candidate-rebased'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'README.md'),'intermediate',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add README.md
+                    & git -C $repo commit -m 'synthetic intermediate'|Out-Null
+                    $promotionBaseline=(& git -C $repo rev-parse HEAD).Trim()
+                }
+                $candidatePaths=@((Get-AionRepairGate 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE').TrustedAllowedPaths)
+                foreach($path in $candidatePaths){
+                    [IO.File]::WriteAllText((Join-Path $repo ($path.Replace('/','\'))),"candidate $path",[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add $path
+                }
+                if($Mode -ceq 'candidate-unauthorized-path'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'package.json'),'{"bad":true}',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add package.json
+                }
+                if($Mode -ceq 'candidate-local-assistant-change'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\src\developer-bridge.ts'),'changed local assistant',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add packages/local-assistant/src/developer-bridge.ts
+                }
+                & git -C $repo commit -m 'synthetic director candidate'|Out-Null
+                $candidate=(& git -C $repo rev-parse HEAD).Trim()
+                $script:AionDirectorPromotionExpectedCandidateSha=$candidate
+                $script:AionDirectorPromotionExpectedCandidateBaselineSha=$repairBaseline
+                $script:AionDirectorPromotionClosedDirectiveId='TEST-REPAIR'
+                if($Mode -ne 'closure-missing'){
+                    $closureResult=if($Mode -ceq 'closure-failing'){'FAIL'}else{'PASS'}
+                    Write-DirectorClosureReceiptFixture $repo 'TEST-REPAIR' $repairBaseline $candidate $closureResult
+                }
+                if($Mode -ne 'directive-not-closed'){
+                    Write-ClosedRepairDirectiveFixture $repo 'TEST-REPAIR' $repairBaseline
+                }
+                $reviewVerdict=if($Mode -ceq 'review-fail'){'FAIL'}else{'PASS'}
+                $reviewBlocking=if($Mode -ceq 'review-blocking') {1} else {0}
+                $reviewHash=Write-ReviewArtifactFixture $repo $candidate $reviewVerdict $reviewBlocking
+                if($Mode -ceq 'g7-parent-not-candidate'){
+                    & git -C $repo checkout -q -B main $repairBaseline
+                    $candidate=$script:AionDirectorPromotionExpectedCandidateSha
+                }
+                [IO.Directory]::CreateDirectory((Join-Path $repo 'scripts'))|Out-Null
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\control-plane-common.ps1'),'governance common',[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\promote-reviewed-director.ps1'),'governance promote',[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\test-control-plane.ps1'),'governance tests',[Text.UTF8Encoding]::new($false))
+                & git -C $repo add scripts
+                if($Mode -ceq 'g7-non-governance-change'){
+                    [IO.Directory]::CreateDirectory((Join-Path $repo 'docs'))|Out-Null
+                    [IO.File]::WriteAllText((Join-Path $repo 'docs\bad.md'),'bad',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add docs/bad.md
+                }
+                & git -C $repo commit -m 'synthetic g7 governance'|Out-Null
+                $g7=(& git -C $repo rev-parse HEAD).Trim()
+                if($Mode -ceq 'origin-moved'){
+                    & git -C $repo update-ref refs/remotes/origin/main $candidate
+                }
+                $hashForDirective=if($Mode -ceq 'review-sha-mismatch'){'0000000000000000000000000000000000000000000000000000000000000000'}else{$reviewHash}
+                $status=if($Mode -ceq 'directive-not-authorized'){'PENDING_OWNER_AUTHORIZATION'}else{'AUTHORIZED'}
+                New-PromotionDirective $current $status $g7 $hashForDirective
+                return [pscustomobject]@{Candidate=$candidate;G7=$g7;Baseline=$repairBaseline}
+            }
+
+            $validPromotion=Reset-PromotionFixture
+            try{Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null;Pass '76 promotion preflight accepts exact topology'}catch{Fail '76 promotion preflight accepts exact topology' $_.Exception.Message}
+            try{Invoke-AionReviewedDirectorPromotion -Root $repo -Directive (Get-AionDirective $current) -DryRun|Out-Null;Pass '77 promotion dry-run writes receipt without push'}catch{Fail '77 promotion dry-run writes receipt without push' $_.Exception.Message}
+            Expect-True '78 promotion script does not accept caller candidate SHA' (-not((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'promote-reviewed-director.ps1') -Raw) -match 'CandidateSha'))
+
+            $case=Reset-PromotionFixture 'candidate-rebased'
+            Expect-Throw '79 promotion rejects candidate amended or rebased' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'g7-parent-not-candidate'
+            Expect-Throw '80 promotion rejects G7 parent not exact candidate' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'origin-moved'
+            Expect-Throw '81 promotion rejects moved origin main' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'candidate-unauthorized-path'
+            Expect-Throw '82 promotion rejects candidate seventh path' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'g7-non-governance-change'
+            Expect-Throw '83 promotion rejects non-governance G7 change' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'directive-not-closed'
+            Expect-Throw '84 promotion rejects missing CLOSED repair directive' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'closure-missing'
+            Expect-Throw '85 promotion rejects missing closure receipt' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'closure-failing'
+            Expect-Throw '86 promotion rejects failing closure receipt' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture
+            $oldExpectedPromotionCandidate=$script:AionDirectorPromotionExpectedCandidateSha
+            $script:AionDirectorPromotionExpectedCandidateSha='0000000000000000000000000000000000000000'
+            Expect-Throw '87 promotion rejects candidate SHA mismatch' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $script:AionDirectorPromotionExpectedCandidateSha=$oldExpectedPromotionCandidate
+            $case=Reset-PromotionFixture 'review-sha-mismatch'
+            Expect-Throw '88 promotion rejects review SHA mismatch' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'review-fail'
+            Expect-Throw '89 promotion rejects review FAIL verdict' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'review-blocking'
+            Expect-Throw '90 promotion rejects blocking defects' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'candidate-local-assistant-change'
+            Expect-Throw '91 promotion rejects local-assistant candidate tree change' {Assert-AionReviewedDirectorPromotionPreflight -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            $case=Reset-PromotionFixture 'directive-not-authorized'
+            Expect-Throw '92 promotion action rejects non-AUTHORIZED directive' {Invoke-AionReviewedDirectorPromotion -Root $repo -Directive (Get-AionDirective $current) -DryRun|Out-Null}
+            Expect-Throw '93 promotion script rejects arbitrary SkipRepositoryChecks parameter' {& (Join-Path $PSScriptRoot 'promote-reviewed-director.ps1') -RepositoryRoot $repo -DirectivePath $current -SkipRepositoryChecks}
+            $case=Reset-PromotionFixture
+            $promotionResult=Invoke-AionReviewedDirectorPromotion -Root $repo -Directive (Get-AionDirective $current) -DryRun
+            Expect-True '94 promotion receipt does not certify D2' ($promotionResult.Receipt.d2Certification -ceq 'NOT_GRANTED')
         }
         finally {
             $script:AionReviewedDirectorSha=$oldReviewedDirectorSha
+            $script:AionDirectorPromotionExpectedCandidateSha='6a4cb1d058fb6375798fa27e7629fd5a2d889ba1'
+            $script:AionDirectorPromotionExpectedCandidateBaselineSha='3938e0b6b7b5452830b47b3ae3ba9d95ed6b4746'
+            $script:AionDirectorPromotionClosedDirectiveId='D2-DIRECTOR-RECOVERY-LEASE-HYGIENE-CARRYFORWARD-20260817T044618Z'
         }
     }
     finally {
