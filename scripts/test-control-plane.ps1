@@ -207,11 +207,16 @@ exit /b 37
 
 :verify
 if "%MODE%"=="verify-fail" exit /b 9
+if "%MODE%"=="cert-full-verify-fail" exit /b 9
 if "%MODE%"=="director-verify-misleading" goto directorverifyfail
 if "%MODE%"=="director-structured-other-fail" goto directorverifyfail
 exit /b 0
 
 :test
+if "%MODE%"=="cert-pass" if "%4"=="@aion/director" goto certdirector
+if "%MODE%"=="cert-pass" if "%4"=="@aion/local-assistant" goto certlocal
+if "%MODE%"=="cert-director-suite-fail" if "%4"=="@aion/director" goto certdirectorbad
+if "%MODE%"=="cert-local-suite-fail" if "%4"=="@aion/local-assistant" goto certlocalbad
 if "%MODE%"=="director-structured-other-fail" exit /b 4
 if "%MODE%"=="broken" goto broken
 if "%MODE%"=="wrong-text" goto wrongtext
@@ -270,6 +275,42 @@ exit /b 9
 echo developer bridge is the single process boundary and is repository-scoped
 echo packages/local-assistant/src/developer-bridge.ts contains process.env
 echo not ok 99 - unrelated local assistant failure
+exit /b 1
+
+:certdirector
+echo 1..1066
+echo # tests 1066
+echo # pass 1066
+echo # fail 0
+echo # skipped 0
+echo # todo 0
+exit /b 0
+
+:certlocal
+echo 1..1051
+echo # tests 1051
+echo # pass 1051
+echo # fail 0
+echo # skipped 0
+echo # todo 0
+exit /b 0
+
+:certdirectorbad
+echo 1..1066
+echo # tests 1066
+echo # pass 1065
+echo # fail 1
+echo # skipped 0
+echo # todo 0
+exit /b 1
+
+:certlocalbad
+echo 1..1051
+echo # tests 1051
+echo # pass 1050
+echo # fail 1
+echo # skipped 0
+echo # todo 0
 exit /b 1
 
 "@
@@ -421,6 +462,121 @@ function Write-ReviewArtifactFixture(
     }
     [IO.File]::WriteAllText($path,($review|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
     return (Get-AionFileSha256 -Path $path)
+}
+
+function New-CertificationDirective([string]$Path,[string]$Status,[string]$G8,[string]$Target,[string]$Anchor,[string]$Phrase='AUTHORIZE SYNTHETIC D2 CERTIFICATION'){
+    $body=@"
+# AION Current Directive
+Directive-ID: TEST-D2-CERTIFICATION
+Status: $Status
+Title: Synthetic D2 Final Certification Execution
+Prepared-Date: 2026-08-17T00:00:00Z
+Prepared-By: CTO
+Repository-Baseline: $G8
+Required-Authorization-Phrase: $Phrase
+Authorization-Class: NORMAL
+Trusted-Certification-Gate: DIRECTOR_D2_FINAL_CERTIFICATION
+Certification-Target: $Target
+Reviewed-Director-Anchor: $Anchor
+D2-Certification: NOT_GRANTED
+D2-Certified-Sha: NONE
+R31: NONE
+Production: UNTOUCHED
+Writer-Launched: NO
+Funnel: OFF
+Spend-USD: 0
+
+## Goal
+Certify exact D2 target only.
+## Authorized Scope
+- run trusted certification only
+## Prohibited Scope
+- no source changes
+## Required Inputs
+- synthetic
+## Baseline Checks
+- synthetic
+## Required Work
+- synthetic
+## Verification
+- synthetic
+## Commit and Push Authorization
+None.
+## Backup Authorization
+None.
+## Stop Conditions
+Stop.
+## Required Handoff
+Synthetic.
+## Next-Phase Prohibition
+No R31.
+"@
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Path))|Out-Null
+    [IO.File]::WriteAllText($Path,$body,[Text.UTF8Encoding]::new($false))
+}
+
+function Write-LocalAssistantClosureReceiptFixture(
+    [string]$Root,
+    [string]$DirectiveId,
+    [string]$Baseline,
+    [string]$Target,
+    [string]$Anchor,
+    [string]$ClosureResult='PASS'
+){
+    $dir=Join-Path $Root ".aion-local\repair-closures\$DirectiveId"
+    [IO.Directory]::CreateDirectory($dir)|Out-Null
+    $anchorDirectorTree=(& git -C $Root rev-parse "${Anchor}:packages/director").Trim()
+    $targetDirectorTree=(& git -C $Root rev-parse "${Target}:packages/director").Trim()
+    $receipt=[pscustomobject]@{
+        schemaVersion='aion.brokenBaselineRepairClosure.v1'
+        directiveId=$DirectiveId
+        authorizationClass='BROKEN_BASELINE_REPAIR'
+        knownFailingGateId='LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY'
+        baselineSha=$Baseline
+        resultSha=$Target
+        authorizedRepairPaths=@('packages/local-assistant/src/developer-bridge.ts')
+        actualChangedPaths=@('packages/local-assistant/src/developer-bridge.ts')
+        protectedFileIntegrityResult='PASS'
+        targetedRepairGateResult='PASS'
+        targetedTypecheckResult='PASS'
+        fullVerifyResult='PASS'
+        changedPathScopeResult='PASS'
+        reviewedDirectorSha=$Anchor
+        reviewedDirectorTree=$anchorDirectorTree
+        resultDirectorTree=$targetDirectorTree
+        directorTreeEquivalence='PASS'
+        timestampUtc='2026-08-17T00:00:00Z'
+        closureResult=$ClosureResult
+    }
+    [IO.File]::WriteAllText((Join-Path $dir "$Target.json"),($receipt|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+}
+
+function Write-PromotionReceiptFixture([string]$Root,[string]$G7,[string]$Candidate,[string]$CandidateBaseline,[string]$DirectiveId='TEST-REPAIR',[string]$Result='PASS',[int]$Blocking=0){
+    $dir=Join-Path $Root ".aion-local\promotions\D2-DIRECTOR-REVIEWED-PROMOTION-PUSH-20260817T060000Z"
+    [IO.Directory]::CreateDirectory($dir)|Out-Null
+    $receipt=[pscustomobject]@{
+        schemaVersion='aion.directorReviewedPromotion.v1'
+        directiveId='D2-DIRECTOR-REVIEWED-PROMOTION-PUSH-20260817T060000Z'
+        g7Sha=$G7
+        candidateSha=$Candidate
+        candidateBaselineSha=$CandidateBaseline
+        closedRepairDirectiveId=$DirectiveId
+        closureResult='PASS'
+        reviewShaBinding='EXACT'
+        reviewVerdict=$Result
+        concreteBlockingDefects=$Blocking
+        candidateChangedPaths=@((Get-AionRepairGate 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE').TrustedAllowedPaths)
+        governanceChangedPaths=@('scripts/control-plane-common.ps1','scripts/promote-reviewed-director.ps1','scripts/test-control-plane.ps1')
+        localAssistantTreeIntegrity='PASS'
+        promotionResult='PASS'
+        shaAPrime=$Candidate
+        remoteBeforePush=$CandidateBaseline
+        remoteAfterPush=$G7
+        pushResult='PASS'
+        d2Certification='NOT_GRANTED'
+        timestampUtc='2026-08-17T00:00:00Z'
+    }
+    [IO.File]::WriteAllText((Join-Path $dir "$G7.json"),($receipt|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
 }
 
 try {
@@ -876,12 +1032,151 @@ try {
             $case=Reset-PromotionFixture
             $promotionResult=Invoke-AionReviewedDirectorPromotion -Root $repo -Directive (Get-AionDirective $current) -DryRun
             Expect-True '94 promotion receipt does not certify D2' ($promotionResult.Receipt.d2Certification -ceq 'NOT_GRANTED')
+
+            function Reset-CertificationFixture([string]$Mode='valid'){
+                $npmMode=switch($Mode){
+                    'director-suite-fail' {'cert-director-suite-fail'}
+                    'local-suite-fail' {'cert-local-suite-fail'}
+                    'full-verify-fail' {'cert-full-verify-fail'}
+                    default {'cert-pass'}
+                }
+                New-FakeNpm $fakeBin $npmMode|Out-Null
+                if(Test-Path -LiteralPath $local){Remove-Item -LiteralPath $local -Recurse -Force}
+                & git -C $repo checkout -q -B main $repairBaseline
+                & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+                foreach($path in @((Get-AionRepairGate 'DIRECTOR_D2_RECOVERY_LEASE_AND_HYGIENE').TrustedAllowedPaths)){
+                    [IO.File]::WriteAllText((Join-Path $repo ($path.Replace('/','\'))),"candidate $path",[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add $path
+                }
+                & git -C $repo commit -m 'synthetic D2 Director candidate'|Out-Null
+                $candidate=(& git -C $repo rev-parse HEAD).Trim()
+                $script:AionDirectorPromotionExpectedCandidateSha=$candidate
+                $script:AionDirectorPromotionExpectedCandidateBaselineSha=$repairBaseline
+                $script:AionDirectorPromotionClosedDirectiveId='TEST-DIRECTOR-REPAIR'
+                if($Mode -ne 'director-closure-missing'){
+                    $closureResult=if($Mode -ceq 'director-closure-fail'){'FAIL'}else{'PASS'}
+                    Write-DirectorClosureReceiptFixture $repo 'TEST-DIRECTOR-REPAIR' $repairBaseline $candidate $closureResult
+                }
+                if($Mode -ne 'hostile-review-missing'){
+                    $reviewVerdict=if($Mode -ceq 'hostile-review-fail'){'FAIL'}else{'PASS'}
+                    $reviewBlocking=if($Mode -ceq 'hostile-blocking') {1} else {0}
+                    [void](Write-ReviewArtifactFixture $repo $candidate $reviewVerdict $reviewBlocking)
+                    if($Mode -ceq 'review-sha-mismatch'){
+                        $reviewPath=Join-Path $repo ".aion-local\reviews\director-candidate-$candidate.json"
+                        $review=Get-Content -LiteralPath $reviewPath -Raw|ConvertFrom-Json
+                        $review.candidateSha='0000000000000000000000000000000000000000'
+                        [IO.File]::WriteAllText($reviewPath,($review|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+                    }
+                    if($Mode -ceq 'missing-review-verdict'){
+                        $reviewPath=Join-Path $repo ".aion-local\reviews\director-candidate-$candidate.json"
+                        $review=Get-Content -LiteralPath $reviewPath -Raw|ConvertFrom-Json
+                        $review.PSObject.Properties.Remove('verdict')
+                        [IO.File]::WriteAllText($reviewPath,($review|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+                    }
+                    if($Mode -ceq 'malformed-review'){
+                        $reviewPath=Join-Path $repo ".aion-local\reviews\director-candidate-$candidate.json"
+                        [IO.File]::WriteAllText($reviewPath,'{bad json',[Text.UTF8Encoding]::new($false))
+                    }
+                }
+                [IO.Directory]::CreateDirectory((Join-Path $repo 'scripts'))|Out-Null
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\control-plane-common.ps1'),'g7 common',[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\promote-reviewed-director.ps1'),'g7 promote',[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\test-control-plane.ps1'),'g7 tests',[Text.UTF8Encoding]::new($false))
+                & git -C $repo add scripts
+                & git -C $repo commit -m 'synthetic G7 governance'|Out-Null
+                $g7=(& git -C $repo rev-parse HEAD).Trim()
+                $script:AionD2FinalLocalAssistantBaselineSha=$g7
+                Write-PromotionReceiptFixture $repo $g7 $candidate $repairBaseline 'TEST-DIRECTOR-REPAIR'
+                [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\src\developer-bridge.ts'),'export const fixed = true;',[Text.UTF8Encoding]::new($false))
+                & git -C $repo add packages/local-assistant/src/developer-bridge.ts
+                & git -C $repo commit -m 'synthetic final local assistant repair'|Out-Null
+                $target=(& git -C $repo rev-parse HEAD).Trim()
+                $script:AionD2TechnicalCertificationTargetSha=$target
+                $script:AionD2FinalLocalAssistantRepairDirectiveId='TEST-LA-REPAIR'
+                if($Mode -ne 'local-closure-missing'){
+                    $laClosure=if($Mode -ceq 'local-closure-fail'){'FAIL'}else{'PASS'}
+                    Write-LocalAssistantClosureReceiptFixture $repo 'TEST-LA-REPAIR' $g7 $target $candidate $laClosure
+                }
+                if($Mode -ceq 'target-differs-from-parent'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'README.md'),'between target and G8',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add README.md
+                    & git -C $repo commit -m 'wrong parent between target and G8'|Out-Null
+                }
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\control-plane-common.ps1'),'g8 common',[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\certify-director-d2.ps1'),'g8 certify',[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $repo 'scripts\test-control-plane.ps1'),'g8 tests',[Text.UTF8Encoding]::new($false))
+                & git -C $repo add scripts
+                if($Mode -ceq 'g8-source-modification'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'apps\aion\developer-agent.mjs'),'bad source mutation',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add apps/aion/developer-agent.mjs
+                }
+                & git -C $repo commit -m 'synthetic G8 certification governance'|Out-Null
+                $g8=(& git -C $repo rev-parse HEAD).Trim()
+                & git -C $repo update-ref refs/remotes/origin/main $g8
+                $anchorForDirective=if($Mode -ceq 'sha-a-prime-mismatch'){'0000000000000000000000000000000000000000'}else{$candidate}
+                New-CertificationDirective $current 'AUTHORIZED' $g8 $target $anchorForDirective
+                if($Mode -ceq 'r31-present'){(Get-Content $current -Raw).Replace('R31: NONE','R31: R31-CANDIDATE')|Set-Content -LiteralPath $current -NoNewline}
+                if($Mode -ceq 'production-touched'){(Get-Content $current -Raw).Replace('Production: UNTOUCHED','Production: TOUCHED')|Set-Content -LiteralPath $current -NoNewline}
+                if($Mode -ceq 'writer-launched'){(Get-Content $current -Raw).Replace('Writer-Launched: NO','Writer-Launched: YES')|Set-Content -LiteralPath $current -NoNewline}
+                if($Mode -ceq 'funnel-active'){(Get-Content $current -Raw).Replace('Funnel: OFF','Funnel: ON')|Set-Content -LiteralPath $current -NoNewline}
+                if($Mode -ceq 'spend-positive'){(Get-Content $current -Raw).Replace('Spend-USD: 0','Spend-USD: 1')|Set-Content -LiteralPath $current -NoNewline}
+                return [pscustomobject]@{ Candidate=$candidate; G7=$g7; Target=$target; G8=$g8 }
+            }
+
+            $validCertification=Reset-CertificationFixture
+            try{
+                $preflight=Assert-AionD2FinalCertificationPreflight -Root $repo -Directive (Get-AionDirective $current)
+                Pass '95 D2 certification preflight accepts exact G8 topology'
+                Expect-True '96 certification target is derived from HEAD parent' ($preflight.Target -ceq $validCertification.Target)
+            }catch{Fail '95 D2 certification preflight accepts exact G8 topology' $_.Exception.Message}
+            $certResult=Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)
+            Expect-True '97 D2 certification all-PASS path writes GRANTED state' ((Test-Path $certResult.StatePath)-and($certResult.Receipt.d2CertifiedSha -ceq $validCertification.Target)-and($certResult.Receipt.shaAPrime -ceq $validCertification.Candidate))
+            $idempotent=Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)
+            Expect-True '98 D2 certification same-target rerun is idempotent' ($idempotent.Receipt.mode -ceq 'IDEMPOTENT')
+            [IO.File]::WriteAllText((Get-AionD2CertificationStatePath -Root $repo),([pscustomobject]@{schemaVersion='aion.d2CertificationState.v1';d2Certification='GRANTED';d2CertifiedSha=$repairBaseline;shaAPrime=$validCertification.Candidate}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+            Expect-Throw '99 D2 certification rejects existing different target' {Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+
+            foreach($case in @(
+                [pscustomobject]@{Name='100 missing hostile review rejects';Mode='hostile-review-missing'},
+                [pscustomobject]@{Name='101 hostile review FAIL rejects';Mode='hostile-review-fail'},
+                [pscustomobject]@{Name='102 hostile blocking defects reject';Mode='hostile-blocking'},
+                [pscustomobject]@{Name='103 review SHA mismatch rejects';Mode='review-sha-mismatch'},
+                [pscustomobject]@{Name='104 Director closure missing rejects';Mode='director-closure-missing'},
+                [pscustomobject]@{Name='105 Director suite failure rejects';Mode='director-suite-fail'},
+                [pscustomobject]@{Name='106 local-assistant closure missing rejects';Mode='local-closure-missing'},
+                [pscustomobject]@{Name='107 full verify FAIL rejects';Mode='full-verify-fail'},
+                [pscustomobject]@{Name='108 missing expected review verdict fails closed';Mode='missing-review-verdict'},
+                [pscustomobject]@{Name='109 malformed evidence fails closed';Mode='malformed-review'},
+                [pscustomobject]@{Name='110 SHA_A_PRIME mismatch rejects';Mode='sha-a-prime-mismatch'},
+                [pscustomobject]@{Name='111 target different from HEAD parent rejects';Mode='target-differs-from-parent'},
+                [pscustomobject]@{Name='112 G8 application-source modification rejects';Mode='g8-source-modification'},
+                [pscustomobject]@{Name='113 R31 present rejects';Mode='r31-present'},
+                [pscustomobject]@{Name='114 production touched rejects';Mode='production-touched'},
+                [pscustomobject]@{Name='115 writer launched rejects';Mode='writer-launched'},
+                [pscustomobject]@{Name='116 Funnel active rejects';Mode='funnel-active'},
+                [pscustomobject]@{Name='117 spend positive rejects';Mode='spend-positive'},
+                [pscustomobject]@{Name='118 local-assistant suite failure rejects';Mode='local-suite-fail'},
+                [pscustomobject]@{Name='119 local-assistant closure FAIL rejects';Mode='local-closure-fail'},
+                [pscustomobject]@{Name='120 Director closure FAIL rejects';Mode='director-closure-fail'}
+            )){
+                [void](Reset-CertificationFixture $case.Mode)
+                Expect-Throw $case.Name {Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            }
+
+            $case=Reset-CertificationFixture
+            Add-Content -LiteralPath $current -Value "`r`nCertification-Target: caller-controlled"
+            Expect-Throw '121 arbitrary caller target fields are rejected' {Get-AionDirectiveFieldOrDefault (Get-AionDirective $current) 'Certification-Target'|Out-Null}
+            $case=Reset-CertificationFixture
+            Expect-Throw '122 certification script rejects arbitrary target parameter' {& (Join-Path $PSScriptRoot 'certify-director-d2.ps1') -RepositoryRoot $repo -DirectivePath $current -TargetSha $case.Target}
         }
         finally {
             $script:AionReviewedDirectorSha=$oldReviewedDirectorSha
             $script:AionDirectorPromotionExpectedCandidateSha='6a4cb1d058fb6375798fa27e7629fd5a2d889ba1'
             $script:AionDirectorPromotionExpectedCandidateBaselineSha='3938e0b6b7b5452830b47b3ae3ba9d95ed6b4746'
             $script:AionDirectorPromotionClosedDirectiveId='D2-DIRECTOR-RECOVERY-LEASE-HYGIENE-CARRYFORWARD-20260817T044618Z'
+            $script:AionD2TechnicalCertificationTargetSha='17b012b28d911fe563aab19f6e4a697a05b9b718'
+            $script:AionD2FinalLocalAssistantBaselineSha='9b1d68bc774be7952da109d0d971d47cc85b234f'
+            $script:AionD2FinalLocalAssistantRepairDirectiveId='D2-FINAL-LOCAL-ASSISTANT-ARCH-REPAIR-20260817T153000Z'
         }
     }
     finally {

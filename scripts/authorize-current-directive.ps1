@@ -37,16 +37,17 @@ try {
     Write-Host '============================================================' -ForegroundColor Cyan
     Write-Host ''
 
-    if($ValidationOnly){throw 'Validation-only refusal: no authorization phrase accepted'}
     if(-not $PSBoundParameters.ContainsKey('AuthorizationInput')){
         if($TestMode){throw 'TestMode requires explicit AuthorizationInput'}
-        $AuthorizationInput=Read-Host 'Paste/type the EXACT phrase shown above (not a personal password)'
+        if(-not $ValidationOnly){
+            $AuthorizationInput=Read-Host 'Paste/type the EXACT phrase shown above (not a personal password)'
+        }
     }
     # Trim only; do not change case. Empty after trim still fails closed.
     if($null -ne $AuthorizationInput){
         $AuthorizationInput = $AuthorizationInput.Trim()
     }
-    if(-not(Test-AionAuthorizationPhrase -Expected $requiredPhrase -Actual $AuthorizationInput)){
+    if((-not $ValidationOnly) -and -not(Test-AionAuthorizationPhrase -Expected $requiredPhrase -Actual $AuthorizationInput)){
         throw 'Authorization phrase did not match exactly. This is not a Windows/login password and not a password you invent. Copy the Required-Authorization-Phrase from CURRENT.md exactly.'
     }
     if($SkipRepositoryChecks){
@@ -61,12 +62,18 @@ try {
         $class=Get-AionDirectiveFieldOrDefault $directive 'Authorization-Class' 'NORMAL'
         if($class -ceq 'NORMAL'){
             Assert-AionRepositoryGate -Root $root -ExpectedHead $directive.Fields.'Repository-Baseline' -RunVerification
+            $certGate=Get-AionDirectiveFieldOrDefault $directive 'Trusted-Certification-Gate' ''
+            if(-not[string]::IsNullOrWhiteSpace($certGate)){
+                if($certGate -cne $script:AionD2FinalCertificationGateId){throw "Unsupported Trusted-Certification-Gate: $certGate"}
+                [void](Assert-AionD2FinalCertificationPreflight -Root $root -Directive $directive)
+            }
         } elseif($class -ceq 'BROKEN_BASELINE_REPAIR'){
             Assert-AionBrokenBaselineRepairGate -Root $root -Directive $directive
         } else {
             throw "Unsupported Authorization-Class: $class"
         }
     }
+    if($ValidationOnly){throw 'Validation-only refusal: no authorization phrase accepted'}
     Set-AionDirectiveStatus -Path $DirectivePath -From 'PENDING_OWNER_AUTHORIZATION' -To 'AUTHORIZED' -RecordAuthorization
     Write-Host 'Directive authorized locally. It was not staged, committed, or executed.'
     Write-Host 'Run VS Code task: AION: Run Current Directive'

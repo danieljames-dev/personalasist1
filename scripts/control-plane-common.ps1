@@ -12,9 +12,19 @@ $script:AionDirectorRecoveryKnownBrokenBaselineSha = '78425d3923ff06bbc6193165c3
 $script:AionDirectorPromotionExpectedCandidateSha = '6a4cb1d058fb6375798fa27e7629fd5a2d889ba1'
 $script:AionDirectorPromotionExpectedCandidateBaselineSha = '3938e0b6b7b5452830b47b3ae3ba9d95ed6b4746'
 $script:AionDirectorPromotionClosedDirectiveId = 'D2-DIRECTOR-RECOVERY-LEASE-HYGIENE-CARRYFORWARD-20260817T044618Z'
+$script:AionD2FinalCertificationGateId = 'DIRECTOR_D2_FINAL_CERTIFICATION'
+$script:AionD2TechnicalCertificationTargetSha = '17b012b28d911fe563aab19f6e4a697a05b9b718'
+$script:AionD2FinalLocalAssistantBaselineSha = '9b1d68bc774be7952da109d0d971d47cc85b234f'
+$script:AionD2FinalLocalAssistantRepairDirectiveId = 'D2-FINAL-LOCAL-ASSISTANT-ARCH-REPAIR-20260817T153000Z'
 $script:AionDirectorPromotionAllowedGovernancePaths = @(
     'scripts/control-plane-common.ps1',
     'scripts/promote-reviewed-director.ps1',
+    'scripts/test-control-plane.ps1'
+)
+$script:AionD2CertificationAllowedGovernancePaths = @(
+    'scripts/authorize-current-directive.ps1',
+    'scripts/control-plane-common.ps1',
+    'scripts/certify-director-d2.ps1',
     'scripts/test-control-plane.ps1'
 )
 $script:AionDirectorRecoverySourceIdentityPaths = @(
@@ -495,6 +505,293 @@ function Get-AionRepairClosureReceipt {
     $path=Join-Path $Root ".aion-local\repair-closures\$DirectiveId\$ResultSha.json"
     if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw "Repair closure receipt missing: $path"}
     return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+}
+
+function Get-AionRequiredJsonProperty {
+    param([Parameter(Mandatory=$true)][object]$Object,[Parameter(Mandatory=$true)][string]$Name)
+    if($null -eq $Object){throw "JSON object missing while reading $Name"}
+    if(-not($Object.PSObject.Properties.Name -contains $Name)){throw "Required JSON property missing: $Name"}
+    return $Object.$Name
+}
+
+function Assert-AionJsonStringEquals {
+    param([object]$Object,[string]$Name,[string]$Expected)
+    $value=[string](Get-AionRequiredJsonProperty -Object $Object -Name $Name)
+    if($value -cne $Expected){throw "$Name mismatch: expected $Expected, observed $value"}
+}
+
+function Assert-AionJsonIntEquals {
+    param([object]$Object,[string]$Name,[int]$Expected)
+    $raw=Get-AionRequiredJsonProperty -Object $Object -Name $Name
+    try {$value=[int]$raw} catch {throw "$Name is not an integer"}
+    if($value -ne $Expected){throw "$Name mismatch: expected $Expected, observed $value"}
+}
+
+function Read-AionJsonFile {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){throw "Required evidence file missing: $Path"}
+    try { return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
+    catch { throw "Malformed JSON evidence: $Path" }
+}
+
+function Get-AionD2CertificationStatePath {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    return (Join-Path $Root '.aion-local\certifications\d2\state.json')
+}
+
+function Get-AionD2CertificationState {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $path=Get-AionD2CertificationStatePath -Root $Root
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)){
+        return [pscustomobject]@{ Certification='NOT_GRANTED'; CertifiedSha='NONE'; ShaAPrime=$script:AionDirectorPromotionExpectedCandidateSha; Path=$path; Exists=$false }
+    }
+    $state=Read-AionJsonFile -Path $path
+    Assert-AionJsonStringEquals -Object $state -Name 'd2Certification' -Expected 'GRANTED'
+    Assert-AionJsonStringEquals -Object $state -Name 'd2CertifiedSha' -Expected $script:AionD2TechnicalCertificationTargetSha
+    Assert-AionJsonStringEquals -Object $state -Name 'shaAPrime' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    return [pscustomobject]@{ Certification='GRANTED'; CertifiedSha=$state.d2CertifiedSha; ShaAPrime=$state.shaAPrime; Path=$path; Exists=$true; Raw=$state }
+}
+
+function Assert-AionD2CertificationStateAllowsTarget {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Target)
+    $statePath=Get-AionD2CertificationStatePath -Root $Root
+    if(-not(Test-Path -LiteralPath $statePath -PathType Leaf)){
+        return [pscustomobject]@{ Mode='NEW'; CertificationBefore='NOT_GRANTED'; CertifiedShaBefore='NONE' }
+    }
+    $state=Read-AionJsonFile -Path $statePath
+    Assert-AionJsonStringEquals -Object $state -Name 'd2Certification' -Expected 'GRANTED'
+    $certified=[string](Get-AionRequiredJsonProperty -Object $state -Name 'd2CertifiedSha')
+    if($certified -cne $Target){throw "Existing D2 certification targets a different SHA: $certified"}
+    Assert-AionJsonStringEquals -Object $state -Name 'shaAPrime' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    return [pscustomobject]@{ Mode='IDEMPOTENT'; CertificationBefore='GRANTED'; CertifiedShaBefore=$certified }
+}
+
+function Assert-AionNoD2RuntimeSideEffects {
+    param([Parameter(Mandatory=$true)][object]$Directive)
+    if((Get-AionDirectiveFieldOrDefault $Directive 'R31') -cne 'NONE'){throw 'R31 state must be NONE'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Production') -cne 'UNTOUCHED'){throw 'Production state must be UNTOUCHED'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Writer-Launched') -cne 'NO'){throw 'Writer-Launched state must be NO'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Funnel') -cne 'OFF'){throw 'Funnel state must be OFF'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Spend-USD') -cne '0'){throw 'Spend-USD must be 0'}
+}
+
+function Assert-AionD2CertificationDirectiveFields {
+    param([Parameter(Mandatory=$true)][object]$Directive,[Parameter(Mandatory=$true)][string]$Head,[Parameter(Mandatory=$true)][string]$Target)
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Authorization-Class' 'NORMAL') -cne 'NORMAL'){throw 'D2 certification execution must use NORMAL authorization class'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Trusted-Certification-Gate') -cne $script:AionD2FinalCertificationGateId){throw 'D2 certification trusted gate mismatch'}
+    if($Directive.Fields.'Repository-Baseline' -cne $Head){throw 'D2 certification directive baseline must equal current G8 HEAD'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Certification-Target') -cne $Target){throw 'D2 certification target field mismatch'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'Reviewed-Director-Anchor') -cne $script:AionDirectorPromotionExpectedCandidateSha){throw 'Reviewed Director anchor field mismatch'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'D2-Certification') -cne 'NOT_GRANTED'){throw 'Directive D2 certification state before transition must be NOT_GRANTED'}
+    if((Get-AionDirectiveFieldOrDefault $Directive 'D2-Certified-Sha') -cne 'NONE'){throw 'Directive D2 certified SHA before transition must be NONE'}
+    Assert-AionNoD2RuntimeSideEffects -Directive $Directive
+}
+
+function Get-AionD2FinalPromotionReceipt {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $path=Join-Path $Root ".aion-local\promotions\D2-DIRECTOR-REVIEWED-PROMOTION-PUSH-20260817T060000Z\$($script:AionD2FinalLocalAssistantBaselineSha).json"
+    $receipt=Read-AionJsonFile -Path $path
+    Assert-AionJsonStringEquals -Object $receipt -Name 'schemaVersion' -Expected 'aion.directorReviewedPromotion.v1'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'candidateSha' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'reviewShaBinding' -Expected 'EXACT'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'reviewVerdict' -Expected 'PASS'
+    Assert-AionJsonIntEquals -Object $receipt -Name 'concreteBlockingDefects' -Expected 0
+    Assert-AionJsonStringEquals -Object $receipt -Name 'promotionResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'shaAPrime' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'pushResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'd2Certification' -Expected 'NOT_GRANTED'
+    return $receipt
+}
+
+function Get-AionD2FinalHostileReview {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $path=Join-Path $Root ".aion-local\reviews\director-candidate-$($script:AionDirectorPromotionExpectedCandidateSha).json"
+    $review=Read-AionJsonFile -Path $path
+    Assert-AionJsonStringEquals -Object $review -Name 'candidateSha' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $review -Name 'reviewFamily' -Expected 'Grok'
+    Assert-AionJsonStringEquals -Object $review -Name 'verdict' -Expected 'PASS'
+    Assert-AionJsonIntEquals -Object $review -Name 'concreteBlockingDefects' -Expected 0
+    Assert-AionJsonStringEquals -Object $review -Name 'focusedTests' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $review -Name 'falseReleaseCounterexample' -Expected 'NO'
+    Assert-AionJsonStringEquals -Object $review -Name 'falseRetentionCounterexample' -Expected 'NO'
+    Assert-AionJsonStringEquals -Object $review -Name 'cleanupErrorHandlingSafe' -Expected 'YES'
+    Assert-AionJsonStringEquals -Object $review -Name 'oneWriterSafety' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $review -Name 'foreignHolderSafety' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $review -Name 'filesChanged' -Expected 'NONE'
+    return $review
+}
+
+function Get-AionD2DirectorClosureReceipt {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $receipt=Get-AionRepairClosureReceipt -Root $Root -DirectiveId $script:AionDirectorPromotionClosedDirectiveId -ResultSha $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'schemaVersion' -Expected 'aion.directorRecoveryCandidateClosure.v1'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'candidateSha' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'resultSha' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'structuredVerificationResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'targetedRepairGateResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'targetedTypecheckResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'changedPathScopeResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'directorTreeDisposition' -Expected 'REPLACED_BY_AUTHORIZED_CANDIDATE'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'closureResult' -Expected 'PASS'
+    return $receipt
+}
+
+function Get-AionD2FinalLocalAssistantClosureReceipt {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $receipt=Get-AionRepairClosureReceipt -Root $Root -DirectiveId $script:AionD2FinalLocalAssistantRepairDirectiveId -ResultSha $script:AionD2TechnicalCertificationTargetSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'schemaVersion' -Expected 'aion.brokenBaselineRepairClosure.v1'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'knownFailingGateId' -Expected 'LOCAL_ASSISTANT_ARCHITECTURE_BOUNDARY'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'baselineSha' -Expected $script:AionD2FinalLocalAssistantBaselineSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'resultSha' -Expected $script:AionD2TechnicalCertificationTargetSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'protectedFileIntegrityResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'targetedRepairGateResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'targetedTypecheckResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'fullVerifyResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'changedPathScopeResult' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'reviewedDirectorSha' -Expected $script:AionDirectorPromotionExpectedCandidateSha
+    Assert-AionJsonStringEquals -Object $receipt -Name 'directorTreeEquivalence' -Expected 'PASS'
+    Assert-AionJsonStringEquals -Object $receipt -Name 'closureResult' -Expected 'PASS'
+    Assert-AionExactPathSet -Actual @($receipt.actualChangedPaths) -Expected @('packages/local-assistant/src/developer-bridge.ts') -Description 'Final local-assistant repair'
+    return $receipt
+}
+
+function Get-AionTapSummary {
+    param([Parameter(Mandatory=$true)][object[]]$Output,[Parameter(Mandatory=$true)][string]$Name)
+    $text=($Output | ForEach-Object { [string]$_ }) -join "`n"
+    $tests=[regex]::Matches($text,'(?m)^# tests\s+(\d+)\s*$')
+    $pass=[regex]::Matches($text,'(?m)^# pass\s+(\d+)\s*$')
+    $fail=[regex]::Matches($text,'(?m)^# fail\s+(\d+)\s*$')
+    $skip=[regex]::Matches($text,'(?m)^# skipped\s+(\d+)\s*$')
+    if($tests.Count -lt 1 -or $pass.Count -lt 1 -or $fail.Count -lt 1 -or $skip.Count -lt 1){throw "$Name TAP summary missing"}
+    return [pscustomobject]@{
+        Tests=[int]$tests[$tests.Count-1].Groups[1].Value
+        Pass=[int]$pass[$pass.Count-1].Groups[1].Value
+        Fail=[int]$fail[$fail.Count-1].Groups[1].Value
+        Skipped=[int]$skip[$skip.Count-1].Groups[1].Value
+    }
+}
+
+function Invoke-AionD2TargetTrustedVector {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Target,[Parameter(Mandatory=$true)][object[]]$Vector,[Parameter(Mandatory=$true)][string]$Name)
+    $temp=Join-Path ([IO.Path]::GetTempPath()) ("aion-d2-cert-target-"+[guid]::NewGuid().ToString('N'))
+    try {
+        & git -C $Root worktree add --detach $temp $Target | Out-Null
+        if($LASTEXITCODE -ne 0){throw "Could not create target worktree for $Target"}
+        $result=Invoke-AionTrustedVector -Root $temp -Vector $Vector
+        if($result.ExitCode -ne 0){throw "$Name failed with exit code $($result.ExitCode)"}
+        return $result
+    }
+    finally {
+        if(Test-Path -LiteralPath $temp){
+            & git -C $Root worktree remove --force $temp 2>$null | Out-Null
+            if(Test-Path -LiteralPath $temp){
+                $resolved=[IO.Path]::GetFullPath($temp);$tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+                if(-not $resolved.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw "Unsafe target worktree cleanup path: $resolved"}
+                Remove-Item -LiteralPath $temp -Recurse -Force
+            }
+        }
+    }
+}
+
+function Invoke-AionD2CertificationTargetVerification {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Target)
+    $director=Invoke-AionD2TargetTrustedVector -Root $Root -Target $Target -Vector @('npm.cmd','run','test','--workspace','@aion/director') -Name 'director suite'
+    $directorSummary=Get-AionTapSummary -Output $director.Output -Name 'director suite'
+    if($directorSummary.Tests -ne 1066 -or $directorSummary.Pass -ne 1066 -or $directorSummary.Fail -ne 0 -or $directorSummary.Skipped -ne 0){throw 'Director suite summary mismatch'}
+    $localAssistant=Invoke-AionD2TargetTrustedVector -Root $Root -Target $Target -Vector @('npm.cmd','run','test','--workspace','@aion/local-assistant') -Name 'local-assistant suite'
+    $localSummary=Get-AionTapSummary -Output $localAssistant.Output -Name 'local-assistant suite'
+    if($localSummary.Tests -ne 1051 -or $localSummary.Pass -ne 1051 -or $localSummary.Fail -ne 0 -or $localSummary.Skipped -ne 0){throw 'Local-assistant suite summary mismatch'}
+    [void](Invoke-AionD2TargetTrustedVector -Root $Root -Target $Target -Vector @('npm.cmd','run','verify') -Name 'full repository verify')
+    return [pscustomobject]@{
+        DirectorSuite='1066/1066 PASS'
+        LocalAssistantSuite='1051/1051 PASS'
+        FullRepositoryVerify='PASS'
+        KnownFailureCount=0
+        UnexpectedFailureCount=0
+        TestDeletionOrWeakening=0
+        UnauthorizedSkips=0
+    }
+}
+
+function Assert-AionD2FinalCertificationPreflight {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][object]$Directive)
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $head=(& git -C $root rev-parse HEAD).Trim()
+    $target=Get-AionGitSingleParent -Root $root -Revision $head
+    Assert-AionD2CertificationDirectiveFields -Directive $Directive -Head $head -Target $target
+    Assert-AionRepositoryIdentityGate -Root $root -ExpectedHead $head
+    if($target -cne $script:AionD2TechnicalCertificationTargetSha){throw 'G8 parent is not the exact D2 technical certification target'}
+    if(-not(Test-AionGitCommitExists -Root $root -Revision $target)){throw 'D2 technical certification target commit missing'}
+    if(-not(Test-AionGitCommitExists -Root $root -Revision $script:AionDirectorPromotionExpectedCandidateSha)){throw 'Reviewed Director anchor commit missing'}
+    & git -C $root merge-base --is-ancestor $script:AionDirectorPromotionExpectedCandidateSha $target
+    if($LASTEXITCODE -ne 0){throw 'Reviewed Director anchor is not in certification target ancestry'}
+    $changed=@(& git -C $root diff --name-only $target $head)
+    foreach($path in $changed){
+        if($script:AionD2CertificationAllowedGovernancePaths -notcontains $path){throw "G8 contains non-governance certification change: $path"}
+    }
+    if(@($changed).Count -eq 0){throw 'G8 certification governance diff is empty'}
+    if(-not(Test-Path -LiteralPath (Join-Path $root 'scripts\certify-director-d2.ps1') -PathType Leaf)){throw 'Trusted D2 certification mechanism script missing'}
+    [void](Get-AionD2DirectorClosureReceipt -Root $root)
+    [void](Get-AionD2FinalHostileReview -Root $root)
+    [void](Get-AionD2FinalPromotionReceipt -Root $root)
+    [void](Get-AionD2FinalLocalAssistantClosureReceipt -Root $root)
+    [void](Assert-AionD2CertificationStateAllowsTarget -Root $root -Target $target)
+    return [pscustomobject]@{ Result='PASS'; Head=$head; Target=$target; ShaAPrime=$script:AionDirectorPromotionExpectedCandidateSha; ChangedPaths=@($changed) }
+}
+
+function Invoke-AionD2FinalCertification {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][object]$Directive)
+    if($Directive.Fields.Status -cne 'AUTHORIZED'){throw 'D2 certification requires AUTHORIZED directive'}
+    $preflight=Assert-AionD2FinalCertificationPreflight -Root $Root -Directive $Directive
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $stateMode=Assert-AionD2CertificationStateAllowsTarget -Root $root -Target $preflight.Target
+    $verification=Invoke-AionD2CertificationTargetVerification -Root $root -Target $preflight.Target
+    $receipt=[pscustomobject]@{
+        schemaVersion='aion.d2FinalCertification.v1'
+        directiveId=$Directive.Fields.'Directive-ID'
+        certificationResult='GRANTED'
+        mode=$stateMode.Mode
+        governanceHead=$preflight.Head
+        d2CertifiedSha=$preflight.Target
+        shaAPrime=$preflight.ShaAPrime
+        g8ChangedPaths=@($preflight.ChangedPaths)
+        directorClosureEvidence='PASS'
+        hostileReviewEvidence='PASS'
+        hostileBlockingDefects=0
+        directorPromotionEvidence='PASS'
+        directorSuite=$verification.DirectorSuite
+        localAssistantClosureEvidence='PASS'
+        localAssistantSuite=$verification.LocalAssistantSuite
+        fullRepositoryVerify=$verification.FullRepositoryVerify
+        knownFailureCount=$verification.KnownFailureCount
+        unexpectedFailureCount=$verification.UnexpectedFailureCount
+        frozenCatalogIntegrity='NOT_APPLICABLE'
+        testDeletionOrWeakening=$verification.TestDeletionOrWeakening
+        unauthorizedSkips=$verification.UnauthorizedSkips
+        r31='NONE'
+        production='UNTOUCHED'
+        writerLaunched='NO'
+        funnel='OFF'
+        spendUsd=0
+        timestampUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $dir=Join-Path $root ".aion-local\certifications\d2"
+    [IO.Directory]::CreateDirectory($dir)|Out-Null
+    $receiptPath=Join-Path $dir "$($preflight.Target).json"
+    $statePath=Join-Path $dir 'state.json'
+    [IO.File]::WriteAllText($receiptPath,($receipt|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($statePath,([pscustomobject]@{
+        schemaVersion='aion.d2CertificationState.v1'
+        d2Certification='GRANTED'
+        d2CertifiedSha=$preflight.Target
+        shaAPrime=$preflight.ShaAPrime
+        receiptPath=(Get-AionRepositoryRelativePath -Root $root -Path $receiptPath)
+        governanceHead=$preflight.Head
+        timestampUtc=$receipt.timestampUtc
+    }|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+    & git -C $root update-ref refs/aion/certified/d2 $preflight.Target
+    if($LASTEXITCODE -ne 0){throw 'Could not write local D2 certification ref'}
+    return [pscustomobject]@{ ReceiptPath=$receiptPath; StatePath=$statePath; Receipt=$receipt }
 }
 
 function Assert-AionRepairClosureReceiptForPush {
