@@ -254,7 +254,7 @@ function Get-AionDirectorStructuredVerifyPlan {
                 'process\.env'
             )
             ForbiddenText=@(
-                'not ok .* - (?!developer bridge is the single process boundary and is repository-scoped)'
+                'not ok .* - (?!.*developer bridge is the single process boundary and is repository-scoped)'
             )
         }
         RawFullVerify=[pscustomobject]@{
@@ -270,17 +270,37 @@ function Invoke-AionLocalAssistantNonArchitectureVerification {
     $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector @('npm.cmd','run','build','--workspace','@aion/local-assistant') -Name 'local-assistant:build'
     $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector @('npm.cmd','run','build:test','--workspace','@aion/local-assistant') -Name 'local-assistant:build:test'
     $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector @('npm.cmd','run','typecheck','--workspace','@aion/local-assistant') -Name 'local-assistant:typecheck'
-    $testRoots=@(
-        (Join-Path $Root 'packages\local-assistant\dist-test\test'),
-        (Join-Path $Root 'packages\local-assistant\test')
-    )
-    $files=@()
-    foreach($testRoot in $testRoots){
-        if(Test-Path -LiteralPath $testRoot -PathType Container){
-            $files+=@(Get-ChildItem -LiteralPath $testRoot -Recurse -File -Include '*.test.js','*.test.mjs' |
-                Where-Object { $_.Name -cne 'architecture-boundary.test.mjs' } |
-                ForEach-Object { Get-AionRepositoryRelativePath -Root $Root -Path $_.FullName })
+    $sourceTestRoot=Join-Path $Root 'packages\local-assistant\test'
+    $compiledTestRoot=Join-Path $Root 'packages\local-assistant\dist-test\test'
+    $architectureSource=Join-Path $sourceTestRoot 'architecture-boundary.test.mjs'
+    if(-not(Test-Path -LiteralPath $architectureSource -PathType Leaf)){throw 'Local-assistant architecture-boundary test missing'}
+    $architectureMatches=@(Get-ChildItem -LiteralPath $sourceTestRoot -Recurse -File |
+        Where-Object { $_.Name -ceq 'architecture-boundary.test.mjs' })
+    if(@($architectureMatches).Count -ne 1){throw 'Local-assistant architecture-boundary test identity is ambiguous'}
+    if(-not(Test-Path -LiteralPath $compiledTestRoot -PathType Container)){throw 'Local-assistant compiled test directory missing'}
+    $sourceTsTests=@(Get-ChildItem -LiteralPath $sourceTestRoot -Recurse -File |
+        Where-Object { $_.Name.EndsWith('.test.ts',[StringComparison]::Ordinal) })
+    foreach($source in $sourceTsTests){
+        $relative=Get-AionRepositoryRelativePath -Root $sourceTestRoot -Path $source.FullName
+        $expectedRelative=$relative.Substring(0,$relative.Length-3)+'.js'
+        $expected=Join-Path $compiledTestRoot ($expectedRelative.Replace('/','\'))
+        if(-not(Test-Path -LiteralPath $expected -PathType Leaf)){
+            throw "Local-assistant compiled test artifact missing: $expectedRelative"
         }
+    }
+    $files=@()
+    $files+=@(Get-ChildItem -LiteralPath $compiledTestRoot -Recurse -File |
+        Where-Object { $_.Name.EndsWith('.test.js',[StringComparison]::Ordinal) } |
+        ForEach-Object { Get-AionRepositoryRelativePath -Root $Root -Path $_.FullName })
+    $files+=@(Get-ChildItem -LiteralPath $sourceTestRoot -Recurse -File |
+        Where-Object {
+            $_.Name.EndsWith('.test.mjs',[StringComparison]::Ordinal) -and
+            $_.Name -cne 'architecture-boundary.test.mjs'
+        } |
+        ForEach-Object { Get-AionRepositoryRelativePath -Root $Root -Path $_.FullName })
+    foreach($file in $files){
+        if($file.EndsWith('.test.ts',[StringComparison]::Ordinal)){throw "Raw TypeScript test selected for node execution: $file"}
+        if($file -match '(^|/)architecture-boundary\.test\.mjs$'){throw 'Architecture-boundary test selected in non-architecture set'}
     }
     if(@($files).Count -gt 0){
         $results+=Invoke-AionTrustedVectorPass -Root $Root -Vector (@('node','--test','--test-reporter=tap') + @($files)) -Name 'local-assistant:non-architecture-tests'

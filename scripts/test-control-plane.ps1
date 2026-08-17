@@ -230,11 +230,13 @@ exit /b 1
 function Add-RepairBaselineFiles([string]$Root){
     $src=Join-Path $Root 'packages\local-assistant\src'
     $test=Join-Path $Root 'packages\local-assistant\test'
+    $distTest=Join-Path $Root 'packages\local-assistant\dist-test\test'
     $director=Join-Path $Root 'packages\director'
     $app=Join-Path $Root 'apps\aion'
     $aionTest=Join-Path $Root 'test\aion'
     [IO.Directory]::CreateDirectory($src)|Out-Null
     [IO.Directory]::CreateDirectory($test)|Out-Null
+    [IO.Directory]::CreateDirectory($distTest)|Out-Null
     [IO.Directory]::CreateDirectory($director)|Out-Null
     [IO.Directory]::CreateDirectory((Join-Path $director 'src'))|Out-Null
     [IO.Directory]::CreateDirectory((Join-Path $director 'test'))|Out-Null
@@ -243,6 +245,8 @@ function Add-RepairBaselineFiles([string]$Root){
     [IO.File]::WriteAllText((Join-Path $src 'developer-bridge.ts'),'export const broken = process.env.AION_TEST;',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $test 'architecture-boundary.test.mjs'),'assert boundary policy',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $test 'non-architecture.test.mjs'),'import test from "node:test"; test("synthetic non-architecture", () => {});',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $test 'compiled-only.test.ts'),'import test from "node:test"; test("compiled source", () => {});',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $distTest 'compiled-only.test.js'),'import test from "node:test"; test("compiled artifact", () => {});',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $director 'src\lease-store.ts'),'export const lease = "broken";',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $director 'src\git-truth.ts'),'export const truth = "mojibake";',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $director 'test\lease-store.test.ts'),'test',[Text.UTF8Encoding]::new($false))
@@ -509,6 +513,30 @@ try {
         try{Assert-AionRepairClosureReceiptForPush -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha -BaselineSha $repairBaseline -ReviewedDirectorSha $repairBaseline;Pass '63 push receipt validator accepts exact closed repair'}catch{Fail '63 push receipt validator accepts exact closed repair' $_.Exception.Message}
         $receipt=Get-AionRepairClosureReceipt -Root $repo -DirectiveId 'TEST-REPAIR' -ResultSha $resultSha
         Expect-True '64 closure records Director tree equivalence' ($receipt.directorTreeEquivalence -ceq 'PASS')
+        & git -C $repo checkout -q -B main $repairBaseline
+        & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
+        New-FakeNpm $fakeBin 'fixed'|Out-Null
+        try {
+            $laResults=Invoke-AionLocalAssistantNonArchitectureVerification -Root $repo
+            $nonArch=@($laResults | Where-Object { $_.Name -ceq 'local-assistant:non-architecture-tests' } | Select-Object -First 1)
+            Pass '64a local-assistant non-architecture verifier uses compiled/canonical artifacts'
+            Expect-True '64b local-assistant non-architecture verifier records test component' ($null -ne $nonArch)
+        } catch { Fail '64a local-assistant non-architecture verifier uses compiled/canonical artifacts' $_.Exception.Message }
+        $compiledArtifact=Join-Path $repo 'packages\local-assistant\dist-test\test\compiled-only.test.js'
+        Remove-Item -LiteralPath $compiledArtifact -Force
+        Expect-Throw '64c local-assistant verifier rejects missing compiled artifact' {Invoke-AionLocalAssistantNonArchitectureVerification -Root $repo|Out-Null}
+        [IO.File]::WriteAllText($compiledArtifact,'import test from "node:test"; test("compiled artifact", () => {});',[Text.UTF8Encoding]::new($false))
+        $failingArtifact=Join-Path $repo 'packages\local-assistant\dist-test\test\failing-extra.test.js'
+        [IO.File]::WriteAllText($failingArtifact,'import test from "node:test"; test("extra failure", () => { throw new Error("second failure"); });',[Text.UTF8Encoding]::new($false))
+        Expect-Throw '64d local-assistant verifier rejects extra failing non-architecture test' {Invoke-AionLocalAssistantNonArchitectureVerification -Root $repo|Out-Null}
+        Remove-Item -LiteralPath $failingArtifact -Force
+        $rawTsLeak=Join-Path $repo 'packages\local-assistant\dist-test\test\raw-leak.test.ts'
+        [IO.File]::WriteAllText($rawTsLeak,'import test from "node:test"; test("raw leak", () => {});',[Text.UTF8Encoding]::new($false))
+        try {
+            Invoke-AionLocalAssistantNonArchitectureVerification -Root $repo|Out-Null
+            Pass '64e raw TypeScript test artifact is not selected for node execution'
+        } catch { Fail '64e raw TypeScript test artifact is not selected for node execution' $_.Exception.Message }
+        Remove-Item -LiteralPath $rawTsLeak -Force
 
         $oldReviewedDirectorSha=$script:AionReviewedDirectorSha
         try {

@@ -154,6 +154,18 @@ function New-FakeNode([string]$Dir){
     return $scriptPath
 }
 
+function Add-LocalAssistantCompiledTestArtifacts([string]$Root){
+    $sourceRoot=Join-Path $Root 'packages\local-assistant\test'
+    $compiledRoot=Join-Path $Root 'packages\local-assistant\dist-test\test'
+    [IO.Directory]::CreateDirectory($compiledRoot)|Out-Null
+    foreach($source in @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | Where-Object { $_.Name.EndsWith('.test.ts',[StringComparison]::Ordinal) })){
+        $relative=Get-AionRepositoryRelativePath -Root $sourceRoot -Path $source.FullName
+        $target=Join-Path $compiledRoot (($relative.Substring(0,$relative.Length-3)+'.js').Replace('/','\'))
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $target))|Out-Null
+        [IO.File]::WriteAllText($target,'import test from "node:test"; test("compiled placeholder", () => {});',[Text.UTF8Encoding]::new($false))
+    }
+}
+
 function Invoke-AuthorizationFixture([string]$DirectivePath,[string]$Phrase,[switch]$SkipRepositoryChecks,[string]$Root=$repo){
     $out=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.out')
     $err=Join-Path $testRoot ([guid]::NewGuid().ToString('N')+'.err')
@@ -181,6 +193,7 @@ try {
     & git -C $repo config core.autocrlf false
     & git -C $repo remote set-url origin $script:AionCanonicalOrigin
     & git -C $repo update-ref refs/remotes/origin/main $baseline
+    Add-LocalAssistantCompiledTestArtifacts $repo
     $fakeBin=Join-Path $testRoot 'fake-bin'
     New-FakeNode $fakeBin|Out-Null
     $env:PATH="$fakeBin;$env:PATH"
