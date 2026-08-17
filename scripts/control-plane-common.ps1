@@ -16,6 +16,34 @@ function Resolve-AionGitRoot {
     return (Resolve-Path -LiteralPath $root.Trim()).Path
 }
 
+function Get-AionRepositoryRelativePath {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Path
+    )
+    if([string]::IsNullOrWhiteSpace($Root)){throw 'Repository root is empty'}
+    if([string]::IsNullOrWhiteSpace($Path)){throw 'Repository path is empty'}
+    try {
+        $resolvedRoot=((Resolve-Path -LiteralPath $Root -ErrorAction Stop)|Select-Object -First 1).ProviderPath
+        $resolvedPath=((Resolve-Path -LiteralPath $Path -ErrorAction Stop)|Select-Object -First 1).ProviderPath
+        $rootFull=[IO.Path]::GetFullPath($resolvedRoot).TrimEnd('\','/')
+        $pathFull=[IO.Path]::GetFullPath($resolvedPath).TrimEnd('\','/')
+        if($pathFull -ceq $rootFull){return '.'}
+        $rootWithSeparator=$rootFull + [IO.Path]::DirectorySeparatorChar
+        if(-not $pathFull.StartsWith($rootWithSeparator,[StringComparison]::OrdinalIgnoreCase)){
+            throw "Path is outside repository root: $Path"
+        }
+        $rootUri=[Uri]($rootWithSeparator)
+        $pathUri=[Uri]$pathFull
+        $relative=[Uri]::UnescapeDataString($rootUri.MakeRelativeUri($pathUri).ToString())
+        if([string]::IsNullOrWhiteSpace($relative)){return '.'}
+        return $relative.Replace('\','/')
+    }
+    catch {
+        throw "Could not compute repository-relative path: $($_.Exception.Message)"
+    }
+}
+
 function Get-AionDirective {
     param([Parameter(Mandatory=$true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Current directive missing: $Path" }
@@ -218,7 +246,7 @@ function Invoke-AionLocalAssistantNonArchitectureVerification {
         if(Test-Path -LiteralPath $testRoot -PathType Container){
             $files+=@(Get-ChildItem -LiteralPath $testRoot -Recurse -File -Include '*.test.js','*.test.mjs' |
                 Where-Object { $_.Name -cne 'architecture-boundary.test.mjs' } |
-                ForEach-Object { [IO.Path]::GetRelativePath($Root,$_.FullName).Replace('\','/') })
+                ForEach-Object { Get-AionRepositoryRelativePath -Root $Root -Path $_.FullName })
         }
     }
     if(@($files).Count -gt 0){

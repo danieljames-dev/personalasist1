@@ -229,6 +229,7 @@ function Add-RepairBaselineFiles([string]$Root){
     [IO.Directory]::CreateDirectory($director)|Out-Null
     [IO.File]::WriteAllText((Join-Path $src 'developer-bridge.ts'),'export const broken = process.env.AION_TEST;',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $test 'architecture-boundary.test.mjs'),'assert boundary policy',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $test 'non-architecture.test.mjs'),'import test from "node:test"; test("synthetic non-architecture", () => {});',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $director 'sentinel.txt'),'director evidence tree',[Text.UTF8Encoding]::new($false))
     & git -C $Root add packages
     & git -C $Root commit -m 'add repair baseline files'|Out-Null
@@ -287,6 +288,23 @@ try {
     Expect-True '17 .aion-local ignored' ($LASTEXITCODE -eq 0)
     $staged=@(& git -C $repo diff --cached --name-only)
     Expect-True '18 local state is not staged' (@($staged|?{$_-like '.aion-local/*'}).Count -eq 0)
+    $relativeDir=Join-Path $repo 'nested\path'
+    [IO.Directory]::CreateDirectory($relativeDir)|Out-Null
+    $relativeFile=Join-Path $relativeDir 'child.test.mjs'
+    [IO.File]::WriteAllText($relativeFile,'test file',[Text.UTF8Encoding]::new($false))
+    Expect-True '18a PS5 relative helper maps child file' ((Get-AionRepositoryRelativePath -Root $repo -Path $relativeFile) -ceq 'nested/path/child.test.mjs')
+    Expect-True '18b PS5 relative helper maps nested directory' ((Get-AionRepositoryRelativePath -Root $repo -Path $relativeDir) -ceq 'nested/path')
+    Expect-True '18c PS5 relative helper maps repository root deterministically' ((Get-AionRepositoryRelativePath -Root $repo -Path $repo) -ceq '.')
+    Expect-True '18d PS5 relative helper normalizes separators' (-not((Get-AionRepositoryRelativePath -Root $repo -Path $relativeFile).Contains('\')))
+    $evilRoot="$repo-evil"
+    [IO.Directory]::CreateDirectory($evilRoot)|Out-Null
+    $evilFile=Join-Path $evilRoot 'owned.txt'
+    [IO.File]::WriteAllText($evilFile,'evil',[Text.UTF8Encoding]::new($false))
+    Expect-Throw '18e PS5 relative helper rejects sibling prefix attack' {Get-AionRepositoryRelativePath -Root $repo -Path $evilFile|Out-Null}
+    $outsideFile=Join-Path $testRoot 'outside.txt'
+    [IO.File]::WriteAllText($outsideFile,'outside',[Text.UTF8Encoding]::new($false))
+    Expect-Throw '18f PS5 relative helper rejects parent traversal outside root' {Get-AionRepositoryRelativePath -Root $repo -Path (Join-Path $repo '..\outside.txt')|Out-Null}
+    Remove-Item -LiteralPath (Join-Path $repo 'nested') -Recurse -Force
     & git -C $repo add AGENTS.md
     & git -C $repo commit -m 'add synthetic agents'|Out-Null
     $runHead=(& git -C $repo rev-parse HEAD).Trim()
