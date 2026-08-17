@@ -298,7 +298,6 @@ test("an exported symbol whose only production call site discards the return is 
     ["advance", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: CLI writes the verdict to mission.json, which has no reader, and still launches"],
     ["writeAtomic", "void writer: failure throws; the return is not a fact"],
     ["artifactPathWithinRoot", "consumed via boolean control flow; heuristic cannot see the use"],
-    ["releaseDeveloperAgentWorktreeLease", "void releaser: the fact is the side-effect unlock"],
     ["livenessGrants", "consumed via .reclaim property read after the call"],
     ["resourceIsIdentifiable", "consumed in boolean position; heuristic cannot see the use"],
     ["isSpawnPermitSpent", "consumed in boolean position; heuristic cannot see the use"],

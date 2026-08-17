@@ -11,7 +11,9 @@ import { createFixedClock } from "../src/bounded-log.js";
 import { HANDOFF_SCHEMA_V1 } from "../src/handoff.js";
 import { acquireLease } from "../src/leases.js";
 import {
+  acquireDeveloperAgentWorktreeLease,
   createNodeLeaseStore,
+  releaseDeveloperAgentWorktreeLease,
   sandboxDirectorStoreRoot,
 } from "../src/lease-store.js";
 import {
@@ -246,4 +248,140 @@ test("two executeRun runtimes on one store root spawn into a worktree only once"
 test("sandboxDirectorStoreRoot never defaults to C:\\AION\\director", () => {
   const root = sandboxDirectorStoreRoot({});
   assert.equal(root.toLowerCase().startsWith("c:\\aion\\"), false);
+});
+
+test("developer-agent release trusts empty scanner verdict over null-nonce helper descendants", () => {
+  const root = mkdtempSync(join(tmpdir(), "aion-dev-agent-release-"));
+  const wt = join(root, "wt");
+  const holderStartedAt = "2026-08-13T12:00:00.000Z";
+  const probe = {
+    observe: (pid: number) => ({
+      outcome: "FOUND" as const,
+      reason: "injected-holder",
+      pid,
+      creationDate: holderStartedAt,
+      executablePath: "C:\\Tools\\node.exe",
+    }),
+  };
+  try {
+    const store = createNodeLeaseStore(root);
+    const acquired = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot: wt,
+      now: NOW,
+      store,
+      probe,
+    });
+    assert.equal(acquired.ok, true, acquired.ok ? undefined : acquired.reason);
+    if (!acquired.ok) return;
+    const holderPid = acquired.lease.pid ?? 5000;
+    const released = releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease, {
+      scanOrphans: () => ({
+        snapshot: [
+          {
+            pid: holderPid + 1,
+            parentPid: holderPid,
+            parentPresent: true,
+            parentName: "node.exe",
+            parentCreationDate: holderStartedAt,
+            creationDate: "2026-08-13T12:00:01.000Z",
+            executablePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            runNonce: null,
+            nonceReadable: false,
+          },
+          {
+            pid: holderPid + 2,
+            parentPid: holderPid + 1,
+            parentPresent: true,
+            parentName: "powershell.exe",
+            parentCreationDate: "2026-08-13T12:00:01.000Z",
+            creationDate: "2026-08-13T12:00:02.000Z",
+            executablePath: "C:\\Windows\\System32\\conhost.exe",
+            runNonce: null,
+            nonceReadable: false,
+          },
+        ],
+        killable: [{ pid: holderPid + 1 }, { pid: holderPid + 2 }],
+        liveSightings: [{ pid: holderPid + 1 }, { pid: holderPid + 2 }],
+        undecidable: [],
+      }),
+    });
+    assert.equal(released.ok, true, released.reason);
+    assert.equal(store.list().length, 0);
+
+    const second = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot: wt,
+      now: "2026-08-13T12:01:00.000Z",
+      store,
+      probe,
+    });
+    assert.equal(second.ok, true, second.ok ? undefined : second.reason);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("developer-agent release still retains the lease for live nonce or undecidable evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), "aion-dev-agent-retain-"));
+  const wt = join(root, "wt");
+  const holderStartedAt = "2026-08-13T12:00:00.000Z";
+  const probe = {
+    observe: (pid: number) => ({
+      outcome: "FOUND" as const,
+      reason: "injected-holder",
+      pid,
+      creationDate: holderStartedAt,
+      executablePath: "C:\\Tools\\node.exe",
+    }),
+  };
+  try {
+    const store = createNodeLeaseStore(root);
+    const acquired = acquireDeveloperAgentWorktreeLease({
+      repositoryRoot: wt,
+      now: NOW,
+      store,
+      probe,
+    });
+    assert.equal(acquired.ok, true, acquired.ok ? undefined : acquired.reason);
+    if (!acquired.ok) return;
+    const nonce = acquired.lease.processIdentity?.runToken ?? "";
+    const holderPid = acquired.lease.pid ?? 5000;
+    const matchingNonce = releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease, {
+      scanOrphans: () => ({
+        snapshot: [{
+          pid: holderPid + 1,
+          parentPid: holderPid,
+          parentPresent: true,
+          parentCreationDate: holderStartedAt,
+          creationDate: "2026-08-13T12:00:01.000Z",
+          runNonce: nonce,
+          nonceReadable: true,
+        }],
+        killable: [],
+        liveSightings: [],
+        undecidable: [],
+      }),
+    });
+    assert.equal(matchingNonce.ok, false);
+    assert.equal(store.list().length, 1);
+
+    const undecidableEvidence = releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease, {
+      scanOrphans: () => ({
+        snapshot: [{
+          pid: holderPid + 2,
+          parentPid: holderPid + 99,
+          parentPresent: false,
+          creationDate: "2026-08-13T12:00:01.000Z",
+          runNonce: null,
+          nonceReadable: false,
+        }],
+        killable: [],
+        liveSightings: [],
+        undecidable: [],
+      }),
+    });
+    assert.equal(undecidableEvidence.ok, false);
+    assert.equal(store.list().length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

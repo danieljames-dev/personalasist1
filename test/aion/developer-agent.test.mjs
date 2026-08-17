@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
-import { isAbsolute } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import test from "node:test";
-import { developerAgentCandidates, resolveClaudeCodeExecutable, resolveDeveloperAgentBridge, resolveDeveloperAgentBridges } from "../../apps/aion/developer-agent.mjs";
-import { discoverClaudeExecutor } from "../../packages/director/dist/index.js";
+import {
+  developerAgentCandidates,
+  guardBridgeWithDirectorLease,
+  resolveClaudeCodeExecutable,
+  resolveDeveloperAgentBridge,
+  resolveDeveloperAgentBridges,
+} from "../../apps/aion/developer-agent.mjs";
+import { createNodeLeaseStore, discoverClaudeExecutor } from "../../packages/director/dist/index.js";
 
 const repositoryRoot = process.cwd();
 const absentEnvironment = { AION_DEVELOPER_AGENT_PATH: "C:\\synthetic\\definitely\\absent\\codex.exe", AION_CLAUDE_CODE_PATH: "C:\\synthetic\\definitely\\absent\\claude.exe" };
@@ -151,5 +159,52 @@ test("no part of a task instruction can ever become an argument or shell text", 
       assert.notEqual(readOnly, writing, "the two boundaries are genuinely different commands");
       assert.doesNotMatch(readOnly, /workspace-write|danger-full-access|bypassPermissions/u, "a read-only task never asks for write or bypass authority");
     }
+  }
+});
+
+test("guarded developer-agent reports failed lease cleanup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aion-dev-agent-cleanup-"));
+  try {
+    const store = createNodeLeaseStore(root);
+    const bridge = {
+      id: "codex-cli",
+      async status() {
+        return {
+          bridgeId: "codex-cli",
+          available: true,
+          executable: "codex",
+          version: "synthetic",
+          modes: ["read-only"],
+          account: "not-checked",
+          accountDetail: "not checked",
+          detail: "synthetic",
+        };
+      },
+      describe() {
+        return { executable: "codex", args: [] };
+      },
+      async run(task) {
+        assert.equal(typeof task.directorMintedPermit, "object");
+        assert.equal(typeof task.runNonce, "string");
+        return { ok: true };
+      },
+    };
+    const guarded = guardBridgeWithDirectorLease(bridge, root, {
+      store,
+      now: "2026-08-13T12:00:00.000Z",
+      scanOrphans: () => ({
+        snapshot: [],
+        killable: [],
+        liveSightings: [{ pid: 9876 }],
+        undecidable: [],
+      }),
+    });
+    await assert.rejects(
+      guarded.run({ repositoryRoot: root, instruction: "inspect", mode: "read-only" }, new AbortController().signal),
+      /developer-agent cleanup failed: developer-agent tree is not gone/u,
+    );
+    assert.equal(store.list().length, 1, "failed cleanup keeps the lease durable");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

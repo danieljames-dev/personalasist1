@@ -47,6 +47,7 @@ import {
   isUsablePid,
   livenessGrants,
   measurementApparatusIdentitiesOfThisProcess,
+  nonceMatchesRun,
   observationIsAboutPid,
   normaliseRunNonce,
   placeableInstantMs,
@@ -878,10 +879,9 @@ function snapshotCarriesLeftoverEvidence(snapshot: unknown): boolean {
 
 function namedDeveloperAgentLeftovers(scan: {
   readonly killable?: unknown;
-  readonly liveSightings?: unknown;
   readonly undecidable?: unknown;
 }): { ok: false; reason: string } | null {
-  for (const field of [scan.killable, scan.liveSightings, scan.undecidable]) {
+  for (const field of [scan.killable, scan.undecidable]) {
     const length = leftoverFieldLength(field);
     if (length === "unreadable") {
       return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
@@ -891,6 +891,74 @@ function namedDeveloperAgentLeftovers(scan: {
     }
   }
   return null;
+}
+
+function developerAgentNamedPids(value: unknown): { ok: true; pids: readonly number[] } | { ok: false } {
+  const length = leftoverFieldLength(value);
+  if (length === "absent") return { ok: true, pids: [] };
+  if (length === "unreadable") return { ok: false };
+  if (!Array.isArray(value)) return { ok: false };
+  const pids: number[] = [];
+  for (const row of value) {
+    if (row === null || typeof row !== "object") return { ok: false };
+    const pid = (row as { pid?: unknown }).pid;
+    if (!isUsablePid(pid)) return { ok: false };
+    pids.push(pid);
+  }
+  return { ok: true, pids };
+}
+
+function isDeveloperAgentScannerHelperRoot(
+  row: {
+    readonly parentPid?: number;
+    readonly executablePath?: string | null;
+    readonly name?: string | null;
+    readonly runNonce?: string | null;
+    readonly nonceReadable?: boolean;
+  },
+  holderPid: number | null,
+): boolean {
+  if (holderPid === null || row.parentPid !== holderPid) return false;
+  if (row.runNonce !== null && row.runNonce !== undefined) return false;
+  if (row.nonceReadable !== false) return false;
+  const executable = `${row.executablePath ?? row.name ?? ""}`.toLowerCase();
+  return executable.endsWith("\\powershell.exe")
+    || executable.endsWith("/powershell.exe")
+    || executable === "powershell.exe"
+    || executable.endsWith("\\pwsh.exe")
+    || executable.endsWith("/pwsh.exe")
+    || executable === "pwsh.exe";
+}
+
+function developerAgentScannerHelperPids(
+  rows: readonly {
+    readonly pid?: number;
+    readonly parentPid?: number;
+    readonly executablePath?: string | null;
+    readonly name?: string | null;
+    readonly runNonce?: string | null;
+    readonly nonceReadable?: boolean;
+  }[],
+  holderPid: number | null,
+): ReadonlySet<number> {
+  const helpers = new Set<number>();
+  for (const row of rows) {
+    if (isUsablePid(row.pid) && isDeveloperAgentScannerHelperRoot(row, holderPid)) {
+      helpers.add(row.pid);
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      if (!isUsablePid(row.pid) || !isUsablePid(row.parentPid)) continue;
+      if (helpers.has(row.pid) || !helpers.has(row.parentPid)) continue;
+      if (row.runNonce !== null && row.runNonce !== undefined) continue;
+      helpers.add(row.pid);
+      changed = true;
+    }
+  }
+  return helpers;
 }
 
 export function releaseDeveloperAgentWorktreeLease(
@@ -933,12 +1001,16 @@ export function releaseDeveloperAgentWorktreeLease(
       holderPid,
       createdNotBefore,
     });
-    const namedLeftovers = namedDeveloperAgentLeftovers(scan);
-    if (namedLeftovers !== null) return namedLeftovers;
     if (snapshotCarriesLeftoverEvidence(scan.snapshot)) {
       return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
     }
     if (Array.isArray(scan.snapshot)) {
+      const namedKillable = developerAgentNamedPids(scan.killable);
+      const namedLiveSightings = developerAgentNamedPids(scan.liveSightings);
+      const namedUndecidable = developerAgentNamedPids(scan.undecidable);
+      if (!namedKillable.ok || !namedLiveSightings.ok || !namedUndecidable.ok) {
+        return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
+      }
       const ctx = processRowPlausibilityContext({
         runNonce: nonce,
         createdNotBefore,
@@ -946,16 +1018,41 @@ export function releaseDeveloperAgentWorktreeLease(
         observedPids: holderPid !== null ? new Set([holderPid]) : new Set(),
         rows: scan.snapshot,
       });
-      const live = scan.snapshot.filter((row) => processRowCouldBelongToThisRun(row, ctx));
+      const live = scan.snapshot.filter((row) => nonceMatchesRun(row, nonce));
       const undecidable = undecidableRowsOf(scan.snapshot, ctx);
-      if (live.length > 0 || undecidable.length > 0) {
+      const helperPids = developerAgentScannerHelperPids(scan.snapshot, holderPid);
+      const namedPids = [
+        ...namedKillable.pids,
+        ...namedLiveSightings.pids,
+        ...namedUndecidable.pids,
+      ];
+      const blockingNamedLive = namedLiveSightings.pids.filter((pid) => {
+        const row = scan.snapshot!.find((item) => item.pid === pid);
+        if (row === undefined) return true;
+        return !(
+          (row.runNonce === null || row.runNonce === undefined)
+          && processRowCouldBelongToThisRun(row, ctx)
+          && !nonceMatchesRun(row, nonce)
+          && !undecidable.includes(row)
+        );
+      });
+      const blockingNamedPids = namedPids.filter((pid) => !helperPids.has(pid));
+      if (live.length > 0 || undecidable.length > 0 || blockingNamedLive.length > 0 || blockingNamedPids.length > 0) {
         return {
           ok: false,
           reason: "developer-agent tree is not gone; WORKTREE lease retained",
         };
       }
     } else if (scan.liveSightings !== undefined || scan.undecidable !== undefined) {
-      // Named leftover fields were already required to be empty arrays.
+      const namedLeftovers = namedDeveloperAgentLeftovers(scan);
+      if (namedLeftovers !== null) return namedLeftovers;
+      const namedLiveSightings = developerAgentNamedPids(scan.liveSightings);
+      if (!namedLiveSightings.ok) {
+        return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
+      }
+      if (namedLiveSightings.pids.length > 0) {
+        return { ok: false, reason: "developer-agent tree is not gone; WORKTREE lease retained" };
+      }
     } else {
       return { ok: false, reason: "developer-agent tree scan shape is unreadable; WORKTREE lease retained" };
     }
@@ -969,5 +1066,3 @@ export function releaseDeveloperAgentWorktreeLease(
     return { ok: false, reason: "lease store unreadable; not a successful release" };
   }
 }
-
-

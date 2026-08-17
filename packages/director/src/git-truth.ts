@@ -9,8 +9,8 @@
  * ## Pure decisions, injected facts
  *
  * Reading Git needs a process; deciding whether the reading is acceptable does not. Everything here
- * takes a plain snapshot of facts and returns a verdict, which is why the awkward cases â€” a
- * detached HEAD, a remote that moved mid-run, an unexpected large artifact â€” are testable without a
+ * takes a plain snapshot of facts and returns a verdict, which is why the awkward cases — a
+ * detached HEAD, a remote that moved mid-run, an unexpected large artifact — are testable without a
  * repository at all. The caller owns the spawning; this owns the judgement.
  *
  * ## Absence is never agreement
@@ -25,7 +25,7 @@
  *
  * Some Git operations cannot be made safe by automation, only by a person who understands what they
  * are about to lose. Reset, force-push, rebasing accepted history, blind clean and blind stash are
- * refused by classifying the argv â€” subcommand first, then its own flags â€” because the substring
+ * refused by classifying the argv — subcommand first, then its own flags — because the substring
  * matching this used to do is wrong in both directions: it refused `git stash list`, which only
  * prints, and it allowed `git push origin +main`, which is a force-push written in refspec syntax.
  *
@@ -48,7 +48,7 @@ export const GIT_TRUTH_SCHEMA_V1 = "aion.director.git-truth.v1" as const;
 /** A reading of a repository at one moment. Supplied by the caller; never fetched here. */
 export interface GitSnapshotV1 {
   worktreePath: string;
-  /** Null when HEAD is detached â€” which is itself a finding, not a detail. */
+  /** Null when HEAD is detached — which is itself a finding, not a detail. */
   attachedBranch: string | null;
   head: string;
   localBranchHead: string | null;
@@ -76,7 +76,7 @@ export interface GitExpectationV1 {
    * Demand that HEAD be on a branch without naming which one.
    *
    * Attachment and identity are different questions. A caller that only knows work must land
-   * somewhere pushable â€” a run about to commit, before its branch has been chosen â€” still needs the
+   * somewhere pushable — a run about to commit, before its branch has been chosen — still needs the
    * detached case caught, and previously could only get that by inventing an expected branch name.
    */
   requireAttachedBranch?: boolean;
@@ -525,7 +525,7 @@ function snapshotFromObservation(observation: GitObservationV1): GitSnapshotV1 {
  * A readable inventory of what `isForbiddenGitOperation` refuses, and the label each refusal
  * reports. It is not the matcher: matching on these strings is what produced both a refused
  * `git stash list` and an allowed `git push origin +main`. Every entry here, run as `git <entry>`,
- * is refused by the classifier â€” that correspondence is asserted in the tests, so the list cannot
+ * is refused by the classifier — that correspondence is asserted in the tests, so the list cannot
  * drift into decoration.
  */
 export const FORBIDDEN_GIT_OPERATIONS: readonly string[] = [
@@ -587,7 +587,7 @@ function hasShortFlag(args: readonly string[], letter: string): boolean {
   return args.some((arg) => /^-[A-Za-z]+$/.test(arg) && arg.slice(1).includes(letter));
 }
 
-/** The first argument that is not an option â€” a subcommand's own verb, where it has one. */
+/** The first argument that is not an option — a subcommand's own verb, where it has one. */
 function firstPositional(args: readonly string[]): string | null {
   for (const arg of args) {
     if (!arg.startsWith("-")) return arg;
@@ -645,8 +645,8 @@ export function isForbiddenGitOperation(
       }
 
       case "stash": {
-        // `list` and `show` only read. Everything else â€” including a bare `git stash`, which is an
-        // implicit `push` â€” takes the worktree away and leaves the executor building nothing.
+        // `list` and `show` only read. Everything else — including a bare `git stash`, which is an
+        // implicit `push` — takes the worktree away and leaves the executor building nothing.
         const verb = firstPositional(args);
         return verb === "list" || verb === "show" ? null : "stash";
       }
@@ -683,7 +683,7 @@ export function describeVerdict(verdict: GitVerdictV1): string {
  *
  * {@link verifyGitTruth} judges a snapshot it is handed. That snapshot has to come from
  * somewhere, and it must not come from the executor: `headAfter` on a handoff is testimony.
- * This collector is the corroboration â€” the Director runs Git and records the answers.
+ * This collector is the corroboration — the Director runs Git and records the answers.
  *
  * ## Argv arrays, never a shell string
  *
@@ -1145,7 +1145,7 @@ function observeBranch(result: GitCommandResultV1): GitBranchObservationV1 {
     return { outcome: "ATTACHED", name };
   }
   // `symbolic-ref -q` exits 1 with no output when HEAD is detached. Any other non-zero is a
-  // real failure â€” including "not a git repository" (128) â€” and must not look detached.
+  // real failure — including "not a git repository" (128) — and must not look detached.
   if (result.status === 1 && result.stdout.trim() === "") {
     return { outcome: "DETACHED" };
   }

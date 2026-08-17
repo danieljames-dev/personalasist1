@@ -130,6 +130,12 @@ export function createGuardedDeveloperAgentRegistry(bridges, repositoryRoot, opt
 export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {}) {
   const originalRun = bridge.run.bind(bridge);
   bridge.run = async function runWithDirectorLease(task, signal) {
+    if (resolve(task.repositoryRoot) !== resolve(repositoryRoot)) {
+      throw new Error("developer-agent refused: task is outside the approved repository root");
+    }
+    if (typeof task.instruction !== "string" || task.instruction.trim() === "") {
+      throw new Error("developer-agent refused: instruction is invalid");
+    }
     const acquired = acquireDeveloperAgentWorktreeLease({
       repositoryRoot,
       now: options.now ?? new Date().toISOString(),
@@ -138,6 +144,8 @@ export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {
     if (!acquired.ok) {
       throw new Error(`developer-agent refused: ${acquired.reason}`);
     }
+    let runResult;
+    let runError;
     try {
       const permit = mintDirectorWritePermit({
         leaseId: acquired.lease.leaseId,
@@ -156,16 +164,31 @@ export function guardBridgeWithDirectorLease(bridge, repositoryRoot, options = {
       if (runNonce === null) {
         throw new Error("developer-agent refused: minted run nonce is missing or unusable");
       }
-      return await originalRun({
+      runResult = await originalRun({
         ...task,
         directorMintedPermit: permit,
         now,
         runNonce,
       }, signal);
+    } catch (error) {
+      runError = error;
     } finally {
       const scanOrphans = options.scanOrphans ?? createWindowsOrphanScanner();
-      releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease, { scanOrphans });
+      const released = releaseDeveloperAgentWorktreeLease(acquired.store, acquired.lease, { scanOrphans });
+      if (!released.ok) {
+        const cleanupError = new Error(`developer-agent cleanup failed: ${released.reason}`);
+        if (runError !== undefined) {
+          const runMessage = runError instanceof Error ? runError.message : String(runError);
+          throw new AggregateError(
+            [runError, cleanupError],
+            `developer-agent failed: ${runMessage}; cleanup failed: ${released.reason}`,
+          );
+        }
+        throw cleanupError;
+      }
     }
+    if (runError !== undefined) throw runError;
+    return runResult;
   };
   return bridge;
 }
