@@ -20,6 +20,21 @@ try {
         throw "Authorization requires PENDING_OWNER_AUTHORIZATION; observed $($directive.Fields.Status)"
     }
 
+    $standing=Resolve-AionStandingDirectiveAuthorization -Root $root -Directive $directive
+    if((Get-AionDirectiveFieldOrDefault $directive 'Authority-Source' '') -ceq $script:AionOwnerStandingAuthoritySource){
+        if($standing.outcome -ceq 'DENY'){throw "Standing authority denied: $($standing.reason)"}
+        if($standing.outcome -ceq 'ALLOW_STANDING'){
+            Write-Host "Directive ID : $($directive.Fields.'Directive-ID')"
+            Write-Host "Title        : $($directive.Fields.Title)"
+            Write-Host "Baseline     : $($directive.Fields.'Repository-Baseline')"
+            Write-Host "Standing     : $($standing.reason)"
+            if($ValidationOnly){throw 'Validation-only refusal: no authorization phrase accepted'}
+            Set-AionDirectiveStatus -Path $DirectivePath -From 'PENDING_OWNER_AUTHORIZATION' -To 'AUTHORIZED'
+            Write-Host 'Standing authority applied. No Owner phrase required.'
+            exit 0
+        }
+    }
+
     Write-Host "Directive ID : $($directive.Fields.'Directive-ID')"
     Write-Host "Title        : $($directive.Fields.Title)"
     Write-Host "Baseline     : $($directive.Fields.'Repository-Baseline')"
@@ -75,6 +90,7 @@ try {
     }
     if($ValidationOnly){throw 'Validation-only refusal: no authorization phrase accepted'}
     Set-AionDirectiveStatus -Path $DirectivePath -From 'PENDING_OWNER_AUTHORIZATION' -To 'AUTHORIZED' -RecordAuthorization
+    [void](Write-AionOwnerMilestoneAuthorizationFromDirective -Root $root -Directive $directive -FounderPhraseVerified)
     Write-Host 'Directive authorized locally. It was not staged, committed, or executed.'
     Write-Host 'Run VS Code task: AION: Run Current Directive'
     exit 0

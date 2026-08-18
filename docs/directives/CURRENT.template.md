@@ -11,6 +11,12 @@ Required-Authorization-Phrase: <exact phrase>
 # Authorization-Class: NORMAL | BROKEN_BASELINE_REPAIR
 # Known-Failing-Gate: <allowlisted gate id, no commands>
 # Allowed-Repair-Files: <optional semicolon-separated exact repo-relative subset>
+# Optional standing-authority metadata:
+# Milestone-Id: <stable milestone id>
+# Owner-Authorization-Id: <durable owner auth id>
+# Authorized-Objective: <exact objective>
+# Authority-Source: OWNER_STANDING_AUTHORITY_V1
+# Fresh-Owner-Approval-Required: YES | NO
 
 ## Goal
 

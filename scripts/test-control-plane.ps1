@@ -1269,6 +1269,16 @@ try {
         Remove-Item Env:AION_FAKE_NPM_LOG -ErrorAction SilentlyContinue
     }
 
+    $standingOut=Join-Path $testRoot 'standing.out'
+    $standingErr=Join-Path $testRoot 'standing.err'
+    $standing=Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'test-owner-standing-authority.ps1')+'"')
+    ) -Wait -PassThru -NoNewWindow -RedirectStandardOutput $standingOut -RedirectStandardError $standingErr
+    $standingText=((Get-Content -LiteralPath $standingOut -Raw -ErrorAction SilentlyContinue)+"`n"+(Get-Content -LiteralPath $standingErr -Raw -ErrorAction SilentlyContinue))
+    if($standing.ExitCode -ne 0){throw "standing-authority suite failed: $standingText"}
+    if($standingText -notmatch 'standing-authority regression: PASS'){throw "standing-authority suite missing PASS summary"}
+    Pass 'standing-authority suite'
+
     if($failed-ne 0){throw "$failed control-plane tests failed"}
     $complete=$true
     Write-Host "control-plane regression: PASS ($passed passed, 0 failed)"

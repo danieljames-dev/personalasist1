@@ -51,9 +51,16 @@ read-only host inspection, audit evidence, handoffs.
 Structural deny: tracked production source edit, commit, push, source fix, builder
 mutation — unless a future Owner-authorized role explicitly grants them.
 
+## Owner standing authority
+
+After one Founder-authorized milestone, `OWNER_STANDING_AUTHORITY_V1` covers routine
+internal work (read, test, build, bounded repair, internal directives, provider
+failover, and controlled push when already in the envelope) without another Owner
+phrase. Decisions are `ALLOW_STANDING`, `REQUIRE_FRESH_OWNER_APPROVAL`, or `DENY`.
+
 ## Still require new Owner authority
 
-Do **not** treat always-approve as license to:
+Do **not** treat always-approve or standing authority as license to:
 
 - create a new milestone or expand the capability envelope
 - access credentials / spend money / increase budgets

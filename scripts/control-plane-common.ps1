@@ -1250,3 +1250,5 @@ function Assert-AionPostRun {
     if(-not(Test-Path -LiteralPath $HandoffPath -PathType Leaf)){throw 'LATEST handoff missing'}
     if((Get-Item -LiteralPath $HandoffPath).Length -eq 0){throw 'LATEST handoff is empty'}
 }
+
+. (Join-Path $PSScriptRoot 'owner-standing-authority.ps1')

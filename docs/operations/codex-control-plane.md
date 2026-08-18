@@ -13,17 +13,25 @@ the evidence bridge back to CTO review.
 
 Root `AGENTS.md` supplies permanent repository rules. It never authorizes a task. The only current
 task is `.aion-local/directives/CURRENT.md`, and it is runnable only at exact status `AUTHORIZED`.
-Codex cannot change a pending directive to that status; only the interactive Founder authorization
-script can.
+A pending directive becomes `AUTHORIZED` only through the Founder authorization script or, for
+internal continuation, through `OWNER_STANDING_AUTHORITY_V1` derived from an already-persisted
+Owner milestone authorization. Agents cannot create or broaden Owner authority.
 
 ## Directive lifecycle
 
 ```text
 PENDING_OWNER_AUTHORIZATION --Founder script--> AUTHORIZED
+PENDING_OWNER_AUTHORIZATION --standing authority ALLOW_STANDING--> AUTHORIZED
 AUTHORIZED --Codex begins--> RUNNING
 RUNNING --> AWAITING_CTO_REVIEW | BLOCKED | FAILED
 PENDING_OWNER_AUTHORIZATION --> SUPERSEDED (Founder/CTO preparation only)
 ```
+
+Internal sub-directives may declare `Authority-Source: OWNER_STANDING_AUTHORITY_V1` and
+`Fresh-Owner-Approval-Required: NO`. If the referenced Owner authorization is ACTIVE and
+covers the request, the Founder script applies standing authority without a new phrase.
+Missing, revoked, suspended, expired, or malformed authority is DENY. High-consequence
+requests remain `REQUIRE_FRESH_OWNER_APPROVAL` and keep the phrase path.
 
 No other status is valid. A completed or stopped directive must not remain `AUTHORIZED` or
 `RUNNING`. Prior directives and roadmap phases provide context, not continuing authority.

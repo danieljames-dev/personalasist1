@@ -11,8 +11,10 @@
 ### Command approval vs authority approval
 
 - **Authority approval** is the Founder phrase / delegated Owner approval that
-  moves a directive to `AUTHORIZED` (and the capability envelope when the live
-  broker is active). It is required once per milestone.
+  moves a milestone directive to `AUTHORIZED` and, when the directive names a
+  Milestone-Id, persists `OWNER_STANDING_AUTHORITY_V1`. Routine internal
+  sub-directives covered by that standing authority do not require another
+  Owner phrase. High-consequence actions still require fresh Owner approval.
 - **Command approval** is IDE/agent UI prompting for each PowerShell/npm/Git
   tool call. For work under an already-authorized AION milestone in
   `C:\AION-HQ`, routine commands must **not** re-prompt the Owner.
