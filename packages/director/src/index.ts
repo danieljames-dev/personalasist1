@@ -28,6 +28,7 @@ export {
   CANCEL_HARD_MS,
   launchRun,
   directorExecuteJobWithFailover,
+  directorSubmitMvaJob,
   createInProcessCapacityGate,
   recoverAbandonedRun,
   proveWriterExit,
@@ -75,3 +76,4 @@ export * from "./work-items.js";
 export * from "./store-contract.js";
 export * from "./src-reachability.js";
 export * from "./provider-bridge.js";
+export * from "./mva-dispatch.js";

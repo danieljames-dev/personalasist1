@@ -59,6 +59,14 @@ standing authority still covers the same envelope. UNKNOWN is never treated as
 available. A live or UNKNOWN writer blocks replacement writers. Ambiguous
 external effects are not retried.
 
+## MVA real dispatch V1
+
+Director can accept one bounded repository-reversible job, freeze a
+`JobEnvelopeV1`, route it through Provider Bridge V1, hold one worktree lease,
+and run a real local deterministic adapter. Controlled quota/rate-limit
+failover does not require another Owner phrase. Production/external-effect
+requests still require fresh Owner approval. UNKNOWN prior writers fail closed.
+
 ## Owner standing authority
 
 After one Founder-authorized milestone, `OWNER_STANDING_AUTHORITY_V1` covers routine

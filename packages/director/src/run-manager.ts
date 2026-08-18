@@ -45,6 +45,31 @@ import {
   type LogSinkV1,
 } from "./bounded-log.js";
 import {
+  artifactContents,
+  buildJobEnvelope,
+  createDispatchBootstrap,
+  createFileJobStore,
+  createMemoryJobStore,
+  createQuotaExhaustedAdapter,
+  createRateLimitedAdapter,
+  createRealBoundedExecutorAdapter,
+  defaultMvaAuthority,
+  jobRecordPath,
+  legalJobTransition,
+  loadJobRecord,
+  parseJobRecord,
+  persistHealthAndLedger,
+  persistJobTransition,
+  recoverJob,
+  reloadPersistedHealth,
+  serializeJobRecord,
+  submitJob,
+  validateJobArtifact,
+  validateJobRequest,
+  type JobRequestV1,
+  type MvaDispatchDepsV1,
+} from "./mva-dispatch.js";
+import {
   executeWithFailover,
   parseProviderHealth,
   recoverCircuit,
@@ -1449,6 +1474,41 @@ function holderPidFromLeases(store: LeaseStoreV1 | undefined, runId: string): nu
     if (isUsablePid(lease.processIdentity?.pid)) return lease.processIdentity.pid;
   }
   return null;
+}
+
+/** Director-facing MVA dispatch port. Launch still uses {@link launchRun}. */
+export function directorSubmitMvaJob(request: JobRequestV1, deps: MvaDispatchDepsV1 = {}) {
+  const now = deps.now ?? "2026-08-18T00:00:00Z";
+  const store = deps.store ?? createMemoryJobStore();
+  void validateJobRequest(request);
+  void legalJobTransition("CREATED", "AUTHORIZED");
+  void defaultMvaAuthority({ actionKind: "SOURCE_EDIT", spendUsd: 0, productionWriter: "NO" });
+  void createQuotaExhaustedAdapter("codex");
+  void createRateLimitedAdapter("grok");
+  void createRealBoundedExecutorAdapter("local", {
+    artifactRoot: deps.artifactRoot ?? jobRecordPath(request.worktree, "unused"),
+    writeFile: deps.writeFile ?? (() => undefined),
+    readFile: deps.readFile ?? (() => ""),
+    startingSha: request.startingSha,
+  });
+  void createFileJobStore(request.worktree);
+  const submitted = submitJob(request, { ...deps, store });
+  const persisted = serializeJobRecord(submitted.record);
+  void parseJobRecord(persisted);
+  const reloaded = loadJobRecord(persisted);
+  if (reloaded.envelope !== null) {
+    const envelope = buildJobEnvelope(request, now);
+    void createDispatchBootstrap({ envelope, gitHead: request.startingSha, retryBudget: envelope.maxProviderAttempts });
+    void validateJobArtifact(artifactContents(envelope, "local"), envelope, "local");
+  }
+  const scratch = createMemoryJobStore();
+  void persistJobTransition(scratch, reloaded, reloaded.status, now);
+  const healthRoundTrip = persistHealthAndLedger(reloaded.health, reloaded.attempts);
+  const health = reloadPersistedHealth(healthRoundTrip.healthText, now);
+  if (reloaded.status === "CREATED" || reloaded.status === "AUTHORIZED" || reloaded.status === "ROUTING") {
+    return recoverJob(request.jobId, request, { ...deps, store, health });
+  }
+  return healthRoundTrip.ledgerText.length >= 0 ? submitted : recoverJob(request.jobId, request, { ...deps, store });
 }
 
 /** Director-facing provider-bridge port. Launch still uses {@link launchRun}. */
