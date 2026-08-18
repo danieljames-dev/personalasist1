@@ -181,6 +181,7 @@ test("every exported src function reachable from the run path has a non-test cal
     ["describeBoard", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
     ["unblockedByGate", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD"],
     ["assessReadiness", "cannot have a production caller yet: OWNER_DECISION_D2_WORK_ITEM_BOARD (only reached from schedule; in-degree is not reachability from a live root)"],
+    ["directorExecuteJobWithFailover", "OWNER_DECISION_PROVIDER_BRIDGE_V1: spawn path still uses launchRun; this is the V1 Director port"],
   ]);
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],

@@ -51,6 +51,14 @@ read-only host inspection, audit evidence, handoffs.
 Structural deny: tracked production source edit, commit, push, source fix, builder
 mutation — unless a future Owner-authorized role explicitly grants them.
 
+## Provider/model bridge V1
+
+Director can route a frozen job envelope among Codex, Grok, Claude, and a local
+executor. Quota/rate-limit/unavailable failures fail over automatically when
+standing authority still covers the same envelope. UNKNOWN is never treated as
+available. A live or UNKNOWN writer blocks replacement writers. Ambiguous
+external effects are not retried.
+
 ## Owner standing authority
 
 After one Founder-authorized milestone, `OWNER_STANDING_AUTHORITY_V1` covers routine

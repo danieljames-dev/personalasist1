@@ -27,6 +27,7 @@ export {
   CANCEL_SOFT_MS,
   CANCEL_HARD_MS,
   launchRun,
+  directorExecuteJobWithFailover,
   createInProcessCapacityGate,
   recoverAbandonedRun,
   proveWriterExit,
@@ -73,3 +74,4 @@ export * from "./lease-store.js";
 export * from "./work-items.js";
 export * from "./store-contract.js";
 export * from "./src-reachability.js";
+export * from "./provider-bridge.js";

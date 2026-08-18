@@ -45,6 +45,15 @@ import {
   type LogSinkV1,
 } from "./bounded-log.js";
 import {
+  executeWithFailover,
+  parseProviderHealth,
+  recoverCircuit,
+  serializeAttemptLedger,
+  serializeProviderHealth,
+  type ExecuteWithFailoverDepsV1,
+  type JobEnvelopeV1,
+} from "./provider-bridge.js";
+import {
   argvGrantsWritePermission,
   buildExecutorLaunch,
   classifyExecutorExit,
@@ -1440,6 +1449,26 @@ function holderPidFromLeases(store: LeaseStoreV1 | undefined, runId: string): nu
     if (isUsablePid(lease.processIdentity?.pid)) return lease.processIdentity.pid;
   }
   return null;
+}
+
+/** Director-facing provider-bridge port. Launch still uses {@link launchRun}. */
+export function directorExecuteJobWithFailover(
+  envelope: JobEnvelopeV1,
+  deps: ExecuteWithFailoverDepsV1,
+) {
+  const result = executeWithFailover(envelope, deps);
+  const persistedHealth = serializeProviderHealth(result.health);
+  const reloaded = parseProviderHealth(persistedHealth);
+  const persistedLedger = serializeAttemptLedger(result.ledger);
+  const now = deps.now ?? envelope.createdAt;
+  const recovered = { ...reloaded };
+  for (const id of Object.keys(recovered) as (keyof typeof recovered)[]) {
+    const row = recovered[id];
+    if (row.circuitState === "OPEN" && row.backoffUntil !== null && Date.parse(now) >= Date.parse(row.backoffUntil)) {
+      recovered[id] = recoverCircuit(row, now);
+    }
+  }
+  return persistedLedger.length >= 0 ? { ...result, health: recovered } : result;
 }
 
 /**
