@@ -36,7 +36,9 @@ const repositoryRoot = join(here, "..");
 
 const {
   buildOwnerContextReport,
+  buildOwnerCurrentJobFacts,
   createFilePersonalContextStore,
+  createMemoryPersonalContextStore,
   PERSONAL_CONTEXT_STORE_RELATIVE_PATH,
   recordOwnerCurrentJob,
   registerContextSource,
@@ -146,9 +148,19 @@ if (command === "set-current-job") {
     mode: options.mode === "MERGE" ? "MERGE" : "REPLACE",
   };
 
+  const dryRun = options["dry-run"] !== undefined;
+
   // The Owner-entry source is created on first use. It has no files and never reads any; the row
   // exists so this entry has the same registry-backed provenance as everything else.
-  if (store.loadSource(OWNER_JOB_SOURCE_ID) === null) {
+  //
+  // A dry run creates it in a MEMORY store instead. The first version registered it against the file
+  // store before checking the flag, so `--dry-run` wrote a registry row and then printed "Nothing was
+  // written" — a tool making a false claim about what it had done, which is precisely the failure
+  // this system exists to prevent. Routing the preview through a throwaway store makes the promise
+  // structural rather than a branch someone has to remember.
+  let source = store.loadSource(OWNER_JOB_SOURCE_ID);
+  if (source === null) {
+    const target = dryRun ? createMemoryPersonalContextStore() : store;
     const registered = registerContextSource(
       {
         sourceId: OWNER_JOB_SOURCE_ID,
@@ -157,7 +169,7 @@ if (command === "set-current-job") {
         displayName: "Current job, stated by the Owner",
         purpose: "What the Owner states directly about their current work. No file is read.",
       },
-      { store, now: nowUtc(), authority },
+      { store: target, now: nowUtc(), authority },
     );
     if (!registered.registered) {
       fail(
@@ -165,16 +177,15 @@ if (command === "set-current-job") {
           "This usually means the current directive does not grant sensitive-data permission.",
       );
     }
-    console.log(`Created source ${OWNER_JOB_SOURCE_ID} (${registered.source.sensitivityClass}, providers: ${registered.source.eligibleProviders.join(", ")}).`);
+    source = registered.source;
+    if (!dryRun) {
+      console.log(`Created source ${OWNER_JOB_SOURCE_ID} (${source.sensitivityClass}, providers: ${source.eligibleProviders.join(", ")}).`);
+    }
   }
 
-  if (options["dry-run"] !== undefined) {
-    const source = store.loadSource(OWNER_JOB_SOURCE_ID);
-    const { buildOwnerCurrentJobFacts } = await import(
-      pathToFileURL(join(repositoryRoot, "packages", "personal-context", "dist", "index.js")).href
-    );
+  if (dryRun) {
     const preview = buildOwnerCurrentJobFacts(input, source, nowUtc());
-    console.log(`\nWould store ${preview.facts.length} fact(s):`);
+    console.log(`Would store ${preview.facts.length} fact(s):`);
     for (const fact of preview.facts) console.log(`  ${fact.category}/${fact.predicate} = ${fact.value}`);
     console.log(`\nNot supplied (left missing, not guessed): ${preview.notSupplied.join(", ") || "nothing"}`);
     console.log("\nNothing was written. Re-run without --dry-run to store it.");
