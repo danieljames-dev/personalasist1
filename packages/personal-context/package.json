@@ -1,0 +1,38 @@
+{
+  "name": "@aion/personal-context",
+  "version": "0.1.0",
+  "description": "Owner-approved personal context: explicit source authorization, bounded synchronization, provenance, freshness, conflict tracking, and provider-scoped retrieval",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @aion/director && tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "npm run build --workspace @aion/director && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/**/*.test.js\"",
+    "test:contracts": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/contracts.test.js\"",
+    "test:boundary": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/path-boundary.test.js\"",
+    "test:sync": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/sync.test.js\"",
+    "test:reconcile": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/reconcile.test.js\"",
+    "test:retrieval": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/retrieval.test.js\"",
+    "test:persistence": "npm run build && npm run build:test && node --test --test-reporter=tap \"dist-test/test/persistence.test.js\""
+  },
+  "dependencies": {
+    "@aion/director": "0.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED"
+}

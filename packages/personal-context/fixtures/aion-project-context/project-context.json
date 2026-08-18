@@ -1,0 +1,65 @@
+{
+  "schema": "aion.personalContext.declaration.v1",
+  "subject": "aion-project",
+  "documentId": "aion-project-context-v1",
+  "facts": [
+    {
+      "category": "BUSINESS_CONTEXT",
+      "predicate": "governanceModel",
+      "value": "Owner-authorized directives with OWNER_STANDING_AUTHORITY_V1 for routine work",
+      "evidenceReference": "AGENTS.md#authority",
+      "temporalState": "CURRENT",
+      "lastConfirmedAt": "2026-08-18T00:00:00Z",
+      "confidence": "HIGH",
+      "sensitivity": "INTERNAL",
+      "eligibleUses": ["BUSINESS_CONTEXT", "INTERNAL_DIAGNOSTIC"]
+    },
+    {
+      "category": "TECHNOLOGY",
+      "predicate": "runtime",
+      "value": "Node.js 22 with TypeScript in an npm workspace",
+      "evidenceReference": "package.json#engines",
+      "temporalState": "CURRENT",
+      "lastConfirmedAt": "2026-08-18T00:00:00Z",
+      "confidence": "HIGH",
+      "sensitivity": "INTERNAL",
+      "eligibleUses": ["BUSINESS_CONTEXT", "INTERNAL_DIAGNOSTIC"]
+    },
+    {
+      "category": "TECHNOLOGY",
+      "predicate": "providerRouting",
+      "value": "Provider Bridge V1 with quota-aware failover across codex, grok, claude and local",
+      "evidenceReference": "packages/director/src/provider-bridge.ts",
+      "temporalState": "CURRENT",
+      "lastConfirmedAt": "2026-08-18T00:00:00Z",
+      "confidence": "HIGH",
+      "sensitivity": "INTERNAL",
+      "eligibleUses": ["BUSINESS_CONTEXT", "INTERNAL_DIAGNOSTIC"]
+    },
+    {
+      "category": "PROJECT",
+      "predicate": "activeMilestone",
+      "value": "PERSONAL-CONTEXT-SYNC-V1",
+      "evidenceReference": ".aion-local/directives/CURRENT.md#directive-id",
+      "temporalState": "CURRENT",
+      "validFrom": "2026-08-18T14:35:11Z",
+      "lastConfirmedAt": "2026-08-18T00:00:00Z",
+      "confidence": "HIGH",
+      "sensitivity": "INTERNAL",
+      "eligibleUses": ["BUSINESS_CONTEXT", "INTERNAL_DIAGNOSTIC"]
+    },
+    {
+      "category": "PROJECT",
+      "predicate": "priorMilestone",
+      "value": "MVA-REAL-DISPATCH-V1",
+      "evidenceReference": ".aion-local/handoffs/history/20260818T130137Z-MVA-REAL-DISPATCH-V1.md",
+      "temporalState": "HISTORICAL",
+      "validFrom": "2026-08-18T07:29:19Z",
+      "validTo": "2026-08-18T13:01:37Z",
+      "observedAt": "2026-08-18T13:01:37Z",
+      "confidence": "HIGH",
+      "sensitivity": "INTERNAL",
+      "eligibleUses": ["BUSINESS_CONTEXT", "INTERNAL_DIAGNOSTIC"]
+    }
+  ]
+}
