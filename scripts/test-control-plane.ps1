@@ -11,6 +11,7 @@ $passed=0
 $failed=0
 $complete=$false
 $current=$null
+$script:FakeNpmLogPath=''
 
 function Pass([string]$Name){$script:passed++;Write-Host "PASS $Name"}
 function Fail([string]$Name,[string]$Detail){$script:failed++;Write-Host "FAIL $Name - $Detail" -ForegroundColor Red}
@@ -192,6 +193,9 @@ function New-FakeNpm([string]$Dir,[string]$Mode){
     $body=@"
 @echo off
 set MODE=$Mode
+if not "%AION_FAKE_NPM_LOG%"=="" echo %CD% -- %*>>"%AION_FAKE_NPM_LOG%"
+if "%1"=="ci" goto ci
+if "%1"=="exec" goto exec
 if "%1"=="--prefix" shift
 if not "%1"=="run" shift
 if not "%1"=="run" exit /b 37
@@ -203,6 +207,24 @@ if "%2"=="aion:server:test" goto server
 if "%2"=="career:test" exit /b 0
 if "%2"=="build" exit /b 0
 if "%2"=="build:test" exit /b 0
+exit /b 37
+
+:ci
+if "%MODE%"=="cert-ci-fail" exit /b 11
+if "%MODE%"=="cert-ci-mutates-lock" echo changed>>package-lock.json
+if "%MODE%"=="cert-ci-timeout" powershell -NoProfile -Command "Start-Sleep -Seconds 5"
+if not exist node_modules mkdir node_modules
+if not exist node_modules\.bin mkdir node_modules\.bin
+echo @echo off>node_modules\.bin\tsc.cmd
+echo echo Version 5.0.0>>node_modules\.bin\tsc.cmd
+exit /b 0
+
+:exec
+if "%MODE%"=="cert-tsc-missing" exit /b 12
+if "%5"=="tsc" (
+  echo Version 5.0.0
+  exit /b 0
+)
 exit /b 37
 
 :verify
@@ -673,10 +695,12 @@ try {
 
     $repairBaseline=Add-RepairBaselineFiles $repo
     & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
-    $fakeBin=Join-Path $testRoot 'fake-bin'
-    $oldPath=$env:PATH
-    $env:PATH="$fakeBin;$env:PATH"
-    try {
+        $fakeBin=Join-Path $testRoot 'fake-bin'
+        $oldPath=$env:PATH
+        $env:PATH="$fakeBin;$env:PATH"
+        $script:FakeNpmLogPath=Join-Path $testRoot 'fake-npm.log'
+        $env:AION_FAKE_NPM_LOG=$script:FakeNpmLogPath
+        try {
         New-FakeNpm $fakeBin 'verify-fail'|Out-Null
         New-Directive $current 'PENDING_OWNER_AUTHORIZATION' $repairBaseline 'AUTHORIZE NORMAL'
         $normalExit=Invoke-AuthorizationFixture 'AUTHORIZE NORMAL' -NoSkip
@@ -1038,9 +1062,14 @@ try {
                     'director-suite-fail' {'cert-director-suite-fail'}
                     'local-suite-fail' {'cert-local-suite-fail'}
                     'full-verify-fail' {'cert-full-verify-fail'}
+                    'environment-prep-fail' {'cert-ci-fail'}
+                    'environment-prep-mutates-lock' {'cert-ci-mutates-lock'}
+                    'environment-tsc-missing' {'cert-tsc-missing'}
+                    'environment-prep-timeout' {'cert-ci-timeout'}
                     default {'cert-pass'}
                 }
                 New-FakeNpm $fakeBin $npmMode|Out-Null
+                if(Test-Path -LiteralPath $script:FakeNpmLogPath){Remove-Item -LiteralPath $script:FakeNpmLogPath -Force}
                 if(Test-Path -LiteralPath $local){Remove-Item -LiteralPath $local -Recurse -Force}
                 & git -C $repo checkout -q -B main $repairBaseline
                 & git -C $repo update-ref refs/remotes/origin/main $repairBaseline
@@ -1087,11 +1116,21 @@ try {
                 $g7=(& git -C $repo rev-parse HEAD).Trim()
                 $script:AionD2FinalLocalAssistantBaselineSha=$g7
                 Write-PromotionReceiptFixture $repo $g7 $candidate $repairBaseline 'TEST-DIRECTOR-REPAIR'
+                [IO.File]::WriteAllText((Join-Path $repo 'package.json'),'{"name":"synthetic","scripts":{"verify":"echo verify"}}',[Text.UTF8Encoding]::new($false))
+                if($Mode -ne 'missing-lockfile'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'package-lock.json'),'{"name":"synthetic","lockfileVersion":3,"requires":true,"packages":{}}',[Text.UTF8Encoding]::new($false))
+                } elseif(Test-Path -LiteralPath (Join-Path $repo 'package-lock.json')){
+                    Remove-Item -LiteralPath (Join-Path $repo 'package-lock.json') -Force
+                }
+                [IO.Directory]::CreateDirectory((Join-Path $repo 'packages\director'))|Out-Null
+                [IO.File]::WriteAllText((Join-Path $repo 'packages\director\package.json'),'{"name":"@aion/director","scripts":{"test":"echo test"}}',[Text.UTF8Encoding]::new($false))
                 [IO.File]::WriteAllText((Join-Path $repo 'packages\local-assistant\src\developer-bridge.ts'),'export const fixed = true;',[Text.UTF8Encoding]::new($false))
-                & git -C $repo add packages/local-assistant/src/developer-bridge.ts
+                & git -C $repo add package.json packages/director/package.json packages/local-assistant/src/developer-bridge.ts
+                if($Mode -ne 'missing-lockfile'){& git -C $repo add package-lock.json}
                 & git -C $repo commit -m 'synthetic final local assistant repair'|Out-Null
                 $target=(& git -C $repo rev-parse HEAD).Trim()
                 $script:AionD2TechnicalCertificationTargetSha=$target
+                & git -C $repo update-ref refs/aion/d2-certification-target/17b012b $target
                 $script:AionD2FinalLocalAssistantRepairDirectiveId='TEST-LA-REPAIR'
                 if($Mode -ne 'local-closure-missing'){
                     $laClosure=if($Mode -ceq 'local-closure-fail'){'FAIL'}else{'PASS'}
@@ -1112,6 +1151,26 @@ try {
                 }
                 & git -C $repo commit -m 'synthetic G8 certification governance'|Out-Null
                 $g8=(& git -C $repo rev-parse HEAD).Trim()
+                if($Mode -ceq 'governance-descendant'){
+                    [IO.File]::WriteAllText((Join-Path $repo 'scripts\certify-director-d2.ps1'),'g9 certify',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add scripts/certify-director-d2.ps1
+                    & git -C $repo commit -m 'synthetic G9 certification environment governance'|Out-Null
+                    $g8=(& git -C $repo rev-parse HEAD).Trim()
+                }
+                if($Mode -ceq 'target-ref-mismatch'){
+                    & git -C $repo update-ref refs/aion/d2-certification-target/17b012b $repairBaseline
+                }
+                if($Mode -ceq 'target-not-ancestor'){
+                    & git -C $repo checkout -q -B main $repairBaseline
+                    [IO.Directory]::CreateDirectory((Join-Path $repo 'scripts'))|Out-Null
+                    [IO.File]::WriteAllText((Join-Path $repo 'scripts\control-plane-common.ps1'),'unrelated common',[Text.UTF8Encoding]::new($false))
+                    [IO.File]::WriteAllText((Join-Path $repo 'scripts\certify-director-d2.ps1'),'unrelated certify',[Text.UTF8Encoding]::new($false))
+                    [IO.File]::WriteAllText((Join-Path $repo 'scripts\test-control-plane.ps1'),'unrelated tests',[Text.UTF8Encoding]::new($false))
+                    [IO.File]::WriteAllText((Join-Path $repo 'README.md'),'unrelated governance head',[Text.UTF8Encoding]::new($false))
+                    & git -C $repo add README.md scripts
+                    & git -C $repo commit -m 'synthetic unrelated governance'|Out-Null
+                    $g8=(& git -C $repo rev-parse HEAD).Trim()
+                }
                 & git -C $repo update-ref refs/remotes/origin/main $g8
                 $anchorForDirective=if($Mode -ceq 'sha-a-prime-mismatch'){'0000000000000000000000000000000000000000'}else{$candidate}
                 New-CertificationDirective $current 'AUTHORIZED' $g8 $target $anchorForDirective
@@ -1127,14 +1186,19 @@ try {
             try{
                 $preflight=Assert-AionD2FinalCertificationPreflight -Root $repo -Directive (Get-AionDirective $current)
                 Pass '95 D2 certification preflight accepts exact G8 topology'
-                Expect-True '96 certification target is derived from HEAD parent' ($preflight.Target -ceq $validCertification.Target)
+                Expect-True '96 certification target is trusted control-plane target' ($preflight.Target -ceq $validCertification.Target)
             }catch{Fail '95 D2 certification preflight accepts exact G8 topology' $_.Exception.Message}
             $certResult=Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)
-            Expect-True '97 D2 certification all-PASS path writes GRANTED state' ((Test-Path $certResult.StatePath)-and($certResult.Receipt.d2CertifiedSha -ceq $validCertification.Target)-and($certResult.Receipt.shaAPrime -ceq $validCertification.Candidate))
+            Expect-True '97 D2 certification all-PASS path writes GRANTED state' ((Test-Path $certResult.StatePath)-and($certResult.Receipt.d2CertifiedSha -ceq $validCertification.Target)-and($certResult.Receipt.shaAPrime -ceq $validCertification.Candidate)-and($certResult.Receipt.targetEnvironmentPreparation -ceq 'PASS'))
             $idempotent=Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)
             Expect-True '98 D2 certification same-target rerun is idempotent' ($idempotent.Receipt.mode -ceq 'IDEMPOTENT')
             [IO.File]::WriteAllText((Get-AionD2CertificationStatePath -Root $repo),([pscustomobject]@{schemaVersion='aion.d2CertificationState.v1';d2Certification='GRANTED';d2CertifiedSha=$repairBaseline;shaAPrime=$validCertification.Candidate}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
             Expect-Throw '99 D2 certification rejects existing different target' {Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
+            [void](Reset-CertificationFixture 'governance-descendant')
+            try{
+                $descendantPreflight=Assert-AionD2FinalCertificationPreflight -Root $repo -Directive (Get-AionDirective $current)
+                Expect-True '99a certification target remains stable across governance descendants' ($descendantPreflight.Target -ceq $script:AionD2TechnicalCertificationTargetSha)
+            }catch{Fail '99a certification target remains stable across governance descendants' $_.Exception.Message}
 
             foreach($case in @(
                 [pscustomobject]@{Name='100 missing hostile review rejects';Mode='hostile-review-missing'},
@@ -1148,7 +1212,7 @@ try {
                 [pscustomobject]@{Name='108 missing expected review verdict fails closed';Mode='missing-review-verdict'},
                 [pscustomobject]@{Name='109 malformed evidence fails closed';Mode='malformed-review'},
                 [pscustomobject]@{Name='110 SHA_A_PRIME mismatch rejects';Mode='sha-a-prime-mismatch'},
-                [pscustomobject]@{Name='111 target different from HEAD parent rejects';Mode='target-differs-from-parent'},
+                [pscustomobject]@{Name='111 trusted target ref mismatch rejects';Mode='target-ref-mismatch'},
                 [pscustomobject]@{Name='112 G8 application-source modification rejects';Mode='g8-source-modification'},
                 [pscustomobject]@{Name='113 R31 present rejects';Mode='r31-present'},
                 [pscustomobject]@{Name='114 production touched rejects';Mode='production-touched'},
@@ -1157,15 +1221,35 @@ try {
                 [pscustomobject]@{Name='117 spend positive rejects';Mode='spend-positive'},
                 [pscustomobject]@{Name='118 local-assistant suite failure rejects';Mode='local-suite-fail'},
                 [pscustomobject]@{Name='119 local-assistant closure FAIL rejects';Mode='local-closure-fail'},
-                [pscustomobject]@{Name='120 Director closure FAIL rejects';Mode='director-closure-fail'}
+                [pscustomobject]@{Name='120 Director closure FAIL rejects';Mode='director-closure-fail'},
+                [pscustomobject]@{Name='123 missing lockfile rejects environment preparation';Mode='missing-lockfile'},
+                [pscustomobject]@{Name='124 dependency preparation failure rejects certification';Mode='environment-prep-fail'},
+                [pscustomobject]@{Name='125 dependency preparation tracked mutation rejects certification';Mode='environment-prep-mutates-lock'},
+                [pscustomobject]@{Name='126 missing target-local tsc rejects as environment failure';Mode='environment-tsc-missing'},
+                [pscustomobject]@{Name='127 target absent from governance ancestry rejects';Mode='target-not-ancestor'}
             )){
                 [void](Reset-CertificationFixture $case.Mode)
                 Expect-Throw $case.Name {Invoke-AionD2FinalCertification -Root $repo -Directive (Get-AionDirective $current)|Out-Null}
             }
+            $case=Reset-CertificationFixture
+            $prepCheck=Invoke-AionD2PreparedTargetWorktree -Root $repo -Target $case.Target -Action {
+                param($targetRoot,$environment)
+                [pscustomobject]@{
+                    Env=$environment.Result
+                    Tsc=(Invoke-AionTrustedVector -Root $targetRoot -Vector @('npm.cmd','exec','--workspace','@aion/director','--','tsc','--version')).ExitCode
+                    HasNodeModules=(Test-Path -LiteralPath (Join-Path $targetRoot 'node_modules') -PathType Container)
+                }
+            }
+            Expect-True '128 detached target dependency prep creates local runnable environment' (($prepCheck.Env -ceq 'PASS')-and($prepCheck.Tsc -eq 0)-and($prepCheck.HasNodeModules))
+            $commonSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'control-plane-common.ps1') -Raw
+            $verificationBlock=[regex]::Match($commonSource,'(?ms)^function Invoke-AionD2CertificationTargetVerification\s*\{.*?^}\s*$').Value
+            Expect-True '129 Director suite runs only through prepared target wrapper' (($verificationBlock.Contains('Invoke-AionD2PreparedTargetWorktree'))-and($verificationBlock.Contains('Invoke-AionD2PreparedTargetTrustedVector'))-and(-not($verificationBlock.Contains('Invoke-AionTrustedVector -Root $Root'))))
+            $case=Reset-CertificationFixture 'environment-prep-timeout'
+            Expect-Throw '130 dependency preparation timeout fails closed' {Invoke-AionD2PreparedTargetWorktree -Root $repo -Target $case.Target -EnvironmentTimeoutSeconds 1 -Action {param($targetRoot,$environment) 'unexpected'}|Out-Null}
 
             $case=Reset-CertificationFixture
             Add-Content -LiteralPath $current -Value "`r`nCertification-Target: caller-controlled"
-            Expect-Throw '121 arbitrary caller target fields are rejected' {Get-AionDirectiveFieldOrDefault (Get-AionDirective $current) 'Certification-Target'|Out-Null}
+            Expect-Throw '121 directive cannot redefine certification target' {Get-AionDirectiveFieldOrDefault (Get-AionDirective $current) 'Certification-Target'|Out-Null}
             $case=Reset-CertificationFixture
             Expect-Throw '122 certification script rejects arbitrary target parameter' {& (Join-Path $PSScriptRoot 'certify-director-d2.ps1') -RepositoryRoot $repo -DirectivePath $current -TargetSha $case.Target}
         }
@@ -1175,12 +1259,14 @@ try {
             $script:AionDirectorPromotionExpectedCandidateBaselineSha='3938e0b6b7b5452830b47b3ae3ba9d95ed6b4746'
             $script:AionDirectorPromotionClosedDirectiveId='D2-DIRECTOR-RECOVERY-LEASE-HYGIENE-CARRYFORWARD-20260817T044618Z'
             $script:AionD2TechnicalCertificationTargetSha='17b012b28d911fe563aab19f6e4a697a05b9b718'
+            $script:AionD2TechnicalCertificationTargetRef='refs/aion/d2-certification-target/17b012b'
             $script:AionD2FinalLocalAssistantBaselineSha='9b1d68bc774be7952da109d0d971d47cc85b234f'
             $script:AionD2FinalLocalAssistantRepairDirectiveId='D2-FINAL-LOCAL-ASSISTANT-ARCH-REPAIR-20260817T153000Z'
         }
     }
     finally {
         $env:PATH=$oldPath
+        Remove-Item Env:AION_FAKE_NPM_LOG -ErrorAction SilentlyContinue
     }
 
     if($failed-ne 0){throw "$failed control-plane tests failed"}

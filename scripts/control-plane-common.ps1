@@ -14,6 +14,7 @@ $script:AionDirectorPromotionExpectedCandidateBaselineSha = '3938e0b6b7b5452830b
 $script:AionDirectorPromotionClosedDirectiveId = 'D2-DIRECTOR-RECOVERY-LEASE-HYGIENE-CARRYFORWARD-20260817T044618Z'
 $script:AionD2FinalCertificationGateId = 'DIRECTOR_D2_FINAL_CERTIFICATION'
 $script:AionD2TechnicalCertificationTargetSha = '17b012b28d911fe563aab19f6e4a697a05b9b718'
+$script:AionD2TechnicalCertificationTargetRef = 'refs/aion/d2-certification-target/17b012b'
 $script:AionD2FinalLocalAssistantBaselineSha = '9b1d68bc774be7952da109d0d971d47cc85b234f'
 $script:AionD2FinalLocalAssistantRepairDirectiveId = 'D2-FINAL-LOCAL-ASSISTANT-ARCH-REPAIR-20260817T153000Z'
 $script:AionDirectorPromotionAllowedGovernancePaths = @(
@@ -204,6 +205,54 @@ function Invoke-AionTrustedVectorPass {
     $result=Invoke-AionTrustedVector -Root $Root -Vector $Vector
     if($result.ExitCode -ne 0){throw "$Name failed with exit code $($result.ExitCode)"}
     return [pscustomobject]@{ Name=$Name; ExitCode=$result.ExitCode; Result='PASS' }
+}
+
+function Join-AionNativeArguments {
+    param([object[]]$Arguments)
+    return (@($Arguments)|ForEach-Object {
+        $arg=[string]$_
+        if($arg -notmatch '[\s"]'){$arg}
+        else{'"' + ($arg -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'}
+    }) -join ' '
+}
+
+function Invoke-AionTrustedVectorWithTimeout {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][object[]]$Vector,
+        [Parameter(Mandatory=$true)][string]$Name,
+        [int]$TimeoutSeconds=900
+    )
+    if(@($Vector).Count -lt 1){throw 'Trusted command vector is empty'}
+    if($TimeoutSeconds -lt 1){throw "Invalid timeout for $Name"}
+    $resolved=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $exe=[string]$Vector[0]
+    $args=@($Vector | Select-Object -Skip 1)
+    $command=Get-Command $exe -CommandType Application -ErrorAction Stop|Select-Object -First 1
+    $psi=[Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName=$command.Source
+    $psi.WorkingDirectory=$resolved
+    $psi.UseShellExecute=$false
+    $psi.RedirectStandardOutput=$false
+    $psi.RedirectStandardError=$false
+    $psi.CreateNoWindow=$true
+    $psi.Arguments=Join-AionNativeArguments $args
+    $process=[Diagnostics.Process]::new()
+    $process.StartInfo=$psi
+    try {
+        [void]$process.Start()
+        if(-not $process.WaitForExit($TimeoutSeconds*1000)){
+            try{$process.Kill()}catch{}
+            throw "$Name timed out after $TimeoutSeconds seconds"
+        }
+        $process.WaitForExit()
+        $code=$process.ExitCode
+        if($null -eq $code){throw "$Name did not report a native exit code"}
+        return [pscustomobject]@{ ExitCode=$code; Output=@(); Cwd=$resolved }
+    }
+    finally {
+        $process.Dispose()
+    }
 }
 
 function Get-AionGitObjectId {
@@ -579,12 +628,27 @@ function Assert-AionD2CertificationDirectiveFields {
     param([Parameter(Mandatory=$true)][object]$Directive,[Parameter(Mandatory=$true)][string]$Head,[Parameter(Mandatory=$true)][string]$Target)
     if((Get-AionDirectiveFieldOrDefault $Directive 'Authorization-Class' 'NORMAL') -cne 'NORMAL'){throw 'D2 certification execution must use NORMAL authorization class'}
     if((Get-AionDirectiveFieldOrDefault $Directive 'Trusted-Certification-Gate') -cne $script:AionD2FinalCertificationGateId){throw 'D2 certification trusted gate mismatch'}
-    if($Directive.Fields.'Repository-Baseline' -cne $Head){throw 'D2 certification directive baseline must equal current G8 HEAD'}
+    if($Directive.Fields.'Repository-Baseline' -cne $Head){throw 'D2 certification directive baseline must equal current governance HEAD'}
     if((Get-AionDirectiveFieldOrDefault $Directive 'Certification-Target') -cne $Target){throw 'D2 certification target field mismatch'}
     if((Get-AionDirectiveFieldOrDefault $Directive 'Reviewed-Director-Anchor') -cne $script:AionDirectorPromotionExpectedCandidateSha){throw 'Reviewed Director anchor field mismatch'}
     if((Get-AionDirectiveFieldOrDefault $Directive 'D2-Certification') -cne 'NOT_GRANTED'){throw 'Directive D2 certification state before transition must be NOT_GRANTED'}
     if((Get-AionDirectiveFieldOrDefault $Directive 'D2-Certified-Sha') -cne 'NONE'){throw 'Directive D2 certified SHA before transition must be NONE'}
     Assert-AionNoD2RuntimeSideEffects -Directive $Directive
+}
+
+function Resolve-AionD2TechnicalCertificationTarget {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$GovernanceHead)
+    $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    $target=$script:AionD2TechnicalCertificationTargetSha
+    if(-not(Test-AionGitCommitExists -Root $root -Revision $target)){throw 'D2 technical certification target commit missing'}
+    & git -C $root show-ref --verify --quiet $script:AionD2TechnicalCertificationTargetRef
+    if($LASTEXITCODE -eq 0){
+        $refTarget=(& git -C $root rev-parse $script:AionD2TechnicalCertificationTargetRef).Trim()
+        if($refTarget -cne $target){throw "Trusted D2 certification target ref mismatch: $refTarget"}
+    }
+    & git -C $root merge-base --is-ancestor $target $GovernanceHead
+    if($LASTEXITCODE -ne 0){throw 'D2 technical certification target is not in governance HEAD ancestry'}
+    return $target
 }
 
 function Get-AionD2FinalPromotionReceipt {
@@ -671,15 +735,41 @@ function Get-AionTapSummary {
     }
 }
 
-function Invoke-AionD2TargetTrustedVector {
-    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Target,[Parameter(Mandatory=$true)][object[]]$Vector,[Parameter(Mandatory=$true)][string]$Name)
+function Assert-AionD2TargetTrackedTreeClean {
+    param([Parameter(Mandatory=$true)][string]$TargetRoot,[Parameter(Mandatory=$true)][string]$Stage)
+    $status=@(& git -C $TargetRoot status --porcelain=v1 -uno)
+    if(@($status).Count -ne 0){throw "D2 target tracked tree changed during $Stage"}
+}
+
+function Invoke-AionD2TargetEnvironmentPreparation {
+    param([Parameter(Mandatory=$true)][string]$TargetRoot,[int]$TimeoutSeconds=900)
+    $root=(Resolve-Path -LiteralPath $TargetRoot -ErrorAction Stop).Path
+    if(-not(Test-Path -LiteralPath (Join-Path $root 'package.json') -PathType Leaf)){throw 'D2 target package.json missing'}
+    if(-not(Test-Path -LiteralPath (Join-Path $root 'package-lock.json') -PathType Leaf)){throw 'D2 target package-lock.json missing'}
+    Assert-AionD2TargetTrackedTreeClean -TargetRoot $root -Stage 'environment preparation preflight'
+    $install=Invoke-AionTrustedVectorWithTimeout -Root $root -Vector @('npm.cmd','ci') -Name 'target environment preparation' -TimeoutSeconds $TimeoutSeconds
+    if($install.ExitCode -ne 0){throw "target environment preparation failed with exit code $($install.ExitCode)"}
+    Assert-AionD2TargetTrackedTreeClean -TargetRoot $root -Stage 'dependency preparation'
+    $tsc=Invoke-AionTrustedVector -Root $root -Vector @('npm.cmd','exec','--workspace','@aion/director','--','tsc','--version')
+    if($tsc.ExitCode -ne 0){throw "target environment preparation failed: local TypeScript compiler unavailable"}
+    return [pscustomobject]@{ Result='PASS'; InstallExitCode=$install.ExitCode; TscExitCode=$tsc.ExitCode }
+}
+
+function Invoke-AionD2PreparedTargetWorktree {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Target,
+        [Parameter(Mandatory=$true)][scriptblock]$Action,
+        [int]$EnvironmentTimeoutSeconds=900
+    )
     $temp=Join-Path ([IO.Path]::GetTempPath()) ("aion-d2-cert-target-"+[guid]::NewGuid().ToString('N'))
     try {
         & git -C $Root worktree add --detach $temp $Target | Out-Null
         if($LASTEXITCODE -ne 0){throw "Could not create target worktree for $Target"}
-        $result=Invoke-AionTrustedVector -Root $temp -Vector $Vector
-        if($result.ExitCode -ne 0){throw "$Name failed with exit code $($result.ExitCode)"}
-        return $result
+        $actual=(& git -C $temp rev-parse HEAD).Trim()
+        if($actual -cne $Target){throw "Prepared target worktree HEAD mismatch: $actual"}
+        $environment=Invoke-AionD2TargetEnvironmentPreparation -TargetRoot $temp -TimeoutSeconds $EnvironmentTimeoutSeconds
+        return & $Action $temp $environment
     }
     finally {
         if(Test-Path -LiteralPath $temp){
@@ -693,23 +783,34 @@ function Invoke-AionD2TargetTrustedVector {
     }
 }
 
+function Invoke-AionD2PreparedTargetTrustedVector {
+    param([Parameter(Mandatory=$true)][string]$TargetRoot,[Parameter(Mandatory=$true)][object[]]$Vector,[Parameter(Mandatory=$true)][string]$Name)
+    $result=Invoke-AionTrustedVector -Root $TargetRoot -Vector $Vector
+    if($result.ExitCode -ne 0){throw "$Name failed with exit code $($result.ExitCode)"}
+    return $result
+}
+
 function Invoke-AionD2CertificationTargetVerification {
     param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$Target)
-    $director=Invoke-AionD2TargetTrustedVector -Root $Root -Target $Target -Vector @('npm.cmd','run','test','--workspace','@aion/director') -Name 'director suite'
-    $directorSummary=Get-AionTapSummary -Output $director.Output -Name 'director suite'
-    if($directorSummary.Tests -ne 1066 -or $directorSummary.Pass -ne 1066 -or $directorSummary.Fail -ne 0 -or $directorSummary.Skipped -ne 0){throw 'Director suite summary mismatch'}
-    $localAssistant=Invoke-AionD2TargetTrustedVector -Root $Root -Target $Target -Vector @('npm.cmd','run','test','--workspace','@aion/local-assistant') -Name 'local-assistant suite'
-    $localSummary=Get-AionTapSummary -Output $localAssistant.Output -Name 'local-assistant suite'
-    if($localSummary.Tests -ne 1051 -or $localSummary.Pass -ne 1051 -or $localSummary.Fail -ne 0 -or $localSummary.Skipped -ne 0){throw 'Local-assistant suite summary mismatch'}
-    [void](Invoke-AionD2TargetTrustedVector -Root $Root -Target $Target -Vector @('npm.cmd','run','verify') -Name 'full repository verify')
-    return [pscustomobject]@{
-        DirectorSuite='1066/1066 PASS'
-        LocalAssistantSuite='1051/1051 PASS'
-        FullRepositoryVerify='PASS'
-        KnownFailureCount=0
-        UnexpectedFailureCount=0
-        TestDeletionOrWeakening=0
-        UnauthorizedSkips=0
+    return Invoke-AionD2PreparedTargetWorktree -Root $Root -Target $Target -Action {
+        param($targetRoot,$environment)
+        $director=Invoke-AionD2PreparedTargetTrustedVector -TargetRoot $targetRoot -Vector @('npm.cmd','run','test','--workspace','@aion/director') -Name 'director suite'
+        $directorSummary=Get-AionTapSummary -Output $director.Output -Name 'director suite'
+        if($directorSummary.Tests -ne 1066 -or $directorSummary.Pass -ne 1066 -or $directorSummary.Fail -ne 0 -or $directorSummary.Skipped -ne 0){throw 'Director suite summary mismatch'}
+        $localAssistant=Invoke-AionD2PreparedTargetTrustedVector -TargetRoot $targetRoot -Vector @('npm.cmd','run','test','--workspace','@aion/local-assistant') -Name 'local-assistant suite'
+        $localSummary=Get-AionTapSummary -Output $localAssistant.Output -Name 'local-assistant suite'
+        if($localSummary.Tests -ne 1051 -or $localSummary.Pass -ne 1051 -or $localSummary.Fail -ne 0 -or $localSummary.Skipped -ne 0){throw 'Local-assistant suite summary mismatch'}
+        [void](Invoke-AionD2PreparedTargetTrustedVector -TargetRoot $targetRoot -Vector @('npm.cmd','run','verify') -Name 'full repository verify')
+        return [pscustomobject]@{
+            TargetEnvironmentPreparation=$environment.Result
+            DirectorSuite='1066/1066 PASS'
+            LocalAssistantSuite='1051/1051 PASS'
+            FullRepositoryVerify='PASS'
+            KnownFailureCount=0
+            UnexpectedFailureCount=0
+            TestDeletionOrWeakening=0
+            UnauthorizedSkips=0
+        }
     }
 }
 
@@ -717,26 +818,24 @@ function Assert-AionD2FinalCertificationPreflight {
     param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][object]$Directive)
     $root=(Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
     $head=(& git -C $root rev-parse HEAD).Trim()
-    $target=Get-AionGitSingleParent -Root $root -Revision $head
+    $target=Resolve-AionD2TechnicalCertificationTarget -Root $root -GovernanceHead $head
     Assert-AionD2CertificationDirectiveFields -Directive $Directive -Head $head -Target $target
     Assert-AionRepositoryIdentityGate -Root $root -ExpectedHead $head
-    if($target -cne $script:AionD2TechnicalCertificationTargetSha){throw 'G8 parent is not the exact D2 technical certification target'}
-    if(-not(Test-AionGitCommitExists -Root $root -Revision $target)){throw 'D2 technical certification target commit missing'}
     if(-not(Test-AionGitCommitExists -Root $root -Revision $script:AionDirectorPromotionExpectedCandidateSha)){throw 'Reviewed Director anchor commit missing'}
     & git -C $root merge-base --is-ancestor $script:AionDirectorPromotionExpectedCandidateSha $target
     if($LASTEXITCODE -ne 0){throw 'Reviewed Director anchor is not in certification target ancestry'}
     $changed=@(& git -C $root diff --name-only $target $head)
     foreach($path in $changed){
-        if($script:AionD2CertificationAllowedGovernancePaths -notcontains $path){throw "G8 contains non-governance certification change: $path"}
+        if($script:AionD2CertificationAllowedGovernancePaths -notcontains $path){throw "D2 certification governance layer contains non-governance change: $path"}
     }
-    if(@($changed).Count -eq 0){throw 'G8 certification governance diff is empty'}
+    if(@($changed).Count -eq 0){throw 'D2 certification governance diff is empty'}
     if(-not(Test-Path -LiteralPath (Join-Path $root 'scripts\certify-director-d2.ps1') -PathType Leaf)){throw 'Trusted D2 certification mechanism script missing'}
     [void](Get-AionD2DirectorClosureReceipt -Root $root)
     [void](Get-AionD2FinalHostileReview -Root $root)
     [void](Get-AionD2FinalPromotionReceipt -Root $root)
     [void](Get-AionD2FinalLocalAssistantClosureReceipt -Root $root)
     [void](Assert-AionD2CertificationStateAllowsTarget -Root $root -Target $target)
-    return [pscustomobject]@{ Result='PASS'; Head=$head; Target=$target; ShaAPrime=$script:AionDirectorPromotionExpectedCandidateSha; ChangedPaths=@($changed) }
+    return [pscustomobject]@{ Result='PASS'; Head=$head; Target=$target; ShaAPrime=$script:AionDirectorPromotionExpectedCandidateSha; ChangedPaths=@($changed); TargetEnvironmentMechanism='AVAILABLE' }
 }
 
 function Invoke-AionD2FinalCertification {
@@ -759,6 +858,7 @@ function Invoke-AionD2FinalCertification {
         hostileReviewEvidence='PASS'
         hostileBlockingDefects=0
         directorPromotionEvidence='PASS'
+        targetEnvironmentPreparation=$verification.TargetEnvironmentPreparation
         directorSuite=$verification.DirectorSuite
         localAssistantClosureEvidence='PASS'
         localAssistantSuite=$verification.LocalAssistantSuite
