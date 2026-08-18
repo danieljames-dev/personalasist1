@@ -45,14 +45,14 @@ function conflictingFacts() {
   const fromResume = extractFactsFromFile({
     source: makeSource({ sourceId: "resume" }),
     sourceReference: "resume.json",
-    contents: declaration(rows("Operations Manager"), "owner", "resume-doc"),
+    contents: declaration(rows("Fixture Role B"), "owner", "resume-doc"),
     sourceModifiedAt: null,
     now: NOW,
   }).facts;
   const fromCurrentJob = extractFactsFromFile({
     source: makeSource({ sourceId: "current-job" }),
     sourceReference: "current-job.json",
-    contents: declaration(rows("Operations Lead"), "owner", "current-job-doc"),
+    contents: declaration(rows("Fixture Role A"), "owner", "current-job-doc"),
     sourceModifiedAt: null,
     now: NOW,
   }).facts;

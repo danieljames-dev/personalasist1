@@ -39,7 +39,9 @@ function fact(overrides: Partial<PersonalContextFactV1> & { factId: string }): P
     value: "value",
     normalizedValue: "value",
     sourceId: "src-a",
+    origin: "EXTRACTED",
     sourceReference: "declaration.json",
+    sourceCommit: null,
     evidenceReference: "doc-1#facts[0]",
     observedAt: "2026-08-01T00:00:00Z",
     sourceModifiedAt: null,
@@ -230,8 +232,8 @@ test("a superseded fact is not disclosed, and says so", () => {
 test("disclosed facts carry provenance and conflict warnings rather than a settled answer", () => {
   const store = storeWith(
     [
-      fact({ factId: "f-a", sourceId: "src-a", category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Lead", conflictState: "CONFIRMED", conflictsWith: ["f-b"] }),
-      fact({ factId: "f-b", sourceId: "src-b", category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Manager", conflictState: "CONFIRMED", conflictsWith: ["f-a"] }),
+      fact({ factId: "f-a", sourceId: "src-a", category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role A", conflictState: "CONFIRMED", conflictsWith: ["f-b"] }),
+      fact({ factId: "f-b", sourceId: "src-b", category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role B", conflictState: "CONFIRMED", conflictsWith: ["f-a"] }),
     ],
     [makeSource({ sourceId: "src-a", displayName: "Current job record" }), makeSource({ sourceId: "src-b", displayName: "Resume" })],
   );

@@ -12,9 +12,15 @@ stale resume that happened to be in a folder.
 registry  →  bounded sync  →  extraction  →  freshness  →  reconciliation  →  local store  →  retrieval
 ```
 
-- **Registry** (`enrollment.ts`, `contracts.ts`) — `ContextSourceV1`. AION may read a source only if
-  it is a row here and that row is `ACTIVE`. Enrollment is data, not code: adding a source needs no
-  edit to this package.
+- **Registry** (`enrollment.ts`, `enrollment-defaults.ts`, `contracts.ts`) — `ContextSourceV1`. AION
+  may read a source only if it is a row here and that row is `ACTIVE`. Enrollment is data, not code.
+  The Owner supplies where a source is and what it is; defaults supply the rest, local-only for
+  anything personal.
+- **Ceiling** (`authority.ts`) — what class may be enrolled is read from the durable Owner authority
+  record, not from a constant here. `sensitiveDataPermission: "YES"` permits `CONFIDENTIAL`; anything
+  unusable fails closed to `INTERNAL`.
+- **Owner entry** (`owner-entry.ts`) — the Owner states their current job with no file and no schema.
+  Facts are marked `OWNER_ENTERED`; unsupplied values stay unsupplied.
 - **Bounded sync** (`sync.ts`, `path-boundary.ts`) — walk the approved root inside depth, file and
   byte ceilings; refuse anything that resolves outside it; fingerprint from metadata so an unchanged
   source costs no reads.
@@ -29,6 +35,10 @@ registry  →  bounded sync  →  extraction  →  freshness  →  reconciliatio
 - **Retrieval** (`retrieval.ts`, `disclosure.ts`) — `getContextForJob` returns the smallest set that
   satisfies the request, with provenance, conflict warnings, and an itemised list of what was left
   out and why.
+- **Review** (`report.ts`) — the Owner-facing picture: what is known, what conflicts, what is stale,
+  what is missing, and what each provider would be shown. Origin is labelled on every fact.
+- **Git identity** (`git-identity.ts`) — repository and commit provenance, read from the checkout
+  rather than by running `git`.
 
 ## Three rules that shape everything else
 
@@ -45,6 +55,11 @@ for a more-eligible model.
 ## Using it
 
 ```bash
+node scripts/owner-context.mjs status
+node scripts/owner-context.mjs set-current-job --title "..." --skills "a;b" --dry-run
+node scripts/owner-context.mjs report
+
+node scripts/register-context-source.mjs defaults
 node scripts/register-context-source.mjs list
 node scripts/register-context-source.mjs register --sourceId resume-2026 --sourceType RESUME_CV \
   --location "C:\path\to\approved\folder" --displayName "Resume" --purpose "Career evidence"

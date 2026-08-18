@@ -4,8 +4,8 @@ Personal Context is the controlled picture AION holds of the Owner's approved pe
 information. It exists so downstream objectives reason from current, attributed evidence rather than
 from whatever document happened to be lying around.
 
-Milestone: `PERSONAL-CONTEXT-SYNC-V1`
-Owner authorization: `PERSONAL-CONTEXT-SYNC-V1-20260818T140242Z`
+Milestones: `PERSONAL-CONTEXT-SYNC-V1` (engine), `OWNER-CONTEXT-ENROLLMENT-V1` (real enrollment)
+Owner authorization: whichever record `CURRENT.md` names — see "The sensitivity ceiling" below
 Implementation: `packages/personal-context`
 Store: `.aion-local/personal-context` (local, untracked, never uploaded)
 
@@ -46,12 +46,71 @@ node scripts/register-context-source.mjs list
 Re-synchronizing an already-approved source is routine and needs no further Owner decision. Adding a
 source, widening its root, or raising its sensitivity class is a new decision.
 
-### What the sensitivity ceiling means here
+### The sensitivity ceiling
 
-The authorizing directive carries `Sensitive-Data-Permission: NO`, so this milestone enrolls sources
-up to `INTERNAL` only. A `CONFIDENTIAL` or `RESTRICTED` source is refused at enrollment with
-`SENSITIVITY_ABOVE_MILESTONE_CEILING`. That refusal is the correct outcome, not an obstacle to route
-around: raising it is an Owner decision, made by authorizing a directive that grants it.
+The ceiling is **not a constant in the code**. It is read from the durable Owner authority record
+that the current directive names (`Owner-Authorization-Id` in `CURRENT.md`, resolved against
+`.aion-local/owner-authority/<id>.json`), a file only a verified Founder phrase can create:
+
+| Authority record | Enrollable up to |
+| --- | --- |
+| `sensitiveDataPermission: "NO"` | `INTERNAL` |
+| `sensitiveDataPermission: "YES"` | `CONFIDENTIAL` |
+| missing, revoked, suspended, expired or malformed | `INTERNAL` (fail closed) |
+
+`RESTRICTED` is not reachable from an authority record at all; it would need its own governance
+change. A source above the ceiling is refused with `SENSITIVITY_ABOVE_MILESTONE_CEILING`, naming the
+record that decided it. That refusal is the correct outcome, not an obstacle to route around.
+
+This used to be a constant pinned to one directive, which meant an agent blocked by the refusal had
+a one-line edit available that looked like ordinary maintenance in a diff. It is authority-derived
+now for exactly that reason.
+
+### Least-disclosure defaults
+
+The Owner supplies **where** a source is and **what** it is. Everything else comes from defaults:
+
+```bash
+node scripts/register-context-source.mjs defaults
+node scripts/register-context-source.mjs register ... --dry-run
+```
+
+Every personal source type — `RESUME_CV`, `WORK_HISTORY`, `OWNER_ENTERED_CURRENT_JOB`,
+`APPROVED_LOCAL_FILE`, `APPROVED_LOCAL_FOLDER` — defaults to `CONFIDENTIAL` and
+`eligibleProviders: ["local"]`. That is stricter than Provider Bridge V1 would allow, deliberately:
+a default that is too tight produces a job saying "I could not see your work history"; a default that
+is too loose has already sent it. Widen one source with `--eligibleProviders codex;grok;claude;local`
+when you decide it is appropriate.
+
+Registration prints the defaults before it writes the row, so conservative never means surprising.
+
+## Your current job, without a file
+
+Personal Context could always model current employment and, at first, could only accept it inside a
+hand-authored JSON declaration — which is why the store stayed empty. It is flags now:
+
+```bash
+node scripts/owner-context.mjs status
+
+node scripts/owner-context.mjs set-current-job --employer "..." --title "..." --industry "..." --responsibilities "a;b;c" --tools "a;b" --skills "a;b" --projects "a;b" --startDate 2024-02-01 --dry-run
+
+node scripts/owner-context.mjs report
+```
+
+Every flag is optional. **A value you do not give is not stored, not guessed, and not filled with a
+placeholder** — the command prints exactly what it did not receive, so the gap stays visible instead
+of becoming an invented fact. `--dry-run` shows what would be stored and writes nothing.
+
+Facts entered this way are marked `origin: OWNER_ENTERED`, and the review report never blurs them
+with `EXTRACTED` ones. What you said and what a document implied are different kinds of evidence.
+
+Each list item becomes its own fact, so one obsolete tool can be retired without restating the rest.
+A second submission is a **full restatement** by default: anything you stated before and did not
+repeat is retired — kept, with its provenance, but no longer live. Use `--mode MERGE` to add without
+retiring.
+
+The Owner-entry source is created on first use, reads no file, and is `CONFIDENTIAL` / local-only
+like every other personal source.
 
 ## Supplying facts: declarations, not guesses
 
@@ -100,7 +159,32 @@ Fields that carry weight:
 Credential-shaped material (passwords, tokens, account or card numbers, SSNs) is refused at
 validation. It never enters the store, so no retrieval path can leak it.
 
-## Reading context back
+## Reading back what AION knows
+
+```bash
+node scripts/owner-context.mjs report
+node scripts/owner-context.mjs report --stdout
+node scripts/owner-context.mjs report --redact
+```
+
+The review is written under `.aion-local/personal-context/reports/` — local, untracked, never
+uploaded. It contains: current facts, historical facts, skills and technologies, projects,
+preferences and constraints, conflicts, stale or unknown-freshness facts, **missing important career
+context**, source provenance, and a per-provider disclosure table.
+
+Two things it does on purpose:
+
+- **Origin is labelled on every fact** (`OWNER_ENTERED`, `OWNER_CONFIRMED`, `EXTRACTED`), and the
+  `INFERRED` count is printed even though it is always zero — the fact validator refuses to store an
+  inferred fact, and the report says so each time it runs. An inferred fact presented as
+  Owner-confirmed is the specific failure this whole system exists to prevent.
+- **Missing categories are computed from a fixed expectation list**, not from what happens to be
+  present. Deriving "what is missing" from "what exists" can only ever report nothing missing.
+
+`--redact` replaces values with lengths and keeps every structural field, for any consumer that is
+not you at your own machine.
+
+## Director retrieval: what one job is shown
 
 Director asks for the smallest set it needs:
 
@@ -162,11 +246,26 @@ claim success while recording failures. Worth watching:
 - `filesUnsupported` — files read that produced no facts, usually prose. A high count against a
   source the Owner expected facts from means a declaration is missing.
 
+## Git sources
+
+A named repository can be enrolled with `--sourceType APPROVED_GIT_REPOSITORY`. Provenance then
+records the repository identity alongside each fact: the remote URL and the commit HEAD resolved to
+at sync time, stored on the source row and as `sourceCommit` on every fact from that pass.
+
+Identity is **read, not executed** — from `.git/HEAD`, the loose ref it names, `.git/packed-refs`,
+and the `url` in `.git/config`. There is no `git` subprocess, because giving one source adapter the
+ability to run processes gives every future adapter the same. A layout this reader cannot resolve
+(a linked worktree whose real repository lives outside the approved root, an unborn branch) records
+`null` with a reason rather than a plausible-looking commit.
+
+`.git` and build output are excluded from the content walk by default. Repository content is not
+treated as career evidence — only declarations inside it are.
+
 ## Verifying
 
 ```bash
 npm run test --workspace @aion/personal-context   # focused suite, fake filesystem, hostile paths
-node scripts/personal-context-acceptance.mjs      # real sync over the project fixture
+node scripts/personal-context-acceptance.mjs      # real sync, Owner entry and report over fixtures
 npm run verify                                    # whole repository
 ```
 

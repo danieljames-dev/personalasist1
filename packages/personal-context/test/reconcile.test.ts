@@ -2,8 +2,8 @@
  * Two approved sources, one slot, and the refusal to pick a winner.
  *
  * Everything here is about the difference between *disagreeing* and *describing different times*. A
- * resume that says "Former Dealer Group, 2018–2022" and a current-job record that says "Example
- * Motors, since 2024" are not in conflict, and a system that flags them as one teaches its reader to
+ * resume that says "Fixture Prior Employer, 2018–2022" and a current-job record that says "Fixture
+ * Employer, since 2024" are not in conflict, and a system that flags them as one teaches its reader to
  * ignore conflict flags. Two records that both claim to describe today, with different values, are in
  * conflict, and a system that silently keeps the newer file's answer has destroyed the only evidence
  * that the question was open.
@@ -32,13 +32,13 @@ function factsFrom(sourceId: string, rows: Parameters<typeof declaration>[0], pr
 test("current and historical employment are distinguished, not merged", () => {
   const current = factsFrom("current-job", [
     {
-      category: "CURRENT_EMPLOYMENT", predicate: "employer", value: "Example Motors",
+      category: "CURRENT_EMPLOYMENT", predicate: "employer", value: "Fixture Employer",
       temporalState: "CURRENT", validFrom: "2024-02-01T00:00:00Z", lastConfirmedAt: "2026-08-01T00:00:00Z",
     },
   ]);
   const past = factsFrom("resume", [
     {
-      category: "WORK_HISTORY", predicate: "employer", value: "Former Dealer Group",
+      category: "WORK_HISTORY", predicate: "employer", value: "Fixture Prior Employer",
       temporalState: "HISTORICAL", validFrom: "2018-01-01T00:00:00Z", validTo: "2022-06-30T00:00:00Z",
       observedAt: "2022-06-30T00:00:00Z",
     },
@@ -100,14 +100,14 @@ test("a claim dated in the future is unknown rather than maximally fresh", () =>
 test("claims about different periods do not conflict", () => {
   const resume = factsFrom("resume", [
     {
-      category: "CAREER", predicate: "employer", value: "Former Dealer Group",
+      category: "CAREER", predicate: "employer", value: "Fixture Prior Employer",
       temporalState: "HISTORICAL", validFrom: "2018-01-01T00:00:00Z", validTo: "2022-06-30T00:00:00Z",
       observedAt: "2022-06-30T00:00:00Z",
     },
   ]);
   const currentJob = factsFrom("current-job", [
     {
-      category: "CAREER", predicate: "employer", value: "Example Motors",
+      category: "CAREER", predicate: "employer", value: "Fixture Employer",
       temporalState: "CURRENT", validFrom: "2024-02-01T00:00:00Z", lastConfirmedAt: "2026-08-01T00:00:00Z",
     },
   ]);
@@ -122,13 +122,13 @@ test("claims about different periods do not conflict", () => {
 test("two sources that both claim today, differently, produce a confirmed conflict on both rows", () => {
   const resume = factsFrom("resume", [
     {
-      category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Manager",
+      category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role B",
       temporalState: "CURRENT", lastConfirmedAt: "2026-07-01T00:00:00Z",
     },
   ]);
   const currentJob = factsFrom("current-job", [
     {
-      category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Lead",
+      category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role A",
       temporalState: "CURRENT", lastConfirmedAt: "2026-08-01T00:00:00Z",
     },
   ]);
@@ -162,18 +162,18 @@ test("an uncertain disagreement is POTENTIAL rather than promoted to CONFIRMED",
 
 test("a source changing its own answer supersedes without overwriting", () => {
   const before = factsFrom("current-job", [
-    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Manager", temporalState: "CURRENT", lastConfirmedAt: "2026-06-01T00:00:00Z" },
+    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role B", temporalState: "CURRENT", lastConfirmedAt: "2026-06-01T00:00:00Z" },
   ]);
   const after = factsFrom("current-job", [
-    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Lead", temporalState: "CURRENT", lastConfirmedAt: "2026-08-01T00:00:00Z" },
+    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role A", temporalState: "CURRENT", lastConfirmedAt: "2026-08-01T00:00:00Z" },
   ]);
 
   const first = reconcileFacts([], before);
   const second = reconcileFacts(first.facts, after);
 
   assert.equal(second.facts.length, 2, "the earlier statement is still there");
-  const old = second.facts.find((fact) => fact.value === "Operations Manager");
-  const fresh = second.facts.find((fact) => fact.value === "Operations Lead");
+  const old = second.facts.find((fact) => fact.value === "Fixture Role B");
+  const fresh = second.facts.find((fact) => fact.value === "Fixture Role A");
   assert.ok(old && fresh);
   assert.equal(old.supersededBy, fresh.factId);
   assert.deepEqual(fresh.supersedes, [old.factId]);
@@ -184,10 +184,10 @@ test("a source changing its own answer supersedes without overwriting", () => {
 
 test("a high-priority source cannot erase a low-priority source's evidence", () => {
   const lowPriority = factsFrom("resume", [
-    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Manager", temporalState: "CURRENT", lastConfirmedAt: "2026-07-01T00:00:00Z" },
+    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role B", temporalState: "CURRENT", lastConfirmedAt: "2026-07-01T00:00:00Z" },
   ], 1);
   const highPriority = factsFrom("current-job", [
-    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Operations Lead", temporalState: "CURRENT", lastConfirmedAt: "2026-08-01T00:00:00Z" },
+    { category: "CURRENT_EMPLOYMENT", predicate: "title", value: "Fixture Role A", temporalState: "CURRENT", lastConfirmedAt: "2026-08-01T00:00:00Z" },
   ], 1000);
 
   const result = reconcileFacts(lowPriority, highPriority);

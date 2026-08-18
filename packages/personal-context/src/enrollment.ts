@@ -12,23 +12,31 @@
  * milestone can build the machinery now and enroll the Owner's real sources later without another
  * engineering pass.
  *
- * ## The ceiling is the directive
+ * ## The ceiling is the Owner's authority record, not a constant here
  *
- * The authorizing directive carries `Sensitive-Data-Permission: NO`. So enrollment refuses a source
- * classified above {@link MILESTONE_SENSITIVITY_CEILING_V1}, and says so in the Owner's terms rather
- * than failing somewhere deep in a sync. The refusal is the honest answer: that source needs a fresh
- * Owner decision, not a workaround.
+ * Enrollment refuses a source classified above the ceiling, and says so in the Owner's terms rather
+ * than failing somewhere deep in a sync. That ceiling is resolved from the durable
+ * `.aion-local/owner-authority` record (see `authority.ts`) — a file only a verified Founder phrase
+ * can create — so raising it is a governance act rather than a source edit. An earlier version kept
+ * it as a constant in this package, which meant an agent blocked by the refusal had a one-line fix
+ * available that looked like maintenance in a diff.
+ *
+ * ## Defaults do the schema work
+ *
+ * The Owner supplies where a source is and what it is. Everything else comes from
+ * `enrollment-defaults.ts`, which defaults every personal source to local-only disclosure. Widening
+ * is one explicit flag; un-sending is not a thing.
  */
 
 import { isResolvedHostPath, type ProviderIdV1, type SensitivityClassV1 } from "@aion/director";
 
+import { resolveEnrollmentCeiling, withinCeiling, type CeilingDecisionV1, type OwnerAuthorityRecordV1 } from "./authority.js";
+import { defaultsForSourceType } from "./enrollment-defaults.js";
 import {
-  MILESTONE_SENSITIVITY_CEILING_V1,
   PERSONAL_CONTEXT_AUTHORITY_SOURCE,
   PERSONAL_CONTEXT_MILESTONE_ID,
   PERSONAL_CONTEXT_OWNER_AUTHORIZATION_ID,
   PERSONAL_CONTEXT_SCHEMA_V1,
-  sensitivityWithin,
   SOURCE_TYPES_V1,
   SYNC_MODES_V1,
   validateContextSource,
@@ -37,12 +45,8 @@ import {
   type SourceTypeV1,
   type SyncModeV1,
 } from "./contracts.js";
-import { providerEligibleForSensitivity, providersEligibleForSensitivity } from "./disclosure.js";
+import { providerEligibleForSensitivity } from "./disclosure.js";
 import type { PersonalContextStoreV1 } from "./store.js";
-
-export const DEFAULT_MAX_DEPTH = 6;
-export const DEFAULT_MAX_FILES = 500;
-export const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface RegisterContextSourceInputV1 {
   readonly sourceId: string;
@@ -74,12 +78,17 @@ export type EnrollmentDenialReasonV1 =
   | "INVALID_RECORD";
 
 export type EnrollmentResultV1 =
-  | { readonly registered: true; readonly source: ContextSourceV1 }
+  | { readonly registered: true; readonly source: ContextSourceV1; readonly ceiling: CeilingDecisionV1 }
   | { readonly registered: false; readonly reason: EnrollmentDenialReasonV1; readonly detail: string };
 
 export interface EnrollmentDepsV1 {
   readonly store: PersonalContextStoreV1;
   readonly now: string;
+  /**
+   * The durable Owner authority this enrollment claims. Omit only in tests that are not about the
+   * ceiling: omitting it fails closed to the default rather than granting anything.
+   */
+  readonly authority?: OwnerAuthorityRecordV1 | null;
 }
 
 export function registerContextSource(
@@ -89,7 +98,7 @@ export function registerContextSource(
   if (!SOURCE_TYPES_V1.includes(input.sourceType as SourceTypeV1)) {
     return { registered: false, reason: "UNSUPPORTED_SOURCE_TYPE", detail: `unknown source type: ${input.sourceType}` };
   }
-  const syncMode = (input.syncMode ?? "ON_DEMAND") as SyncModeV1;
+  const syncMode = (input.syncMode ?? defaultsForSourceType(input.sourceType as SourceTypeV1).syncMode) as SyncModeV1;
   if (!SYNC_MODES_V1.includes(syncMode)) {
     return { registered: false, reason: "UNSUPPORTED_SYNC_MODE", detail: `unknown sync mode: ${String(input.syncMode)}` };
   }
@@ -106,18 +115,22 @@ export function registerContextSource(
     };
   }
 
-  const sensitivityClass = (input.sensitivityClass ?? "INTERNAL") as SensitivityClassV1;
-  if (!sensitivityWithin(sensitivityClass, MILESTONE_SENSITIVITY_CEILING_V1)) {
+  const defaults = defaultsForSourceType(input.sourceType as SourceTypeV1);
+  const sensitivityClass = (input.sensitivityClass ?? defaults.sensitivityClass) as SensitivityClassV1;
+
+  // The ceiling comes from the durable Owner authority record, never from a constant in this package.
+  const ceiling = resolveEnrollmentCeiling(deps.authority ?? null, deps.now);
+  if (!withinCeiling(sensitivityClass, ceiling)) {
     return {
       registered: false,
       reason: "SENSITIVITY_ABOVE_MILESTONE_CEILING",
       detail:
-        `this milestone may enroll sources up to ${MILESTONE_SENSITIVITY_CEILING_V1}; ` +
-        `${sensitivityClass} requires a fresh Owner decision`,
+        `enrollment ceiling is ${ceiling.ceiling} (${ceiling.basis}); ` +
+        `${sensitivityClass} requires an Owner-authorized directive granting it. ${ceiling.detail}`,
     };
   }
 
-  const requested = (input.eligibleProviders ?? providersEligibleForSensitivity(sensitivityClass)) as readonly ProviderIdV1[];
+  const requested = (input.eligibleProviders ?? defaults.eligibleProviders) as readonly ProviderIdV1[];
   for (const provider of requested) {
     if (!providerEligibleForSensitivity(provider, sensitivityClass)) {
       return {
@@ -143,29 +156,33 @@ export function registerContextSource(
     displayName: input.displayName,
     purpose: input.purpose,
     authorizationSource: PERSONAL_CONTEXT_AUTHORITY_SOURCE,
-    milestoneId: PERSONAL_CONTEXT_MILESTONE_ID,
-    ownerAuthorizationId: PERSONAL_CONTEXT_OWNER_AUTHORIZATION_ID,
+    // The row records the authority it was actually enrolled under, so a later reader can check the
+    // enrollment against the decision that permitted it rather than against today's directive.
+    milestoneId: deps.authority?.milestoneId ?? PERSONAL_CONTEXT_MILESTONE_ID,
+    ownerAuthorizationId: deps.authority?.ownerAuthorizationId ?? PERSONAL_CONTEXT_OWNER_AUTHORIZATION_ID,
     allowedScope: [...(input.allowedScope ?? [])],
-    deniedScope: [...(input.deniedScope ?? [])],
+    deniedScope: [...(input.deniedScope ?? defaults.deniedScope)],
     sensitivityClass,
     eligibleProviders: [...requested],
     syncMode,
-    recursiveAllowed: input.recursiveAllowed ?? true,
-    maxDepth: input.maxDepth ?? DEFAULT_MAX_DEPTH,
-    maxFiles: input.maxFiles ?? DEFAULT_MAX_FILES,
-    maxBytes: input.maxBytes ?? DEFAULT_MAX_BYTES,
+    recursiveAllowed: input.recursiveAllowed ?? defaults.recursiveAllowed,
+    maxDepth: input.maxDepth ?? defaults.maxDepth,
+    maxFiles: input.maxFiles ?? defaults.maxFiles,
+    maxBytes: input.maxBytes ?? defaults.maxBytes,
     // Off by default. A source that follows links is a source whose approved root is only as bounded
     // as whatever the filesystem happens to point at today.
     followSymlinksAllowed: input.followSymlinksAllowed ?? false,
     activeState: "ACTIVE",
     revokedAt: null,
     expiresAt: input.expiresAt ?? null,
-    priority: input.priority ?? 100,
+    priority: input.priority ?? defaults.priority,
     lastAttemptedSync: null,
     lastSuccessfulSync: null,
     fingerprint: null,
     version: 1,
     sourceModifiedAt: null,
+    repositoryHead: null,
+    repositoryRemote: null,
     createdAt: deps.now,
     updatedAt: deps.now,
   };
@@ -174,7 +191,7 @@ export function registerContextSource(
   if (problem !== null) return { registered: false, reason: "INVALID_RECORD", detail: problem };
 
   deps.store.saveSource(source);
-  return { registered: true, source };
+  return { registered: true, source, ceiling };
 }
 
 export type SourceStateChangeResultV1 =

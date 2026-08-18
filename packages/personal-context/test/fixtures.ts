@@ -163,6 +163,8 @@ export function makeSource(overrides: Partial<ContextSourceV1> = {}): ContextSou
     fingerprint: null,
     version: 1,
     sourceModifiedAt: null,
+    repositoryHead: null,
+    repositoryRemote: null,
     createdAt: "2026-08-18T00:00:00Z",
     updatedAt: "2026-08-18T00:00:00Z",
     ...overrides,

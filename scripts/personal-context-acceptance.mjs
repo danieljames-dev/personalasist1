@@ -31,6 +31,11 @@ const repositoryRoot = join(here, "..");
 
 const {
   authorityFromPersonalContext,
+  buildOwnerContextReport,
+  readOwnerAuthorityRecord,
+  recordOwnerCurrentJob,
+  renderOwnerContextReport,
+  resolveEnrollmentCeiling,
   createFilePersonalContextStore,
   createNodePersonalContextFs,
   failoverBroadensDisclosure,
@@ -130,6 +135,9 @@ const primary = registerContextSource(
     displayName: "AION project context",
     purpose: "Bounded acceptance source describing the AION project, not the Owner",
     sensitivityClass: "INTERNAL",
+    // Widened deliberately. This is AION's own project data, not personal material, and the widening
+    // has to be explicit precisely because the default is local-only.
+    eligibleProviders: ["codex", "grok", "claude", "local"],
     syncMode: "ON_DEMAND",
     maxDepth: 2,
     maxFiles: 20,
@@ -139,6 +147,22 @@ const primary = registerContextSource(
 );
 assert.equal(primary.registered, true, `enrollment failed: ${primary.detail ?? ""}`);
 record("SOURCE_REGISTERED", primary.source.sourceId);
+
+// Omitting the provider flag must produce the least-disclosure row, not the convenient one.
+const defaulted = registerContextSource(
+  {
+    sourceId: "default-disclosure-probe",
+    sourceType: "APPROVED_PROJECT_ARTIFACT",
+    location: fixtureRoot,
+    displayName: "Least-disclosure probe",
+    purpose: "Prove the default provider set is local-only",
+  },
+  { store, now: nowUtc() },
+);
+assert.equal(defaulted.registered, true, `probe enrollment failed: ${defaulted.detail ?? ""}`);
+assert.deepEqual([...defaulted.source.eligibleProviders], ["local"], "the default must be least disclosure");
+setSourceState("default-disclosure-probe", "REVOKED", { store, now: nowUtc() });
+record("LEAST_DISCLOSURE_DEFAULT", "PASS");
 
 /* -------------------------------------------------------------------------- */
 /* 2. A real bounded sync over real files                                      */
@@ -367,11 +391,117 @@ assert.ok(receipts.some((receipt) => receipt.outcome === "DENIED"));
 record("SYNC_RECEIPTS_DURABLE", "PASS");
 
 /* -------------------------------------------------------------------------- */
+/* 11. The ceiling is the Owner authority record, not a constant               */
+/* -------------------------------------------------------------------------- */
+
+const enrollmentAuthority = readOwnerAuthorityRecord(repositoryRoot, "OWNER-CONTEXT-ENROLLMENT-V1-20260818T172656Z");
+assert.ok(enrollmentAuthority !== null, "the enrollment authority record could not be read");
+const grantedCeiling = resolveEnrollmentCeiling(enrollmentAuthority, nowUtc());
+assert.equal(grantedCeiling.ceiling, "CONFIDENTIAL");
+assert.equal(grantedCeiling.basis, "OWNER_AUTHORITY_SENSITIVE_YES");
+
+const withoutAuthority = resolveEnrollmentCeiling(null, nowUtc());
+assert.equal(withoutAuthority.ceiling, "INTERNAL", "no authority must fail closed");
+
+const personalRefused = registerContextSource(
+  {
+    sourceId: "personal-without-authority",
+    sourceType: "RESUME_CV",
+    location: fixtureRoot,
+    displayName: "Refused",
+    purpose: "prove the ceiling is authority-driven",
+  },
+  { store, now: nowUtc() },
+);
+assert.equal(personalRefused.registered, false);
+assert.equal(personalRefused.reason, "SENSITIVITY_ABOVE_MILESTONE_CEILING");
+record("CEILING_FROM_OWNER_AUTHORITY", "PASS");
+
+/* -------------------------------------------------------------------------- */
+/* 12. File-free Owner current-job entry, on synthetic acceptance values       */
+/* -------------------------------------------------------------------------- */
+
+const ownerJobSource = registerContextSource(
+  {
+    sourceId: "acceptance-current-job",
+    sourceType: "OWNER_ENTERED_CURRENT_JOB",
+    location: join(workspace, "owner-entry"),
+    displayName: "Acceptance current job",
+    purpose: "Synthetic Owner-entry source used to prove the file-free entry path",
+  },
+  { store, now: nowUtc(), authority: enrollmentAuthority },
+);
+assert.equal(ownerJobSource.registered, true, `owner-entry enrollment failed: ${ownerJobSource.detail ?? ""}`);
+assert.equal(ownerJobSource.source.sensitivityClass, "CONFIDENTIAL");
+assert.deepEqual([...ownerJobSource.source.eligibleProviders], ["local"], "least disclosure by default");
+
+// Deliberately synthetic and obviously not the Owner: this harness proves the mechanism, and must
+// never be mistaken for real context.
+const SUBJECT = "acceptance-subject";
+const partial = recordOwnerCurrentJob(
+  "acceptance-current-job",
+  { subject: SUBJECT, title: "Acceptance Role", skills: ["Fixture Skill A", "Fixture Skill B"] },
+  { store, now: nowUtc() },
+);
+assert.ok(!("error" in partial), `owner entry failed: ${"error" in partial ? partial.error : ""}`);
+assert.equal(partial.receipt.filesRead, 0, "an Owner entry must read no file");
+assert.ok(partial.facts.length >= 3);
+assert.ok(partial.notSupplied.includes("employer"), "an unsupplied field must be reported, not invented");
+assert.equal(partial.facts.every((fact) => fact.origin === "OWNER_ENTERED"), true);
+record("OWNER_ENTERED_CURRENT_JOB", "PASS");
+record("OWNER_ENTRY_NO_FABRICATION", "PASS");
+
+const storedOwnerFacts = createFilePersonalContextStore(storeRoot).listFacts().filter((fact) => fact.subject === SUBJECT);
+assert.ok(storedOwnerFacts.length >= 3, "Owner-entered facts did not survive a store reload");
+assert.equal(storedOwnerFacts.some((fact) => fact.predicate === "employer"), false, "nothing stood in for the missing employer");
+
+// A restatement retires what it does not repeat, and keeps the retired row answerable.
+const restated = recordOwnerCurrentJob(
+  "acceptance-current-job",
+  { subject: SUBJECT, title: "Acceptance Role Updated", skills: ["Fixture Skill A"] },
+  { store, now: nowUtc() },
+);
+assert.ok(!("error" in restated));
+assert.ok(restated.retired.length >= 1, "an unrepeated value should be retired");
+const liveOwner = store.listFacts().filter((fact) => fact.subject === SUBJECT && fact.supersededBy === null);
+assert.equal(liveOwner.some((fact) => fact.value === "Fixture Skill B"), false, "a retired skill is no longer live");
+assert.equal(store.listFacts().some((fact) => fact.value === "Fixture Skill B"), true, "but it is not deleted");
+record("OWNER_ENTRY_RESTATEMENT", "PASS");
+
+/* -------------------------------------------------------------------------- */
+/* 13. Owner review report                                                     */
+/* -------------------------------------------------------------------------- */
+
+const ownerReport = buildOwnerContextReport({ store }, { subject: SUBJECT, now: nowUtc() });
+assert.equal(ownerReport.byOrigin.INFERRED, 0, "nothing may ever be inferred");
+assert.ok(ownerReport.byOrigin.OWNER_ENTERED > 0);
+assert.ok(ownerReport.missingCategories.includes("WORK_HISTORY"), "a gap must be named rather than omitted");
+assert.equal(ownerReport.ownerContextComplete, "PARTIAL");
+
+const rendered = renderOwnerContextReport(ownerReport);
+assert.match(rendered, /## Missing important career context/);
+assert.match(rendered, /## Provider disclosure restrictions/);
+assert.match(rendered, /origin: `OWNER_ENTERED`/);
+assert.match(rendered, /No fact here was inferred/);
+
+const redacted = renderOwnerContextReport(ownerReport, { redactValues: true });
+assert.equal(redacted.includes("Acceptance Role Updated"), false, "redaction must remove values");
+assert.match(redacted, /chars withheld/);
+
+const grokRow = ownerReport.providerDisclosure.find((row) => row.provider === "grok");
+assert.equal(grokRow?.visibleFacts, 0, "least disclosure means a cloud provider sees none of the personal facts");
+record("OWNER_REVIEW_REPORT", "PASS");
+record("REPORT_ORIGIN_LABELLING", "PASS");
+record("REPORT_REDACTION", "PASS");
+
+/* -------------------------------------------------------------------------- */
 /* The distinction that must not be blurred                                    */
 /* -------------------------------------------------------------------------- */
 
-const ownerFacts = store.listFacts().filter((fact) => fact.subject !== "aion-project");
-assert.equal(ownerFacts.length, 0, "the acceptance run ingested something that was not project data");
+const foreign = store
+  .listFacts()
+  .filter((fact) => fact.subject !== "aion-project" && fact.subject !== SUBJECT);
+assert.equal(foreign.length, 0, "the acceptance run ingested something that was neither project data nor its own fixture");
 
 record("SYNC_ENGINE_PROVEN", "YES");
 record("OWNER_CONTEXT_COMPLETE", "NO");

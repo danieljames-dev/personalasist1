@@ -14,6 +14,7 @@
  *
  * Usage:
  *   node scripts/register-context-source.mjs list
+ *   node scripts/register-context-source.mjs defaults
  *   node scripts/register-context-source.mjs register --sourceId <id> --sourceType <type> \
  *        --location <absolute path> --displayName "<name>" --purpose "<why>" \
  *        [--allowedScope a;b] [--deniedScope c;d] [--sensitivityClass PUBLIC|INTERNAL] \
@@ -25,6 +26,7 @@
  * Nothing here reads a source. `register` writes a registry row; `sync` runs the bounded engine.
  */
 
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -34,13 +36,46 @@ const repositoryRoot = join(here, "..");
 const {
   createFilePersonalContextStore,
   createNodePersonalContextFs,
+  defaultsForSourceType,
   PERSONAL_CONTEXT_STORE_RELATIVE_PATH,
+  readOwnerAuthorityRecord,
   registerContextSource,
   setSourceState,
   SOURCE_STATES_V1,
+  SOURCE_TYPES_V1,
   syncAllSources,
   syncSource,
 } = await import(pathToFileURL(join(repositoryRoot, "packages", "personal-context", "dist", "index.js")).href);
+
+/**
+ * The Owner authority the current directive names.
+ *
+ * Read from `CURRENT.md` rather than chosen from the authority directory, so enrollment can only
+ * happen under the milestone the Owner actually authorized.
+ */
+function activeAuthority() {
+  let directive;
+  try {
+    directive = readFileSync(join(repositoryRoot, ".aion-local", "directives", "CURRENT.md"), "utf8");
+  } catch {
+    return null;
+  }
+  const match = /^Owner-Authorization-Id:\s*(.+?)\s*$/m.exec(directive);
+  if (match === null) return null;
+  return readOwnerAuthorityRecord(repositoryRoot, match[1]);
+}
+
+/** Print the row the Owner is about to approve, before it is written. */
+function showDefaults(sourceType) {
+  const defaults = defaultsForSourceType(sourceType);
+  console.log(`Defaults for ${sourceType}:`);
+  console.log(`  ${defaults.rationale}`);
+  console.log(`  sensitivity : ${defaults.sensitivityClass}`);
+  console.log(`  providers   : ${defaults.eligibleProviders.join(", ")}  (least disclosure; widen with --eligibleProviders)`);
+  console.log(`  recursion   : ${defaults.recursiveAllowed} (maxDepth ${defaults.maxDepth}, maxFiles ${defaults.maxFiles})`);
+  console.log(`  excluded    : ${defaults.deniedScope.join(", ") || "<nothing>"}`);
+  console.log(`  syncMode    : ${defaults.syncMode}`);
+}
 
 function parseArguments(argv) {
   const options = {};
@@ -102,9 +137,25 @@ if (command === "list") {
   process.exit(0);
 }
 
+if (command === "defaults") {
+  for (const type of SOURCE_TYPES_V1) {
+    showDefaults(type);
+    console.log("");
+  }
+  process.exit(0);
+}
+
 if (command === "register") {
   for (const required of ["sourceId", "sourceType", "location", "displayName", "purpose"]) {
     if (options[required] === undefined) fail(`Missing required option: --${required}`);
+  }
+  if (!SOURCE_TYPES_V1.includes(options.sourceType)) fail(`Unsupported source type: ${options.sourceType}`);
+  // Shown before the row is written, so "conservative defaults" never means "surprising defaults".
+  showDefaults(options.sourceType);
+  console.log("");
+  if (options["dry-run"] !== undefined) {
+    console.log("Dry run: nothing was registered and no file was read.");
+    process.exit(0);
   }
   const result = registerContextSource(
     {
@@ -125,10 +176,12 @@ if (command === "register") {
       priority: options.priority === undefined ? undefined : Number(options.priority),
       expiresAt: options.expiresAt,
     },
-    { store, now: nowUtc() },
+    { store, now: nowUtc(), authority: activeAuthority() },
   );
   if (!result.registered) fail(`Enrollment refused (${result.reason}): ${result.detail}`);
   console.log(`Registered ${result.source.sourceId} as ${result.source.sourceType} (${result.source.sensitivityClass}).`);
+  console.log(`Providers allowed: ${result.source.eligibleProviders.join(", ")}`);
+  console.log(`Ceiling that permitted it: ${result.ceiling.ceiling} (${result.ceiling.basis})`);
   console.log("No file has been read. Run `sync` when the Owner wants this source synchronized.");
   process.exit(0);
 }
@@ -159,4 +212,4 @@ if (command === "sync") {
   process.exit(0);
 }
 
-fail("Usage: register-context-source.mjs <list|register|state|sync> [options]");
+fail("Usage: register-context-source.mjs <list|defaults|register|state|sync> [options]");

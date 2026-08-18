@@ -33,6 +33,7 @@ import {
 } from "./contracts.js";
 import { sourceReadable } from "./enrollment.js";
 import { extractFactsFromFile, type ExtractionSkipV1 } from "./extraction.js";
+import { readRepositoryIdentity } from "./git-identity.js";
 import { digestOf } from "./hash.js";
 import {
   enumerateApprovedFiles,
@@ -190,6 +191,10 @@ export function syncSource(sourceId: string, deps: SyncDepsV1): SyncReceiptV1 {
     return skipped;
   }
 
+  // Repository identity is captured before any content is read, so every fact from this pass can name
+  // the commit it was observed at. A source that is not a checkout simply reports nulls.
+  const repository = readRepositoryIdentity(source, deps.fs);
+
   const extracted: PersonalContextFactV1[] = [];
   const skips: ExtractionSkipV1[] = [];
   const errors: string[] = [];
@@ -213,6 +218,7 @@ export function syncSource(sourceId: string, deps: SyncDepsV1): SyncReceiptV1 {
       sourceReference: file.relativePath,
       contents,
       sourceModifiedAt: isoOrNull(file.mtimeMs),
+      sourceCommit: repository.head,
       now: deps.now,
     });
     if (!result.recognized) filesUnsupported += 1;
@@ -281,6 +287,8 @@ export function syncSource(sourceId: string, deps: SyncDepsV1): SyncReceiptV1 {
     fingerprint: rootFailure ? source.fingerprint : fingerprintAfter,
     version: rootFailure ? source.version : source.version + 1,
     sourceModifiedAt: isoOrNull(newestModified) ?? source.sourceModifiedAt,
+    repositoryHead: repository.head,
+    repositoryRemote: repository.remote,
     updatedAt: startedAt,
   };
   deps.store.saveSource(updatedSource);

@@ -139,6 +139,18 @@ export const ELIGIBLE_USES_V1 = [
 ] as const;
 export type EligibleUseV1 = (typeof ELIGIBLE_USES_V1)[number];
 
+/**
+ * How a fact came to exist, which the Owner review report must never blur.
+ *
+ * `OWNER_ENTERED` is a value the Owner typed. `OWNER_CONFIRMED` is one they later re-affirmed.
+ * `EXTRACTED` came from an approved document. `INFERRED` exists in the type so a report can name the
+ * category and assert it is empty — nothing in this package produces one, and nothing should start
+ * without saying so out loud. An inferred fact presented as Owner-confirmed is the specific lie this
+ * system is built to prevent.
+ */
+export const FACT_ORIGINS_V1 = ["OWNER_ENTERED", "OWNER_CONFIRMED", "EXTRACTED", "INFERRED"] as const;
+export type FactOriginV1 = (typeof FACT_ORIGINS_V1)[number];
+
 /** A use name that reads like doing something rather than knowing something. */
 export const ACTION_SHAPED_USE =
   /(login|log_?in|sign_?in|authenticate|send|email|mail|apply|submit|post|purchase|pay|order|delete|write|publish|contact|call|dial)/i;
@@ -155,13 +167,14 @@ export const SENSITIVITY_ORDER_V1: readonly SensitivityClassV1[] = [
 ];
 
 /**
- * The highest class this milestone may enroll.
+ * The ceiling used when no Owner authority record is available.
  *
- * The authorizing directive carries `Sensitive-Data-Permission: NO`, so a source that could contain
- * `CONFIDENTIAL` or `RESTRICTED` material is not enrollable under it. That is not a limitation to be
- * worked around in code — it is the directive, expressed where enrollment can enforce it.
+ * This used to be `MILESTONE_SENSITIVITY_CEILING_V1`, a constant pinned to one directive — which
+ * meant raising the ceiling was a one-line source edit an agent could make to get past a refusal.
+ * The real ceiling now comes from the durable Owner authority record (see `authority.ts`), and this
+ * value is only the fail-closed answer for a caller that supplied none.
  */
-export const MILESTONE_SENSITIVITY_CEILING_V1: SensitivityClassV1 = "INTERNAL";
+export const DEFAULT_SENSITIVITY_CEILING_V1: SensitivityClassV1 = "INTERNAL";
 
 export function sensitivityRank(value: SensitivityClassV1): number {
   const index = SENSITIVITY_ORDER_V1.indexOf(value);
@@ -212,6 +225,10 @@ export interface ContextSourceV1 {
   readonly fingerprint: string | null;
   readonly version: number;
   readonly sourceModifiedAt: string | null;
+  /** For a Git source: the commit the last sync observed. `null` when unknown or not a repository. */
+  readonly repositoryHead: string | null;
+  /** For a Git source: the remote it identifies as, when one is recorded inside the approved root. */
+  readonly repositoryRemote: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -227,8 +244,12 @@ export interface PersonalContextFactV1 {
   readonly value: string;
   readonly normalizedValue: string;
   readonly sourceId: string;
+  /** Whether the Owner said this, or a document did. Never blurred in a report. */
+  readonly origin: FactOriginV1;
   /** Which file inside the source, relative to its approved root. */
   readonly sourceReference: string;
+  /** The commit this was observed at, for a Git source. `null` otherwise. */
+  readonly sourceCommit: string | null;
   /** Where inside that file, in whatever terms the document supports. */
   readonly evidenceReference: string;
   /** When the claim was true or last confirmed by the document itself. Not a filesystem time. */
@@ -327,6 +348,8 @@ export function validateContextSource(candidate: unknown): string | null {
   if (badInstant(source.lastAttemptedSync ?? null)) return "lastAttemptedSync is not an ISO instant";
   if (badInstant(source.lastSuccessfulSync ?? null)) return "lastSuccessfulSync is not an ISO instant";
   if (source.fingerprint !== null && typeof source.fingerprint !== "string") return "fingerprint must be a string or null";
+  if (source.repositoryHead !== null && typeof source.repositoryHead !== "string") return "repositoryHead must be a string or null";
+  if (source.repositoryRemote !== null && typeof source.repositoryRemote !== "string") return "repositoryRemote must be a string or null";
   if (CREDENTIAL_SHAPED.test(source.displayName) || CREDENTIAL_SHAPED.test(source.purpose)) {
     return "source metadata names credential material";
   }
@@ -350,6 +373,13 @@ export function validatePersonalContextFact(candidate: unknown): string | null {
     return "claimKey does not match subject/category/predicate";
   }
   if (typeof fact.sourceId !== "string" || !IDENTIFIER.test(fact.sourceId)) return "sourceId is not a safe identifier";
+  if (typeof fact.origin !== "string" || !FACT_ORIGINS_V1.includes(fact.origin as FactOriginV1)) {
+    return "origin is not a supported fact origin";
+  }
+  // Nothing in this package produces an inferred fact. Refusing to store one is what keeps the
+  // report's OWNER_CONFIRMED column trustworthy: there is no path by which a guess becomes a row.
+  if (fact.origin === "INFERRED") return "inferred facts are not storable";
+  if (fact.sourceCommit !== null && typeof fact.sourceCommit !== "string") return "sourceCommit must be a string or null";
   if (typeof fact.sourceReference !== "string" || fact.sourceReference.trim() === "") return "sourceReference is empty";
   if (typeof fact.evidenceReference !== "string" || fact.evidenceReference.trim() === "") return "evidenceReference is empty";
   if (typeof fact.extractedAt !== "string" || !ISO_INSTANT.test(fact.extractedAt)) return "extractedAt is not an ISO instant";

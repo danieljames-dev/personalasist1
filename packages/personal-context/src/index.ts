@@ -18,15 +18,20 @@
  * this fact let me act", and it is always no.
  */
 
+export * from "./authority.js";
 export * from "./contracts.js";
 export * from "./disclosure.js";
 export * from "./enrollment.js";
+export * from "./enrollment-defaults.js";
 export * from "./extraction.js";
 export * from "./freshness.js";
+export * from "./git-identity.js";
 export * from "./hash.js";
 export * from "./node-fs.js";
+export * from "./owner-entry.js";
 export * from "./path-boundary.js";
 export * from "./receipts.js";
+export * from "./report.js";
 export * from "./reconcile.js";
 export * from "./retrieval.js";
 export * from "./store.js";

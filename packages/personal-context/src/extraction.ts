@@ -138,6 +138,8 @@ export interface ExtractionInputV1 {
   readonly sourceReference: string;
   readonly contents: string;
   readonly sourceModifiedAt: string | null;
+  /** For a Git source, the commit these bytes were read at. `null` otherwise. */
+  readonly sourceCommit?: string | null;
   readonly now: string;
 }
 
@@ -266,7 +268,11 @@ export function extractFactsFromFile(input: ExtractionInputV1): ExtractionResult
       value,
       normalizedValue,
       sourceId: source.sourceId,
+      // A document said this. Only `owner-entry.ts` produces OWNER_ENTERED, and nothing produces
+      // INFERRED — which is what makes the report's origin column worth reading.
+      origin: "EXTRACTED",
       sourceReference,
+      sourceCommit: input.sourceCommit ?? null,
       evidenceReference: asString(row.evidenceReference) ?? `${declaration.documentId}#facts[${index}]`,
       observedAt,
       sourceModifiedAt: input.sourceModifiedAt,

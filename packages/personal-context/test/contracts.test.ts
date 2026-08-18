@@ -16,7 +16,7 @@ import {
   claimKeyOf,
   CONTEXT_CATEGORIES_V1,
   ELIGIBLE_USES_V1,
-  MILESTONE_SENSITIVITY_CEILING_V1,
+  DEFAULT_SENSITIVITY_CEILING_V1,
   PERSONAL_CONTEXT_SCHEMA_V1,
   sensitivityWithin,
   SOURCE_STATES_V1,
@@ -42,7 +42,9 @@ function wellFormedFact(overrides: Partial<PersonalContextFactV1> = {}): Persona
     value: "TypeScript",
     normalizedValue: "typescript",
     sourceId: "test-source",
+    origin: "EXTRACTED",
     sourceReference: "declaration.json",
+    sourceCommit: null,
     evidenceReference: "doc-1#facts[0]",
     observedAt: "2026-07-01T00:00:00Z",
     sourceModifiedAt: null,
@@ -126,8 +128,8 @@ test("no approved use names an action, and the action pattern would catch one", 
 
 test("knowledge never becomes permission, whatever the fact says", () => {
   for (const fact of [
-    wellFormedFact({ category: "CURRENT_EMPLOYMENT", predicate: "employer", value: "Example Motors" }),
-    wellFormedFact({ category: "TECHNOLOGY", predicate: "platform", value: "Tekion" }),
+    wellFormedFact({ category: "CURRENT_EMPLOYMENT", predicate: "employer", value: "Fixture Employer" }),
+    wellFormedFact({ category: "TECHNOLOGY", predicate: "platform", value: "Fixture Platform" }),
     wellFormedFact({ category: "IDENTITY_REFERENCE", predicate: "contactChannel", value: "a work address" }),
   ]) {
     const answer = authorityFromPersonalContext(fact);
@@ -137,12 +139,12 @@ test("knowledge never becomes permission, whatever the fact says", () => {
   }
 });
 
-test("the milestone ceiling refuses classes the authorizing directive did not grant", () => {
-  assert.equal(MILESTONE_SENSITIVITY_CEILING_V1, "INTERNAL");
-  assert.equal(sensitivityWithin("PUBLIC", MILESTONE_SENSITIVITY_CEILING_V1), true);
-  assert.equal(sensitivityWithin("INTERNAL", MILESTONE_SENSITIVITY_CEILING_V1), true);
-  assert.equal(sensitivityWithin("CONFIDENTIAL", MILESTONE_SENSITIVITY_CEILING_V1), false);
-  assert.equal(sensitivityWithin("RESTRICTED", MILESTONE_SENSITIVITY_CEILING_V1), false);
+test("the fallback ceiling is the fail-closed one, used only when no authority is supplied", () => {
+  assert.equal(DEFAULT_SENSITIVITY_CEILING_V1, "INTERNAL");
+  assert.equal(sensitivityWithin("PUBLIC", DEFAULT_SENSITIVITY_CEILING_V1), true);
+  assert.equal(sensitivityWithin("INTERNAL", DEFAULT_SENSITIVITY_CEILING_V1), true);
+  assert.equal(sensitivityWithin("CONFIDENTIAL", DEFAULT_SENSITIVITY_CEILING_V1), false);
+  assert.equal(sensitivityWithin("RESTRICTED", DEFAULT_SENSITIVITY_CEILING_V1), false);
 });
 
 test("current employment is a first-class claim with its own evidence", () => {
@@ -153,7 +155,7 @@ test("current employment is a first-class claim with its own evidence", () => {
       {
         category: "CURRENT_EMPLOYMENT",
         predicate: "employer",
-        value: "Example Motors",
+        value: "Fixture Employer",
         temporalState: "CURRENT",
         validFrom: "2024-02-01T00:00:00Z",
         lastConfirmedAt: "2026-08-01T00:00:00Z",
@@ -161,7 +163,7 @@ test("current employment is a first-class claim with its own evidence", () => {
       {
         category: "CURRENT_EMPLOYMENT",
         predicate: "title",
-        value: "Operations Lead",
+        value: "Fixture Role A",
         temporalState: "CURRENT",
         lastConfirmedAt: "2026-08-01T00:00:00Z",
       },
@@ -189,7 +191,7 @@ test("an absent current job is absent, not invented", () => {
       {
         category: "WORK_HISTORY",
         predicate: "employer",
-        value: "Former Dealer Group",
+        value: "Fixture Prior Employer",
         temporalState: "HISTORICAL",
         validFrom: "2018-01-01T00:00:00Z",
         validTo: "2022-06-30T00:00:00Z",
@@ -209,7 +211,7 @@ test("prose produces no facts at all rather than a plausible guess", () => {
   const result = extractFactsFromFile({
     source: makeSource(),
     sourceReference: "resume.md",
-    contents: "# Resume\n\nSenior Operations Lead at Example Motors since 2024.\nSkills: TypeScript, SQL.\n",
+    contents: "# Resume\n\nSenior Fixture Role at Fixture Employer since 2024.\nSkills: TypeScript, SQL.\n",
     sourceModifiedAt: "2026-08-18T00:00:00Z",
     now: NOW,
   });
