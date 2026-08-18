@@ -15,7 +15,12 @@ import { authorityFromPersonalContext } from "../src/contracts.js";
 import { defaultsForSourceType, isPersonalSourceType } from "../src/enrollment-defaults.js";
 import { registerContextSource, setSourceState } from "../src/enrollment.js";
 import { parsePackedRef, parseRemoteUrl, readRepositoryIdentity } from "../src/git-identity.js";
-import { buildOwnerCurrentJobFacts, recordOwnerCurrentJob, type OwnerEntryResultV1 } from "../src/owner-entry.js";
+import {
+  buildOwnerCurrentJobFacts,
+  recordOwnerCurrentJob,
+  recordOwnerFacts,
+  type OwnerEntryResultV1,
+} from "../src/owner-entry.js";
 import { buildOwnerContextReport, renderOwnerContextReport } from "../src/report.js";
 import { createMemoryPersonalContextStore } from "../src/store.js";
 import { FakeFs, makeSource, NOW } from "./fixtures.js";
@@ -543,4 +548,119 @@ test("a conflict between the Owner and a document is shown, not resolved", () =>
   const rendered = renderOwnerContextReport(report);
   assert.match(rendered, /## Conflicts/);
   assert.match(rendered, /conflict: `CONFIRMED`/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Owner-stated facts beyond the current job                                   */
+/* -------------------------------------------------------------------------- */
+
+function ownerFactsStore(sourceId: string) {
+  const store = createMemoryPersonalContextStore();
+  const registered = registerContextSource(
+    {
+      sourceId,
+      sourceType: "OWNER_ENTERED_CURRENT_JOB",
+      location: `c:/pc-test/owner-entry/${sourceId}`,
+      displayName: `Owner-stated ${sourceId}`,
+      purpose: "What the Owner states directly. No file is read.",
+    },
+    { store, now: NOW, authority: authority() },
+  );
+  assert.equal(registered.registered, true, registered.registered === false ? registered.detail : "");
+  return store;
+}
+
+test("Owner-stated businesses are stored as OWNER_ENTERED business-context facts", () => {
+  const store = ownerFactsStore("owner-businesses");
+  const result = recordOwnerFacts(
+    "owner-businesses",
+    [{ category: "BUSINESS_CONTEXT", kind: "business", values: ["Fixture Business One", "Fixture Business Two"] }],
+    { store, now: NOW },
+  );
+  assert.ok(!("error" in result));
+
+  const stored = store.listFacts();
+  assert.equal(stored.length, 2);
+  assert.equal(stored.every((fact) => fact.category === "BUSINESS_CONTEXT"), true);
+  assert.equal(stored.every((fact) => fact.origin === "OWNER_ENTERED"), true);
+  assert.equal(stored.every((fact) => fact.temporalState === "CURRENT"), true);
+  assert.equal(stored.every((fact) => fact.conflictState === "NONE"), true, "two businesses are not a disagreement");
+  // No start date is invented for something that has none.
+  assert.equal(stored.every((fact) => fact.validFrom === null), true);
+  assert.deepEqual([...new Set(stored.map((fact) => fact.eligibleProviders.join(",")))], ["local"]);
+});
+
+test("a blank or whitespace-only value is skipped rather than stored", () => {
+  const store = ownerFactsStore("owner-businesses");
+  const result = recordOwnerFacts(
+    "owner-businesses",
+    [{ category: "BUSINESS_CONTEXT", kind: "business", values: ["  ", "", "Fixture Business One"] }],
+    { store, now: NOW },
+  );
+  assert.ok(!("error" in result));
+  assert.equal(store.listFacts().length, 1);
+});
+
+test("restating one group never retires another group's source", () => {
+  const store = createMemoryPersonalContextStore();
+  for (const id of ["owner-businesses", "owner-preferences"]) {
+    const registered = registerContextSource(
+      {
+        sourceId: id,
+        sourceType: "OWNER_ENTERED_CURRENT_JOB",
+        location: `c:/pc-test/owner-entry/${id}`,
+        displayName: id,
+        purpose: "Owner-stated group",
+      },
+      { store, now: NOW, authority: authority() },
+    );
+    assert.equal(registered.registered, true);
+  }
+
+  recordOwnerFacts(
+    "owner-businesses",
+    [{ category: "BUSINESS_CONTEXT", kind: "business", values: ["Fixture Business One"] }],
+    { store, now: NOW },
+  );
+  recordOwnerFacts(
+    "owner-preferences",
+    [{ category: "WORK_MODE_PREFERENCE", kind: "workMode", values: ["Fixture Mode"] }],
+    { store, now: LATER },
+  );
+
+  const live = store.listFacts().filter((fact) => fact.supersededBy === null);
+  assert.equal(live.length, 2, "a preference entry must not retire a business fact");
+  assert.deepEqual(live.map((fact) => fact.category).sort(), ["BUSINESS_CONTEXT", "WORK_MODE_PREFERENCE"]);
+});
+
+test("restating a group retires what it does not repeat, within that source only", () => {
+  const store = ownerFactsStore("owner-businesses");
+  recordOwnerFacts(
+    "owner-businesses",
+    [{ category: "BUSINESS_CONTEXT", kind: "business", values: ["Fixture Business One", "Fixture Business Two"] }],
+    { store, now: NOW },
+  );
+  const restated = recordOwnerFacts(
+    "owner-businesses",
+    [{ category: "BUSINESS_CONTEXT", kind: "business", values: ["Fixture Business One"] }],
+    { store, now: LATER },
+  );
+  assert.ok(!("error" in restated));
+  assert.equal(restated.retired.length, 1);
+
+  const live = store.listFacts().filter((fact) => fact.supersededBy === null);
+  assert.deepEqual(live.map((fact) => fact.value), ["Fixture Business One"]);
+  assert.equal(store.listFacts().length, 2, "the retired statement is kept, not deleted");
+});
+
+test("recording against an unregistered or revoked source is refused", () => {
+  const store = ownerFactsStore("owner-businesses");
+  assert.ok("error" in recordOwnerFacts("nope", [{ category: "GOAL", kind: "goal", values: ["x"] }], { store, now: NOW }));
+  setSourceState("owner-businesses", "REVOKED", { store, now: NOW });
+  const revoked = recordOwnerFacts(
+    "owner-businesses",
+    [{ category: "GOAL", kind: "goal", values: ["x"] }],
+    { store, now: NOW },
+  );
+  assert.ok("error" in revoked);
 });

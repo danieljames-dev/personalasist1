@@ -1,5 +1,5 @@
 /**
- * The Owner states their current job directly. No file, no schema, no JSON.
+ * The Owner states things about themselves directly. No file, no schema, no JSON.
  *
  * Personal Context V1 could model current employment perfectly and could not accept it: every fact
  * had to arrive inside a declaration document, so "tell AION where you work" meant "hand-author a
@@ -134,6 +134,82 @@ function cleaned(value: string | null | undefined): string | null {
  * Exported so a caller can preview exactly what would be stored before storing it — which is what
  * makes an Owner-facing confirmation step possible without a dry-run mode inside the store.
  */
+/**
+ * Build one Owner-stated fact. Shared by every entry path so they cannot drift apart.
+ *
+ * `validFrom` is threaded rather than assumed: a current job has a start date, a stated preference
+ * does not, and inventing one for the second would put a fabricated date into provenance.
+ */
+function buildOwnerFact(
+  source: ContextSourceV1,
+  subject: string,
+  category: ContextCategoryV1,
+  predicate: string,
+  value: string,
+  options: { standing: TemporalStateV1; lastConfirmedAt: string; validFrom: string | null; now: string },
+): PersonalContextFactV1 | null {
+  const eligibleUses: readonly EligibleUseV1[] = ["JOB_MATCHING", "CAREER_SUMMARY", "SKILL_INVENTORY"];
+  const eligibleProviders: readonly ProviderIdV1[] = providersEligibleForSensitivity(source.sensitivityClass)
+    .filter((id) => source.eligibleProviders.includes(id));
+  const claimKey = claimKeyOf(subject, category, predicate);
+  const normalizedValue = normalizeValue(value);
+  const freshness = assessFreshness({
+    observedAt: null,
+    lastConfirmedAt: options.lastConfirmedAt,
+    sourceModifiedAt: null,
+    temporalState: options.standing,
+    validTo: null,
+    now: options.now,
+  });
+  const fact: PersonalContextFactV1 = {
+    schema: PERSONAL_CONTEXT_SCHEMA_V1,
+    factId: digestOf([source.sourceId, "owner-entry", claimKey, normalizedValue]),
+    claimKey,
+    subject,
+    category,
+    predicate,
+    value,
+    normalizedValue,
+    sourceId: source.sourceId,
+    origin: "OWNER_ENTERED",
+    sourceReference: "owner-entry",
+    sourceCommit: null,
+    evidenceReference: `Stated directly by the Owner on ${options.lastConfirmedAt}`,
+    observedAt: options.lastConfirmedAt,
+    sourceModifiedAt: null,
+    extractedAt: options.now,
+    // The Owner is the best available authority on their own life.
+    confidence: "HIGH",
+    sensitivity: source.sensitivityClass,
+    freshnessState: freshness.state,
+    freshnessEvidence: freshness.evidence,
+    temporalState: options.standing,
+    validFrom: options.validFrom,
+    validTo: null,
+    conflictState: "NONE",
+    conflictsWith: [],
+    supersedes: [],
+    supersededBy: null,
+    eligibleUses,
+    eligibleProviders,
+    contentFingerprint: sha256Hex(
+      JSON.stringify([claimKey, value, normalizedValue, options.lastConfirmedAt, options.standing, options.validFrom]),
+    ),
+    version: 1,
+    lastConfirmedAt: options.lastConfirmedAt,
+  };
+  return validatePersonalContextFact(fact) === null ? fact : null;
+}
+
+/** One group of Owner-stated values that share a category and a predicate kind. */
+export interface OwnerFactGroupV1 {
+  readonly category: ContextCategoryV1;
+  /** Predicate prefix, e.g. `business`, `targetRole`, `avoid`. */
+  readonly kind: string;
+  readonly values: readonly string[];
+  readonly standing?: TemporalStateV1;
+}
+
 export function buildOwnerCurrentJobFacts(
   input: OwnerCurrentJobInputV1,
   source: ContextSourceV1,
@@ -144,60 +220,18 @@ export function buildOwnerCurrentJobFacts(
   // The Owner is telling us this now, so "now" is the confirmation unless they date it themselves.
   const lastConfirmedAt = cleaned(input.lastConfirmedAt) ?? now;
   const startDate = cleaned(input.startDate);
-  const eligibleUses: readonly EligibleUseV1[] = ["JOB_MATCHING", "CAREER_SUMMARY", "SKILL_INVENTORY"];
-  const eligibleProviders: readonly ProviderIdV1[] = providersEligibleForSensitivity(source.sensitivityClass)
-    .filter((id) => source.eligibleProviders.includes(id));
 
   const facts: PersonalContextFactV1[] = [];
   const notSupplied: string[] = [];
 
   const emit = (category: ContextCategoryV1, predicate: string, value: string): void => {
-    const claimKey = claimKeyOf(subject, category, predicate);
-    const normalizedValue = normalizeValue(value);
-    const freshness = assessFreshness({
-      observedAt: null,
+    const fact = buildOwnerFact(source, subject, category, predicate, value, {
+      standing,
       lastConfirmedAt,
-      sourceModifiedAt: null,
-      temporalState: standing,
-      validTo: null,
+      validFrom: startDate,
       now,
     });
-    const fact: PersonalContextFactV1 = {
-      schema: PERSONAL_CONTEXT_SCHEMA_V1,
-      factId: digestOf([source.sourceId, "owner-entry", claimKey, normalizedValue]),
-      claimKey,
-      subject,
-      category,
-      predicate,
-      value,
-      normalizedValue,
-      sourceId: source.sourceId,
-      origin: "OWNER_ENTERED",
-      sourceReference: "owner-entry",
-      sourceCommit: null,
-      evidenceReference: `Stated directly by the Owner on ${lastConfirmedAt}`,
-      observedAt: lastConfirmedAt,
-      sourceModifiedAt: null,
-      extractedAt: now,
-      // The Owner is the best available authority on their own job.
-      confidence: "HIGH",
-      sensitivity: source.sensitivityClass,
-      freshnessState: freshness.state,
-      freshnessEvidence: freshness.evidence,
-      temporalState: standing,
-      validFrom: startDate,
-      validTo: null,
-      conflictState: "NONE",
-      conflictsWith: [],
-      supersedes: [],
-      supersededBy: null,
-      eligibleUses,
-      eligibleProviders,
-      contentFingerprint: sha256Hex(JSON.stringify([claimKey, value, normalizedValue, lastConfirmedAt, standing, startDate])),
-      version: 1,
-      lastConfirmedAt,
-    };
-    if (validatePersonalContextFact(fact) === null) facts.push(fact);
+    if (fact !== null) facts.push(fact);
   };
 
   for (const [field, predicate, category] of SINGLE_FIELDS) {
@@ -312,6 +346,119 @@ export function recordOwnerCurrentJob(
     retired: retired.sort(),
     unchanged: reconciled.unchanged,
     notSupplied,
+    receipt,
+  };
+}
+
+
+export interface OwnerFactsResultV1 {
+  readonly entryId: string;
+  readonly facts: readonly PersonalContextFactV1[];
+  readonly created: readonly string[];
+  readonly updated: readonly string[];
+  readonly retired: readonly string[];
+  readonly unchanged: readonly string[];
+  readonly receipt: SyncReceiptV1;
+}
+
+/**
+ * Record Owner-stated facts that are not the current job — businesses, preferences, constraints, goals.
+ *
+ * Kept as a separate call against a separate source rather than folded into
+ * {@link recordOwnerCurrentJob}, because restatement retires within a source: enrolling a preference
+ * must not retire an employment fact stated an hour earlier. One source per kind of statement also
+ * means the Owner can revoke their preferences without revoking their job history.
+ */
+export function recordOwnerFacts(
+  sourceId: string,
+  groups: readonly OwnerFactGroupV1[],
+  deps: OwnerEntryDepsV1 & { readonly subject?: string; readonly mode?: "REPLACE" | "MERGE" },
+): OwnerFactsResultV1 | { readonly error: string } {
+  const source = deps.store.loadSource(sourceId);
+  if (source === null) return { error: `source is not registered: ${sourceId}` };
+  if (source.activeState !== "ACTIVE") return { error: `source is ${source.activeState}, so it cannot accept entries` };
+
+  const subject = cleaned(deps.subject) ?? "owner";
+  const entryId = digestOf([sourceId, deps.now, "owner-facts"]);
+  const built: PersonalContextFactV1[] = [];
+
+  for (const group of groups) {
+    for (const raw of group.values) {
+      const value = cleaned(raw);
+      if (value === null) continue;
+      const fact = buildOwnerFact(source, subject, group.category, predicateFor(group.kind, value), value, {
+        standing: group.standing ?? "CURRENT",
+        lastConfirmedAt: deps.now,
+        validFrom: null,
+        now: deps.now,
+      });
+      if (fact !== null) built.push(fact);
+    }
+  }
+
+  const reconciled = reconcileFacts(deps.store.listFacts(), built);
+  const submitted = new Set(built.map((fact) => fact.factId));
+  const retired: string[] = [];
+  const merged = reconciled.facts.map((fact) => {
+    const stale =
+      (deps.mode ?? "REPLACE") === "REPLACE" &&
+      fact.sourceId === sourceId &&
+      fact.origin === "OWNER_ENTERED" &&
+      fact.supersededBy === null &&
+      !submitted.has(fact.factId);
+    if (!stale) return fact;
+    retired.push(fact.factId);
+    return { ...fact, supersededBy: entryId };
+  });
+  deps.store.saveFacts(merged);
+
+  const receipt: SyncReceiptV1 = {
+    schema: PERSONAL_CONTEXT_RECEIPT_SCHEMA_V1,
+    receiptId: entryId,
+    sourceId,
+    milestoneId: source.milestoneId,
+    ownerAuthorizationId: source.ownerAuthorizationId,
+    outcome: "COMPLETED",
+    denialReason: null,
+    startedAt: deps.now,
+    completedAt: deps.now,
+    fingerprintBefore: source.fingerprint,
+    fingerprintAfter: entryId,
+    sourceVersionBefore: source.version,
+    sourceVersionAfter: source.version + 1,
+    filesConsidered: 0,
+    filesRead: 0,
+    filesUnsupported: 0,
+    denials: [],
+    boundaryEscapeAttempts: 0,
+    truncatedBy: null,
+    factsExtracted: built.length,
+    factsCreated: reconciled.created.length,
+    factsUpdated: reconciled.updated.length,
+    factsSuperseded: reconciled.superseded.length + retired.length,
+    factsUnchanged: reconciled.unchanged.length,
+    conflictsDetected: reconciled.conflicts.length,
+    conflictsConfirmed: reconciled.conflicts.filter((row) => row.state === "CONFIRMED").length,
+    skips: [],
+    errors: [],
+  };
+  deps.store.saveReceipt(receipt);
+  deps.store.saveSource({
+    ...source,
+    lastAttemptedSync: deps.now,
+    lastSuccessfulSync: deps.now,
+    fingerprint: entryId,
+    version: source.version + 1,
+    updatedAt: deps.now,
+  });
+
+  return {
+    entryId,
+    facts: built,
+    created: reconciled.created,
+    updated: reconciled.updated,
+    retired: retired.sort(),
+    unchanged: reconciled.unchanged,
     receipt,
   };
 }

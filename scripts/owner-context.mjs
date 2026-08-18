@@ -15,6 +15,9 @@
  *     [--startDate 2024-02-01] [--standing CURRENT|HISTORICAL|UNKNOWN] \
  *     [--lastConfirmedAt 2026-08-18] [--mode REPLACE|MERGE] [--dry-run]
  *
+ *   node scripts/owner-context.mjs set-facts --sourceId owner-businesses \
+ *     --category BUSINESS_CONTEXT --kind business --values "a;b" [--mode REPLACE|MERGE] [--dry-run]
+ *
  *   node scripts/owner-context.mjs report [--redact] [--stdout]
  *
  * Every flag is optional. A value you do not give is not stored, not guessed, and not filled with a
@@ -40,7 +43,9 @@ const {
   createFilePersonalContextStore,
   createMemoryPersonalContextStore,
   PERSONAL_CONTEXT_STORE_RELATIVE_PATH,
+  CONTEXT_CATEGORIES_V1,
   recordOwnerCurrentJob,
+  recordOwnerFacts,
   registerContextSource,
   renderOwnerContextReport,
   readOwnerAuthorityRecord,
@@ -202,6 +207,55 @@ if (command === "set-current-job") {
   process.exit(0);
 }
 
+if (command === "set-facts") {
+  for (const required of ["sourceId", "category", "kind", "values"]) {
+    if (options[required] === undefined) fail(`Missing required option: --${required}`);
+  }
+  if (!CONTEXT_CATEGORIES_V1.includes(options.category)) fail(`Unsupported category: ${options.category}`);
+  const values = splitList(options.values);
+  if (values === undefined) fail("--values contained nothing after trimming");
+
+  const dryRun = options["dry-run"] !== undefined;
+  const authority = activeAuthority();
+
+  // One source per kind of statement, so restating preferences cannot retire employment facts and
+  // each group stays separately revocable.
+  let source = store.loadSource(options.sourceId);
+  if (source === null) {
+    const target = dryRun ? createMemoryPersonalContextStore() : store;
+    const registered = registerContextSource(
+      {
+        sourceId: options.sourceId,
+        sourceType: "OWNER_ENTERED_CURRENT_JOB",
+        location: join(repositoryRoot, ".aion-local", "personal-context", "owner-entry", options.sourceId),
+        displayName: options.displayName ?? `Owner-stated ${options.category}`,
+        purpose: options.purpose ?? `What the Owner states directly about ${options.category}. No file is read.`,
+      },
+      { store: target, now: nowUtc(), authority },
+    );
+    if (!registered.registered) fail(`Cannot create source ${options.sourceId} (${registered.reason}): ${registered.detail}`);
+    source = registered.source;
+    if (!dryRun) console.log(`Created source ${source.sourceId} (${source.sensitivityClass}, providers: ${source.eligibleProviders.join(", ")}).`);
+  }
+
+  if (dryRun) {
+    console.log(`Would store ${values.length} fact(s) as ${options.category}:`);
+    for (const value of values) console.log(`  ${value}`);
+    console.log("\nNothing was written. Re-run without --dry-run to store it.");
+    process.exit(0);
+  }
+
+  const result = recordOwnerFacts(
+    options.sourceId,
+    [{ category: options.category, kind: options.kind, values, standing: options.standing }],
+    { store, now: nowUtc(), mode: options.mode === "MERGE" ? "MERGE" : "REPLACE" },
+  );
+  if ("error" in result) fail(`Entry refused: ${result.error}`);
+  console.log(`Stored ${result.facts.length} Owner-stated ${options.category} fact(s).`);
+  console.log(`  created ${result.created.length} · updated ${result.updated.length} · unchanged ${result.unchanged.length} · retired ${result.retired.length}`);
+  process.exit(0);
+}
+
 if (command === "report") {
   const report = buildOwnerContextReport({ store }, { subject: options.subject ?? "owner", now: nowUtc() });
   const rendered = renderOwnerContextReport(report, { redactValues: options.redact !== undefined });
@@ -224,4 +278,4 @@ if (command === "report") {
   process.exit(0);
 }
 
-fail("Usage: owner-context.mjs <status|set-current-job|report> [options]");
+fail("Usage: owner-context.mjs <status|set-current-job|set-facts|report> [options]");
