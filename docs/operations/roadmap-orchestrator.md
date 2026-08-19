@@ -262,10 +262,48 @@ deliberate: a claim of coverage that does not exist is not "we cannot prove it",
 question to ask would reward inventing ids.
 
 Inheritance requires **all** of: an ACTIVE, unexpired, unsuperseded, unrevoked envelope; lineage to
-an approved parent objective; write domains a subset; providers a subset; sensitivity within the
-ceiling; spend within the ceiling; a permitted external-effect class; reversibility satisfied; no
-always-gated boundary crossed; and an authority class below `HIGH_CONSEQUENCE`. A milestone that
-declares **no** write domains is gated rather than read as writing nothing.
+an approved parent milestone; **every requested consequence covered by the envelope**; write domains
+a subset; providers a subset; sensitivity within the ceiling; spend within the ceiling; a permitted
+external-effect class; reversibility satisfied; no always-gated boundary crossed; and an authority
+class below `HIGH_CONSEQUENCE`. A milestone that declares **no** write domains is gated rather than
+read as writing nothing.
+
+### Lineage proves relationship, not permission
+
+A second independent review took a fixture with perfectly valid lineage and a valid active envelope
+and walked **18 of 31** high-consequence requests through on the strength of that lineage alone —
+"Send this to the customer.", "Give AION access to my inbox.", "Relax the security policy.". None
+contained a listed phrase, and a phrase list cannot be a security boundary: the ways to say "email
+the customer" are unbounded and the list is not.
+
+`consequence-model.ts` replaced it. Consequence is read as **action × target**, not vocabulary:
+
+| | |
+| --- | --- |
+| Actions | send, publish, destroy, connect-an-account, spend, weaken-a-security-control, expand-authority, change-production, read-sensitive-data |
+| Targets | external party, the public, important data, an account, money, a security control, production, sensitive personal data, a code artifact, an internal technical object |
+
+"Remove the unused CSS class" and "Remove the production archives" share a verb and are not the same
+request; the target decides. That is what generalises past wording.
+
+**Uncertainty is itself a consequence.** A consequential action whose target cannot be resolved sets
+`uncertainConsequence`, which gates and which **no envelope setting can cover**. "Send it." is not
+routine because nothing matched — it is unread. So a gap in these tables costs an unnecessary Owner
+decision, where a gap in a phrase list cost an unauthorized action.
+
+Each consequence maps to the one permission that could cover it — destruction to
+`destructiveActionPermission`, account access to `oauthConsentPermission`, external send to an
+allowed `IRREVERSIBLE_EXTERNAL` effect, and so on. **The wrong grant does not cover it**: an envelope
+permitting destruction does not permit publishing. `authorityExpansion` and `uncertainConsequence`
+map to nothing at all — an envelope that could grant its own widening would make every other entry
+decorative.
+
+The central property, asserted by test with identical parent, envelope and declared fields:
+
+```
+VALID_LINEAGE + ROUTINE_CHILD          = ALLOW_INHERITED
+VALID_LINEAGE + HIGH_CONSEQUENCE_CHILD = REQUIRE_FRESH_OWNER_APPROVAL
+```
 
 A failed envelope claim is never retried against the direct-record path. Falling through would let a
 refused inheritance be re-asked as a different question until one of them said yes.

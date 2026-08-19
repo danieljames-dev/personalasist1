@@ -25,6 +25,12 @@
  * evidence; it is a refusal.
  */
 
+import {
+  CONSEQUENCE_PERMISSIONS_V1,
+  describeConsequences,
+  detectRequestedConsequences,
+  type RequestedConsequenceV1,
+} from "./consequence-model.js";
 import { assessOwnerBoundaries, describeBoundaries } from "./owner-boundary-detection.js";
 import type { ProviderIdV1, SensitivityClassV1 } from "./provider-bridge.js";
 import type {
@@ -315,12 +321,14 @@ export function resolveInheritedAuthority(
    * what a planner fills in, and a planner that misreads a request produces a record that is
    * internally consistent and completely wrong.
    */
-  const boundaries = assessOwnerBoundaries(milestone.objective);
-  if (boundaries.requiresFreshOwnerApproval) {
-    note("no always-gated boundary in the objective", false, describeBoundaries(boundaries));
-    return gate(describeBoundaries(boundaries), checks, claimed, envelope.ownerAuthorizationId);
+  const consequences = consequencesOf(milestone.objective);
+  const uncovered = uncoveredConsequences(consequences, envelope);
+  if (uncovered.length > 0) {
+    const detail = `${uncovered.join(", ")} — ${describeConsequences(consequences)}`;
+    note("requested consequence is inside the envelope", false, detail);
+    return gate(`requested consequence is outside the Owner envelope: ${detail}`, checks, claimed, envelope.ownerAuthorizationId);
   }
-  note("no always-gated boundary in the objective", true, "none recognised");
+  note("requested consequence is inside the envelope", true, describeConsequences(consequences));
 
   /*
    * Lineage, by milestone id.
@@ -400,8 +408,16 @@ export function resolveInheritedAuthority(
   }
   note("external effect permitted", true, milestone.externalEffectClass);
 
-  if (envelope.requiresReversible && milestone.reversibilityClass === "IRREVERSIBLE") {
-    note("reversibility satisfied", false, "irreversible work under a reversible-only envelope");
+  /*
+   * Irreversible work needs *a* permission covering it — not necessarily the external-effects one.
+   *
+   * `requiresReversible` is derived from the allowed external effects, and deleting a local backup is
+   * irreversible without being external. Gating on that alone meant an envelope explicitly granting
+   * destructive action could still never exercise it, which makes the permission decorative in the
+   * safe-looking direction. Either permission covers it; neither does not.
+   */
+  if (milestone.reversibilityClass === "IRREVERSIBLE" && !irreversibleWorkIsCovered(envelope)) {
+    note("reversibility satisfied", false, "irreversible work under an envelope that covers neither kind");
     return gate("irreversible work requires fresh Owner approval", checks, claimed, envelope.ownerAuthorizationId);
   }
   note("reversibility satisfied", true, milestone.reversibilityClass);
@@ -427,6 +443,106 @@ export function resolveInheritedAuthority(
     ownerAuthorizationId: envelope.ownerAuthorizationId,
     checks,
   };
+}
+
+/**
+ * The two readings of a request, unioned into one structured answer.
+ *
+ * The lexical pass recognises *named* boundaries; the structured pass reads action × target and flags
+ * what it cannot resolve. Neither is trusted alone — the first misses paraphrase, the second can miss
+ * a boundary that is a noun rather than a verb ("OAuth", "Tekion").
+ *
+ * They are unioned rather than chained, and specifically the lexical pass is folded in as *evidence*
+ * instead of acting as its own unconditional refusal. An unconditional lexical gate would mean an
+ * envelope that explicitly grants destructive action could still never exercise it, which makes the
+ * permission field decorative in the opposite direction — safe-looking and dishonest.
+ */
+export function consequencesOf(objective: string): RequestedConsequenceV1 {
+  const structured = detectRequestedConsequences(objective);
+  const lexical = assessOwnerBoundaries(objective);
+  if (lexical.boundaries.length === 0) return structured;
+
+  const raised = { ...structured } as Record<string, unknown>;
+  const evidence = [...structured.evidence];
+  for (const row of lexical.boundaries) {
+    const consequence = LEXICAL_BOUNDARY_CONSEQUENCE[row.boundary];
+    if (consequence === undefined) continue;
+    if (raised[consequence] === true) continue;
+    raised[consequence] = true;
+    evidence.push({
+      consequence,
+      action: "named boundary",
+      target: row.boundary,
+      detail: `"${row.matched}" names ${row.boundary}`,
+    });
+  }
+  return { ...(raised as unknown as RequestedConsequenceV1), evidence };
+}
+
+/**
+ * Whether an envelope covers irreversible work at all.
+ *
+ * There are two distinct kinds and they have two distinct permissions: deleting a local backup is
+ * irreversible and not external, while emailing a customer is irreversible and not destructive.
+ * Requiring the wrong one of the two made a granted permission unusable — a failure that looks safe
+ * and is simply wrong, and which hid behind "it gated, so it must be working".
+ */
+function irreversibleWorkIsCovered(envelope: OwnerRoadmapAuthorityEnvelopeV1): boolean {
+  return (
+    envelope.destructiveActionPermission === "YES"
+    || envelope.allowedExternalEffectClasses.includes("IRREVERSIBLE_EXTERNAL")
+  );
+}
+
+/** Which structured consequence each named lexical boundary implies. */
+const LEXICAL_BOUNDARY_CONSEQUENCE: Readonly<Record<string, keyof RequestedConsequenceV1>> = {
+  "new OAuth or account consent": "accountAccess",
+  "new or materially expanded credential access": "credentialAccess",
+  "destructive action on important data": "destructiveImportantData",
+  "backup destruction": "destructiveImportantData",
+  "production activation or change": "productionMutation",
+  "new paid resource or subscription": "paidResource",
+  "spend beyond the approved ceiling": "spendIncrease",
+  "sensitive or restricted data expansion": "sensitiveDataExpansion",
+  "new external publication, send or contact": "externalPublish",
+  "major Windows or security configuration change": "securityConfigurationChange",
+  "job discovery or applications": "externalContact",
+  "authority envelope expansion": "authorityExpansion",
+  "external system of record": "externalContact",
+};
+
+/**
+ * Every requested consequence this envelope does not carry permission for.
+ *
+ * This is the rule the independent review's second finding is about, stated once:
+ *
+ *   **Valid lineage proves relationship. It does not grant permission to cross a consequence the
+ *   envelope was never given.**
+ *
+ * A child can be a perfect, bounded, correctly-parented step of approved work and still be asking to
+ * email a customer. Lineage answers "does this belong to that?"; it says nothing about what "this"
+ * would do. Before this check existed, 18 of 31 high-consequence requests inherited authority on the
+ * strength of a valid parent id alone.
+ */
+export function uncoveredConsequences(
+  consequences: RequestedConsequenceV1,
+  envelope: OwnerRoadmapAuthorityEnvelopeV1,
+): readonly string[] {
+  const uncovered: string[] = [];
+  for (const { consequence, requires } of CONSEQUENCE_PERMISSIONS_V1) {
+    if (consequences[consequence] !== true) continue;
+    const covered =
+      requires === "never" ? false
+        : requires === "destructive" ? envelope.destructiveActionPermission === "YES"
+          : requires === "oauth" ? envelope.oauthConsentPermission === "YES"
+            : requires === "security" ? envelope.securityChangePermission === "YES"
+              : requires === "production" ? envelope.productionWriterPermission === "YES"
+                : requires === "sensitive" ? envelope.sensitiveDataPermission === "YES"
+                  : requires === "spend" ? envelope.spendCeilingUsd > 0
+                    : envelope.allowedExternalEffectClasses.includes("IRREVERSIBLE_EXTERNAL");
+    if (!covered) uncovered.push(consequence);
+  }
+  return uncovered;
 }
 
 /**
@@ -461,8 +577,8 @@ export function alwaysGatedBoundaryFor(
   if (risks.has("PERSISTENCE_OR_RECOVERY") && envelope.destructiveActionPermission !== "YES") {
     return "destructive or recovery-affecting action requires fresh Owner approval";
   }
-  if (milestone.reversibilityClass === "IRREVERSIBLE" && envelope.destructiveActionPermission !== "YES") {
-    return "irreversible work requires the destructive-action permission this envelope does not carry";
+  if (milestone.reversibilityClass === "IRREVERSIBLE" && !irreversibleWorkIsCovered(envelope)) {
+    return "irreversible work requires a destructive-action or irreversible-external permission this envelope does not carry";
   }
   if (envelope.oauthConsentPermission !== "YES") {
     // OAuth is the one boundary with no honest proxy among the declared fields, so it is read from

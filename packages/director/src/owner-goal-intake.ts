@@ -29,6 +29,11 @@
 
 import { createHash } from "node:crypto";
 
+import {
+  describeConsequences,
+  detectRequestedConsequences,
+  hasAnyConsequence,
+} from "./consequence-model.js";
 import { assessOwnerBoundaries, describeBoundaries } from "./owner-boundary-detection.js";
 import type { ProviderIdV1 } from "./provider-bridge.js";
 import type {
@@ -225,11 +230,50 @@ export function classifyOwnerInput(text: string): ClassificationV1 {
     }
   }
 
-  // Nothing matched. This is the branch that decides what an unrecognised sentence costs, and it
-  // costs a clarifying question rather than a milestone.
+  /*
+   * Imperative shape, for instructions whose verb is not in the list above.
+   *
+   * An independent review found "Loosen Windows security.", "Purge the old recovery copies." and
+   * "Give AION access to my inbox." all classified as questions — not because anything judged them
+   * safe, but because no rule recognised the verb. A refusal that happens by accident looks exactly
+   * like a refusal that happens on purpose, and only one of them survives the next paraphrase.
+   *
+   * An English imperative is a sentence that starts with its verb. Detecting that structurally
+   * catches verbs no list will ever hold. The confidence is deliberately lower than a recognised
+   * verb's, and this creates a *proposal* — a typed goal has no lineage, so it gates either way.
+   * Expanding the classifier therefore widens what AION will discuss, never what it will do.
+   */
+  const ADVERBS = ["just", "please", "also", "now", "then", "quickly", "simply", "actually", "really", "kindly", "maybe", "perhaps"];
+  let head = normalized;
+  for (;;) {
+    const adverb = ADVERBS.find((word) => head.startsWith(`${word} `));
+    if (adverb === undefined) break;
+    head = head.slice(adverb.length + 1);
+  }
+  // Words that begin a statement rather than an instruction. A sentence opening with one of these is
+  // describing something, not asking for it.
+  const NON_IMPERATIVE_STARTERS = [
+    "the", "a", "an", "this", "that", "these", "those", "it", "there", "here",
+    "my", "our", "your", "his", "her", "their", "its",
+    "i", "we", "you", "he", "she", "they", "someone", "nobody", "everything", "nothing",
+    "and", "but", "or", "so", "because", "if", "when", "while", "although", "since",
+    "not", "no", "yes", "ok", "okay", "thanks", "hi", "hello",
+  ];
+  const firstWord = head.split(/[^a-z']+/).filter(Boolean)[0] ?? "";
+  if (firstWord !== "" && !NON_IMPERATIVE_STARTERS.includes(firstWord)) {
+    return {
+      classification: "ACTIONABLE_OBJECTIVE",
+      reason: `read as an imperative because the sentence begins with "${firstWord}"; not a recognised instruction verb, so this is a proposal for Owner review`,
+      confidence: 0.55,
+      ambiguity: "CLEAR",
+    };
+  }
+
+  // Nothing matched, and the sentence does not even have the shape of an instruction. This is the
+  // branch that decides what an unrecognised statement costs, and it costs a clarifying question.
   return {
     classification: "QUESTION",
-    reason: "no instruction verb or decision phrase was recognised; treated as something to answer rather than to do",
+    reason: "no instruction verb, decision phrase or imperative shape was recognised; treated as something to answer rather than to do",
     confidence: 0.4,
     ambiguity: "AMBIGUOUS",
   };
@@ -486,12 +530,36 @@ export function planFromGoal(input: {
    * envelope's ceilings and found to fit. They fit because they described nothing.
    */
   const assessment = assessOwnerBoundaries(intent.originalText);
-  const highConsequence = assessment.requiresFreshOwnerApproval;
+  /*
+   * Two independent readings, and the union of them.
+   *
+   * The lexical pass catches named boundaries; the structured pass reads action × target and flags
+   * what it cannot resolve. Where they disagree the more restrictive wins, because the failure this
+   * guards is one reader missing a paraphrase the other caught.
+   */
+  const consequences = detectRequestedConsequences(intent.originalText);
+  const structural = hasAnyConsequence(consequences);
+  const highConsequence = assessment.requiresFreshOwnerApproval || structural;
+
+  const consequenceRisks: RiskClassV1[] = [];
+  if (consequences.destructiveImportantData) consequenceRisks.push("PERSISTENCE_OR_RECOVERY");
+  if (consequences.accountAccess || consequences.credentialAccess || consequences.securityConfigurationChange) {
+    consequenceRisks.push("SECURITY_OR_PRIVACY");
+  }
+  if (consequences.sensitiveDataExpansion) consequenceRisks.push("SENSITIVE_DATA");
+  if (consequences.paidResource || consequences.spendIncrease || consequences.newFinancialObligation) {
+    consequenceRisks.push("MONEY");
+  }
+  if (consequences.externalSend || consequences.externalPublish || consequences.productionMutation) {
+    consequenceRisks.push("PRODUCTION_OR_EXTERNAL");
+  }
+  if (consequences.authorityExpansion) consequenceRisks.push("AUTHORITY_OR_GOVERNANCE");
+  if (consequences.uncertainConsequence) consequenceRisks.push("LOW_CONFIDENCE");
 
   return {
     kind: "CREATE_MILESTONE",
     reason: highConsequence
-      ? describeBoundaries(assessment)
+      ? (assessment.requiresFreshOwnerApproval ? describeBoundaries(assessment) : describeConsequences(consequences))
       : "no existing milestone covers this objective",
     matchedMilestoneId: null,
     milestone: {
@@ -510,9 +578,15 @@ export function planFromGoal(input: {
       writeDomains: [...input.writeDomains],
       allowedProviders: [...input.allowedProviders],
       verificationSteps: [...input.verificationSteps],
-      riskClasses: assessment.riskClasses,
-      externalEffectClass: assessment.externalEffectClass ?? "REPOSITORY_REVERSIBLE",
-      reversibilityClass: assessment.reversibilityClass ?? "REVERSIBLE",
+      riskClasses: [...new Set([...assessment.riskClasses, ...consequenceRisks])],
+      externalEffectClass:
+        consequences.externalSend || consequences.externalPublish || consequences.irreversibleExternalEffect
+          ? "IRREVERSIBLE_EXTERNAL"
+          : assessment.externalEffectClass ?? "REPOSITORY_REVERSIBLE",
+      reversibilityClass:
+        consequences.destructiveImportantData || consequences.irreversibleExternalEffect
+          ? "IRREVERSIBLE"
+          : assessment.reversibilityClass ?? "REVERSIBLE",
       // A request that reaches a boundary is high-consequence by construction, which the authority
       // resolver refuses to inherit regardless of every other field.
       authorityClass: highConsequence ? "HIGH_CONSEQUENCE" : "MILESTONE_AUTHORIZED",

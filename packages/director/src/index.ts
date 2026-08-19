@@ -83,6 +83,7 @@ export * from "./roadmap-policy.js";
 export * from "./roadmap-authority-envelope.js";
 export * from "./owner-goal-intake.js";
 export * from "./owner-boundary-detection.js";
+export * from "./consequence-model.js";
 export * from "./roadmap-orchestrator.js";
 export * from "./roadmap-port.js";
 export * from "./mva-dispatch.js";
