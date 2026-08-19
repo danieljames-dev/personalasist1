@@ -15,7 +15,10 @@
 # relative to the current directory on drive C:". It looks absolute to a person and resolves to
 # something different for every process. It is rejected.
 
-Set-StrictMode -Version Latest
+# No Set-StrictMode here. This file is dot-sourced, so any mode it sets leaks into the caller's
+# scope — and turning strict mode on underneath `aion-production.ps1` breaks `.Count` on scalars it
+# has always relied on, which stopped the service mid-restart the first time this shipped. A shared
+# helper must not change how its caller's code behaves.
 
 $script:AionRepositoryMarkers = @('.git', 'package.json', 'scripts')
 
