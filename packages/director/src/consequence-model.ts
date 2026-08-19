@@ -611,6 +611,23 @@ function splitOnCommas(text: string): readonly string[] {
   return out;
 }
 
+/**
+ * Grammatical glue that can never name an effect on its own.
+ *
+ * This replaces a `word.length <= 3` escape which was too generous in exactly the direction that
+ * launders: it admitted any short *unknown* word, so "Refactor the parser, nix the log." merged into
+ * one effect and inherited. Short words are not safe by being short; only words that cannot denote
+ * an action or a target are. Anything not listed here is an unaccounted word, and an unaccounted
+ * word makes the fragment its own effect — the direction that gates.
+ */
+const FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  "a", "an", "the", "this", "that", "these", "those", "its", "his", "her", "their", "our", "my",
+  "your", "it", "of", "in", "on", "at", "to", "for", "from", "with", "into", "onto", "over",
+  "under", "and", "or", "nor", "as", "is", "are", "was", "were", "be", "been", "being", "any",
+  "all", "both", "each", "every", "some", "no", "not", "only", "just", "very", "too", "more",
+  "most", "less", "least", "other", "others", "same", "such", "own", "one", "two", "three",
+]);
+
 function isNounPhraseContinuation(fragment: string): boolean {
   const words = fragment.trim().toLowerCase().split(/[^a-z'-]+/).filter(Boolean);
   if (words.length === 0) return true;
@@ -622,7 +639,7 @@ function isNounPhraseContinuation(fragment: string): boolean {
       KNOWN_MODIFIERS.includes(word)
       || MODIFIER_SUFFIX.test(word)
       || ROUTINE_TARGET_WORDS.has(word)
-      || word.length <= 3,
+      || FUNCTION_WORDS.has(word),
   );
 }
 

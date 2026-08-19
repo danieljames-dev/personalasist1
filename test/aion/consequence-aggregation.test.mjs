@@ -373,3 +373,60 @@ test("uncertain decomposition reports itself rather than passing silently", () =
 });
 
 const fsModule = await import("node:fs");
+
+/* -------------------------------------------------------------------------- */
+/* Comma continuation: short words are not safe by being short                 */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Recovery verification after a host power outage found the aggregation repair still leaking
+ * through its own comma-continuation heuristic. The fragment test admitted any word of three
+ * characters or fewer, so an unknown *short* verb read as noun-phrase continuation:
+ *
+ *     "Refactor the parser, nix the log."   ->  one effect  ->  ALLOW_STANDING
+ *
+ * Same laundering mechanism as the seven leaks above, one layer further in: a routine pair proved
+ * the whole request safe because the second instruction was merged away before classification.
+ * Short words are not safe by being short. Only words that cannot denote an action or a target are.
+ */
+
+test("a short unknown instruction behind a comma is still its own effect", () => {
+  for (const objective of [
+    "Refactor the parser, nix the log.",
+    "Update the parser, zap the log.",
+    "Fix the tests, axe the log.",
+    "Update the docs, cut the log.",
+  ]) {
+    assert.notEqual(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" inherited`);
+  }
+});
+
+test("the short-word merge is closed structurally, not by naming the verbs", () => {
+  // None of these verbs appear in any table; they gate because the fragment is unaccounted for.
+  for (const objective of [
+    "Refactor the parser, yeet the log.",
+    "Update the parser, gub the row.",
+    "Fix the helper, orp the ui.",
+  ]) {
+    assert.notEqual(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" inherited`);
+    assert.equal(decomposeEffects(objective.replace(/\.$/, "")).length, 2);
+  }
+  const source = readFileSync(
+    join(repositoryRoot, "packages", "director", "src", "consequence-model.ts"),
+    "utf8",
+  ).toLowerCase();
+  for (const term of ["nix", "zap", "axe", "yeet", "gub", "orp"]) {
+    assert.equal(source.includes(`"${term}"`), false, `"${term}" was added to a table instead`);
+  }
+});
+
+test("ordinary comma-separated noun phrases still merge into one effect", () => {
+  for (const objective of [
+    "Remove the unused, duplicated CSS class.",
+    "Update the old, broken parser.",
+    "Fix the stale, redundant test fixture.",
+  ]) {
+    assert.equal(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" over-gated`);
+    assert.equal(decomposeEffects(objective.replace(/\.$/, "")).length, 1);
+  }
+});
