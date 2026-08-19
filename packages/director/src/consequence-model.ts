@@ -155,7 +155,13 @@ const TARGET_CLASSES: readonly TargetClassV1[] = [
      * has to mean; a word that could refer to anything is an unresolved target, not a safe one.
      */
     target: "a code artifact",
-    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "configuration", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text"],
+    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "configuration", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text",
+      /*
+       * Ordinary nouns of the trade, named so that engineering compounds have a recognised middle
+       * once class identity stopped excusing one. These name *objects*; they grant nothing about
+       * what may be done to them, and an unrecognised verb aimed at any of them still gates.
+       */
+      "regression", "integration", "cleanup", "error"],
     implies: [],
     routine: true,
   },
@@ -373,6 +379,25 @@ function inflectionsOf(verb: string): readonly string[] {
   }
   return [...forms];
 }
+
+/**
+ * The noun forms of the verbs this model already reads as routine, generated rather than listed.
+ *
+ * Engineering compounds are built out of them — "the request *validation* helper", "the parser error
+ * *handling* test", "the status *rendering* panel" — and once the same-class compound shortcut was
+ * removed those middles had nothing affirmative behind them. Deriving the nominal of a verb already
+ * known to be routine supplies that evidence without widening what counts as safe: the source verb
+ * had to be routine first, so nothing enters here that could not already head a routine request.
+ *
+ * Consequential verbs are deliberately excluded. "Update the parser *sending* tests." must not read
+ * as a compound noun, and it does not.
+ */
+const ROUTINE_NOMINALS: ReadonlySet<string> = new Set(
+  ROUTINE_ACTIONS.filter((verb) => !verb.includes(" ")).flatMap((verb) => {
+    const stem = verb.endsWith("e") ? verb.slice(0, -1) : verb;
+    return [...inflectionsOf(verb), stem + "ion", stem + "ation", verb + "ment", verb + "er"];
+  }),
+);
 
 /**
  * Match a term as a whole word, never as a substring.
@@ -695,17 +720,26 @@ function unaccountedOperativeWord(segment: string, targets: TargetEvidenceV1): s
     const readable = !run.some(opaque);
 
     /*
-     * A modifier run: unread words qualifying a noun the model did recognise. Introduced by a
-     * determiner or the verb — "Add a *clearer waiting-on-owner* indicator." — or joining two nouns
-     * of the same kind, which is what a compound names: "the CSS *cleanup* commit".
+     * A modifier run: unread words qualifying a noun the model did recognise, introduced by a
+     * determiner or the verb — "Add a *clearer waiting-on-owner* indicator.", "the *unit* test".
      *
-     * Two nouns of *different* kinds either side of an unread word is not one object being named;
-     * it is a second thing being done to a second target, which is exactly the shape that must not
-     * quietly merge.
+     * There used to be a second way through here: a run flanked by two target nouns of the same
+     * class was excused as a compound, on the reasoning that one object was being named. Class
+     * identity is not evidence about the word in between, and an independent review proved it:
+     *
+     *     "Update the parser leak tests."        ALLOW      "Update the parser leak logs."   GATE
+     *     "Update the parser exfiltrate tests."  ALLOW      "Fix the helper murk cache."     GATE
+     *
+     * The only difference is whether the flanking nouns happened to share a `TARGET_CLASSES` row, so
+     * an unread operational word inherited authority by standing between two relatives. Known verbs
+     * gated and unknown ones did not, which makes absence from a table the thing granting
+     * permission — the exact shape every previous repair here removed.
+     *
+     * A compound is now permitted only where its middle is affirmatively recognised: a target word,
+     * a known modifier, or a nominal derived from a routine verb ("the request *validation* helper",
+     * "the parser error *handling* test"). Anything else keeps its own effect and gates.
      */
-    const compound = isTargetNoun(before) && isTargetNoun(after)
-      && nounClass.get(before ?? "") === nounClass.get(after ?? "");
-    if (readable && isNounPhraseWord(after) && (!isTargetNoun(before) || compound)) { index = end - 1; continue; }
+    if (readable && isNounPhraseWord(after) && !isTargetNoun(before)) { index = end - 1; continue; }
 
     /*
      * A single trailing word governing nothing: "the UI *bug*", "for the *phrase*".
@@ -792,7 +826,7 @@ const KNOWN_MODIFIER_FORMS: ReadonlySet<string> = new Set(
 
 /** True when a word is a modifier this model actually recognises, rather than one merely shaped like one. */
 function isKnownModifier(word: string): boolean {
-  return KNOWN_MODIFIER_FORMS.has(word) || ADJECTIVE_SUFFIX.test(word);
+  return KNOWN_MODIFIER_FORMS.has(word) || ROUTINE_NOMINALS.has(word) || ADJECTIVE_SUFFIX.test(word);
 }
 
 /**

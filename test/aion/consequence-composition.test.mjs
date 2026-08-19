@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   ROADMAP_MILESTONE_SCHEMA_V1,
+  classifyTargets,
   decomposeEffects,
   detectRequestedConsequences,
   resolveMilestoneAuthority,
@@ -284,12 +285,30 @@ test("nothing in this suite was made to pass by growing a table", () => {
     .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
     .join("\n")
     .toLowerCase();
+  /*
+   * `cleanup` was on this list and has deliberately been taken off it.
+   *
+   * It was here as evidence that "Update the CSS cleanup commit." had not been special-cased — at the
+   * time that sentence worked through a same-class compound rule, and the absence of the word proved
+   * the rule was doing the work. A sixth review then proved that rule was itself the bypass: class
+   * identity excused unknown *operational* middles too. With it gone, a compound's middle has to be
+   * affirmatively recognised, and `cleanup` is one of four ordinary nouns of the trade named so that
+   * legitimate compounds survive. Naming an object grants nothing about what may be done to it, which
+   * is what the four assertions below pin.
+   *
+   * The hostile vocabulary stays absent, and the list has grown by the six words the review used.
+   */
   for (const term of [
     "murk", "zorb", "flurb", "grunk", "splot", "vexx", "quon", "brindle", "yeet", "zap", "bin",
-    "shred", "nix", "overwrit", "crm", "stripe", "slack", "vpn", "iam", "payroll", "cleanup",
+    "shred", "nix", "overwrit", "crm", "stripe", "slack", "vpn", "iam", "payroll",
+    "leak", "exfiltrate", "expose", "loot", "zorp", "glorp", "siphon", "zint", "blip", "frob",
   ]) {
     assert.equal(source.includes(`"${term}"`), false, `"${term}" was added to a table instead`);
   }
+  // Naming an object is not permission to act on it: the four added nouns rescue no action.
+  for (const objective of [
+    "Zorble the regression.", "Nuke the integration.", "Send the cleanup.", "Exfiltrate the error.",
+  ]) gates(objective);
   // `file` must not have returned as a blanket routine rescue, and the delimiter repair must not
   // have been a longer punctuation list.
   assert.equal(source.includes('"file"'), false, "`file` returned as a blanket routine target");
@@ -303,4 +322,134 @@ test("the leftover check is what gates the delimiter cases, not a lexical danger
   // And the action's own consequence is structured, not lexical.
   assert.equal(detectRequestedConsequences("send the log").externalSend, true);
   assert.equal(detectRequestedConsequences("nuke the parser").destructiveImportantData, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Same-class compound: class identity is not authorisation evidence          */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * A sixth independent review found the compound rule these tests introduced was itself a bypass.
+ *
+ * An unread word flanked by two target nouns of the *same* `TARGET_CLASSES` row was excused as
+ * compound-noun material. Known verbs still gated, so what granted permission was a word's *absence*
+ * from a table — the exact shape every repair in this file exists to remove:
+ *
+ *     "Update the parser leak tests."   ALLOW      "Update the parser leak logs."    GATE
+ *     "Update the parser zorp tests."   ALLOW      "Update the parser zorp logs."    GATE
+ *
+ * The only difference between the columns is whether `tests` and `parser` happened to be relatives.
+ * 118 leaks were reproduced before the change, across eight reported sentences and a matrix of
+ * invented middles. A compound is now permitted only where its middle is affirmatively recognised.
+ */
+
+test("an unread word between two same-class routine nouns is still its own effect", () => {
+  for (const objective of [
+    "Update the parser leak tests.",
+    "Update the parser exfiltrate tests.",
+    "Update the parser expose tests.",
+    "Update the parser yeet tests.",
+    "Update the parser loot tests.",
+    "Update the parser zorp tests.",
+    "Fix the helper exfiltrate fixture.",
+    "Update the log exfiltrate cache.",
+  ]) gates(objective);
+});
+
+test("target-class identity no longer decides the outcome", () => {
+  // The contrast that proved the bypass. Both columns must now agree, and agree on gating.
+  for (const middle of ["zorp", "murk", "blip", "frob", "leak", "exfiltrate"]) {
+    gates(`Update the parser ${middle} tests.`);   // same class
+    gates(`Update the parser ${middle} logs.`);    // different class
+    gates(`Fix the helper ${middle} docs.`);
+    gates(`Fix the helper ${middle} cache.`);
+  }
+});
+
+test("unseen middles gate whether or not any table has heard of them", () => {
+  // None of these appears in a production table, and the repair must not depend on that either way.
+  const middles = [
+    "glorp", "murk", "zint", "siphon", "bridge", "relay", "frob", "blip", "quon", "brindle",
+    "export", "harvest", "scrape", "smuggle", "divert", "vexx", "splot", "zorble",
+  ];
+  const frames = [
+    ["Update the parser", "tests"], ["Fix the helper", "fixture"], ["Update the log", "cache"],
+    ["Update the test", "fixture"], ["Fix the docs", "readme"], ["Update the row", "column"],
+  ];
+  for (const middle of middles) {
+    for (const [lead, tail] of frames) gates(`${lead} ${middle} ${tail}.`);
+  }
+});
+
+test("a consequential verb's noun form is not compound-noun material either", () => {
+  // Nominals are derived from *routine* verbs only. The consequential side must find no way in.
+  for (const objective of [
+    "Update the parser sending tests.",
+    "Update the parser deletion tests.",
+    "Update the parser nuking tests.",
+    "Update the parser publishing tests.",
+    "Fix the helper wiping fixture.",
+    "Fix the helper grant fixture.",
+  ]) gates(objective);
+});
+
+test("malformed same-class grammar is not evidence of safety", () => {
+  for (const objective of [
+    "Update parser exfiltrate tests.",
+    "Parser update leak tests.",
+    "Fix helper expose fixture.",
+    "Tests update siphon parser.",
+  ]) gates(objective);
+});
+
+test("legitimate engineering compounds remain usable", () => {
+  // The cost of removing the shortcut, paid back by recognising the middle instead of guessing it.
+  for (const objective of [
+    "Update the CSS cleanup commit.",
+    "Fix the parser regression test.",
+    "Update the build cache config.",
+    "Fix the unit test fixture.",
+    "Update the local integration test.",
+    "Refactor the request validation helper.",
+    "Update the parser error handling test.",
+  ]) inherits(objective);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Target accounting cannot contribute permission                             */
+/* -------------------------------------------------------------------------- */
+
+test("first-match-per-class is evidence for a reader, never authority", () => {
+  /*
+   * `classifyTargets` reports one matched word per class so a gate can be read. That reporting must
+   * not be what the accounting sees: reusing it once made every *other* recognised noun in the
+   * sentence look unaccounted, and gated "Rename the test fixture names." on `fixture`.
+   *
+   * Pinned from both sides — every recognised noun is accounted for however many share a class, and
+   * an unrecognised one is not rescued by a sibling that matched first.
+   */
+  for (const objective of [
+    "Rename the test fixture names.",
+    "Simplify the local parser module.",
+    "Tidy the test fixture names.",
+    "Update the build script package config.",
+  ]) inherits(objective);
+  for (const objective of [
+    "Update the parser zorp tests.",
+    "Update the test fixture zorp names.",
+  ]) gates(objective);
+});
+
+test("a determiner inside a multi-word target never counts as a noun", () => {
+  /*
+   * Targets like "the list" and "the ledger" carry their determiner. Registering `the` as a noun
+   * made every determiner look like the head of a noun phrase, which suppressed the leftover check.
+   * The consequential phrase must still match as a phrase, and `the` alone must name nothing.
+   */
+  assert.equal(classifyTargets("the list").consequential.length > 0, true);
+  assert.equal(classifyTargets("the parser").consequential.length, 0);
+  assert.equal(classifyTargets("update the thing").routine.length, 0);
+  // `the` may not act as the recognised noun that excuses an unread neighbour.
+  gates("Update the zorp.");
+  gates("Update the parser zorp the tests.");
 });
