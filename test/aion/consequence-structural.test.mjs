@@ -254,9 +254,24 @@ test("unknown action + unresolved target gates", () => {
   }
 });
 
-test("unknown action + clearly routine target may still inherit", () => {
-  // A model that gated every unfamiliar verb would be safe and useless.
-  for (const objective of ["Frobnicate the test fixture names.", "Zorble the local parser module."]) {
+test("unknown action + routine target now gates — a routine noun does not vouch for an unread verb", () => {
+  /*
+   * This expectation was **reversed**, and deliberately made stricter.
+   *
+   * It previously asserted that an unknown verb aimed at a routine artifact could inherit. A third
+   * independent review showed what that permitted: "Shred those files." inherited authority, because
+   * `shred` was unread and `files` was listed as a code artifact. A recognised noun is not evidence
+   * about what an unrecognised verb would do to it.
+   *
+   * Routine must be affirmative on both halves. The cost is that an unfamiliar verb needs one Owner
+   * decision; the alternative was shredding.
+   */
+  for (const objective of ["Frobnicate the test fixture names.", "Zorble the local parser module.", "Shred those files."]) {
+    assert.notEqual(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" inherited on an unread verb`);
+  }
+
+  // And the model has not become a blanket refusal: a *recognised* verb on the same targets inherits.
+  for (const objective of ["Rename the test fixture names.", "Simplify the local parser module."]) {
     assert.equal(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" was gated unnecessarily`);
   }
 });

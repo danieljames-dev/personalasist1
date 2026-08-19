@@ -300,6 +300,32 @@ Detection is now **target-first**, in four independent passes:
 is not consequential. A verb nobody recognised near the word "backups" is not a safe request; it is
 an unread one.
 
+**And routine must be affirmative.** A third review found the mirror defect: with no *listed*
+dangerous target, "Update the CRM.", "Fix IAM.", "Add the S3 bucket.", "Shred those files." and
+"Update it." all inherited — absence of a known danger was being read as proof of safety. Both halves
+must now be recognised:
+
+| action | target known-routine | target unresolved |
+| --- | --- | --- |
+| routine / non-effectful | inherit | **gate** |
+| consequential | inherit | **gate** |
+| unknown | **gate** | **gate** |
+
+Three supporting rules came from the same review:
+
+- **`file` is not a routine artifact.** "The files" could be source, backups or the Owner's
+  documents; listing it turned the most generic noun in the language into a blanket permission.
+- **Clauses are aggregated.** "Refactor the parser and shred the files." is two requests, and a
+  routine one does not launder a consequential one.
+- **Routine verbs match only as the imperative head; consequential verbs match anywhere.** A
+  consequential match restricts, so scanning widely is conservative — a routine match *permits*, so
+  it must be the word actually giving the instruction. Without that asymmetry a noun rescues an
+  unread verb: "Frobnicate the test fixture." matched the routine verb `test` inside "test fixture".
+
+An empty or whitespace-only objective never inherits. Quoted spans are stripped before
+classification, so "Write tests for the phrase 'disable security.'" is engineering work while
+"Disable security." is not.
+
 **Uncertainty is itself a consequence.** An action that cannot be resolved, or a consequential action
 with no identifiable target, sets `uncertainConsequence` — which gates and which **no envelope
 setting can cover**. "Send it." is not routine because nothing matched; it is unread.

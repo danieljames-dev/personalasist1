@@ -143,14 +143,25 @@ const TARGET_CLASSES: readonly TargetClassV1[] = [
     routine: false,
   },
   {
+    /*
+     * Deliberately **not** including "file" or "files".
+     *
+     * An independent review found "Shred those files.", "Nuke the files." and "Get rid of the files."
+     * inheriting authority, because `file` was listed here and rescued them. "The files" names
+     * nothing — it could be source, backups, or the Owner's documents — so treating it as a code
+     * artifact turned the most generic noun in the language into a blanket permission.
+     *
+     * Everything below names a *specific* engineering object. That is what "affirmatively routine"
+     * has to mean; a word that could refer to anything is an unresolved target, not a safe one.
+     */
     target: "a code artifact",
-    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "file", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text"],
+    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text"],
     implies: [],
     routine: true,
   },
   {
     target: "an internal technical object",
-    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "payload", "socket", "buffer", "cache", "the panel", "the page", "the button", "the indicator", "the ui", "the view", "the port", "process", "node", "nodes", "rendering", "status"],
+    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "response", "payload", "socket", "buffer", "cache", "panel", "page", "button", "indicator", "ui", "view", "port", "process", "node", "nodes", "rendering", "status", "roadmap", "dashboard", "screen", "layout", "label", "state", "states", "form", "input", "output", "banner", "tooltip", "column", "row", "table", "chart", "log line", "wording", "copy", "name", "names", "title", "heading"],
     implies: [],
     routine: true,
   },
@@ -177,7 +188,11 @@ export function classifyTargets(text: string): TargetEvidenceV1 {
   const matched: [string, string][] = [];
 
   for (const row of TARGET_CLASSES) {
-    const word = row.words.find((candidate) => lower.includes(candidate));
+    // Whole-word for single tokens, substring for phrases. Matching "live" inside "delivery" or
+    // "port" inside "important" produced both false gates and false confidence.
+    const word = row.words.find((candidate) =>
+      candidate.includes(" ") ? lower.includes(candidate) : containsWord(lower, candidate),
+    );
     if (word === undefined) continue;
     matched.push([row.target, word]);
     if (row.routine) {
@@ -210,6 +225,9 @@ const ROUTINE_ACTIONS: readonly string[] = [
   "comment", "clarify", "improve", "adjust", "tweak", "reorganize", "reorder", "extract", "inline",
   "describe", "explain", "review", "read", "inspect", "check", "measure", "profile", "log",
   "test", "lint", "typecheck", "build", "compile", "verify", "fix", "add", "update", "write",
+  // "handle" is an ordinary engineering verb ("handle the response"). The dangerous sense of it —
+  // "handle these without checking" — is carried by the authority *target* words, which win.
+  "handle", "render", "parse", "validate", "wire",
 ];
 
 /** Verbs whose effect is consequential *when* they reach a consequential or unresolved target. */
@@ -223,7 +241,7 @@ const CONSEQUENTIAL_ACTIONS: readonly string[] = [
   "let", "allow", "enable", "use",
   "buy", "purchase", "pay", "fund", "spend", "subscribe", "upgrade",
   "disable", "turn off", "loosen", "relax", "ease", "weaken", "bypass", "open", "unblock", "lower",
-  "stop", "skip", "assume", "preapprove", "pre-approve", "handle", "treat", "deploy", "activate",
+  "stop", "skip", "assume", "preapprove", "pre-approve", "treat", "deploy", "activate",
   "promote", "cut over",
 ];
 
@@ -239,7 +257,7 @@ function firstWordOf(text: string): string {
 }
 
 /**
- * Match a verb as a whole word, never as a substring.
+ * Match a term as a whole word, never as a substring.
  *
  * Found while writing the tests: "Zorble my Gmail inbox." matched the verb `mail` inside the noun
  * `Gmail` and was classified as a known action. It still gated — the account target caught it — but a
@@ -259,7 +277,17 @@ export function classifyAction(text: string): { kind: ActionKindV1; matched: str
   const consequential = CONSEQUENTIAL_ACTIONS.find((verb) => head === verb || containsWord(lower, verb));
   if (consequential !== undefined) return { kind: "CONSEQUENTIAL", matched: consequential };
 
-  const routine = ROUTINE_ACTIONS.find((verb) => head === verb || containsWord(lower, verb));
+  /*
+   * Routine verbs are matched only as the imperative head, while consequential verbs are matched
+   * anywhere. The asymmetry is the point: a consequential match *restricts*, so scanning the whole
+   * sentence is conservative; a routine match *permits*, so it must be the word actually giving the
+   * instruction.
+   *
+   * Without that, a noun rescues an unread verb — "Frobnicate the test fixture." matched the routine
+   * verb `test` inside the noun phrase "test fixture" and was classified routine. Same shape as
+   * `mail` inside `Gmail`, and as `file` being a blanket artifact.
+   */
+  const routine = ROUTINE_ACTIONS.find((verb) => head === verb || lower.startsWith(`${verb} `));
   if (routine !== undefined) return { kind: "ROUTINE", matched: routine };
 
   return { kind: "UNKNOWN", matched: head };
@@ -330,9 +358,44 @@ export function detectRequestedConsequences(
     evidence.push({ consequence, action, target, detail });
   };
 
-  const lower = typeof text === "string" ? text.toLowerCase() : "";
-  if (lower.trim() === "") {
+  const raw = typeof text === "string" ? text : "";
+  if (raw.trim() === "") {
+    /*
+     * An empty objective is not routine work; it is a milestone that says nothing about what it
+     * would do. It previously returned all-false, which the resolver read as "no consequence" and
+     * allowed under valid lineage — the most literal possible case of absence being mistaken for
+     * proof of safety.
+     */
+    raise("uncertainConsequence", "none", "none", "the objective is empty, so nothing about it can be shown to be routine");
     return { ...flags, evidence };
+  }
+
+  /*
+   * Quoted spans are discussed, not requested.
+   *
+   * "Write tests for the phrase 'disable security.'" asks for tests. Reading the quotation as an
+   * instruction gates ordinary engineering work forever, and the cost of ignoring quoted text is
+   * bounded: an Owner who genuinely wants an effect states it outside quotation marks.
+   */
+  const lower = stripQuotedSpans(raw.toLowerCase());
+
+  /*
+   * Clauses are evaluated separately and aggregated most-restrictive-first.
+   *
+   * "Refactor the parser and shred the files." inherited authority because the sentence as a whole
+   * matched a routine verb and a routine noun. A routine clause must not launder a consequential one.
+   */
+  const clauses = splitClauses(lower);
+  if (clauses.length > 1) {
+    const merged: ConsequenceEvidenceV1[] = [];
+    for (const clause of clauses) {
+      const part = detectRequestedConsequences(clause, declared);
+      for (const key of Object.keys(EMPTY_FLAGS) as ConsequenceKey[]) {
+        if (part[key]) flags[key] = true;
+      }
+      for (const row of part.evidence) merged.push({ ...row, detail: `in "${clause.trim()}": ${row.detail}` });
+    }
+    return { ...flags, evidence: merged };
   }
 
   const targets = classifyTargets(lower);
@@ -364,28 +427,68 @@ export function detectRequestedConsequences(
   }
 
   /*
-   * No consequential target. Now the action decides whether the *absence* of one is safe.
+   * No consequential target matched. That is **not** proof the request is routine.
    *
-   * A consequential verb with nothing recognisable to act on is unread, not harmless: "Send it." and
-   * "Remove that permanently." are ordinary sentences that cannot be classified without knowing what
-   * "it" is. A routine target rescues them; nothing else does.
+   * This is the defect the second review found, and it is the mirror of the first: the first version
+   * asked the verb before the target, this one treated "no listed dangerous target" as safety. So
+   * "Update the CRM.", "Fix IAM.", "Add the S3 bucket." and "Update it." all inherited — every one of
+   * them naming something the tables had never heard of.
+   *
+   * Routine now has to be *shown*, not inferred from silence. Both halves must be affirmatively
+   * recognised:
+   *
+   *   | action                  | target known-routine | target unresolved |
+   *   | ROUTINE / NON_EFFECTFUL | allow                | GATE              |
+   *   | CONSEQUENTIAL           | allow                | GATE              |
+   *   | UNKNOWN                 | GATE                 | GATE              |
+   *
+   * A consequential verb is permitted against a *specific* engineering object — "Remove the unused
+   * CSS class", "Push the CSS cleanup commit internally" — because both halves are read. An
+   * unrecognised verb is never permitted, because half of what it would do is unknown.
    */
-  if (action.kind === "CONSEQUENTIAL") {
-    if (targets.routine.length > 0) return { ...flags, evidence };
-    raise("uncertainConsequence", action.matched, "unresolved",
-      `"${action.matched}" was requested but nothing identifiable was named as its target`);
+  if (targets.routine.length === 0) {
+    raise("uncertainConsequence", action.matched || "unresolved", "unresolved",
+      `nothing identifiable was named as the target of "${action.matched || "the request"}", so it cannot be shown to be routine`);
     return { ...flags, evidence };
   }
 
   if (action.kind === "UNKNOWN") {
-    if (targets.routine.length > 0) return { ...flags, evidence };
-    raise("uncertainConsequence", action.matched || "unresolved", "unresolved",
-      "neither the action nor its target could be identified");
+    raise("uncertainConsequence", action.matched || "unresolved", targets.routine.join(", "),
+      `the action "${action.matched}" was not recognised, and a routine-looking target does not establish what it would do`);
     return { ...flags, evidence };
   }
 
-  // Routine action, no consequential target. The one path that concludes "routine".
+  // Both halves affirmatively recognised, and no consequential target. The one path to "routine".
   return { ...flags, evidence };
+}
+
+/**
+ * Remove quoted spans so discussed language is not read as requested effect.
+ *
+ * Straight and curly quotes, single and double. Deliberately simple: an unbalanced quote leaves the
+ * text untouched rather than swallowing the rest of the sentence, because losing the tail of a
+ * request is the failure that would matter.
+ */
+export function stripQuotedSpans(text: string): string {
+  return text
+    .replace(/'[^']*'/g, " ")
+    .replace(/"[^"]*"/g, " ")
+    .replace(/‘[^’]*’/g, " ")
+    .replace(/“[^”]*”/g, " ");
+}
+
+/**
+ * Split a request into clauses that are evaluated independently.
+ *
+ * Conjunctions, semicolons and sequencing words only. Commas are *not* split on: "Remove the unused,
+ * duplicated CSS class" is one clause, and splitting it would manufacture fragments with no verb.
+ */
+export function splitClauses(text: string): readonly string[] {
+  const parts = text
+    .split(/\s+(?:and|then|also|plus|as well as)\s+|;\s*/)
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  return parts.length > 1 ? parts : [text];
 }
 
 /** True when anything at all was detected. */
