@@ -15,7 +15,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createGoalControl, createRoadmapControl } from "../../apps/aion/roadmap-control.mjs";
-import { GOAL_VERBS_V1, selectEnvelopeForGoal } from "../../apps/aion/goal-intake.mjs";
+import { GOAL_VERBS_V1, lineageForTypedGoal } from "../../apps/aion/goal-intake.mjs";
 import {
   DUPLICATE_SIMILARITY_THRESHOLD_V1,
   PLANNABLE_CLASSES_V1,
@@ -300,24 +300,22 @@ test("goal intake refuses to be built without a repository root or a port", () =
 /* Envelope selection                                                          */
 /* -------------------------------------------------------------------------- */
 
-test("a goal milestone claims an envelope only when one actually covers its write domains", () => {
+test("a typed goal supplies no lineage, so it can never attach itself to an envelope", () => {
+  /*
+   * This replaces a test that asserted the *defective* behaviour: it checked that
+   * `selectEnvelopeForGoal` picked the newest ACTIVE envelope covering a goal's write domains, and
+   * it passed while "delete the production backups" was being stamped with that envelope and
+   * reported as automatic work. The test was not weakened — the behaviour it described was removed,
+   * and this asserts the replacement.
+   */
+  assert.equal(lineageForTypedGoal(), null);
+
   const record = JSON.parse(
     readFileSync(join(repositoryRoot, ".aion-local", "owner-authority", `${ENVELOPE_AUTH_ID}.json`), "utf8"),
   );
-  const now = "2026-08-19T05:00:00Z";
-
-  const covered = selectEnvelopeForGoal([record], ["apps", "docs"], now);
-  assert.notEqual(covered, null);
-  assert.equal(covered.ownerAuthorizationId, ENVELOPE_AUTH_ID);
-
-  const uncovered = selectEnvelopeForGoal([record], ["private", "C:\\Windows"], now);
-  assert.equal(uncovered, null, "an envelope was selected for domains it does not cover");
-
-  const revoked = selectEnvelopeForGoal([{ ...record, state: "REVOKED" }], ["apps"], now);
-  assert.equal(revoked, null, "a revoked envelope was selected");
-
-  assert.equal(selectEnvelopeForGoal([], ["apps"], now), null);
-  assert.equal(deriveEnvelopeFromOwnerAuthority(null, now), null);
+  // Even a real ACTIVE record projects no envelope without an explicit Owner grant.
+  assert.equal(deriveEnvelopeFromOwnerAuthority(record, "2026-08-19T06:00:00Z"), null);
+  assert.equal(deriveEnvelopeFromOwnerAuthority(null, "2026-08-19T06:00:00Z"), null);
 });
 
 test("the new envelope mechanism does not swallow the deferred history-access gate", () => {

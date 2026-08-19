@@ -74,6 +74,15 @@ export interface OwnerAuthorityRecordV1 {
   readonly securityChangePermission?: string;
   readonly oauthConsentPermission?: string;
   readonly createdAtUtc?: string;
+  /**
+   * Whether this authorization grants an inheritable roadmap envelope, and which parents it covers.
+   *
+   * Written by `authorize-current-directive.ps1` from the directive the Owner authorized. Absent on
+   * every record written before envelopes existed, which is the correct default: an authorization to
+   * build one thing is not permission to derive arbitrary future work from it.
+   */
+  readonly grantsRoadmapAuthorityEnvelope?: string;
+  readonly envelopeApprovedParentMilestoneIds?: readonly string[];
 }
 
 export interface MilestoneAuthorityDecisionV1 {

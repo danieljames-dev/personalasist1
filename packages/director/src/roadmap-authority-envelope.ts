@@ -25,6 +25,7 @@
  * evidence; it is a refusal.
  */
 
+import { assessOwnerBoundaries, describeBoundaries } from "./owner-boundary-detection.js";
 import type { ProviderIdV1, SensitivityClassV1 } from "./provider-bridge.js";
 import type {
   ExternalEffectClassV1,
@@ -65,7 +66,14 @@ export interface OwnerRoadmapAuthorityEnvelopeV1 {
   readonly schema: typeof ROADMAP_ENVELOPE_SCHEMA_V1;
   readonly envelopeId: string;
   readonly ownerAuthorizationId: string;
-  /** Objectives a derived milestone may claim lineage to. */
+  /**
+   * The parent milestones this envelope covers the children of.
+   *
+   * The Owner names these when authorizing. A child proves lineage by referencing one of them by id;
+   * nothing derived from the *text* of a new request can add to this list.
+   */
+  readonly approvedParentMilestoneIds: readonly string[];
+  /** Objectives, for display and cross-checking. Never lineage on their own. */
   readonly approvedObjectives: readonly string[];
   readonly allowedWriteDomains: readonly string[];
   readonly allowedProviders: readonly ProviderIdV1[];
@@ -126,6 +134,23 @@ export function deriveEnvelopeFromOwnerAuthority(
   now: string,
 ): OwnerRoadmapAuthorityEnvelopeV1 | null {
   if (record === null || record === undefined || typeof record !== "object") return null;
+
+  /*
+   * Only records the Owner explicitly marked as envelope-granting are inheritable.
+   *
+   * The first version projected an envelope from *every* ACTIVE authority record, which quietly
+   * turned eight unrelated milestone authorizations into eight generic inheritance sources. An
+   * authorization to build Provider Bridge is not permission to derive arbitrary future work from;
+   * it is permission to build Provider Bridge. The marker and the approved parent list are written
+   * by `authorize-current-directive.ps1` from the directive the Owner authorized, so they cannot
+   * appear without an Owner decision.
+   */
+  if (record.grantsRoadmapAuthorityEnvelope !== "YES") return null;
+  const parents = Array.isArray(record.envelopeApprovedParentMilestoneIds)
+    ? record.envelopeApprovedParentMilestoneIds.filter(isNonEmptyString)
+    : [];
+  if (parents.length === 0) return null;
+
   if (!isNonEmptyString(record.ownerAuthorizationId)) return null;
   if (!isNonEmptyString(record.authorizedObjective)) return null;
   if (!Array.isArray(record.allowedWriteDomains) || record.allowedWriteDomains.length === 0) return null;
@@ -166,6 +191,7 @@ export function deriveEnvelopeFromOwnerAuthority(
     schema: ROADMAP_ENVELOPE_SCHEMA_V1,
     envelopeId: `ENVELOPE-${record.ownerAuthorizationId}`,
     ownerAuthorizationId: record.ownerAuthorizationId,
+    approvedParentMilestoneIds: parents,
     approvedObjectives: [record.authorizedObjective],
     allowedWriteDomains: [...record.allowedWriteDomains],
     allowedProviders: [...record.allowedProviders] as ProviderIdV1[],
@@ -276,19 +302,58 @@ export function resolveInheritedAuthority(
   }
   note("envelope unexpired", true, envelope.expiresAtUtc === "" ? "no expiry" : envelope.expiresAtUtc);
 
-  // Lineage. The milestone must name an objective the Owner actually approved — not merely a similar
-  // one, and not the milestone's own objective, which it writes itself.
-  const lineage = milestone.derivedFromObjective;
-  if (!isNonEmptyString(lineage)) {
-    note("lineage proven", false, "milestone names no parent objective");
-    return gate("milestone claims an envelope but names no approved parent objective", checks, claimed, envelope.ownerAuthorizationId);
+  /*
+   * The always-gated boundaries, read from the milestone's own objective text.
+   *
+   * Checked here, before lineage and before any ceiling, because this is the step whose absence
+   * caused the review failure. `ALWAYS_GATED_BOUNDARIES_V1` was declared and never evaluated, so
+   * "delete the production backups" passed every ceiling it was measured against — it declared no
+   * spend, no sensitivity and no external effect, and all three were true of the *milestone record*
+   * while being irrelevant to the sentence that created it.
+   *
+   * This runs on the objective rather than on declared fields precisely because declared fields are
+   * what a planner fills in, and a planner that misreads a request produces a record that is
+   * internally consistent and completely wrong.
+   */
+  const boundaries = assessOwnerBoundaries(milestone.objective);
+  if (boundaries.requiresFreshOwnerApproval) {
+    note("no always-gated boundary in the objective", false, describeBoundaries(boundaries));
+    return gate(describeBoundaries(boundaries), checks, claimed, envelope.ownerAuthorizationId);
   }
-  const approved = envelope.approvedObjectives.map(normalizeObjective);
-  if (!approved.includes(normalizeObjective(lineage))) {
-    note("lineage proven", false, "parent objective is not one the Owner approved");
-    return gate("milestone lineage does not trace to an approved parent objective", checks, claimed, envelope.ownerAuthorizationId);
+  note("no always-gated boundary in the objective", true, "none recognised");
+
+  /*
+   * Lineage, by milestone id.
+   *
+   * The earlier version matched an objective *string* against the envelope's approved objective, and
+   * the planner stamped that string onto whatever the Owner had just typed — so lineage proved only
+   * that the planner had copied a value it had been handed. A milestone id refers to a node that
+   * already exists and is named in the envelope by the Owner; no amount of new text can produce one.
+   */
+  const parentId = milestone.derivedFromMilestoneId;
+  if (!isNonEmptyString(parentId)) {
+    note("lineage proven", false, "milestone names no parent milestone");
+    return gate("milestone claims an envelope but names no approved parent milestone", checks, claimed, envelope.ownerAuthorizationId);
   }
-  note("lineage proven", true, lineage);
+  if (!envelope.approvedParentMilestoneIds.includes(parentId)) {
+    note("lineage proven", false, `${parentId} is not an approved parent of this envelope`);
+    return gate(`milestone lineage does not trace to an approved parent milestone (${parentId})`, checks, claimed, envelope.ownerAuthorizationId);
+  }
+  if (parentId === milestone.milestoneId) {
+    note("lineage proven", false, "milestone names itself as its own parent");
+    return deny("milestone names itself as its own parent", checks, claimed, envelope.ownerAuthorizationId);
+  }
+  // The objective, when stated, must still agree with the envelope. A child that names an approved
+  // parent id but an unrelated parent objective is contradicting itself.
+  const statedObjective = milestone.derivedFromObjective;
+  if (isNonEmptyString(statedObjective)) {
+    const approved = envelope.approvedObjectives.map(normalizeObjective);
+    if (!approved.includes(normalizeObjective(statedObjective))) {
+      note("lineage proven", false, "stated parent objective contradicts the envelope");
+      return deny("milestone parent objective contradicts the envelope it claims", checks, claimed, envelope.ownerAuthorizationId);
+    }
+  }
+  note("lineage proven", true, parentId);
 
   // Write scope. Absent is refused rather than treated as "writes nothing": a milestone that does not
   // say what it will touch has not proven it stays inside the envelope.
@@ -387,6 +452,26 @@ export function alwaysGatedBoundaryFor(
   }
   if (risks.has("SECURITY_OR_PRIVACY") && envelope.securityChangePermission !== "YES") {
     return "security or privacy change requires fresh Owner approval";
+  }
+  /*
+   * `destructiveActionPermission` and `oauthConsentPermission` were copied into every envelope and
+   * then read by nothing. A field that exists in a record but is never evaluated is documentation,
+   * not enforcement — and it reads as a guarantee to anyone auditing the projection.
+   */
+  if (risks.has("PERSISTENCE_OR_RECOVERY") && envelope.destructiveActionPermission !== "YES") {
+    return "destructive or recovery-affecting action requires fresh Owner approval";
+  }
+  if (milestone.reversibilityClass === "IRREVERSIBLE" && envelope.destructiveActionPermission !== "YES") {
+    return "irreversible work requires the destructive-action permission this envelope does not carry";
+  }
+  if (envelope.oauthConsentPermission !== "YES") {
+    // OAuth is the one boundary with no honest proxy among the declared fields, so it is read from
+    // the objective. An envelope that does not carry consent permission cannot cover work that asks
+    // for it, however the milestone happens to have classified itself.
+    const oauth = assessOwnerBoundaries(milestone.objective).boundaries.find(
+      (row) => row.boundary === "new OAuth or account consent" || row.boundary === "new or materially expanded credential access",
+    );
+    if (oauth !== undefined) return `${oauth.boundary} requires fresh Owner approval`;
   }
   if (milestone.externalEffectClass === "IRREVERSIBLE_EXTERNAL" && envelope.requiresReversible) {
     return "irreversible external effect requires fresh Owner approval";

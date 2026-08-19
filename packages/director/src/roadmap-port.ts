@@ -107,6 +107,14 @@ export interface SeedMilestoneInputV1 {
   readonly verificationSteps?: readonly VerificationStepV1[];
   /** Claimed Owner envelope and lineage. Verified by the authority evaluator, never trusted here. */
   readonly authorityEnvelopeId?: string | null;
+  /**
+   * Explicit reversibility, when the caller knows better than the effect class implies.
+   *
+   * Deleting a backup has no *external* effect and is still irreversible. Deriving reversibility from
+   * the effect class alone quietly downgraded exactly that case to `REVERSIBLE`.
+   */
+  readonly reversibilityClass?: RoadmapMilestoneV1["reversibilityClass"];
+  readonly derivedFromMilestoneId?: string | null;
   readonly derivedFromObjective?: string | null;
   readonly writeDomains?: readonly string[];
   readonly provenance: string;
@@ -144,7 +152,8 @@ function milestoneFromSeed(seed: SeedMilestoneInputV1, now: string): RoadmapMile
     allowedProviders: [...(seed.allowedProviders ?? ["codex", "grok", "claude", "local"])],
     spendCapUsd: 0,
     externalEffectClass: seed.externalEffectClass,
-    reversibilityClass: seed.externalEffectClass === "IRREVERSIBLE_EXTERNAL" ? "IRREVERSIBLE" : "REVERSIBLE",
+    reversibilityClass:
+      seed.reversibilityClass ?? (seed.externalEffectClass === "IRREVERSIBLE_EXTERNAL" ? "IRREVERSIBLE" : "REVERSIBLE"),
     riskClasses: [...seed.riskClasses],
     verificationPlan: {
       steps:
@@ -164,6 +173,7 @@ function milestoneFromSeed(seed: SeedMilestoneInputV1, now: string): RoadmapMile
     attempts: 0,
     blockedReason: null,
     ...(seed.authorityEnvelopeId !== undefined ? { authorityEnvelopeId: seed.authorityEnvelopeId } : {}),
+    ...(seed.derivedFromMilestoneId !== undefined ? { derivedFromMilestoneId: seed.derivedFromMilestoneId } : {}),
     ...(seed.derivedFromObjective !== undefined ? { derivedFromObjective: seed.derivedFromObjective } : {}),
     ...(seed.writeDomains !== undefined ? { writeDomains: [...seed.writeDomains] } : {}),
     provenance: seed.provenance,

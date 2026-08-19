@@ -29,8 +29,15 @@
 
 import { createHash } from "node:crypto";
 
+import { assessOwnerBoundaries, describeBoundaries } from "./owner-boundary-detection.js";
 import type { ProviderIdV1 } from "./provider-bridge.js";
-import type { RoadmapMilestoneV1, VerificationStepV1 } from "./roadmap-contracts.js";
+import type {
+  ExternalEffectClassV1,
+  ReversibilityClassV1,
+  RiskClassV1,
+  RoadmapMilestoneV1,
+  VerificationStepV1,
+} from "./roadmap-contracts.js";
 
 export const OWNER_GOAL_SCHEMA_V1 = "aion.director.ownerGoalIntent.v1" as const;
 export const OWNER_GOAL_STORE_RELATIVE_PATH = ".aion-local/owner-goals";
@@ -44,8 +51,15 @@ export const OWNER_INPUT_CLASSES_V1 = [
 ] as const;
 export type OwnerInputClassV1 = (typeof OWNER_INPUT_CLASSES_V1)[number];
 
-/** The only two classes that may reach roadmap planning. */
-export const PLANNABLE_CLASSES_V1: readonly OwnerInputClassV1[] = ["ACTIONABLE_OBJECTIVE", "ROADMAP_CONTINUATION"];
+/**
+ * The only class that may reach roadmap planning.
+ *
+ * `ROADMAP_CONTINUATION` used to be here and was a lie: it entered planning and then returned
+ * `NOT_PLANNABLE`, so a semantic type advertised behaviour nothing performed. Continuing the roadmap
+ * is `roadmap.continue`, a separate verb with its own authority path. A classification that claims to
+ * resume work and does not is worse than no classification, because it reads as wired.
+ */
+export const PLANNABLE_CLASSES_V1: readonly OwnerInputClassV1[] = ["ACTIONABLE_OBJECTIVE"];
 
 export type AmbiguityStateV1 = "CLEAR" | "AMBIGUOUS";
 
@@ -104,6 +118,12 @@ const ACTION_VERBS = [
   "refactor", "update", "enable", "disable", "change", "support", "finish", "write", "set up",
   "setup", "harden", "migrate", "replace", "rename", "extend", "reduce", "speed up", "clean up",
   "document", "test", "automate", "integrate", "expose", "hide", "show", "let",
+  // Added after an independent review: "Publish this announcement externally" was classified as a
+  // question purely because no rule recognised "publish", and it looked like a safe refusal. It was
+  // an accident. A missing verb is not a guardrail — the sentence is plainly an instruction, and it
+  // must become a milestone the boundary detector can then gate.
+  "publish", "post", "send", "deploy", "grant", "install", "upgrade", "connect", "apply", "purchase",
+  "buy", "subscribe", "erase", "wipe", "drop", "revoke", "reset", "restore",
 ];
 
 const CONTINUATION_PHRASES = ["continue", "keep going", "carry on", "resume", "proceed", "go ahead", "carry it on", "next step", "keep working"];
@@ -368,11 +388,31 @@ export interface PlannedMilestoneV1 {
   readonly dependencies: readonly string[];
   readonly ownerAuthorizationId: string | null;
   readonly authorityEnvelopeId: string | null;
+  readonly derivedFromMilestoneId: string | null;
   readonly derivedFromObjective: string | null;
   readonly writeDomains: readonly string[];
   readonly allowedProviders: readonly ProviderIdV1[];
   readonly verificationSteps: readonly VerificationStepV1[];
+  /** Read from the Owner's own words, never from a planner default. Only ever raises consequence. */
+  readonly riskClasses: readonly RiskClassV1[];
+  readonly externalEffectClass: ExternalEffectClassV1;
+  readonly reversibilityClass: ReversibilityClassV1;
+  readonly authorityClass: "ROUTINE" | "MILESTONE_AUTHORIZED" | "HIGH_CONSEQUENCE";
+  readonly boundaries: readonly string[];
   readonly provenance: string;
+}
+
+/**
+ * Explicit, durable lineage supplied by whoever recorded the parent relation.
+ *
+ * There is deliberately no way to compute this from an Owner sentence. The failure that made this
+ * repair necessary was a selector that found "some active compatible envelope" and stamped it onto
+ * whatever had just been typed; lineage that a planner can synthesise is not lineage.
+ */
+export interface GoalLineageV1 {
+  readonly envelopeId: string;
+  readonly parentMilestoneId: string;
+  readonly parentObjective: string;
 }
 
 function titleFor(text: string): string {
@@ -391,8 +431,8 @@ function titleFor(text: string): string {
 export function planFromGoal(input: {
   readonly intent: OwnerGoalIntentV1;
   readonly milestones: readonly RoadmapMilestoneV1[];
-  readonly envelopeId: string | null;
-  readonly parentObjective: string | null;
+  /** Explicit recorded lineage, or `null` — which is the normal case for a sentence typed into Ask. */
+  readonly lineage: GoalLineageV1 | null;
   readonly writeDomains: readonly string[];
   readonly allowedProviders: readonly ProviderIdV1[];
   readonly verificationSteps: readonly VerificationStepV1[];
@@ -416,30 +456,43 @@ export function planFromGoal(input: {
       milestone: null,
     };
   }
-  if (intent.classification === "ROADMAP_CONTINUATION") {
-    return {
-      kind: "NOT_PLANNABLE",
-      reason: "continuation resumes the existing roadmap rather than adding to it",
-      matchedMilestoneId: null,
-      milestone: null,
-    };
-  }
 
+  /*
+   * Match against *every* milestone, including gated and blocked ones.
+   *
+   * The bypass this closes: a milestone sitting in `WAITING_OWNER_AUTHORIZATION` could be restated in
+   * different words, and the restatement created a fresh `owner-<hash>` sibling that was not the
+   * gated node and so was not gated. Rephrasing is not a decision, and it must not act like one.
+   */
   const existing = input.milestones.find(
     (milestone) => objectiveSimilarity(intent.originalText, milestone.objective) >= DUPLICATE_SIMILARITY_THRESHOLD_V1,
   );
   if (existing !== undefined) {
     return {
       kind: "MATCHED_EXISTING",
-      reason: `this is already on the roadmap as ${existing.milestoneId}`,
+      reason: existing.status === "WAITING_OWNER_AUTHORIZATION" || existing.status === "BLOCKED"
+        ? `this is already on the roadmap as ${existing.milestoneId}, and it is ${existing.status}`
+        : `this is already on the roadmap as ${existing.milestoneId}`,
       matchedMilestoneId: existing.milestoneId,
       milestone: null,
     };
   }
 
+  /*
+   * Consequence comes from the Owner's words, never from a default.
+   *
+   * The review failure was exactly this step missing: the planner filled in `riskClasses: []`,
+   * `REPOSITORY_REVERSIBLE`, `spendCapUsd: 0`, and those defaults were then measured against the
+   * envelope's ceilings and found to fit. They fit because they described nothing.
+   */
+  const assessment = assessOwnerBoundaries(intent.originalText);
+  const highConsequence = assessment.requiresFreshOwnerApproval;
+
   return {
     kind: "CREATE_MILESTONE",
-    reason: "no existing milestone covers this objective",
+    reason: highConsequence
+      ? describeBoundaries(assessment)
+      : "no existing milestone covers this objective",
     matchedMilestoneId: null,
     milestone: {
       // Derived from the goal id, so replanning the same sentence targets the same milestone.
@@ -449,11 +502,21 @@ export function planFromGoal(input: {
       priority: 500,
       dependencies: [],
       ownerAuthorizationId: null,
-      authorityEnvelopeId: input.envelopeId,
-      derivedFromObjective: input.parentObjective,
+      // A sentence with no recorded parent relation claims no envelope. This is the whole of Fix 2:
+      // there is no fallback that finds "some active compatible envelope" to attach it to.
+      authorityEnvelopeId: input.lineage?.envelopeId ?? null,
+      derivedFromMilestoneId: input.lineage?.parentMilestoneId ?? null,
+      derivedFromObjective: input.lineage?.parentObjective ?? null,
       writeDomains: [...input.writeDomains],
       allowedProviders: [...input.allowedProviders],
       verificationSteps: [...input.verificationSteps],
+      riskClasses: assessment.riskClasses,
+      externalEffectClass: assessment.externalEffectClass ?? "REPOSITORY_REVERSIBLE",
+      reversibilityClass: assessment.reversibilityClass ?? "REVERSIBLE",
+      // A request that reaches a boundary is high-consequence by construction, which the authority
+      // resolver refuses to inherit regardless of every other field.
+      authorityClass: highConsequence ? "HIGH_CONSEQUENCE" : "MILESTONE_AUTHORIZED",
+      boundaries: assessment.boundaries.map((row) => row.boundary),
       provenance: `Owner goal ${intent.goalId}: ${intent.originalText}`,
     },
   };

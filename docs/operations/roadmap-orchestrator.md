@@ -183,10 +183,14 @@ Type it into Ask, on Home or in Chat. AION classifies the text before anything e
 
 | Class | What happens |
 | --- | --- |
-| `ACTIONABLE_OBJECTIVE` | becomes at most one `PLANNED` milestone |
-| `ROADMAP_CONTINUATION` | resumes the roadmap; adds nothing |
+| `ACTIONABLE_OBJECTIVE` | becomes at most one `PLANNED` milestone — **gated**, not runnable |
+| `ROADMAP_CONTINUATION` | recorded only; use `roadmap.continue` to resume |
 | `QUESTION`, `CONTEXT_QUERY` | answered as a question; adds nothing |
 | `OWNER_DECISION` | pointed at the console; the page cannot authorize |
+
+`ROADMAP_CONTINUATION` is deliberately **not** plannable. It used to enter planning and then return
+"not plannable", so a semantic type advertised behaviour nothing performed — which reads as wired to
+anyone auditing it.
 
 Classification is rules in `packages/director/src/owner-goal-intake.ts`, not a model. A model asked
 "is this actionable?" answers yes too often and its answer cannot be tested. The tie-break runs the
@@ -218,8 +222,32 @@ call a decision.
 A milestone may now satisfy authority two ways:
 
 1. **Directly** — it names its own Owner authorization record. Unchanged.
-2. **By inheritance** — it names an `authorityEnvelopeId` and a `derivedFromObjective`, and
+2. **By inheritance** — it names an `authorityEnvelopeId` and a `derivedFromMilestoneId`, and
    `resolveInheritedAuthority` proves it sits inside that envelope.
+
+### What an independent review found, and what changed
+
+The first version of this shipped unsound. grok-4.6 drove six ordinary sentences through the
+production intake path and four came back as covered, automatic work — including **"Delete the
+production backups without asking."** Nothing lied. Intake had *selected* an envelope for the
+sentence, stamped that envelope's objective on as lineage, and left the risk fields at their
+planning defaults; the resolver then verified lineage intake had supplied and measured ceilings
+against a record that described nothing. A goal was vouching for itself.
+
+Four things changed as a result:
+
+- **No envelope auto-selection.** A sentence typed into Ask has no lineage and claims no envelope. It
+  becomes a gated milestone. `lineageForTypedGoal()` returns `null` and there is deliberately no
+  function that computes one from text.
+- **Lineage is a parent milestone id**, not an objective string — a reference to a node that already
+  exists and that the Owner named when granting the envelope. Text cannot conjure one.
+- **Consequence is read from the Owner's words** by `owner-boundary-detection.ts`, before authority
+  is evaluated, and only ever raises. Planner defaults can no longer erase risk.
+- **Only explicitly envelope-granting authorizations are inheritable.** Every ACTIVE record used to
+  project an envelope; an authorization to build Provider Bridge is permission to build Provider
+  Bridge. A record now needs `grantsRoadmapAuthorityEnvelope: YES` and named approved parents, both
+  written by the Founder script from the directive. **No authorization written so far carries that
+  grant, so nothing in production is inheritable today** — which is the correct fail-closed state.
 
 **There is no envelope file and nothing can write one.** An envelope is *projected* read-only from
 the Owner authority record `authorize-current-directive.ps1` writes — same record, same trust

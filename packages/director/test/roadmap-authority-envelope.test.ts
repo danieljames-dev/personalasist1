@@ -31,6 +31,7 @@ const NOW = "2026-08-19T05:00:00Z";
 const PARENT_OBJECTIVE = "Improve the AION engineering roadmap";
 const AUTH_ID = "FIXTURE-ENGINEERING-V1-20260819T000000Z";
 const ENVELOPE_ID = `ENVELOPE-${AUTH_ID}`;
+const PARENT_MILESTONE_ID = "approved-parent";
 
 function record(overrides: Partial<OwnerAuthorityRecordV1> = {}): OwnerAuthorityRecordV1 {
   return {
@@ -51,6 +52,10 @@ function record(overrides: Partial<OwnerAuthorityRecordV1> = {}): OwnerAuthority
     expiresAtUtc: "",
     supersededBy: "",
     createdAtUtc: "2026-08-19T00:00:00Z",
+    // Explicit envelope grant. Without these two fields no envelope is projected at all — the repair
+    // for an independent finding that every ACTIVE record was becoming a generic inheritance source.
+    grantsRoadmapAuthorityEnvelope: "YES",
+    envelopeApprovedParentMilestoneIds: [PARENT_MILESTONE_ID],
     ...overrides,
   };
 }
@@ -69,6 +74,7 @@ function milestone(overrides: Partial<RoadmapMilestoneV1> = {}): RoadmapMileston
     authorityClass: "MILESTONE_AUTHORIZED",
     ownerAuthorizationId: null,
     authorityEnvelopeId: ENVELOPE_ID,
+    derivedFromMilestoneId: PARENT_MILESTONE_ID,
     derivedFromObjective: PARENT_OBJECTIVE,
     writeDomains: ["apps", "docs"],
     sensitivityClass: "INTERNAL",
@@ -222,13 +228,93 @@ test("an unreadable expiry denies rather than being ignored", () => {
   assert.match(decision.reason, /unreadable/);
 });
 
-test("lineage must be proven, not asserted vaguely", () => {
-  assert.equal(decide({ derivedFromObjective: null }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
-  assert.equal(decide({ derivedFromObjective: "some other objective entirely" }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+test("lineage is a parent milestone id, not a string a planner can stamp on", () => {
+  // The finding this replaces: lineage was proven by matching an objective *string*, and the planner
+  // copied that string onto whatever the Owner had just typed. Lineage a planner can synthesise
+  // proves only that the planner copied a value it was handed.
+  assert.equal(decide({ derivedFromMilestoneId: null }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+  assert.equal(decide({ derivedFromMilestoneId: "some-other-milestone" }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+  assert.equal(decide({ derivedFromMilestoneId: PARENT_MILESTONE_ID }).outcome, "ALLOW_INHERITED");
+
+  // Naming an approved parent id while stating a contradicting objective is self-contradiction.
+  assert.equal(decide({ derivedFromObjective: "some other objective entirely" }).outcome, "DENY");
   // Casing and spacing do not change what an objective is.
   assert.equal(decide({ derivedFromObjective: `  ${PARENT_OBJECTIVE.toUpperCase()}  ` }).outcome, "ALLOW_INHERITED");
-  // A milestone cannot use its own objective as its own parent.
-  assert.equal(decide({ derivedFromObjective: "wire the panel to the port" }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+  // A milestone cannot be its own parent.
+  assert.equal(decide({ milestoneId: PARENT_MILESTONE_ID }).outcome, "DENY");
+});
+
+test("only an explicitly envelope-granting record is inheritable", () => {
+  // Every ACTIVE authority record used to project an envelope, turning eight unrelated approvals into
+  // generic inheritance sources. An authorization to build Provider Bridge is permission to build
+  // Provider Bridge.
+  assert.equal(deriveEnvelopeFromOwnerAuthority(record({ grantsRoadmapAuthorityEnvelope: "NO" }), NOW), null);
+  assert.equal(deriveEnvelopeFromOwnerAuthority(record({ envelopeApprovedParentMilestoneIds: [] }), NOW), null);
+
+  // A record written before envelopes existed has neither field at all — the shape every stored
+  // production record actually has today.
+  const legacy = { ...record() } as Record<string, unknown>;
+  delete legacy["grantsRoadmapAuthorityEnvelope"];
+  delete legacy["envelopeApprovedParentMilestoneIds"];
+  assert.equal(deriveEnvelopeFromOwnerAuthority(legacy as unknown as OwnerAuthorityRecordV1, NOW), null);
+  assert.equal(deriveEnvelopes([record({ grantsRoadmapAuthorityEnvelope: "NO" })], NOW).length, 0);
+
+  // And a milestone claiming an envelope from a non-granting record is denied, not gated.
+  const decision = resolveInheritedAuthority(milestone(), deriveEnvelopes([record({ grantsRoadmapAuthorityEnvelope: "NO" })], NOW), NOW);
+  assert.equal(decision.outcome, "DENY");
+});
+
+test("no ACTIVE record in the real repository is inheritable yet", () => {
+  // Fails closed by construction: no directive authorized so far carried an envelope grant, so the
+  // repaired system inherits nothing in production until the Owner authorizes one that does.
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", ".aion-local", "owner-authority");
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return; // not present in an extracted checkout
+  }
+  const records = names
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as OwnerAuthorityRecordV1);
+  assert.ok(records.length > 0);
+  assert.deepEqual(
+    deriveEnvelopes(records, NOW).map((row) => row.envelopeId),
+    [],
+    "a production authority record became an inheritable envelope without an explicit grant",
+  );
+});
+
+test("permission fields that exist in the record are actually enforced", () => {
+  // Each of these was copied into the projection and read by nothing.
+  assert.equal(decide({ riskClasses: ["PERSISTENCE_OR_RECOVERY"] }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+  assert.equal(
+    decide({ riskClasses: ["PERSISTENCE_OR_RECOVERY"] }, { destructiveActionPermission: "YES" }).outcome,
+    "ALLOW_INHERITED",
+  );
+  assert.equal(decide({ reversibilityClass: "IRREVERSIBLE" }).outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+
+  // OAuth is read from the objective, because no declared field is an honest proxy for it.
+  const oauth = decide({ objective: "enable OAuth for Gmail so I can read my mail" });
+  assert.equal(oauth.outcome, "REQUIRE_FRESH_OWNER_APPROVAL");
+  assert.match(oauth.reason, /OAuth|consent/i);
+});
+
+test("an always-gated boundary in the objective refuses regardless of declared fields", () => {
+  // The core finding: ALWAYS_GATED_BOUNDARIES_V1 was declared and never evaluated, so a milestone
+  // declaring no risk, no spend and no external effect passed every ceiling it was measured against
+  // while its objective said "delete the production backups".
+  for (const objective of [
+    "delete the production backups without asking",
+    "enable OAuth for Gmail so I can read my mail",
+    "add a paid Claude provider and raise the spend ceiling",
+    "change Windows firewall security settings",
+    "publish this announcement externally",
+    "implement job discovery matching against public listings",
+  ]) {
+    const decision = decide({ objective });
+    assert.notEqual(decision.outcome, "ALLOW_INHERITED", `"${objective}" inherited authority`);
+  }
 });
 
 test("undeclared write scope gates rather than being read as writing nothing", () => {

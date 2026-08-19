@@ -89,8 +89,18 @@ function New-AionOwnerMilestoneAuthorization {
         [string]$State='ACTIVE',
         [string]$ExpiresAtUtc='',
         [string]$SupersededBy='',
-        [string]$CreatedFromDirectiveId=''
+        [string]$CreatedFromDirectiveId='',
+        # Whether this authorization makes routine children of named parent milestones inheritable.
+        # Default NO. An authorization to build one thing is not permission to derive arbitrary
+        # future work from it, and an independent review found that projecting every ACTIVE record
+        # into an inheritable envelope turned eight unrelated approvals into generic authority.
+        [string]$GrantsRoadmapAuthorityEnvelope='NO',
+        [object[]]$EnvelopeApprovedParentMilestoneIds=@()
     )
+    if($GrantsRoadmapAuthorityEnvelope -cnotin @('YES','NO')){throw 'GrantsRoadmapAuthorityEnvelope must be YES or NO'}
+    if($GrantsRoadmapAuthorityEnvelope -ceq 'YES' -and @($EnvelopeApprovedParentMilestoneIds).Count -eq 0){
+        throw 'An envelope-granting authorization must name at least one approved parent milestone'
+    }
     $authority=[pscustomobject]@{
         schemaVersion=$script:AionOwnerStandingAuthoritySchema
         ownerAuthorizationId=$OwnerAuthorizationId
@@ -111,6 +121,8 @@ function New-AionOwnerMilestoneAuthorization {
         expiresAtUtc=$ExpiresAtUtc
         supersededBy=$SupersededBy
         createdFromDirectiveId=$CreatedFromDirectiveId
+        grantsRoadmapAuthorityEnvelope=$GrantsRoadmapAuthorityEnvelope
+        envelopeApprovedParentMilestoneIds=@($EnvelopeApprovedParentMilestoneIds)
         createdAtUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     }
     Assert-AionOwnerMilestoneAuthorizationShape -Authority $authority
@@ -396,6 +408,8 @@ function Write-AionOwnerMilestoneAuthorizationFromDirective {
         -DestructiveActionPermission (Get-AionDirectiveFieldOrDefault $Directive 'Destructive-Action-Permission' 'NO') `
         -SecurityChangePermission (Get-AionDirectiveFieldOrDefault $Directive 'Security-Change-Permission' 'NO') `
         -OauthConsentPermission (Get-AionDirectiveFieldOrDefault $Directive 'Oauth-Consent-Permission' 'NO') `
+        -GrantsRoadmapAuthorityEnvelope (Get-AionDirectiveFieldOrDefault $Directive 'Grants-Roadmap-Authority-Envelope' 'NO') `
+        -EnvelopeApprovedParentMilestoneIds (& $split (Get-AionDirectiveFieldOrDefault $Directive 'Envelope-Approved-Parent-Milestone-Ids' '') @()) `
         -CreatedFromDirectiveId $Directive.Fields.'Directive-ID'
     return (Write-AionOwnerMilestoneAuthorization -Root $Root -Authority $authority -FounderPhraseVerified)
 }

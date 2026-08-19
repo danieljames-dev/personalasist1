@@ -183,7 +183,17 @@ export interface RoadmapMilestoneV1 {
    * naming no authority at all does.
    */
   readonly authorityEnvelopeId?: string | null;
-  /** The approved parent objective this milestone claims lineage to. Verified, never trusted. */
+  /**
+   * The approved parent **milestone** this milestone is a bounded step of.
+   *
+   * This is the lineage that counts. An earlier version proved lineage by matching an objective
+   * *string*, which a planner could stamp onto any sentence — and did: an independent review drove
+   * "delete the production backups" through intake and it came back covered. A milestone id is a
+   * reference to something that already exists in the roadmap and is named in the envelope, so it
+   * cannot be conjured from the text of a new request.
+   */
+  readonly derivedFromMilestoneId?: string | null;
+  /** The approved parent objective, kept for display and cross-checking. Never lineage on its own. */
   readonly derivedFromObjective?: string | null;
   /** Repository domains this milestone expects to write. Must be a subset of the envelope's. */
   readonly writeDomains?: readonly string[];
@@ -343,6 +353,9 @@ export function validateMilestone(candidate: unknown): string | null {
   }
   if (m.derivedFromObjective !== undefined && m.derivedFromObjective !== null && typeof m.derivedFromObjective !== "string") {
     return "derivedFromObjective must be a string, null or absent";
+  }
+  if (m.derivedFromMilestoneId !== undefined && m.derivedFromMilestoneId !== null && typeof m.derivedFromMilestoneId !== "string") {
+    return "derivedFromMilestoneId must be a string, null or absent";
   }
   if (m.writeDomains !== undefined && !isStringList(m.writeDomains)) return "writeDomains is not a string list";
   if (typeof m.sensitivityClass !== "string") return "sensitivityClass is missing";

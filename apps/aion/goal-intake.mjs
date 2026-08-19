@@ -26,8 +26,8 @@ import {
   OWNER_GOAL_STORE_RELATIVE_PATH,
   PLANNABLE_CLASSES_V1,
   buildOwnerGoalIntent,
-  deriveEnvelopeFromOwnerAuthority,
   planFromGoal,
+  resolveMilestoneAuthority,
 } from "../../packages/director/dist/index.js";
 
 /** Verification steps a goal-created milestone declares. Only steps the runner can actually check. */
@@ -78,23 +78,20 @@ function readAuthorities(repositoryRoot) {
 }
 
 /**
- * The envelope a goal-created milestone should claim, and the objective it claims lineage to.
+ * Lineage for a typed goal, and why there is deliberately no way to compute one.
  *
- * Chosen from the Owner's own records rather than configured here: the most recently created ACTIVE
- * envelope whose write domains cover the domains a goal milestone declares. Returning `null` is
- * normal and means the milestone gates — which is correct when no approved objective covers it.
+ * This used to be `selectEnvelopeForGoal`, which found the newest ACTIVE envelope whose write
+ * domains covered the goal's and stamped it on. An independent review drove "delete the production
+ * backups without asking" through this path and it came back as covered, automatic work — not
+ * because any check was wrong, but because the selector supplied the very lineage the checks then
+ * verified. A goal cannot vouch for itself.
+ *
+ * So a sentence typed into Ask has no lineage. It becomes a milestone that claims no envelope and is
+ * therefore gated. Inheritance is available only to a milestone whose parent relation was recorded
+ * deliberately, host-side, against a parent the Owner named when authorizing the envelope.
  */
-export function selectEnvelopeForGoal(authorities, writeDomains, now) {
-  const candidates = [];
-  for (const record of authorities) {
-    const envelope = deriveEnvelopeFromOwnerAuthority(record, now);
-    if (envelope === null || envelope.state !== "ACTIVE") continue;
-    if (writeDomains.some((domain) => !envelope.allowedWriteDomains.includes(domain))) continue;
-    candidates.push(envelope);
-  }
-  if (candidates.length === 0) return null;
-  candidates.sort((left, right) => String(right.createdAtUtc).localeCompare(String(left.createdAtUtc)));
-  return candidates[0] ?? null;
+export function lineageForTypedGoal() {
+  return null;
 }
 
 /**
@@ -168,12 +165,10 @@ export function createGoalIntake(options = {}) {
         };
       }
 
-      const envelope = selectEnvelopeForGoal(readAuthorities(repositoryRoot), writeDomains, at);
       const plan = planFromGoal({
         intent: stored,
         milestones,
-        envelopeId: envelope?.envelopeId ?? null,
-        parentObjective: envelope?.approvedObjectives?.[0] ?? null,
+        lineage: lineageForTypedGoal(),
         writeDomains,
         allowedProviders,
         verificationSteps: GOAL_MILESTONE_PLAN,
@@ -217,39 +212,54 @@ export function createGoalIntake(options = {}) {
         priority: plan.milestone.priority,
         dependencies: plan.milestone.dependencies,
         ownerAuthorizationId: plan.milestone.ownerAuthorizationId,
-        authorityClass: "MILESTONE_AUTHORIZED",
-        externalEffectClass: "REPOSITORY_REVERSIBLE",
-        riskClasses: [],
+        // Consequence comes from the plan, which read it from the Owner's words. Hard-coding
+        // `riskClasses: []` and `REPOSITORY_REVERSIBLE` here is precisely how "delete the production
+        // backups" arrived at the authority resolver looking like a docs change.
+        authorityClass: plan.milestone.authorityClass,
+        externalEffectClass: plan.milestone.externalEffectClass,
+        reversibilityClass: plan.milestone.reversibilityClass,
+        riskClasses: plan.milestone.riskClasses,
         allowedProviders: plan.milestone.allowedProviders,
         reviewPolicy: "NONE",
         verificationSteps: plan.milestone.verificationSteps,
         authorityEnvelopeId: plan.milestone.authorityEnvelopeId,
+        derivedFromMilestoneId: plan.milestone.derivedFromMilestoneId,
         derivedFromObjective: plan.milestone.derivedFromObjective,
         writeDomains: plan.milestone.writeDomains,
         provenance: plan.milestone.provenance,
       });
 
-      // Authority is read back from the roadmap's own evaluation rather than predicted here. Two
-      // opinions about coverage is one too many, and the port's is the one that decides.
-      const gates = port.getPendingOwnerGates();
-      const gated = gates.some((gate) => gate.milestoneId === plan.milestone.milestoneId);
-      const covered = added.milestone !== null && plan.milestone.authorityEnvelopeId !== null && !gated;
+      /*
+       * The real resolver decides, and its answer is what the Owner is shown.
+       *
+       * Previously this inferred coverage from "an envelope was selected and no gate exists yet" —
+       * and no gate existed yet because nothing had evaluated the milestone. It reported
+       * `canBeginAutomatically: true` for work that had never been through an authority check at all.
+       * This is the same function `advanceRoadmap` calls at selection time, on the stored milestone.
+       */
+      const stored_milestone = added.milestone ?? port.getMilestones().find((m) => m.milestoneId === plan.milestone.milestoneId) ?? null;
+      const decision = stored_milestone === null
+        ? { outcome: "REQUIRE_FRESH_OWNER_APPROVAL", reason: "the milestone could not be stored", ownerAuthorizationId: null }
+        : resolveMilestoneAuthority(stored_milestone, readAuthorities(repositoryRoot), at);
 
+      const allowed = decision.outcome === "ALLOW_STANDING";
       return {
         goalId: stored.goalId,
         classification: stored.classification,
-        reason: plan.reason,
+        reason: allowed ? plan.reason : decision.reason,
         actionable: true,
         created: added.created,
         milestoneId: plan.milestone.milestoneId,
-        authority: covered ? "COVERED_BY_OWNER_ENVELOPE" : "OWNER_DECISION_REQUIRED",
-        canBeginAutomatically: covered,
-        ownerDecisionRequired: !covered,
-        message: added.created
-          ? covered
-            ? "Added to the roadmap. AION can continue automatically."
-            : "Added to the roadmap. Owner decision required before it can run."
-          : added.reason,
+        authority: allowed ? "ALLOW_INHERITED" : decision.outcome,
+        authorityReason: decision.reason,
+        boundaries: plan.milestone.boundaries,
+        canBeginAutomatically: allowed,
+        ownerDecisionRequired: !allowed,
+        message: allowed
+          ? "Added to the roadmap. AION can continue automatically."
+          : decision.outcome === "DENY"
+            ? `Refused: ${decision.reason}`
+            : `Added to the roadmap. Owner decision required before it can run — ${decision.reason}`,
       };
     },
 
