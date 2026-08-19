@@ -29,9 +29,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  MVA_JOB_STORE_RELATIVE_PATH,
+  PROVIDER_IDS_V1,
   ROADMAP_STORE_RELATIVE_PATH,
+  createFileJobStore,
   createRoadmapPort,
 } from "../../packages/director/dist/index.js";
+import { createProviderRegistry } from "./provider-registry.mjs";
+import { createVerificationRunner } from "./verification-runner.mjs";
 
 /** Milestones a person would call "finished recently", newest-looking first. */
 const RECENT_LIMIT = 5;
@@ -103,6 +108,26 @@ function authorizationHintFor(repositoryRoot, gate) {
   }
 }
 
+/**
+ * Every provider any ACTIVE Owner authority record permits.
+ *
+ * A union rather than an intersection, because the records describe separate milestones and a
+ * provider allowed by one of them is inside the Owner's envelope for that work. It bounds what the
+ * process may register, never what it can actually run — that stays with the registry, which has an
+ * executor for exactly one provider.
+ */
+function allowedProvidersFrom(authorities) {
+  const allowed = new Set();
+  for (const record of authorities) {
+    if (record === null || typeof record !== "object" || record.state !== "ACTIVE") continue;
+    if (!Array.isArray(record.allowedProviders)) continue;
+    for (const id of record.allowedProviders) {
+      if (PROVIDER_IDS_V1.includes(id)) allowed.add(id);
+    }
+  }
+  return [...allowed];
+}
+
 function headSha(repositoryRoot) {
   try {
     return execFileSync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -149,29 +174,76 @@ export function createRoadmapControl(options = {}) {
     throw new Error("roadmap control needs a repositoryRoot");
   }
   const storeRoot = options.storeRoot ?? join(repositoryRoot, ...ROADMAP_STORE_RELATIVE_PATH.split("/"));
+  const jobStoreRoot = options.jobStoreRoot ?? join(repositoryRoot, ...MVA_JOB_STORE_RELATIVE_PATH.split("/"));
+  const artifactRoot = options.artifactRoot ?? join(jobStoreRoot, "artifacts");
   const now = options.now ?? nowUtc;
+
+  /**
+   * Which providers this process can execute with, resolved fresh each time rather than cached.
+   *
+   * Authority is durable state that the Owner can change at a console while the server runs; a
+   * registry frozen at boot would keep executing under an envelope that no longer exists.
+   */
+  function registry(head, authorities) {
+    return createProviderRegistry({
+      artifactRoot,
+      startingSha: head,
+      now: now(),
+      allowedProviders: allowedProvidersFrom(authorities),
+    });
+  }
 
   function port() {
     const head = headSha(repositoryRoot);
+    const authorities = readAuthorities(repositoryRoot);
     const base = {
       storeRoot,
-      authorities: readAuthorities(repositoryRoot),
+      authorities,
       now,
       /*
-       * Verification evidence is produced by whoever ran the milestone, not by the browser. Until a
-       * worker records real evidence the honest answer is that none exists, and `evaluateVerification`
-       * then fails the milestone closed rather than completing it on silence.
+       * Evidence comes from durable state the run left behind — the job record, the artifact, git —
+       * never from the fact that nothing threw. `createVerificationRunner` produces no row at all for
+       * a step it cannot check, and `evaluateVerification` fails the milestone on that silence.
        */
-      verify: options.verify ?? (() => []),
+      verify:
+        options.verify ??
+        createVerificationRunner({
+          repositoryRoot,
+          jobStoreRoot,
+          registeredProviders: registry(head, authorities).registered,
+        }),
       baselineSha: options.baselineSha ?? head,
       currentHead: head,
       currentDirectiveId: currentDirectiveId(repositoryRoot),
     };
     if (options.dispatch !== undefined) return createRoadmapPort({ ...base, dispatch: options.dispatch });
+    const providers = registry(head, authorities);
     return createRoadmapPort({
       ...base,
       dispatchTarget: { repository: repositoryRoot, worktree: repositoryRoot, startingSha: head },
+      /*
+       * Without these, `submitJob` would fall back to an in-memory job store, a frozen clock and
+       * self-provisioned adapters for every provider id — including ones this process cannot run.
+       * A durable store is what makes a restart able to tell finished work from work that never
+       * started, and explicit adapters are what stop an artifact claiming a provider that never ran.
+       */
+      dispatchDeps: {
+        adapters: providers.adapters,
+        health: providers.health,
+        store: createFileJobStore(jobStoreRoot),
+        artifactRoot: providers.artifactRoot,
+        now: now(),
+      },
     });
+  }
+
+  /** What the panel is allowed to say about providers: registered, and deliberately not. */
+  function providerReport() {
+    const providers = registry(headSha(repositoryRoot), readAuthorities(repositoryRoot));
+    return {
+      registered: [...providers.registered],
+      unregistered: Object.entries(providers.unregistered).map(([providerId, reason]) => ({ providerId, reason })),
+    };
   }
 
   /** Everything the panel needs in one call, so the page is one round trip. */
@@ -204,6 +276,9 @@ export function createRoadmapControl(options = {}) {
       ready: milestones,
       gates,
       workers,
+      // Stated on every read, because "which provider is working" is one of the six questions the
+      // panel exists to answer and the truthful answer today is "one, and here is what is not wired".
+      providers: providerReport(),
       waitingOnOwner: gates.length > 0,
       generatedAt: now(),
     };

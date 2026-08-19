@@ -1430,6 +1430,18 @@ ${g.authorization ? `<details><summary>How to authorize it</summary><p class="hi
     ? (r.workers || []).map((w) => `<li>${esc(w.milestoneId)} — ${esc(w.status)} · provider ${esc(w.provider)}</li>`).join("")
     : `<li class="meta">No worker is running.</li>`;
 
+  // Which providers can actually run work, and which cannot. Shown rather than hidden because "AION
+  // did not run it" and "AION has nothing to run it with" look identical from a phone otherwise.
+  const p = r.providers || { registered: [], unregistered: [] };
+  const providers = `<p>${p.registered.length
+    ? `Can run work: ${p.registered.map((id) => `<code>${esc(id)}</code>`).join(" ")}`
+    : `<b>No provider is registered.</b> Nothing can execute until one is.`}</p>
+${p.unregistered.length
+  ? `<details><summary>Not wired up (${p.unregistered.length})</summary><ul>${p.unregistered
+      .map((row) => `<li><code>${esc(row.providerId)}</code> — ${esc(row.reason)}</li>`)
+      .join("")}</ul></details>`
+  : ""}`;
+
   const ready = (r.ready || []).length
     ? (r.ready || []).map((m) => `<li>${esc(m.title)} <span class="meta">(${esc(m.milestoneId)} · priority ${m.priority})</span></li>`).join("")
     : `<li class="meta">Nothing is ready right now.</li>`;
@@ -1460,6 +1472,7 @@ ${model._roadmapLast ? `<p class="meta">${esc(model._roadmapLast)}</p>` : ""}
 ${gates}
 <article class="card"><h2>Ready next</h2><ul>${ready}</ul>
 <h2>Active worker</h2><ul>${workers}</ul>
+<h2>Providers</h2>${providers}
 ${stuck}${done}</article>`;
 }
 

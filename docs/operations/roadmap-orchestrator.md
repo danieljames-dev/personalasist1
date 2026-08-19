@@ -116,6 +116,64 @@ approving.
 
 Pause is durable state, not a closed browser tab. Reload and restart both preserve it.
 
+## What actually executes the work
+
+`AION-APP-LIVE-PROVIDER-EXECUTION-V1` closed the gap between "the app reaches the orchestrator" and
+"the app can finish a milestone". Two things were missing, and neither was the one the previous
+handoff predicted.
+
+**Providers are registered explicitly, and the list is short.** `apps/aion/provider-registry.mjs`
+registers `local` with the real bounded executor and registers `codex`, `grok` and `claude` as
+*unavailable* — an adapter that returns `PROVIDER_UNAVAILABLE` and a health row marked `DISABLED`.
+That is not a placeholder. The dispatch layer will otherwise fill any missing adapter with a bounded
+*local* executor under the cloud provider's id, and the artifact it writes then reads
+`EXECUTOR = claude` while nothing resembling Claude ran. Registering all four honestly is what stops
+the system reporting a provider it did not use.
+
+| Provider | State | Why |
+| --- | --- | --- |
+| `local` | registered | deterministic, offline, zero cost, writes one artifact in an artifact root |
+| `codex`, `grok`, `claude` | deliberately not registered | no cloud executor is wired into the app process, and paid providers are not authorized |
+
+The panel says this out loud under **Providers**, so "AION did not run it" and "AION has nothing to
+run it with" cannot be confused from a phone.
+
+**Verification produces evidence, or the milestone fails.** The app used to pass `verify: () => []`,
+which meant every milestone reached `VALIDATION_FAILED` on missing evidence — the honest rule working
+correctly against a chain that could never finish. `apps/aion/verification-runner.mjs` now answers
+from durable state: the MVA job record, the artifact on disk, and `git rev-parse HEAD`. It reads; it
+never writes, shells out, or reaches the network.
+
+The checks it can perform are a closed set:
+
+| Step name | What it observes |
+| --- | --- |
+| `durable state reconciled` | a job record exists, reached SUCCEEDED, every artifact it names is on disk, lease released |
+| `dispatch artifact validated` | the artifact exists, names this job, and dispatch recorded `artifact-validated` |
+| `executor matches selected provider` | the provider the bridge selected is registered *and* is the one the artifact names |
+| `no external effect` | the record and every attempt report `NONE` |
+| `zero spend` | every attempt reported zero cost |
+| `writer released` | the lease is released and the writer is `STOPPED` |
+| `repository head unchanged` | HEAD still equals the sha the job started from |
+
+A milestone whose plan names a step outside that table gets **no evidence row for it**, and
+`evaluateVerification` fails it as missing. That silence is deliberate: a runner that guessed would
+convert "we did not look" into "it passed". Milestones declare their steps through
+`SeedMilestoneInputV1.verificationSteps`; the default plan remains the strict one.
+
+**Dispatch is durable.** The port now forwards `dispatchDeps` to `createMvaDispatcher`, so the app
+supplies registered adapters, a `createFileJobStore` and the real clock. Without it `submitJob` falls
+back to an in-memory store and a frozen timestamp, and the job record disappears at process exit —
+after which a restart cannot tell finished work from work that never started.
+
+```bash
+node scripts/roadmap-live-acceptance.mjs        # the app's own chain, in a scratch workspace
+node --test "test/aion/live-provider-execution.test.mjs"
+```
+
+The acceptance harness seeds a **dedicated disposable milestone**. Proving the wiring must not consume
+real planned work, so it never touches `.aion-local/roadmap`.
+
 **After changing this code, restart the AION server.** A long-running process keeps serving the code
 it started with, so the Roadmap panel will not appear until it is restarted.
 
@@ -133,10 +191,19 @@ it started with, so the Roadmap panel will not appear until it is restarted.
 
 - **The app drives reads and three verbs, not everything.** `apps/aion/roadmap-control.mjs` wires the
   port into the Command Center. Seeding a roadmap, editing milestones and approving gates are all
-  still host-side acts by design.
+  still host-side acts by design — including seeding, which is why nothing in the production roadmap
+  can be created from a browser.
 - **Review is a policy and a hook, not a reviewer.** The orchestrator decides *whether* independent
   review is required and refuses to complete without a verdict; it does not itself summon a second
-  model. Wiring a real reviewer is a later milestone.
+  model. Wiring a real reviewer is a later milestone. Until then, any milestone whose risk demands
+  `INDEPENDENT` or `ADVERSARIAL` review ends in `BLOCKED` with "no verdict was recorded" — the work
+  runs, and the completion is refused. That is the intended behaviour, not a bug to route around.
+- **One executor.** `local` is deterministic and bounded; it writes an artifact and proves the chain.
+  It does not write code. A milestone needing a real coding model needs a cloud executor, which needs
+  a fresh Owner decision about paid providers.
+- **The artifact's `MILESTONE` line names the MVA dispatch authorization, not the roadmap milestone.**
+  It is a constant inside `mva-dispatch.ts` that `validateJobArtifact` checks against, so changing it
+  is a dispatch-contract change rather than an app change. Read `JOB_ID` for the milestone.
 - **Worker execution is one bounded job per milestone.** A milestone that needs several dispatches
   is not modelled yet.
 - **Leases come from the existing layer.** One-writer enforcement lives in `leases.ts` and

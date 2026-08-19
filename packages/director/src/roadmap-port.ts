@@ -20,8 +20,10 @@ import {
   type RoadmapMilestoneV1,
   type RoadmapV1,
   type TakeoverPacketV1,
+  type VerificationStepV1,
 } from "./roadmap-contracts.js";
 import { readyMilestones } from "./roadmap-dag.js";
+import type { MvaDispatchDepsV1 } from "./mva-dispatch.js";
 import {
   advanceRoadmap,
   createMvaDispatcher,
@@ -76,6 +78,15 @@ export interface SeedMilestoneInputV1 {
   /** Narrow this when the work genuinely needs a capability only some providers have. */
   readonly allowedProviders?: RoadmapMilestoneV1["allowedProviders"];
   readonly reviewPolicy: RoadmapMilestoneV1["independentReviewPolicy"];
+  /**
+   * The acceptance criteria this milestone must produce explicit evidence for.
+   *
+   * Optional, and the default below is deliberately strict rather than convenient. Naming steps here
+   * is how a milestone declares criteria something can actually check — a plan whose steps no
+   * verifier understands is not a weaker plan, it is an unpassable one, because missing evidence
+   * fails the milestone.
+   */
+  readonly verificationSteps?: readonly VerificationStepV1[];
   readonly provenance: string;
 }
 
@@ -117,10 +128,13 @@ function seedRoadmap(store: RoadmapStoreV1, input: SeedInputV1, now: string): Ro
     reversibilityClass: seed.externalEffectClass === "IRREVERSIBLE_EXTERNAL" ? "IRREVERSIBLE" : "REVERSIBLE",
     riskClasses: [...seed.riskClasses],
     verificationPlan: {
-      steps: [
-        { kind: "DETERMINISTIC_CHECK", name: "durable state reconciled", required: true },
-        { kind: "FOCUSED_TESTS", name: "focused tests", required: true },
-      ],
+      steps:
+        seed.verificationSteps !== undefined && seed.verificationSteps.length > 0
+          ? seed.verificationSteps.map((step) => ({ ...step }))
+          : [
+              { kind: "DETERMINISTIC_CHECK", name: "durable state reconciled", required: true },
+              { kind: "FOCUSED_TESTS", name: "focused tests", required: true },
+            ],
       declaredAt: now,
     },
     independentReviewPolicy: seed.reviewPolicy,
@@ -172,6 +186,16 @@ export interface RoadmapPortDepsV1 extends Omit<OrchestratorDepsV1, "dispatch" |
   readonly dispatch?: (milestone: RoadmapMilestoneV1, packet: TakeoverPacketV1) => DispatchAttemptV1;
   /** Supplied when the port should build the real MVA dispatcher rather than receive one. */
   readonly dispatchTarget?: { readonly repository: string; readonly worktree: string; readonly startingSha: string };
+  /**
+   * What the built dispatcher is given: registered adapters, a durable job store, the real clock.
+   *
+   * Without this, `submitJob` falls back to its own defaults — an in-memory job store and a frozen
+   * timestamp — which is fine for a unit test and wrong for a long-running process, because the job
+   * record then disappears at exit and a restart cannot tell a finished job from one that never ran.
+   * It is deliberately opaque here: the port forwards it and does not interpret it, so provider
+   * choice stays inside Provider Bridge.
+   */
+  readonly dispatchDeps?: MvaDispatchDepsV1;
 }
 
 /** The Director-facing port. Reads are free; the three verbs are the only state changes. */
@@ -179,7 +203,7 @@ export function createRoadmapPort(deps: RoadmapPortDepsV1): RoadmapPortV1 {
   const dispatch =
     deps.dispatch ??
     (deps.dispatchTarget !== undefined
-      ? createMvaDispatcher(deps.dispatchTarget)
+      ? createMvaDispatcher(deps.dispatchTarget, deps.dispatchDeps ?? {})
       : () => ({
           provider: null,
           succeeded: false,
