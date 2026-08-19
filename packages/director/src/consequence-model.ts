@@ -155,13 +155,13 @@ const TARGET_CLASSES: readonly TargetClassV1[] = [
      * has to mean; a word that could refer to anything is an unresolved target, not a safe one.
      */
     target: "a code artifact",
-    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text"],
+    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "configuration", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text"],
     implies: [],
     routine: true,
   },
   {
     target: "an internal technical object",
-    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "response", "payload", "socket", "buffer", "cache", "panel", "page", "button", "indicator", "ui", "view", "port", "process", "node", "nodes", "rendering", "status", "roadmap", "dashboard", "screen", "layout", "label", "state", "states", "form", "input", "output", "banner", "tooltip", "column", "row", "table", "chart", "log line", "wording", "copy", "name", "names", "title", "heading"],
+    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "response", "payload", "socket", "buffer", "cache", "panel", "page", "button", "indicator", "ui", "view", "port", "process", "node", "nodes", "rendering", "status", "roadmap", "dashboard", "screen", "layout", "label", "state", "states", "form", "input", "output", "banner", "tooltip", "column", "row", "table", "chart", "log", "logs", "log line", "wording", "copy", "name", "names", "title", "heading"],
     implies: [],
     routine: true,
   },
@@ -245,15 +245,78 @@ const CONSEQUENTIAL_ACTIONS: readonly string[] = [
   "promote", "cut over",
 ];
 
+/**
+ * Politeness and auxiliary wrappers that sit in front of the actual predicate.
+ *
+ * Stripped so "Could you update the parser?" finds `update` rather than `could`. This only changes
+ * *which word is treated as the head* — routine recognition remains head-only, so no noun elsewhere
+ * in the sentence gains verb status from it.
+ */
+const INSTRUCTION_WRAPPERS: readonly string[] = [
+  "could you please", "can you please", "would you please", "could you", "can you", "would you",
+  "will you", "i need you to", "i want you to", "i would like you to", "i need to", "i want to",
+  "we need to", "we should", "you should", "you could", "you can", "we could", "try to",
+  "go ahead and", "please go ahead and", "make sure you", "make sure to", "help me",
+];
+
+const LEADING_ADVERBS: readonly string[] = [
+  "just", "please", "also", "now", "then", "quickly", "simply", "actually", "really", "kindly",
+  "maybe", "perhaps", "never", "always", "first", "finally", "next",
+];
+
+/**
+ * Remove a leading politeness or auxiliary wrapper from the whole request.
+ *
+ * Done before decomposition rather than after: "Go ahead and update the parser." splits on " and "
+ * into "go ahead" and "update the parser", and the first half then gates as an unknown effect. A
+ * wrapper is not an effect and must not become one.
+ */
+export function stripInstructionWrappers(text: string): string {
+  let out = text.trim();
+  for (;;) {
+    const wrapper = INSTRUCTION_WRAPPERS.find((phrase) => out.toLowerCase().startsWith(phrase + " "));
+    if (wrapper === undefined) break;
+    out = out.slice(wrapper.length + 1).trim();
+  }
+  return out;
+}
+
+/** The predicate head of an instruction, after politeness and auxiliary wrappers. */
 function firstWordOf(text: string): string {
-  const lead = ["just", "please", "also", "now", "then", "quickly", "simply", "actually", "really", "kindly", "maybe", "perhaps", "don't", "do not", "never", "always"];
   let head = text.trim().toLowerCase();
   for (;;) {
-    const adverb = lead.find((word) => head.startsWith(`${word} `));
-    if (adverb === undefined) break;
-    head = head.slice(adverb.length + 1);
+    const wrapper = INSTRUCTION_WRAPPERS.find((phrase) => head.startsWith(phrase + " "));
+    if (wrapper !== undefined) { head = head.slice(wrapper.length + 1); continue; }
+    const adverb = LEADING_ADVERBS.find((word) => head.startsWith(word + " "));
+    if (adverb !== undefined) { head = head.slice(adverb.length + 1); continue; }
+    break;
   }
   return head.split(/[^a-z'-]+/).filter(Boolean)[0] ?? "";
+}
+
+/**
+ * Every inflected form of a verb worth matching, generated rather than listed.
+ *
+ * `nuke` did not match `nuking` and `shred` did not match `shredding`, so an inflection missing from
+ * a table read as an unrecognised action. Generating the forms removes that whole category of
+ * near-miss without anyone maintaining a list, and it is applied only to the *consequential* side,
+ * where a match restricts.
+ */
+function inflectionsOf(verb: string): readonly string[] {
+  if (verb.includes(" ")) return [verb];
+  const forms = new Set<string>([verb, verb + "s", verb + "d", verb + "ed", verb + "ing"]);
+  if (verb.endsWith("e")) {
+    const stem = verb.slice(0, -1);
+    forms.add(stem + "ing");
+    forms.add(stem + "ed");
+  }
+  const last = verb.slice(-1);
+  const prior = verb.slice(-2, -1);
+  if (/[bdgklmnprt]/.test(last) && /[aeiou]/.test(prior) && verb.length <= 5) {
+    forms.add(verb + last + "ing");
+    forms.add(verb + last + "ed");
+  }
+  return [...forms];
 }
 
 /**
@@ -274,7 +337,9 @@ export function classifyAction(text: string): { kind: ActionKindV1; matched: str
   const lower = typeof text === "string" ? text.toLowerCase() : "";
   const head = firstWordOf(lower);
 
-  const consequential = CONSEQUENTIAL_ACTIONS.find((verb) => head === verb || containsWord(lower, verb));
+  const consequential = CONSEQUENTIAL_ACTIONS.find((verb) =>
+    inflectionsOf(verb).some((form) => head === form || containsWord(lower, form)),
+  );
   if (consequential !== undefined) return { kind: "CONSEQUENTIAL", matched: consequential };
 
   /*
@@ -385,7 +450,7 @@ export function detectRequestedConsequences(
    * "Refactor the parser and shred the files." inherited authority because the sentence as a whole
    * matched a routine verb and a routine noun. A routine clause must not launder a consequential one.
    */
-  const clauses = splitClauses(lower);
+  const clauses = decomposeEffects(stripInstructionWrappers(lower));
   if (clauses.length > 1) {
     const merged: ConsequenceEvidenceV1[] = [];
     for (const clause of clauses) {
@@ -483,13 +548,88 @@ export function stripQuotedSpans(text: string): string {
  * Conjunctions, semicolons and sequencing words only. Commas are *not* split on: "Remove the unused,
  * duplicated CSS class" is one clause, and splitting it would manufacture fragments with no verb.
  */
-export function splitClauses(text: string): readonly string[] {
+/** Words that introduce a clause carrying its own effect. */
+const CLAUSE_BOUNDARIES: readonly string[] = [
+  "and", "then", "also", "plus", "as well as", "but", "while", "whilst", "by", "via", "through",
+  "before", "after", "unless", "until", "if", "when", "once", "followed by", "as soon as",
+  "so that", "in order to", "along with", "together with", "besides", "rather than", "instead of",
+];
+
+const MODIFIER_SUFFIX = /(ed|ing|al|ive|ous|able|ible|less|ful)$/;
+const KNOWN_MODIFIERS: readonly string[] = [
+  "unused", "duplicate", "old", "new", "local", "internal", "stale", "legacy", "broken", "failing",
+  "missing", "extra", "redundant", "deprecated", "temporary", "leftover",
+];
+
+/**
+ * Break a request into the effects it actually asks for.
+ *
+ * The defect this replaces: the splitter knew five delimiters, so "Update the parser. Shred those
+ * files." was evaluated as a single text, matched a routine head and a routine target, and inherited
+ * authority — the second sentence was never classified at all. One routine pair proved the whole
+ * request safe, which is the same laundering mechanism in a new place.
+ *
+ * Sentences, lines, semicolons, coordinators and subordinators all separate effects. This is not an
+ * attempt to parse English; it is an attempt to ensure no operative instruction disappears before
+ * authority is evaluated. Where a split is uncertain the fragment stands as its own effect, and an
+ * effect that cannot be shown routine gates.
+ */
+export function decomposeEffects(text: string): readonly string[] {
   const parts = text
-    .split(/\s+(?:and|then|also|plus|as well as)\s+|;\s*/)
-    .map((part) => part.trim())
+    .split(/[\r\n]+|(?<=[.!?])\s+|[.!?]+\s*$|;\s*/)
+    .flatMap((sentence) => splitOnBoundaries(sentence))
+    .flatMap((clause) => splitOnCommas(clause))
+    .map((part) => part.replace(/[.!?]+$/, "").trim())
     .filter((part) => part !== "");
-  return parts.length > 1 ? parts : [text];
+  return parts.length > 0 ? parts : [text];
 }
+
+function splitOnBoundaries(text: string): readonly string[] {
+  const alternatives = CLAUSE_BOUNDARIES.map((word) => word.replace(/ /g, "\\s+")).join("|");
+  return text.split(new RegExp("\\s+(?:" + alternatives + ")\\s+", "g"));
+}
+
+/**
+ * Commas separate effects, unless the fragment plainly continues the previous noun phrase.
+ *
+ * "Refactor the parser, shred the files." hides a second instruction; "Remove the unused, duplicated
+ * CSS class" does not. The test is whether every word in the fragment is a modifier or a recognised
+ * routine target — a fragment naming something unaccounted for becomes its own effect, which is the
+ * direction that gates.
+ */
+function splitOnCommas(text: string): readonly string[] {
+  const parts = text.split(/,\s*/);
+  if (parts.length < 2) return [text];
+  const out: string[] = [parts[0] ?? ""];
+  for (const part of parts.slice(1)) {
+    if (isNounPhraseContinuation(part)) {
+      out[out.length - 1] = out[out.length - 1] + ", " + part;
+      continue;
+    }
+    out.push(part);
+  }
+  return out;
+}
+
+function isNounPhraseContinuation(fragment: string): boolean {
+  const words = fragment.trim().toLowerCase().split(/[^a-z'-]+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const head = words[0] ?? "";
+  if (CONSEQUENTIAL_ACTIONS.some((verb) => inflectionsOf(verb).includes(head))) return false;
+  if (ROUTINE_ACTIONS.includes(head)) return false;
+  return words.every(
+    (word) =>
+      KNOWN_MODIFIERS.includes(word)
+      || MODIFIER_SUFFIX.test(word)
+      || ROUTINE_TARGET_WORDS.has(word)
+      || word.length <= 3,
+  );
+}
+
+/** Single-word routine target terms, used only by the comma-continuation test. */
+const ROUTINE_TARGET_WORDS: ReadonlySet<string> = new Set(
+  TARGET_CLASSES.filter((row) => row.routine).flatMap((row) => row.words.filter((word) => !word.includes(" "))),
+);
 
 /** True when anything at all was detected. */
 export function hasAnyConsequence(consequences: RequestedConsequenceV1): boolean {

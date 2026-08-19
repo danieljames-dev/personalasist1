@@ -29,7 +29,7 @@ import {
   classifyAction,
   detectRequestedConsequences,
   resolveMilestoneAuthority,
-  splitClauses,
+  decomposeEffects,
   stripQuotedSpans,
 } from "../../packages/director/dist/index.js";
 
@@ -150,9 +150,15 @@ test("a routine clause does not launder a consequential one", () => {
   ]) {
     assert.notEqual(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" inherited`);
   }
-  assert.deepEqual([...splitClauses("refactor the parser and shred the files")], ["refactor the parser", "shred the files"]);
-  // A comma inside one clause is not a clause break — splitting it would manufacture verbless fragments.
-  assert.equal(splitClauses("remove the unused, duplicated css class").length, 1);
+  assert.deepEqual([...decomposeEffects("refactor the parser and shred the files")], ["refactor the parser", "shred the files"]);
+  /*
+   * Commas now separate effects, which this previously asserted they did not. The reversal is a
+   * repair, not a relaxation: "Refactor the parser, shred the files." hid a whole instruction behind
+   * a comma. A fragment that plainly continues the previous noun phrase — every word a modifier or a
+   * routine target — is still merged, so ordinary English survives.
+   */
+  assert.deepEqual([...decomposeEffects("refactor the parser, shred the files")], ["refactor the parser", "shred the files"]);
+  assert.equal(decomposeEffects("remove the unused, duplicated css class").length, 1);
 });
 
 test("an empty or whitespace-only objective never inherits", () => {
