@@ -246,6 +246,61 @@ const CONSEQUENTIAL_ACTIONS: readonly string[] = [
 ];
 
 /**
+ * What a consequential verb does *by itself*, regardless of what it is pointed at.
+ *
+ * The composition table used to read "consequential action + routine target -> allow", so a routine
+ * target neutralised the action outright:
+ *
+ *     "Send the log."  "Nuke the parser."  "Email the cache."  "Grant the helper."
+ *
+ * all inherited standing authority, because `log`, `parser`, `cache` and `helper` are ordinary
+ * engineering objects. That is backwards. Sending is an irreversible external effect whatever is in
+ * the envelope; nuking destroys whatever it names; granting confers authority. The object bounds the
+ * *blast radius*, never the *kind* of effect.
+ *
+ * Split by where the danger lives:
+ *
+ *   - here, because the *doing* is dangerous — the consequence is raised whatever the target;
+ *   - not here, because only the *object* is dangerous — `delete`, `remove`, `clear`, `push`, `use`,
+ *     `open`, `make` are the verbs of ordinary repository work, and "Remove the unused CSS class."
+ *     must stay usable. Those still gate through the target ("Delete the backups.").
+ *
+ * Every verb below was already in `CONSEQUENTIAL_ACTIONS`. Nothing was added: this makes the list the
+ * model already had actually restrict, instead of being cancelled by the noun next to it. The raised
+ * consequence is permission-checked like any other, so an envelope that grants external send can
+ * still send.
+ */
+const ACTION_CONSEQUENCE: readonly (readonly [string, ConsequenceKey])[] = [
+  ["send", "externalSend"], ["email", "externalSend"], ["mail", "externalSend"],
+  ["message", "externalSend"], ["text", "externalSend"], ["dm", "externalSend"],
+  ["forward", "externalSend"], ["notify", "externalSend"], ["circulate", "externalSend"],
+  ["distribute", "externalSend"], ["deliver", "externalSend"],
+  ["publish", "externalPublish"], ["announce", "externalPublish"], ["broadcast", "externalPublish"],
+  ["tweet", "externalPublish"], ["upload", "externalPublish"], ["go live", "externalPublish"],
+  ["roll out", "externalPublish"],
+  ["nuke", "destructiveImportantData"], ["destroy", "destructiveImportantData"],
+  ["wipe", "destructiveImportantData"], ["purge", "destructiveImportantData"],
+  ["erase", "destructiveImportantData"], ["trash", "destructiveImportantData"],
+  ["grant", "securityConfigurationChange"], ["disable", "securityConfigurationChange"],
+  ["turn off", "securityConfigurationChange"], ["weaken", "securityConfigurationChange"],
+  ["bypass", "securityConfigurationChange"], ["unblock", "securityConfigurationChange"],
+  ["loosen", "securityConfigurationChange"], ["preapprove", "securityConfigurationChange"],
+  ["pre-approve", "securityConfigurationChange"],
+  // `fund` is deliberately absent: what it costs is entirely a property of what is funded, so it
+  // belongs with `push` and `remove` among the verbs whose danger is only ever in their object.
+  ["buy", "spendIncrease"], ["purchase", "spendIncrease"], ["pay", "spendIncrease"],
+  ["subscribe", "spendIncrease"],
+  ["deploy", "productionMutation"], ["activate", "productionMutation"],
+  ["promote", "productionMutation"], ["cut over", "productionMutation"],
+  ["authenticate", "accountAccess"], ["log in", "accountAccess"],
+];
+
+/** The consequence a verb carries on its own, or `undefined` when its danger is only in its object. */
+function consequenceOfAction(verb: string): ConsequenceKey | undefined {
+  return ACTION_CONSEQUENCE.find(([name]) => name === verb)?.[1];
+}
+
+/**
  * Politeness and auxiliary wrappers that sit in front of the actual predicate.
  *
  * Stripped so "Could you update the parser?" finds `update` rather than `could`. This only changes
@@ -466,6 +521,20 @@ export function detectRequestedConsequences(
   const targets = classifyTargets(lower);
   const action = classifyAction(lower);
 
+  /*
+   * What the action does by itself, before anything is asked about the object.
+   *
+   * A routine target must never neutralise a consequential action. This is raised first and
+   * unconditionally so that "Send the log." and "Nuke the parser." carry their effect into the
+   * permission check exactly as "Send the customer list." always did.
+   */
+  const actionConsequence =
+    action.kind === "CONSEQUENTIAL" ? consequenceOfAction(action.matched) : undefined;
+  if (actionConsequence !== undefined) {
+    raise(actionConsequence, action.matched, targets.routine.join(", ") || "unresolved",
+      `"${action.matched}" is ${actionConsequence} whatever it is pointed at`);
+  }
+
   // Pass C first, so a milestone that already declares an effect can never be talked out of it.
   for (const consequence of consequencesFromDeclaredFields(declared)) {
     raise(consequence, "declared", "milestone fields", `the milestone declares ${consequence}`);
@@ -523,9 +592,140 @@ export function detectRequestedConsequences(
     return { ...flags, evidence };
   }
 
-  // Both halves affirmatively recognised, and no consequential target. The one path to "routine".
+  /*
+   * Routine recognition proves its own span and nothing else.
+   *
+   * A recognised action and a recognised target used to certify the entire string, so any separator
+   * the splitter did not know carried a second instruction through untouched:
+   *
+   *     "Update the parser: shred those files."      "Update the parser | shred those files."
+   *     "Update the parser — shred those files."     "Refactor the parser because we must shred the files."
+   *     "Refactor the helper for grant the agent access."
+   *
+   * The answer is not a longer delimiter list — that loses to the next punctuation mark. It is to ask
+   * what in the segment is still unaccounted for once the routine reading is taken, and to refuse to
+   * call the whole thing routine while operative-shaped words remain.
+   */
+  const leftover = unaccountedOperativeWord(lower, targets);
+  if (leftover !== undefined) {
+    raise("uncertainConsequence", action.matched, leftover,
+      `"${leftover}" is outside the routine effect that was recognised, and could ask for something else`);
+  }
+
+  // Both halves affirmatively recognised, no consequential target, nothing operative left over.
   return { ...flags, evidence };
 }
+
+/**
+ * The first word in a segment that the routine reading does not account for and that could be an
+ * instruction of its own, or `undefined` when the segment is fully accounted for.
+ *
+ * Accounted for means: the predicate head, grammatical glue, a recognised modifier, or a word inside
+ * a target the model actually matched. What is left is unknown material, and unknown material is
+ * only excused where English only permits a noun phrase — an attributive slot before a recognised
+ * noun ("the *unit* test", "the *flaky* test"), or a trailing word qualified by one ("the UI *bug*").
+ *
+ * Anything else — a word taking its own determiner ("shred *those* files"), or a second unknown word
+ * governing another ("update parser *shred file*") — is a candidate predicate, and a candidate
+ * predicate inside a supposedly routine request is precisely what must not be assumed harmless.
+ */
+function unaccountedOperativeWord(segment: string, targets: TargetEvidenceV1): string | undefined {
+  const words = segment.split(/[^a-z'-]+/).filter(Boolean);
+  if (words.length === 0) return undefined;
+  const head = firstWordOf(segment);
+
+  /*
+   * Accounting reads the *whole* target vocabulary present in the segment, not just the one word per
+   * class that `classifyTargets` reports.
+   *
+   * That reporting keeps the first match per class so a gate can name its cause, and reusing it here
+   * made every other recognised noun look unaccounted: "Rename the test fixture names." gated on
+   * `fixture`, which the model knows perfectly well. Evidence for the reader and evidence for the
+   * accounting are different questions.
+   */
+  const nounClass = new Map<string, string>();
+  for (const row of TARGET_CLASSES) {
+    for (const phrase of row.words) {
+      for (const word of phrase.split(/[^a-z'-]+/).filter(Boolean)) {
+        // Multi-word targets ("the list", "the ledger") carry their determiner. Letting that register
+        // `the` as a noun made every determiner look like the head of a noun phrase.
+        if (FUNCTION_WORDS.has(word)) continue;
+        if (words.includes(word)) nounClass.set(word, row.target);
+      }
+    }
+  }
+
+  const isTargetNoun = (word: string | undefined): boolean => word !== undefined && nounClass.has(word);
+  const isModifier = (word: string | undefined): boolean => word !== undefined && isKnownModifier(word);
+  const isNounPhraseWord = (word: string | undefined): boolean => isTargetNoun(word) || isModifier(word);
+
+  const isGlue = (word: string, index: number): boolean =>
+    index === 0
+    || word === head
+    || FUNCTION_WORDS.has(word)
+    || LEADING_ADVERBS.includes(word)
+    || INSTRUCTION_WRAPPER_WORDS.has(word);
+
+  const accounted = (word: string, index: number): boolean => isGlue(word, index) || isNounPhraseWord(word);
+
+  /*
+   * A participle is never excused by position.
+   *
+   * "the duplicated CSS class" and "murking the log" occupy the same slot, and the only honest
+   * difference is that `duplicate` is a modifier this model knows and `murk` is a word it has never
+   * read. An unknown `-ing`/`-ed` word stays a candidate predicate wherever it sits.
+   */
+  const isUnreadParticiple = (word: string): boolean => /(ing|ed)$/.test(word) && !isKnownModifier(word);
+
+  /** A verb the model knows, appearing somewhere other than the head, is a second predicate. */
+  const isKnownVerb = (word: string): boolean =>
+    ROUTINE_ACTIONS.includes(word)
+    || CONSEQUENTIAL_ACTIONS.some((verb) => inflectionsOf(verb).includes(word));
+
+  const opaque = (word: string): boolean => isUnreadParticiple(word) || isKnownVerb(word);
+
+  for (let index = 0; index < words.length; index += 1) {
+    if (accounted(words[index] ?? "", index)) continue;
+
+    let end = index;
+    while (end < words.length && !accounted(words[end] ?? "", end)) end += 1;
+    const run = words.slice(index, end);
+    const before = index > 0 ? words[index - 1] : undefined;
+    const after = end < words.length ? words[end] : undefined;
+    const readable = !run.some(opaque);
+
+    /*
+     * A modifier run: unread words qualifying a noun the model did recognise. Introduced by a
+     * determiner or the verb — "Add a *clearer waiting-on-owner* indicator." — or joining two nouns
+     * of the same kind, which is what a compound names: "the CSS *cleanup* commit".
+     *
+     * Two nouns of *different* kinds either side of an unread word is not one object being named;
+     * it is a second thing being done to a second target, which is exactly the shape that must not
+     * quietly merge.
+     */
+    const compound = isTargetNoun(before) && isTargetNoun(after)
+      && nounClass.get(before ?? "") === nounClass.get(after ?? "");
+    if (readable && isNounPhraseWord(after) && (!isTargetNoun(before) || compound)) { index = end - 1; continue; }
+
+    /*
+     * A single trailing word governing nothing: "the UI *bug*", "for the *phrase*".
+     *
+     * It ends the segment, so it has no object; qualified by a recognised noun or introduced by a
+     * determiner, it can only be naming something. A predicate that takes nothing away cannot be the
+     * mutation this check exists to catch — and unread verbs are excluded from `readable` anyway.
+     */
+    if (readable && run.length === 1 && end === words.length
+      && (isTargetNoun(before) || (before !== undefined && FUNCTION_WORDS.has(before)))) { index = end - 1; continue; }
+
+    return run[0];
+  }
+  return undefined;
+}
+
+/** Every word appearing in a politeness wrapper, so wrapper remnants are never read as instructions. */
+const INSTRUCTION_WRAPPER_WORDS: ReadonlySet<string> = new Set(
+  INSTRUCTION_WRAPPERS.flatMap((phrase) => phrase.split(" ")),
+);
 
 /**
  * Remove quoted spans so discussed language is not read as requested effect.
@@ -555,11 +755,45 @@ const CLAUSE_BOUNDARIES: readonly string[] = [
   "so that", "in order to", "along with", "together with", "besides", "rather than", "instead of",
 ];
 
-const MODIFIER_SUFFIX = /(ed|ing|al|ive|ous|able|ible|less|ful)$/;
+/**
+ * Suffixes that can only ever be adjectival.
+ *
+ * `-ed` and `-ing` used to be in this set, and that was a permission bypass. A participle is exactly
+ * as much a verb as it is a modifier — "murking the log" and "duplicated CSS class" have the same
+ * shape — so treating any unknown `-ing`/`-ed` word as a harmless modifier let an unread mutation
+ * merge into the routine clause in front of it:
+ *
+ *     "Refactor the parser, murking the log."   ->  one effect  ->  ALLOW_STANDING
+ *
+ * while standalone "Murking the log." gated. Morphology alone may no longer contribute affirmative
+ * permission. The suffixes left here cannot form a predicate.
+ */
+const ADJECTIVE_SUFFIX = /(al|ive|ous|able|ible|less|ful)$/;
+
 const KNOWN_MODIFIERS: readonly string[] = [
   "unused", "duplicate", "old", "new", "local", "internal", "stale", "legacy", "broken", "failing",
   "missing", "extra", "redundant", "deprecated", "temporary", "leftover",
 ];
+
+/**
+ * The participle forms of the modifiers above, generated rather than listed.
+ *
+ * "Remove the unused, duplicated CSS class." must still read as one noun phrase, and `duplicated`
+ * only ever reached that reading through the `-ed` suffix rule. Deriving the forms of words already
+ * known to be modifiers keeps that sentence working without re-admitting every unknown participle —
+ * the same generate-don't-list move `inflectionsOf` makes on the consequential side.
+ */
+const KNOWN_MODIFIER_FORMS: ReadonlySet<string> = new Set(
+  KNOWN_MODIFIERS.flatMap((word) => {
+    const stem = word.endsWith("e") ? word.slice(0, -1) : word;
+    return [word, word + "d", word + "ed", word + "ing", stem + "ed", stem + "ing"];
+  }),
+);
+
+/** True when a word is a modifier this model actually recognises, rather than one merely shaped like one. */
+function isKnownModifier(word: string): boolean {
+  return KNOWN_MODIFIER_FORMS.has(word) || ADJECTIVE_SUFFIX.test(word);
+}
 
 /**
  * Break a request into the effects it actually asks for.
@@ -626,6 +860,8 @@ const FUNCTION_WORDS: ReadonlySet<string> = new Set([
   "under", "and", "or", "nor", "as", "is", "are", "was", "were", "be", "been", "being", "any",
   "all", "both", "each", "every", "some", "no", "not", "only", "just", "very", "too", "more",
   "most", "less", "least", "other", "others", "same", "such", "own", "one", "two", "three",
+  // Verb particles. "Clean up the ..." is one predicate, and `up` names nothing on its own.
+  "up", "down", "out", "off", "back", "again", "around", "through",
 ]);
 
 function isNounPhraseContinuation(fragment: string): boolean {
@@ -636,8 +872,7 @@ function isNounPhraseContinuation(fragment: string): boolean {
   if (ROUTINE_ACTIONS.includes(head)) return false;
   return words.every(
     (word) =>
-      KNOWN_MODIFIERS.includes(word)
-      || MODIFIER_SUFFIX.test(word)
+      isKnownModifier(word)
       || ROUTINE_TARGET_WORDS.has(word)
       || FUNCTION_WORDS.has(word),
   );
