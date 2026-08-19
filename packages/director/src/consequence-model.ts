@@ -1,39 +1,40 @@
 /**
- * What would this actually *do*? — asked structurally, so paraphrase does not defeat it.
+ * What would this actually *do*? — asked target-first, so an unfamiliar verb cannot make it routine.
  *
- * The previous safety boundary was a list of phrases. An independent review took a fixture with
- * perfectly valid lineage and a valid active envelope and walked 18 of 31 high-consequence requests
- * straight through it:
+ * This module has now failed two independent hostile reviews, and the second failure is the reason it
+ * looks the way it does. The first version was a phrase list. The second version produced a
+ * structured result — and still consulted the verb first:
  *
- *   "Send this to the customer."          "Push this announcement live."
- *   "Give AION access to my inbox."       "Turn on the paid model."
- *   "Relax the security policy."          "Treat these as pre-approved."
+ *     unknown verb → no action family selected → targets never examined → routine
  *
- * None of those contained a listed phrase. A phrase list cannot be a security boundary, because the
- * space of ways to say "email the customer" is unbounded and the list is not.
+ * So "Push this update live.", "Ship this to the customer.", "Wire in my Google login." and "Fund the
+ * API." all inherited authority under valid lineage. The output type was structured; the *decision*
+ * was still a synonym lookup, and 22 of 37 consequential requests walked through it.
  *
- * ## The model
+ * ## Target-first
  *
- * Consequence is read as **action × target**, not as vocabulary:
+ * Targets are classified **independently of verbs**, and a consequential target is decisive:
  *
- *   - an ACTION family (send, publish, destroy, connect, spend, weaken-security, expand-authority)
- *   - a TARGET class (external party, the public, important data, an account, money, a security
- *     control, a code artifact, an internal technical object)
+ *   1. **Pass A — targets.** What is being acted on? Classified with no reference to the action.
+ *   2. **Pass B — actions.** Routine, consequential, or *unknown*. Unknown stays unknown.
+ *   3. **Pass C — declared evidence.** Effect class, sensitivity, spend, providers from the milestone.
+ *   4. **Pass D — conservative composition.** Most restrictive interpretation wins.
  *
- * "Remove the unused CSS class" and "Remove the production archives" share a verb and are not the
- * same request. The target decides. That is what generalises past wording.
+ * The composition rule that matters:
  *
- * ## Uncertainty is a consequence
+ *   **A consequential target gates unless the action is proven routine *and* the target is not
+ *   consequential.** A verb nobody recognised near the word "backups" is not a safe request; it is an
+ *   unread one.
  *
- * The rule that makes this safe is not the coverage of the tables below — it is the fallback. A
- * consequential action whose target cannot be resolved sets `uncertainConsequence`, which gates.
- * "Send it." is not routine because nothing matched; it is unresolved, and unresolved means ask.
+ * ## Two ways to be wrong, and which one this file chooses
  *
- * So a gap in these tables costs an unnecessary Owner decision. A gap in a phrase list cost an
- * unauthorized action. Those are the two failure modes available, and this file is arranged so the
- * cheap one is the one that happens.
+ * Over-gating costs an Owner decision on work that was safe. Under-gating deletes backups. "Fix the
+ * customer list rendering bug" mentions a customer and will gate — that is a real false positive and
+ * it is the price. It is stated here rather than hidden, because the temptation to trim these lists
+ * for convenience is exactly how the previous two versions failed.
  *
- * Nothing here lowers a consequence. Every layer may only add.
+ * Adding synonyms does not fix this class of bug. Unseen wording has to fail closed *structurally*,
+ * which is why the action tables below are the least important thing in the file.
  */
 
 /** One reason a consequence was concluded, kept so a gate can be read rather than guessed at. */
@@ -60,268 +61,347 @@ export interface RequestedConsequenceV1 {
   readonly securityConfigurationChange: boolean;
   readonly irreversibleExternalEffect: boolean;
   readonly authorityExpansion: boolean;
-  /** A consequential action was recognised but its target was not. Gates. */
+  /** The request could not be proven routine. Gates, and no envelope setting covers it. */
   readonly uncertainConsequence: boolean;
   readonly evidence: readonly ConsequenceEvidenceV1[];
 }
 
+type ConsequenceKey = Exclude<keyof RequestedConsequenceV1, "evidence">;
+
 /* -------------------------------------------------------------------------- */
-/* Targets                                                                     */
+/* Pass A — targets, classified without reference to any verb                  */
 /* -------------------------------------------------------------------------- */
 
-const TARGETS: readonly (readonly [string, readonly string[]])[] = [
-  ["external party", ["customer", "client", "lead", "prospect", "subscriber", "recipient", "recruiter", "everyone", "the list", "mailing list", "contacts", "the team at", "them", "him", "her", "buyer", "seller", "applicant", "candidate", "vendor", "supplier"]],
-  ["the public", ["publicly", "public", "online", "live", "the internet", "social", "website", "web site", "blog", "twitter", "linkedin", "facebook", "instagram", "press", "announcement"]],
-  ["important data", ["backup", "back up", "back-up", "snapshot", "restore file", "restore point", "recovery cop", "recovery file", "archive", "database", "production data", "records", "history", "shadow copy", "the store", "audit log", "ledger", "handoff", "certification"]],
-  ["an account", ["inbox", "mailbox", "my mail", "my email", "email account", "gmail", "google", "outlook", "office 365", "portal", "my account", "account", "login", "log-in", "sign-in", "credential", "password", "api key", "token", "oauth", "calendar", "drive"]],
-  ["money", ["money", "cost", "costs", "budget", "paid", "pay", "billing", "invoice", "subscription", "api access", "credit", "spend", "price", "plan", "ceiling", "limit", "quota"]],
-  ["a security control", ["firewall", "security", "protection", "defender", "antivirus", "bitlocker", "secure boot", "uac", "policy", "permission", "port", "encryption", "guard", "safeguard", "control"]],
-  ["production", ["production", "prod", "live site", "live environment", "the writer", "customer-facing"]],
-  ["sensitive personal data", ["my messages", "my texts", "my calls", "call transcript", "my photos", "my bank", "financial record", "medical", "ssn", "social security", "tax return", "personal context", "browsing history", "my documents"]],
-  ["a code artifact", ["class", "function", "method", "variable", "import", "test", "spec", "component", "module", "file", "helper", "comment", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "field on", "column in the schema"]],
-  ["an internal technical object", ["port", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "payload", "socket", "buffer", "cache", "the panel", "the page", "the button", "the indicator", "the ui", "the view"]],
+interface TargetClassV1 {
+  readonly target: string;
+  readonly words: readonly string[];
+  /** What touching this target implies, whatever the action turns out to be. */
+  readonly implies: readonly ConsequenceKey[];
+  /** True when this target is safe to act on with an unrecognised verb. */
+  readonly routine: boolean;
+}
+
+const TARGET_CLASSES: readonly TargetClassV1[] = [
+  {
+    target: "an external party",
+    words: ["customer", "client", "buyer", "seller", "lead", "leads", "prospect", "subscriber", "recipient", "recruiter", "applicant", "candidate", "vendor", "supplier", "audience", "everyone", "the list", "mailing list", "our contacts", "the team at"],
+    implies: ["externalSend", "externalContact", "irreversibleExternalEffect"],
+    routine: false,
+  },
+  {
+    target: "the public",
+    words: ["publicly", "public", "website", "web site", "the site", "online", "live", "the internet", "social", "blog", "twitter", "linkedin", "facebook", "instagram", "press release", "announcement", "the notice", "channel"],
+    implies: ["externalPublish", "externalContact", "irreversibleExternalEffect"],
+    routine: false,
+  },
+  {
+    target: "an account or credential",
+    words: ["gmail", "outlook", "office 365", "inbox", "mailbox", "my mail", "my email", "email account", "google account", "google login", "my google", "portal", "my account", "login", "log-in", "sign-in", "credential", "password", "api key", "access token", "oauth", "authenticate", "authentication", "my calendar", "my drive"],
+    implies: ["accountAccess", "oauthConsent", "credentialAccess"],
+    routine: false,
+  },
+  {
+    target: "money",
+    words: ["paid", "paid tier", "paid model", "paid plan", "billing", "invoice", "subscription", "subscribe", "api access", "money", "budget", "purchase", "payment", "spend", "credits", "price", "pricing", "costs money", "cost money", "premium tier", "license fee"],
+    implies: ["paidResource", "spendIncrease", "newFinancialObligation"],
+    routine: false,
+  },
+  {
+    target: "important or recoverable data",
+    words: ["backup", "backups", "back up", "back-up", "snapshot", "snapshots", "restore file", "restore point", "restore copies", "recovery cop", "recovery file", "recovery snapshot", "archive", "archives", "archived", "dump", "dumps", "database", "production data", "shadow copy", "audit log", "the ledger", "the handoff", "certification"],
+    implies: ["destructiveImportantData"],
+    routine: false,
+  },
+  {
+    target: "a security control",
+    words: ["firewall", "windows security", "windows protection", "security policy", "security setting", "protection", "protections", "defender", "antivirus", "bitlocker", "secure boot", "uac", "group policy", "encryption", "open a port", "port forward", "os security", "safeguard"],
+    implies: ["securityConfigurationChange"],
+    routine: false,
+  },
+  {
+    target: "production",
+    words: ["production", "prod ", "prod.", "live site", "live environment", "customer-facing", "the writer"],
+    implies: ["productionMutation"],
+    routine: false,
+  },
+  {
+    target: "sensitive personal data",
+    words: ["my messages", "my texts", "my calls", "call transcript", "my photos", "my bank", "financial record", "medical", "ssn", "social security", "tax return", "personal context", "browsing history", "my documents", "my history"],
+    implies: ["sensitiveDataExpansion"],
+    routine: false,
+  },
+  {
+    target: "AION's own authority",
+    words: ["approval", "approve", "preapprove", "pre-approve", "preapproved", "pre-approved", "prompting", "prompt me", "asking me", "ask me", "checking with me", "check with me", "permission", "permissions", "authorization", "authorize yourself", "autonomy", "going forward", "from now on", "next time", "without checking", "without asking", "automatically", "on your own"],
+    implies: ["authorityExpansion"],
+    routine: false,
+  },
+  {
+    target: "an external system of record",
+    words: ["tekion", "informativ", "metricool", "salesforce", "hubspot", "quickbooks", "job board", "job listing", "public listings", "indeed"],
+    implies: ["externalContact", "sensitiveDataExpansion"],
+    routine: false,
+  },
+  {
+    target: "a code artifact",
+    words: ["class", "function", "method", "variable", "import", "test", "tests", "spec", "fixture", "mock", "component", "module", "file", "helper", "comment", "docstring", "type", "interface", "css", "style", "lint", "dead code", "unused", "duplicate", "stub", "todo", "warning", "parser", "renderer", "serializer", "validator", "schema", "config", "script", "package", "dependency", "build", "pipeline", "commit", "branch", "readme", "documentation", "docs", "help copy", "copy text"],
+    implies: [],
+    routine: true,
+  },
+  {
+    target: "an internal technical object",
+    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "payload", "socket", "buffer", "cache", "the panel", "the page", "the button", "the indicator", "the ui", "the view", "the port", "process", "node", "nodes", "rendering", "status"],
+    implies: [],
+    routine: true,
+  },
 ];
 
-function targetsIn(text: string): readonly string[] {
-  const found: string[] = [];
-  for (const [name, words] of TARGETS) {
-    if (words.some((word) => text.includes(word))) found.push(name);
+export interface TargetEvidenceV1 {
+  readonly consequential: readonly string[];
+  readonly routine: readonly string[];
+  readonly implied: readonly ConsequenceKey[];
+  readonly matched: readonly (readonly [string, string])[];
+}
+
+/**
+ * Classify what a request acts on, with no reference to how.
+ *
+ * This is Pass A and it runs first for a reason: the previous version reached its target table only
+ * after an action pattern matched, so an unrecognised verb meant the targets were never read at all.
+ */
+export function classifyTargets(text: string): TargetEvidenceV1 {
+  const lower = typeof text === "string" ? text.toLowerCase() : "";
+  const consequential: string[] = [];
+  const routine: string[] = [];
+  const implied: ConsequenceKey[] = [];
+  const matched: [string, string][] = [];
+
+  for (const row of TARGET_CLASSES) {
+    const word = row.words.find((candidate) => lower.includes(candidate));
+    if (word === undefined) continue;
+    matched.push([row.target, word]);
+    if (row.routine) {
+      routine.push(row.target);
+      continue;
+    }
+    consequential.push(row.target);
+    for (const consequence of row.implies) {
+      if (!implied.includes(consequence)) implied.push(consequence);
+    }
   }
+
+  return { consequential, routine, implied, matched };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Pass B — actions. Unknown stays unknown.                                    */
+/* -------------------------------------------------------------------------- */
+
+export type ActionKindV1 = "ROUTINE" | "CONSEQUENTIAL" | "UNKNOWN";
+
+/**
+ * Verbs that do not mutate anything outside the repository, whatever they are pointed at.
+ *
+ * This list is a *permission to proceed on an unresolved target*, so it stays small and boring. It is
+ * not a synonym list for safety — a routine verb aimed at a consequential target still gates.
+ */
+const ROUTINE_ACTIONS: readonly string[] = [
+  "polish", "tidy", "simplify", "refactor", "rename", "reformat", "format", "document", "annotate",
+  "comment", "clarify", "improve", "adjust", "tweak", "reorganize", "reorder", "extract", "inline",
+  "describe", "explain", "review", "read", "inspect", "check", "measure", "profile", "log",
+  "test", "lint", "typecheck", "build", "compile", "verify", "fix", "add", "update", "write",
+];
+
+/** Verbs whose effect is consequential *when* they reach a consequential or unresolved target. */
+const CONSEQUENTIAL_ACTIONS: readonly string[] = [
+  "send", "email", "mail", "message", "text", "dm", "forward", "notify", "share", "deliver",
+  "circulate", "distribute", "publish", "post", "announce", "broadcast", "tweet", "release",
+  "roll out", "ship", "push", "upload", "put", "make", "go live",
+  "delete", "remove", "clear", "clean", "erase", "wipe", "purge", "destroy", "drop", "discard",
+  "prune", "trash", "nuke", "get rid of",
+  "connect", "hook", "wire", "link", "tie", "sign", "log in", "authenticate", "grant", "give",
+  "let", "allow", "enable", "use",
+  "buy", "purchase", "pay", "fund", "spend", "subscribe", "upgrade",
+  "disable", "turn off", "loosen", "relax", "ease", "weaken", "bypass", "open", "unblock", "lower",
+  "stop", "skip", "assume", "preapprove", "pre-approve", "handle", "treat", "deploy", "activate",
+  "promote", "cut over",
+];
+
+function firstWordOf(text: string): string {
+  const lead = ["just", "please", "also", "now", "then", "quickly", "simply", "actually", "really", "kindly", "maybe", "perhaps", "don't", "do not", "never", "always"];
+  let head = text.trim().toLowerCase();
+  for (;;) {
+    const adverb = lead.find((word) => head.startsWith(`${word} `));
+    if (adverb === undefined) break;
+    head = head.slice(adverb.length + 1);
+  }
+  return head.split(/[^a-z'-]+/).filter(Boolean)[0] ?? "";
+}
+
+/**
+ * Match a verb as a whole word, never as a substring.
+ *
+ * Found while writing the tests: "Zorble my Gmail inbox." matched the verb `mail` inside the noun
+ * `Gmail` and was classified as a known action. It still gated — the account target caught it — but a
+ * verb matcher that fires on fragments of unrelated nouns produces both false alarms and, worse,
+ * false confidence that the action was understood.
+ */
+function containsWord(text: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(String.raw`(^|[^a-z])${escaped}([^a-z]|$)`).test(text);
+}
+
+/** Classify the action, returning `UNKNOWN` rather than guessing. */
+export function classifyAction(text: string): { kind: ActionKindV1; matched: string } {
+  const lower = typeof text === "string" ? text.toLowerCase() : "";
+  const head = firstWordOf(lower);
+
+  const consequential = CONSEQUENTIAL_ACTIONS.find((verb) => head === verb || containsWord(lower, verb));
+  if (consequential !== undefined) return { kind: "CONSEQUENTIAL", matched: consequential };
+
+  const routine = ROUTINE_ACTIONS.find((verb) => head === verb || containsWord(lower, verb));
+  if (routine !== undefined) return { kind: "ROUTINE", matched: routine };
+
+  return { kind: "UNKNOWN", matched: head };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Pass C — evidence the milestone declares about itself                       */
+/* -------------------------------------------------------------------------- */
+
+export interface DeclaredEffectEvidenceV1 {
+  readonly externalEffectClass?: string;
+  readonly reversibilityClass?: string;
+  readonly sensitivityClass?: string;
+  readonly spendCapUsd?: number;
+  readonly riskClasses?: readonly string[];
+}
+
+/** Consequences the milestone's own declared fields imply. These may only add. */
+export function consequencesFromDeclaredFields(declared: DeclaredEffectEvidenceV1): readonly ConsequenceKey[] {
+  const found: ConsequenceKey[] = [];
+  const risks = new Set(declared.riskClasses ?? []);
+  if (declared.externalEffectClass === "IRREVERSIBLE_EXTERNAL") found.push("irreversibleExternalEffect");
+  if (declared.externalEffectClass === "IDEMPOTENT_EXTERNAL") found.push("externalContact");
+  // Deliberately no `IRREVERSIBLE → destructiveImportantData` mapping. Emailing a customer is
+  // irreversible and destroys nothing; inferring destruction from reversibility meant an envelope
+  // that explicitly granted irreversible external effects still could not send anything. The
+  // resolver checks irreversibility separately, against either covering permission.
+  if (declared.sensitivityClass === "CONFIDENTIAL" || declared.sensitivityClass === "RESTRICTED") {
+    found.push("sensitiveDataExpansion");
+  }
+  if ((declared.spendCapUsd ?? 0) > 0) found.push("paidResource", "spendIncrease");
+  if (risks.has("PRODUCTION_OR_EXTERNAL")) found.push("productionMutation");
+  if (risks.has("SECURITY_OR_PRIVACY")) found.push("securityConfigurationChange");
+  if (risks.has("PERSISTENCE_OR_RECOVERY")) found.push("destructiveImportantData");
+  if (risks.has("MONEY")) found.push("paidResource");
+  if (risks.has("SENSITIVE_DATA")) found.push("sensitiveDataExpansion");
+  if (risks.has("AUTHORITY_OR_GOVERNANCE")) found.push("authorityExpansion");
   return found;
 }
 
 /* -------------------------------------------------------------------------- */
-/* Actions                                                                     */
+/* Pass D — conservative composition                                           */
 /* -------------------------------------------------------------------------- */
 
-interface ActionFamilyV1 {
-  readonly action: string;
-  readonly patterns: readonly string[];
-  /** Targets that make this action consequential, mapped to the consequence it implies. */
-  readonly consequential: readonly (readonly [string, keyof RequestedConsequenceV1])[];
-  /** Targets that make this action routine. Presence of one of these clears the uncertainty. */
-  readonly benign: readonly string[];
-  /** Consequences that hold regardless of target, because the action itself is the boundary. */
-  readonly unconditional?: readonly (keyof RequestedConsequenceV1)[];
-}
-
-const ACTIONS: readonly ActionFamilyV1[] = [
-  {
-    action: "send",
-    patterns: ["send", "email", "e-mail", "mail ", "message", "text ", "dm ", "forward", "notify", "reply to", "respond to", "share this with", "share it with", "share with", "deliver", "contact", "reach out", "follow up with", "cc ", "bcc "],
-    consequential: [
-      ["external party", "externalSend"],
-      ["the public", "externalPublish"],
-      ["sensitive personal data", "sensitiveDataExpansion"],
-    ],
-    benign: ["an internal technical object", "a code artifact"],
-  },
-  {
-    action: "publish",
-    patterns: ["publish", "post ", "post the", "post this", "announce", "broadcast", "tweet", "go live", "put this online", "put it online", "put the announcement online", "push it live", "push this live", "push the announcement live", "make it public", "make this public", "release publicly", "upload to"],
-    consequential: [["the public", "externalPublish"], ["external party", "externalSend"]],
-    benign: ["an internal technical object", "a code artifact"],
-    // Publishing is outward-facing by definition; only an explicitly internal target rescues it.
-    unconditional: ["externalPublish"],
-  },
-  {
-    action: "destroy",
-    patterns: ["delete", "remove", "clear out", "clear the", "clean up", "clean out", "clean this up", "clean that up", "clean it up", "clean them up", "tidy up", "get rid of", "purge", "wipe", "erase", "destroy", "drop the", "discard", "prune", "throw away", "trash", "nuke", "reset the"],
-    consequential: [
-      ["important data", "destructiveImportantData"],
-      ["production", "destructiveImportantData"],
-      ["sensitive personal data", "destructiveImportantData"],
-    ],
-    benign: ["a code artifact", "an internal technical object"],
-  },
-  {
-    action: "connect an account",
-    patterns: ["connect", "hook up", "hook this up", "link my", "sign in", "sign into", "log in", "log into", "authenticate", "authorize access", "give aion access", "give access", "grant access", "use my login", "integrate with", "oauth"],
-    consequential: [
-      ["an account", "accountAccess"],
-      ["sensitive personal data", "sensitiveDataExpansion"],
-    ],
-    benign: ["an internal technical object", "a code artifact"],
-  },
-  {
-    action: "spend",
-    patterns: ["buy", "purchase", "pay for", "pay ", "subscribe", "spend", "costs money", "cost money", "even if it costs", "paid model", "paid provider", "paid plan", "paid api", "raise the budget", "increase the budget", "raise the ceiling", "raise the limit", "increase the limit", "turn on the paid", "enable the paid", "upgrade to"],
-    consequential: [["money", "paidResource"]],
-    benign: [],
-    unconditional: ["paidResource", "newFinancialObligation"],
-  },
-  {
-    action: "weaken a security control",
-    patterns: ["disable", "turn off", "loosen", "relax", "weaken", "bypass", "open up", "open whatever", "allow through", "make an exception", "lower the", "soften", "unblock"],
-    consequential: [
-      ["a security control", "securityConfigurationChange"],
-      ["production", "productionMutation"],
-    ],
-    benign: ["a code artifact", "an internal technical object"],
-  },
-  {
-    action: "expand authority",
-    patterns: ["without checking with me", "without asking", "without confirming", "don't ask me", "do not ask me", "stop asking", "no need to ask", "from now on", "going forward", "pre-approved", "preapproved", "pre approved", "automatically from", "make this automatic", "make these automatic", "give yourself permission", "authorize yourself", "self-authorize", "skip the gate", "skip approval", "skip future approval", "no approval needed", "just handle these", "handle these", "treat these as", "this kind of thing", "these kinds of", "this category"],
-    consequential: [],
-    benign: [],
-    unconditional: ["authorityExpansion"],
-  },
-  {
-    action: "change production",
-    patterns: ["deploy", "activate", "go to prod", "promote to", "release to", "cut over", "switch production"],
-    consequential: [["production", "productionMutation"]],
-    benign: ["a code artifact", "an internal technical object"],
-  },
-  {
-    action: "read sensitive data",
-    patterns: ["read my", "look at my", "go through my", "scan my", "search my", "index my", "access my"],
-    consequential: [
-      ["sensitive personal data", "sensitiveDataExpansion"],
-      ["an account", "accountAccess"],
-    ],
-    benign: ["a code artifact", "an internal technical object"],
-  },
-];
-
-/* -------------------------------------------------------------------------- */
-/* Detection                                                                   */
-/* -------------------------------------------------------------------------- */
-
-const EMPTY: RequestedConsequenceV1 = {
-  externalSend: false,
-  externalPublish: false,
-  externalContact: false,
-  destructiveImportantData: false,
-  credentialAccess: false,
-  accountAccess: false,
-  oauthConsent: false,
-  sensitiveDataExpansion: false,
-  paidResource: false,
-  spendIncrease: false,
-  newFinancialObligation: false,
-  productionMutation: false,
-  securityConfigurationChange: false,
-  irreversibleExternalEffect: false,
-  authorityExpansion: false,
-  uncertainConsequence: false,
-  evidence: [],
+const EMPTY_FLAGS: Record<ConsequenceKey, boolean> = {
+  externalSend: false, externalPublish: false, externalContact: false,
+  destructiveImportantData: false, credentialAccess: false, accountAccess: false, oauthConsent: false,
+  sensitiveDataExpansion: false, paidResource: false, spendIncrease: false, newFinancialObligation: false,
+  productionMutation: false, securityConfigurationChange: false, irreversibleExternalEffect: false,
+  authorityExpansion: false, uncertainConsequence: false,
 };
 
 /**
  * Read the consequences a request would have.
  *
- * Layer 1 is lexical and contributes evidence; it is not the boundary. The boundary is the
- * combination rule and the uncertainty fallback below it.
+ * The composition below is the security boundary. Everything above it is evidence, and no single
+ * source of evidence is trusted to say "routine" on its own.
  */
-export function detectRequestedConsequences(text: string): RequestedConsequenceV1 {
-  const lower = typeof text === "string" ? text.toLowerCase() : "";
-  if (lower.trim() === "") return EMPTY;
-
-  const found = new Set<keyof RequestedConsequenceV1>();
+export function detectRequestedConsequences(
+  text: string,
+  declared: DeclaredEffectEvidenceV1 = {},
+): RequestedConsequenceV1 {
+  const flags: Record<ConsequenceKey, boolean> = { ...EMPTY_FLAGS };
   const evidence: ConsequenceEvidenceV1[] = [];
-  const targets = targetsIn(lower);
-  let uncertain = false;
-
-  for (const family of ACTIONS) {
-    const matched = family.patterns.find((pattern) => lower.includes(pattern));
-    if (matched === undefined) continue;
-
-    const benignTarget = family.benign.find((name) => targets.includes(name));
-    const consequential = family.consequential.filter(([name]) => targets.includes(name));
-
-    for (const [name, consequence] of consequential) {
-      found.add(consequence);
-      evidence.push({ consequence, action: family.action, target: name, detail: `"${matched}" applied to ${name}` });
-    }
-
-    for (const consequence of family.unconditional ?? []) {
-      // An unconditional consequence is cleared only by an explicitly internal target — "post to the
-      // endpoint" is an HTTP call, "post this publicly" is not.
-      if (benignTarget !== undefined && consequential.length === 0) continue;
-      found.add(consequence);
-      evidence.push({ consequence, action: family.action, target: benignTarget ?? "any", detail: `"${matched}" is outward-facing by itself` });
-    }
-
-    /*
-     * The rule that makes a gap in these tables cheap.
-     *
-     * A consequential action with no resolvable target is not routine — it is unread. "Send it." and
-     * "Clean that up." are both perfectly ordinary sentences and neither can be classified without
-     * knowing what "it" is, so they gate rather than proceed.
-     */
-    if (consequential.length === 0 && benignTarget === undefined && (family.unconditional ?? []).length === 0) {
-      uncertain = true;
-      evidence.push({
-        consequence: "uncertainConsequence",
-        action: family.action,
-        target: "unresolved",
-        detail: `"${matched}" was requested but its target could not be determined`,
-      });
-    }
-  }
-
-  // Second-order implications, applied after the primary pass so they cannot be missed by ordering.
-  if (found.has("accountAccess")) {
-    found.add("oauthConsent");
-    found.add("credentialAccess");
-  }
-  if (found.has("paidResource")) found.add("spendIncrease");
-  if (found.has("externalPublish") || found.has("externalSend")) {
-    found.add("externalContact");
-    found.add("irreversibleExternalEffect");
-  }
-  // Deliberately *not* implied by destruction. Deleting a local backup is irreversible and is not an
-  // external effect, and conflating them meant an envelope that explicitly granted destructive action
-  // still could not exercise it — which would make the permission field decorative in the other
-  // direction. Destruction has its own permission; it does not need to borrow this one.
-
-  return {
-    externalSend: found.has("externalSend"),
-    externalPublish: found.has("externalPublish"),
-    externalContact: found.has("externalContact"),
-    destructiveImportantData: found.has("destructiveImportantData"),
-    credentialAccess: found.has("credentialAccess"),
-    accountAccess: found.has("accountAccess"),
-    oauthConsent: found.has("oauthConsent"),
-    sensitiveDataExpansion: found.has("sensitiveDataExpansion"),
-    paidResource: found.has("paidResource"),
-    spendIncrease: found.has("spendIncrease"),
-    newFinancialObligation: found.has("newFinancialObligation"),
-    productionMutation: found.has("productionMutation"),
-    securityConfigurationChange: found.has("securityConfigurationChange"),
-    irreversibleExternalEffect: found.has("irreversibleExternalEffect"),
-    authorityExpansion: found.has("authorityExpansion"),
-    uncertainConsequence: uncertain,
-    evidence,
+  const raise = (consequence: ConsequenceKey, action: string, target: string, detail: string): void => {
+    if (flags[consequence]) return;
+    flags[consequence] = true;
+    evidence.push({ consequence, action, target, detail });
   };
+
+  const lower = typeof text === "string" ? text.toLowerCase() : "";
+  if (lower.trim() === "") {
+    return { ...flags, evidence };
+  }
+
+  const targets = classifyTargets(lower);
+  const action = classifyAction(lower);
+
+  // Pass C first, so a milestone that already declares an effect can never be talked out of it.
+  for (const consequence of consequencesFromDeclaredFields(declared)) {
+    raise(consequence, "declared", "milestone fields", `the milestone declares ${consequence}`);
+  }
+
+  /*
+   * A consequential target is decisive.
+   *
+   * Not "a consequential target plus a recognised verb" — that conjunction is exactly what failed.
+   * "Push this update live", "Fund the API" and "Wire in my Google login" all name a consequential
+   * target, and whether the verb happens to be in a list below changes nothing about what they ask
+   * for.
+   */
+  if (targets.consequential.length > 0) {
+    for (const consequence of targets.implied) {
+      const source = targets.matched.find(([name]) => TARGET_CLASSES.find((row) => row.target === name)?.implies.includes(consequence));
+      raise(consequence, action.matched || "unresolved", source?.[0] ?? "consequential target", `"${source?.[1] ?? ""}" names ${source?.[0] ?? "a consequential target"}`);
+    }
+    if (action.kind === "UNKNOWN") {
+      raise("uncertainConsequence", "unresolved", targets.consequential.join(", "),
+        `the action "${action.matched}" was not recognised and the request names ${targets.consequential.join(", ")}`);
+    }
+    return { ...flags, evidence };
+  }
+
+  /*
+   * No consequential target. Now the action decides whether the *absence* of one is safe.
+   *
+   * A consequential verb with nothing recognisable to act on is unread, not harmless: "Send it." and
+   * "Remove that permanently." are ordinary sentences that cannot be classified without knowing what
+   * "it" is. A routine target rescues them; nothing else does.
+   */
+  if (action.kind === "CONSEQUENTIAL") {
+    if (targets.routine.length > 0) return { ...flags, evidence };
+    raise("uncertainConsequence", action.matched, "unresolved",
+      `"${action.matched}" was requested but nothing identifiable was named as its target`);
+    return { ...flags, evidence };
+  }
+
+  if (action.kind === "UNKNOWN") {
+    if (targets.routine.length > 0) return { ...flags, evidence };
+    raise("uncertainConsequence", action.matched || "unresolved", "unresolved",
+      "neither the action nor its target could be identified");
+    return { ...flags, evidence };
+  }
+
+  // Routine action, no consequential target. The one path that concludes "routine".
+  return { ...flags, evidence };
 }
 
 /** True when anything at all was detected. */
 export function hasAnyConsequence(consequences: RequestedConsequenceV1): boolean {
-  return (
-    consequences.externalSend || consequences.externalPublish || consequences.externalContact
-    || consequences.destructiveImportantData || consequences.credentialAccess || consequences.accountAccess
-    || consequences.oauthConsent || consequences.sensitiveDataExpansion || consequences.paidResource
-    || consequences.spendIncrease || consequences.newFinancialObligation || consequences.productionMutation
-    || consequences.securityConfigurationChange || consequences.irreversibleExternalEffect
-    || consequences.authorityExpansion || consequences.uncertainConsequence
-  );
+  for (const key of Object.keys(EMPTY_FLAGS) as ConsequenceKey[]) {
+    if (consequences[key]) return true;
+  }
+  return false;
 }
 
-/** The permission an envelope must carry for each consequence, or `null` where none ever suffices. */
+/** The permission an envelope must carry for each consequence, or `never` where none suffices. */
 export interface ConsequencePermissionV1 {
-  readonly consequence: keyof RequestedConsequenceV1;
-  /** Envelope field that must be `YES`, a positive spend ceiling, or an allowed effect class. */
+  readonly consequence: ConsequenceKey;
   readonly requires: "destructive" | "oauth" | "security" | "production" | "sensitive" | "spend" | "irreversibleExternal" | "never";
 }
 
-/**
- * Consequence → the permission that could cover it.
- *
- * `never` means no envelope covers it at any setting. Authority expansion is on that list because an
- * envelope granting its own widening is the one thing that would make every other entry decorative;
- * uncertainty is there because "we could not tell" is not a permission anyone can grant in advance.
- */
 export const CONSEQUENCE_PERMISSIONS_V1: readonly ConsequencePermissionV1[] = [
   { consequence: "authorityExpansion", requires: "never" },
   { consequence: "uncertainConsequence", requires: "never" },
@@ -347,9 +427,8 @@ export function describeConsequences(consequences: RequestedConsequenceV1): stri
   const seen = new Set<string>();
   const parts: string[] = [];
   for (const row of consequences.evidence) {
-    const key = `${row.consequence}:${row.target}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(row.consequence)) continue;
+    seen.add(row.consequence);
     parts.push(`${row.consequence} (${row.detail})`);
   }
   return parts.join("; ");

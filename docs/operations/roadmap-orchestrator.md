@@ -276,20 +276,48 @@ and walked **18 of 31** high-consequence requests through on the strength of tha
 contained a listed phrase, and a phrase list cannot be a security boundary: the ways to say "email
 the customer" are unbounded and the list is not.
 
-`consequence-model.ts` replaced it. Consequence is read as **action × target**, not vocabulary:
+`consequence-model.ts` replaced it — and then failed a *second* review, because the replacement still
+consulted the verb first:
 
-| | |
+```
+unknown verb → no action family → targets never examined → routine
+```
+
+"Push this update live.", "Ship this to the customer.", "Wire in my Google login." and "Fund the API."
+all inherited. The output was structured; the decision was still a synonym lookup. Adding those four
+verbs would have passed that review and left the next paraphrase open.
+
+Detection is now **target-first**, in four independent passes:
+
+| Pass | Question |
 | --- | --- |
-| Actions | send, publish, destroy, connect-an-account, spend, weaken-a-security-control, expand-authority, change-production, read-sensitive-data |
-| Targets | external party, the public, important data, an account, money, a security control, production, sensitive personal data, a code artifact, an internal technical object |
+| A — targets | What is being acted on? Classified with **no reference to the verb**. |
+| B — actions | Routine, consequential, or **unknown**. Unknown stays unknown. |
+| C — declared evidence | Effect class, sensitivity, spend and risk the milestone declares. May only add. |
+| D — composition | Most restrictive interpretation wins. |
 
-"Remove the unused CSS class" and "Remove the production archives" share a verb and are not the same
-request; the target decides. That is what generalises past wording.
+**A consequential target is decisive.** It gates unless the action is proven routine *and* the target
+is not consequential. A verb nobody recognised near the word "backups" is not a safe request; it is
+an unread one.
 
-**Uncertainty is itself a consequence.** A consequential action whose target cannot be resolved sets
-`uncertainConsequence`, which gates and which **no envelope setting can cover**. "Send it." is not
-routine because nothing matched — it is unread. So a gap in these tables costs an unnecessary Owner
-decision, where a gap in a phrase list cost an unauthorized action.
+**Uncertainty is itself a consequence.** An action that cannot be resolved, or a consequential action
+with no identifiable target, sets `uncertainConsequence` — which gates and which **no envelope
+setting can cover**. "Send it." is not routine because nothing matched; it is unread.
+
+Same verb, different target, different answer — asserted as pairs:
+
+| Routine | Gated |
+| --- | --- |
+| Push the CSS cleanup commit internally. | Push this announcement live. |
+| Remove the unused CSS class. | Remove the production backups. |
+| Connect the local parser nodes. | Connect my Gmail account. |
+| Fund the zero-cost test fixture. | Fund paid API access. |
+| Stop the local test process. | Stop prompting me for approval. |
+
+This over-gates, on purpose. "Fix the customer list rendering bug" mentions a customer and will ask.
+That is the price, and it is the cheap failure: over-gating costs an Owner decision, under-gating
+deletes backups. The temptation to trim these tables for convenience is how the first two versions
+failed.
 
 Each consequence maps to the one permission that could cover it — destruction to
 `destructiveActionPermission`, account access to `oauthConsentPermission`, external send to an

@@ -215,9 +215,10 @@ test("a consequential action with an unresolved target fails closed", () => {
     assert.equal(consequences.uncertainConsequence, true, `"${objective}" was read as routine`);
     assert.notEqual(decide(objective).outcome, "ALLOW_STANDING", `"${objective}" inherited authority`);
   }
-  // "Post it." resolves rather than being uncertain — publishing is outward-facing by itself — which
-  // is a stronger answer than "unknown", not a weaker one. It must still gate.
-  assert.equal(detectRequestedConsequences("Post it.").externalPublish, true);
+  // "Post it." names no identifiable target, so it is unresolved rather than classified. Under
+  // target-first detection that is the honest answer — the earlier version called it publishing on
+  // the strength of the verb alone, which is the same reasoning that let unknown verbs through.
+  assert.equal(detectRequestedConsequences("Post it.").uncertainConsequence, true);
   assert.notEqual(decide("Post it.").outcome, "ALLOW_STANDING");
 });
 

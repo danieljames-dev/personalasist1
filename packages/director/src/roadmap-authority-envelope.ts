@@ -29,6 +29,7 @@ import {
   CONSEQUENCE_PERMISSIONS_V1,
   describeConsequences,
   detectRequestedConsequences,
+  type DeclaredEffectEvidenceV1,
   type RequestedConsequenceV1,
 } from "./consequence-model.js";
 import { assessOwnerBoundaries, describeBoundaries } from "./owner-boundary-detection.js";
@@ -321,7 +322,13 @@ export function resolveInheritedAuthority(
    * what a planner fills in, and a planner that misreads a request produces a record that is
    * internally consistent and completely wrong.
    */
-  const consequences = consequencesOf(milestone.objective);
+  const consequences = consequencesOf(milestone.objective, {
+    ...(milestone.externalEffectClass !== undefined ? { externalEffectClass: milestone.externalEffectClass } : {}),
+    ...(milestone.reversibilityClass !== undefined ? { reversibilityClass: milestone.reversibilityClass } : {}),
+    ...(milestone.sensitivityClass !== undefined ? { sensitivityClass: milestone.sensitivityClass } : {}),
+    spendCapUsd: milestone.spendCapUsd,
+    riskClasses: milestone.riskClasses,
+  });
   const uncovered = uncoveredConsequences(consequences, envelope);
   if (uncovered.length > 0) {
     const detail = `${uncovered.join(", ")} — ${describeConsequences(consequences)}`;
@@ -457,8 +464,11 @@ export function resolveInheritedAuthority(
  * envelope that explicitly grants destructive action could still never exercise it, which makes the
  * permission field decorative in the opposite direction — safe-looking and dishonest.
  */
-export function consequencesOf(objective: string): RequestedConsequenceV1 {
-  const structured = detectRequestedConsequences(objective);
+export function consequencesOf(
+  objective: string,
+  declared: DeclaredEffectEvidenceV1 = {},
+): RequestedConsequenceV1 {
+  const structured = detectRequestedConsequences(objective, declared);
   const lexical = assessOwnerBoundaries(objective);
   if (lexical.boundaries.length === 0) return structured;
 
