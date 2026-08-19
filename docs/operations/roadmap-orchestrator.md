@@ -83,6 +83,42 @@ port.continueRoadmap();        // runs until nothing is eligible
 port.pauseRoadmap();
 ```
 
+## Driving it from the AION app
+
+The app is the practical control surface. Open AION over the private network and pick **Roadmap**.
+
+The panel answers six questions and nothing else: what state the roadmap is in, what the current
+milestone is, what is ready next, whether anything is waiting on you, which provider is working, and
+whether you can pause it. One button matters — **Continue toward my goals** — and it names no model.
+Which milestone runs, whether authority covers it, which provider executes it and whether review is
+required are all decided behind that call.
+
+Verbs, routed through the app's existing `/api/action` dispatcher and its same-origin and pairing
+checks:
+
+| Verb | Effect |
+| --- | --- |
+| `roadmap.status` | everything the panel renders, in one round trip |
+| `roadmap.current`, `roadmap.ready`, `roadmap.gates`, `roadmap.workers`, `roadmap.recent` | individual reads |
+| `roadmap.continue` | `RoadmapPortV1.continueRoadmap()` |
+| `roadmap.pause`, `roadmap.resume` | durable roadmap state |
+
+That list is closed. There is deliberately no `approveGate`, `grantAuthority`, `forceComplete`,
+`bypassReview`, `bypassVerification` or `activateProduction` verb, and an unknown verb falls through
+to the dispatcher's `Unsupported Command Center action`. **The app observes authority; it never
+manufactures it.** A gate can only be satisfied by running the Founder authorization script at the
+computer running AION — the panel shows that command as read-only text and cannot execute it.
+
+Responses are minimized: milestone id, title, status, priority, dependencies and blocked reason.
+Objectives, provenance, verification plans, takeover packets and filesystem paths stay on the host.
+The one deliberate exception is a gate's `exactScope`, which exists so you can see what you are
+approving.
+
+Pause is durable state, not a closed browser tab. Reload and restart both preserve it.
+
+**After changing this code, restart the AION server.** A long-running process keeps serving the code
+it started with, so the Roadmap panel will not appear until it is restarted.
+
 ## Reading a stalled roadmap
 
 1. `getRoadmapStatus()` — `byStatus` says where everything sits.
@@ -95,9 +131,9 @@ port.pauseRoadmap();
 
 ## Known limitations of V1
 
-- **No app wiring.** Nothing in `apps/` drives the port yet; it is exercised by the focused suite and
-  the acceptance harness. `wiring.test.ts` records this as
-  `OWNER_DECISION_ROADMAP_ORCHESTRATOR_V1` rather than pretending a caller exists.
+- **The app drives reads and three verbs, not everything.** `apps/aion/roadmap-control.mjs` wires the
+  port into the Command Center. Seeding a roadmap, editing milestones and approving gates are all
+  still host-side acts by design.
 - **Review is a policy and a hook, not a reviewer.** The orchestrator decides *whether* independent
   review is required and refuses to complete without a verdict; it does not itself summon a second
   model. Wiring a real reviewer is a later milestone.

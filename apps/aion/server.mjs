@@ -24,6 +24,7 @@ import { PublicUrlResearchProviderV1, SearxngSearchProviderV1 } from "./research
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
+import { createRoadmapControl } from "./roadmap-control.mjs";
 
 /** Bump when shipping mobile UI fixes so phones load new CSS/JS without manual cache clear. */
 const ASSET_VERSION = "20260811g1";
@@ -598,6 +599,20 @@ export async function createAionServer(options = {}) {
      */
     brainRuntime,
   });
+
+  /*
+   * One roadmap control per server, built on first use.
+   *
+   * `roadmapControl` is injectable so a test can drive the Continue path without a provider process;
+   * production builds it over the durable store at `.aion-local/roadmap`.
+   */
+  let roadmapControlInstance = options.roadmapControl ?? null;
+  function roadmapControl() {
+    if (roadmapControlInstance === null) {
+      roadmapControlInstance = createRoadmapControl({ repositoryRoot });
+    }
+    return roadmapControlInstance;
+  }
 
   async function dispatch(input) {
     switch (input.type) {
@@ -1813,6 +1828,21 @@ export async function createAionServer(options = {}) {
         try { const result = await runCareer(repositoryRoot, input); await service.recordCareerActivity(input.command, "success", "No Career content is stored in activity."); return result; }
         catch (error) { if (error?.careerCommand) await service.recordCareerActivity(error.careerCommand, "failed", "The command failed; no Career content is stored."); throw error; }
       }
+      /*
+       * Roadmap control. Five reads and three verbs, and nothing else — there is deliberately no
+       * approve-gate, grant-authority, force-complete or bypass verb here. The app observes
+       * authority; it never manufactures it, so an Owner gate can only ever be satisfied at the
+       * console by the Founder authorization script.
+       */
+      case "roadmap.status": return roadmapControl().status();
+      case "roadmap.current": return roadmapControl().current();
+      case "roadmap.ready": return roadmapControl().ready();
+      case "roadmap.gates": return roadmapControl().gates();
+      case "roadmap.workers": return roadmapControl().workers();
+      case "roadmap.recent": return roadmapControl().recent();
+      case "roadmap.continue": return roadmapControl().continueRoadmap();
+      case "roadmap.pause": return roadmapControl().pause();
+      case "roadmap.resume": return roadmapControl().resume();
       default: throw new Error("Unsupported Command Center action.");
     }
   }

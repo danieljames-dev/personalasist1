@@ -184,16 +184,11 @@ test("every exported src function reachable from the run path has a non-test cal
     ["directorExecuteJobWithFailover", "OWNER_DECISION_PROVIDER_BRIDGE_V1: spawn path still uses launchRun; this is the V1 Director port"],
     ["directorSubmitMvaJob", "OWNER_DECISION_MVA_REAL_DISPATCH_V1: spawn path still uses launchRun; this is the V1 Director dispatch port"],
 
-    ["createRoadmapPort", "OWNER_DECISION_ROADMAP_ORCHESTRATOR_V1: the V1 Director roadmap port; apps/ wiring is a later app-integration milestone"],
-    ["advanceRoadmap", "OWNER_DECISION_ROADMAP_ORCHESTRATOR_V1: entry point of the roadmap loop, driven by the port and the acceptance harness rather than the spawn path"],
-    ["createMvaDispatcher", "OWNER_DECISION_ROADMAP_ORCHESTRATOR_V1: builds the MVA-backed dispatcher; only the roadmap port constructs one"],
-    ["createFileRoadmapStore", "OWNER_DECISION_ROADMAP_ORCHESTRATOR_V1: durable roadmap store constructed by the port and the acceptance harness"],
   ]);
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
     ["src-reachability.ts", "OWNER_DECISION_TEST_HELPER: modulesReachableFrom is a test-only import-graph helper that lives in src/"],
     ["mission.ts", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: whether mission advance gates the CLI exit contract or remains run-root documentation. The CLI writes mission.json; nothing in the repo reads it."],
-    ["roadmap-port.ts", "OWNER_DECISION_ROADMAP_ORCHESTRATOR_V1: whether the roadmap port is wired into apps/ in this milestone or a later AION app integration milestone. The port is exercised by the focused suite and the acceptance harness; nothing in src/ drives it."],
   ]);
 
   const orphans: string[] = [];

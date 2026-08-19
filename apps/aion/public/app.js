@@ -1,5 +1,5 @@
 // AION Command Center UI. Same-origin only; no hosted dependency, analytics, or telemetry.
-const areas = ["Home", "Chat", "Customers", "Tasks", "Capture", "Intake", "Inventory Walk", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
+const areas = ["Home", "Roadmap", "Chat", "Customers", "Tasks", "Capture", "Intake", "Inventory Walk", "Knowledge", "Sales", "People", "Brain", "Studio", "Research", "Projects", "Learning", "Routines", "Memory", "Planner", "Approvals", "Verify", "Activity", "Career", "Imports", "Mobile", "Settings"];
 /** Primary phone bottom bar (5 slots). More opens a sheet for Capture / Intake / Inventory / Knowledge. */
 const mobilePrimaryAreas = ["Home", "Chat", "Customers", "Tasks", "More"];
 const mobileMoreAreas = new Set(["Capture", "Intake", "Inventory Walk", "Knowledge", "Mobile", "Settings", "Sales", "People", "Imports"]);
@@ -1380,6 +1380,89 @@ ${people.map((p) => `<option value="${esc(p.id)}">${esc(p.displayName)}</option>
 <p class="meta">Recent documents: ${(s.crmDocuments ?? []).slice(0, 8).map((d) => `${esc(d.filename || d.id)} (${esc((d.tags || []).join(",") || "no tags")})`).join(" · ") || "none yet"}</p>`;
 }
 
+
+/*
+ * What AION is doing, what is next, and whether it is waiting for the Owner.
+ *
+ * Everything rendered here comes from the Director roadmap port through `roadmap.status`. The page
+ * never reads roadmap files and never infers a milestone's state for itself, because a UI that
+ * derives status independently is a UI that will eventually disagree with the orchestrator.
+ *
+ * There is exactly one important button. It says "Continue toward my goals" and names no model:
+ * which milestone runs, whether authority covers it and which provider executes it are all decided
+ * behind the call. There is deliberately no control here that approves a gate, forces a milestone
+ * complete, or skips review — those would make the gate queue decorative.
+ */
+function roadmapArea() {
+  const r = model._roadmap;
+  if (!r) {
+    return `<h1>Roadmap</h1><p class="lead">AION's own plan of work, and the one button that moves it forward.</p>
+<div class="empty">Loading roadmap…</div><button type="button" data-do="roadmap-refresh">Load roadmap</button>`;
+  }
+  if (!r.exists) {
+    return `<h1>Roadmap</h1><p class="lead">AION's own plan of work.</p>
+<div class="empty">No roadmap is stored yet. Nothing is scheduled, so there is nothing to continue.</div>
+<button type="button" data-do="roadmap-refresh">Refresh</button>`;
+  }
+
+  const busy = model._roadmapBusy === true;
+  const waiting = r.waitingOnOwner;
+  const statusLine = r.paused
+    ? "Paused. Nothing will run until you resume it."
+    : waiting
+      ? "Waiting for you. Safe work continues; the items below need your decision."
+      : r.readyCount > 0
+        ? `${r.readyCount} milestone${r.readyCount === 1 ? "" : "s"} ready to run.`
+        : "Nothing is ready. Every milestone is finished, blocked, or waiting on a dependency.";
+
+  const counts = Object.entries(r.byStatus || {})
+    .map(([k, v]) => `<code>${esc(k)} ${v}</code>`)
+    .join(" · ");
+
+  const gates = (r.gates || []).map((g) => `<article class="card"><h2>Waiting for you: ${esc(g.milestoneId)}</h2>
+<p class="meta">${esc(g.status)} · requested: ${esc(g.authorityRequested)}</p>
+<p>${esc(g.reason)}</p>
+${g.exactScope?.length ? `<details><summary>Exactly what is being asked for</summary><ul>${g.exactScope.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
+${g.authorization ? `<details><summary>How to authorize it</summary><p class="hint">Run this at the computer running AION. It cannot be run from this page.</p>
+<pre>${esc(g.authorization.command)}</pre><pre>${esc(g.authorization.phrase)}</pre></details>` : `<p class="hint">Authorize this at the computer running AION. This page cannot grant authority.</p>`}</article>`).join("");
+
+  const workers = (r.workers || []).length
+    ? (r.workers || []).map((w) => `<li>${esc(w.milestoneId)} — ${esc(w.status)} · provider ${esc(w.provider)}</li>`).join("")
+    : `<li class="meta">No worker is running.</li>`;
+
+  const ready = (r.ready || []).length
+    ? (r.ready || []).map((m) => `<li>${esc(m.title)} <span class="meta">(${esc(m.milestoneId)} · priority ${m.priority})</span></li>`).join("")
+    : `<li class="meta">Nothing is ready right now.</li>`;
+
+  const stuck = (r.stuck || []).length
+    ? `<h2>Stuck</h2><ul>${(r.stuck || []).map((m) => `<li>${esc(m.title)} — ${esc(m.status)}${m.blockedReason ? `: ${esc(m.blockedReason)}` : ""}</li>`).join("")}</ul>`
+    : "";
+
+  const done = (r.completed || []).length
+    ? `<h2>Recently completed</h2><ul>${(r.completed || []).map((m) => `<li>${esc(m.title)}</li>`).join("")}</ul>`
+    : "";
+
+  return `<h1>Roadmap</h1><p class="lead">AION's own plan of work, and the one button that moves it forward.</p>
+<article class="card"><h2>${esc(r.state)}${r.paused ? " · paused" : ""}</h2>
+<p>${esc(statusLine)}</p>
+<p class="meta">${r.total} milestone${r.total === 1 ? "" : "s"} · ${r.openGates} waiting on you · version ${r.version} · ${esc(r.fingerprint)}</p>
+${counts ? `<p class="meta">${counts}</p>` : ""}
+${r.current ? `<p>Current: <b>${esc(r.current.title)}</b> <span class="meta">(${esc(r.current.status)})</span></p>` : `<p class="meta">No current milestone.</p>`}
+<p>
+<button type="button" data-do="roadmap-continue"${busy || r.paused ? " disabled" : ""}>Continue toward my goals</button>
+${r.paused
+  ? `<button type="button" data-do="roadmap-resume"${busy ? " disabled" : ""}>Resume</button>`
+  : `<button type="button" data-do="roadmap-pause"${busy ? " disabled" : ""}>Pause</button>`}
+<button type="button" data-do="roadmap-refresh"${busy ? " disabled" : ""}>Refresh</button>
+</p>
+${model._roadmapLast ? `<p class="meta">${esc(model._roadmapLast)}</p>` : ""}
+</article>
+${gates}
+<article class="card"><h2>Ready next</h2><ul>${ready}</ul>
+<h2>Active worker</h2><ul>${workers}</ul>
+${stuck}${done}</article>`;
+}
+
 function page() {
   const s = model.state;
   if (area === "Home") return homeArea(s);
@@ -1393,6 +1476,7 @@ function page() {
   if (area === "Research") return researchArea(s);
   if (area === "Projects") return projectsArea(s);
   if (area === "Learning") return learningArea(s);
+  if (area === "Roadmap") return roadmapArea();
   if (area === "Chat") return chatArea(s);
   if (area === "Tasks") return tasksArea(s);
   if (area === "Routines") return routinesArea(s);
@@ -1909,6 +1993,40 @@ document.addEventListener("click", async (event) => {
       model._gmailStatus = await api("connector.gmail.status", {});
       toast("Gmail disconnected (local store cleared).");
       render();
+      return;
+    }
+    if (verb === "roadmap-refresh" || verb === "roadmap-continue" || verb === "roadmap-pause" || verb === "roadmap-resume") {
+      // Every verb refreshes the panel from the port afterwards, so the page always shows durable
+      // truth rather than an optimistic guess about what the button did.
+      model._roadmapBusy = true;
+      render();
+      try {
+        if (verb === "roadmap-refresh") {
+          model._roadmap = { ...(await api("roadmap.status", {})), ...(await api("roadmap.recent", {})) };
+          model._roadmapLast = "";
+        } else if (verb === "roadmap-continue") {
+          const result = await api("roadmap.continue", {});
+          model._roadmap = { ...result.status, ...(await api("roadmap.recent", {})) };
+          const parts = [];
+          if (result.completed?.length) parts.push(`completed ${result.completed.length}`);
+          if (result.gated?.length) parts.push(`${result.gated.length} waiting on you`);
+          if (result.blocked?.length) parts.push(`${result.blocked.length} blocked`);
+          if (result.failed?.length) parts.push(`${result.failed.length} failed`);
+          model._roadmapLast = `${parts.join(" · ") || "nothing to do"} — ${result.detail}`;
+          toast(parts.length ? `Roadmap: ${parts.join(", ")}` : "Roadmap: nothing eligible to run.");
+        } else {
+          const result = await api(verb === "roadmap-pause" ? "roadmap.pause" : "roadmap.resume", {});
+          model._roadmap = { ...result.status, ...(await api("roadmap.recent", {})) };
+          model._roadmapLast = `Roadmap is ${result.state}.`;
+          toast(`Roadmap ${result.state}.`);
+        }
+      } catch (err) {
+        model._roadmapLast = `Roadmap error: ${err?.message || err}`;
+        toast(model._roadmapLast);
+      } finally {
+        model._roadmapBusy = false;
+        render();
+      }
       return;
     }
     if (verb === "connector-metricool-status") {

@@ -53,6 +53,8 @@ export interface RoadmapPortV1 {
   getRoadmapStatus(): RoadmapStatusV1;
   getCurrentMilestone(): RoadmapMilestoneV1 | null;
   getReadyMilestones(): readonly RoadmapMilestoneV1[];
+  /** Every milestone, for a caller that needs to show blocked, failed or finished work. */
+  getMilestones(): readonly RoadmapMilestoneV1[];
   getPendingOwnerGates(): readonly RoadmapOwnerGateV1[];
   getActiveWorkers(): readonly ActiveWorkerV1[];
   continueRoadmap(): AdvanceResultV1;
@@ -221,6 +223,9 @@ export function createRoadmapPort(deps: RoadmapPortDepsV1): RoadmapPortV1 {
     },
     getReadyMilestones() {
       return readyMilestones(store.listMilestones());
+    },
+    getMilestones() {
+      return store.listMilestones();
     },
     getPendingOwnerGates() {
       return store.listGates().filter((gate) => gate.status === "OPEN");
