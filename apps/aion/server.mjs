@@ -24,7 +24,7 @@ import { PublicUrlResearchProviderV1, SearxngSearchProviderV1 } from "./research
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
-import { createRoadmapControl } from "./roadmap-control.mjs";
+import { createGoalControl, createRoadmapControl } from "./roadmap-control.mjs";
 
 /** Bump when shipping mobile UI fixes so phones load new CSS/JS without manual cache clear. */
 const ASSET_VERSION = "20260811g1";
@@ -612,6 +612,22 @@ export async function createAionServer(options = {}) {
       roadmapControlInstance = createRoadmapControl({ repositoryRoot });
     }
     return roadmapControlInstance;
+  }
+
+  /*
+   * Owner goal intake, built once and injectable for the same reason.
+   *
+   * It classifies Owner text and, for an actionable objective, adds one PLANNED milestone through the
+   * same port. It cannot approve a gate, grant authority, choose a provider or run anything — whether
+   * that milestone may execute is decided by the roadmap against Owner-written records this process
+   * cannot write.
+   */
+  let goalControlInstance = options.goalControl ?? null;
+  function goalControl() {
+    if (goalControlInstance === null) {
+      goalControlInstance = createGoalControl({ repositoryRoot });
+    }
+    return goalControlInstance;
   }
 
   async function dispatch(input) {
@@ -1843,6 +1859,16 @@ export async function createAionServer(options = {}) {
       case "roadmap.continue": return roadmapControl().continueRoadmap();
       case "roadmap.pause": return roadmapControl().pause();
       case "roadmap.resume": return roadmapControl().resume();
+      /*
+       * Owner goal intake. Two verbs: say a goal, and read back what was said.
+       *
+       * `goal.submit` takes only text. It cannot carry a milestone id, a provider, an authority id or
+       * a status — the classifier decides what the text is, the planner decides whether it becomes a
+       * milestone, and the roadmap decides whether that milestone may run. A browser supplying any of
+       * those would be choosing its own answer to a question the control plane exists to answer.
+       */
+      case "goal.submit": return goalControl().submit(typeof input.text === "string" ? input.text : "");
+      case "goal.recent": return goalControl().recent();
       default: throw new Error("Unsupported Command Center action.");
     }
   }

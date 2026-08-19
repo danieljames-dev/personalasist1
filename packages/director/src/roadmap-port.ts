@@ -63,6 +63,24 @@ export interface RoadmapPortV1 {
   pauseRoadmap(): RoadmapV1 | null;
   resumeRoadmap(): RoadmapV1 | null;
   ensureRoadmap(input: SeedInputV1): RoadmapV1;
+  /**
+   * Add one milestone to an existing roadmap, idempotently.
+   *
+   * This is how an Owner goal becomes governed work. It creates a `PLANNED` node and nothing more —
+   * it grants no authority, sets no status beyond `PLANNED`, and dispatches nothing. Whether the new
+   * milestone may actually run is still decided by `resolveMilestoneAuthority` at selection time,
+   * which is the only place that reads Owner authority.
+   *
+   * Idempotent on `milestoneId`: adding the same milestone twice returns the stored one untouched,
+   * so a repeated goal, a refreshed page and a restarted server converge instead of accumulating.
+   */
+  addMilestone(seed: SeedMilestoneInputV1): AddMilestoneResultV1;
+}
+
+export interface AddMilestoneResultV1 {
+  readonly created: boolean;
+  readonly milestone: RoadmapMilestoneV1 | null;
+  readonly reason: string;
 }
 
 export interface SeedMilestoneInputV1 {
@@ -87,6 +105,10 @@ export interface SeedMilestoneInputV1 {
    * fails the milestone.
    */
   readonly verificationSteps?: readonly VerificationStepV1[];
+  /** Claimed Owner envelope and lineage. Verified by the authority evaluator, never trusted here. */
+  readonly authorityEnvelopeId?: string | null;
+  readonly derivedFromObjective?: string | null;
+  readonly writeDomains?: readonly string[];
   readonly provenance: string;
 }
 
@@ -105,11 +127,8 @@ export interface SeedInputV1 {
  * conservative — every seeded milestone declares a real verification plan and a bounded retry
  * policy, so nothing enters the graph without acceptance criteria.
  */
-function seedRoadmap(store: RoadmapStoreV1, input: SeedInputV1, now: string): RoadmapV1 {
-  const existing = store.loadRoadmap();
-  if (existing !== null) return existing;
-
-  const milestones: RoadmapMilestoneV1[] = input.milestones.map((seed) => ({
+function milestoneFromSeed(seed: SeedMilestoneInputV1, now: string): RoadmapMilestoneV1 {
+  return {
     schema: ROADMAP_MILESTONE_SCHEMA_V1,
     milestoneId: seed.milestoneId,
     title: seed.title,
@@ -144,10 +163,26 @@ function seedRoadmap(store: RoadmapStoreV1, input: SeedInputV1, now: string): Ro
     completionCriteria: [`${seed.title} is durably complete and verified`],
     attempts: 0,
     blockedReason: null,
+    ...(seed.authorityEnvelopeId !== undefined ? { authorityEnvelopeId: seed.authorityEnvelopeId } : {}),
+    ...(seed.derivedFromObjective !== undefined ? { derivedFromObjective: seed.derivedFromObjective } : {}),
+    ...(seed.writeDomains !== undefined ? { writeDomains: [...seed.writeDomains] } : {}),
     provenance: seed.provenance,
     createdAt: now,
     updatedAt: now,
-  }));
+  };
+}
+
+/**
+ * Create the roadmap from durable state, once.
+ *
+ * Idempotent by construction: an existing roadmap is returned unchanged rather than rebuilt, because
+ * re-seeding would reset milestone statuses and re-run completed work.
+ */
+function seedRoadmap(store: RoadmapStoreV1, input: SeedInputV1, now: string): RoadmapV1 {
+  const existing = store.loadRoadmap();
+  if (existing !== null) return existing;
+
+  const milestones: RoadmapMilestoneV1[] = input.milestones.map((seed) => milestoneFromSeed(seed, now));
 
   for (const milestone of milestones) store.saveMilestone(milestone);
 
@@ -279,6 +314,37 @@ export function createRoadmapPort(deps: RoadmapPortDepsV1): RoadmapPortV1 {
     },
     ensureRoadmap(input) {
       return seedRoadmap(store, input, deps.now());
+    },
+    addMilestone(seed) {
+      const roadmap = store.loadRoadmap();
+      if (roadmap === null) {
+        return { created: false, milestone: null, reason: "no roadmap exists to add a milestone to" };
+      }
+      const existing = store.loadMilestone(seed.milestoneId);
+      if (existing !== null) {
+        // Not an error and not an update. Overwriting would let a repeated goal reset the status of
+        // work already in flight or finished, which is exactly the duplication this guards against.
+        return { created: false, milestone: existing, reason: `${seed.milestoneId} is already on the roadmap` };
+      }
+      const now = deps.now();
+      const milestone = milestoneFromSeed(seed, now);
+      store.saveMilestone(milestone);
+      const milestones = store.listMilestones();
+      store.saveRoadmap({
+        ...roadmap,
+        version: roadmap.version + 1,
+        milestoneIds: milestones.map((row) => row.milestoneId),
+        roadmapFingerprint: roadmapFingerprint(milestones),
+        updatedAt: now,
+      });
+      store.appendEvent({
+        type: "MILESTONE_CREATED",
+        roadmapId: roadmap.roadmapId,
+        milestoneId: milestone.milestoneId,
+        detail: milestone.provenance,
+        at: now,
+      });
+      return { created: true, milestone, reason: "milestone added to the roadmap" };
     },
   };
 }

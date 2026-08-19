@@ -33,6 +33,7 @@
  */
 
 import type { AuthorityOutcomeV1, ProviderIdV1, SensitivityClassV1 } from "./provider-bridge.js";
+import { deriveEnvelopes, resolveInheritedAuthority } from "./roadmap-authority-envelope.js";
 import {
   ROADMAP_GATE_SCHEMA_V1,
   type MilestoneStateV1,
@@ -60,6 +61,19 @@ export interface OwnerAuthorityRecordV1 {
   readonly state: string;
   readonly expiresAtUtc: string;
   readonly supersededBy: string;
+  /*
+   * Fields the Founder script also writes, needed to project an authority envelope.
+   *
+   * Optional here rather than required, because the direct-record path below never needed them and
+   * making them mandatory would rewrite every existing fixture into claiming knowledge it does not
+   * have. A record missing any of them simply yields no envelope — which fails closed, since an
+   * envelope is what *widens* what a milestone may inherit.
+   */
+  readonly authorizedObjective?: string;
+  readonly allowedWriteDomains?: readonly string[];
+  readonly securityChangePermission?: string;
+  readonly oauthConsentPermission?: string;
+  readonly createdAtUtc?: string;
 }
 
 export interface MilestoneAuthorityDecisionV1 {
@@ -82,6 +96,27 @@ export function resolveMilestoneAuthority(
   authorities: readonly OwnerAuthorityRecordV1[],
   now: string,
 ): MilestoneAuthorityDecisionV1 {
+  /*
+   * Inheritance is tried first, and only when the milestone actually claims an envelope.
+   *
+   * A milestone naming its own Owner authorization record keeps the original path unchanged — that
+   * is the stronger claim of the two, and nothing about it should now depend on envelope logic. The
+   * inherited path exists for the routine technical children of approved work, which have no record
+   * of their own and previously gated for that reason alone.
+   *
+   * An envelope claim that fails is *not* retried against the direct path. Falling through would let
+   * a refused inheritance be laundered into a different question, and the honest answer to "you
+   * claimed coverage you do not have" is the refusal, not a second attempt.
+   */
+  if (typeof milestone.authorityEnvelopeId === "string" && milestone.authorityEnvelopeId.trim() !== "") {
+    const inherited = resolveInheritedAuthority(milestone, deriveEnvelopes(authorities, now), now);
+    return {
+      outcome: inherited.outcome === "ALLOW_INHERITED" ? "ALLOW_STANDING" : inherited.outcome,
+      reason: inherited.reason,
+      ownerAuthorizationId: inherited.ownerAuthorizationId,
+    };
+  }
+
   if (milestone.ownerAuthorizationId === null) {
     return {
       outcome: "REQUIRE_FRESH_OWNER_APPROVAL",

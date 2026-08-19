@@ -174,6 +174,19 @@ export interface RoadmapMilestoneV1 {
   readonly requiredCapabilities: readonly string[];
   readonly requiredContextCategories: readonly string[];
   readonly authorityClass: AuthorityClassV1;
+  /**
+   * The Owner-approved envelope this milestone claims to be derived from, if any.
+   *
+   * A claim, not a grant. The inheritance evaluator checks it against the durable Owner authority
+   * record and refuses when the envelope does not exist, is not ACTIVE, or does not list the parent
+   * objective below. A milestone naming an envelope it does not belong to gates, exactly as one
+   * naming no authority at all does.
+   */
+  readonly authorityEnvelopeId?: string | null;
+  /** The approved parent objective this milestone claims lineage to. Verified, never trusted. */
+  readonly derivedFromObjective?: string | null;
+  /** Repository domains this milestone expects to write. Must be a subset of the envelope's. */
+  readonly writeDomains?: readonly string[];
   readonly ownerAuthorizationId: string | null;
   readonly sensitivityClass: SensitivityClassV1;
   readonly allowedProviders: readonly ProviderIdV1[];
@@ -322,6 +335,16 @@ export function validateMilestone(candidate: unknown): string | null {
   if (m.ownerAuthorizationId !== null && typeof m.ownerAuthorizationId !== "string") {
     return "ownerAuthorizationId must be a string or null";
   }
+  // Optional inheritance fields. Absent is the normal case and means "no envelope claimed"; present
+  // and malformed is a defect, because a milestone that half-declares lineage would otherwise be
+  // evaluated against a claim nobody can read.
+  if (m.authorityEnvelopeId !== undefined && m.authorityEnvelopeId !== null && typeof m.authorityEnvelopeId !== "string") {
+    return "authorityEnvelopeId must be a string, null or absent";
+  }
+  if (m.derivedFromObjective !== undefined && m.derivedFromObjective !== null && typeof m.derivedFromObjective !== "string") {
+    return "derivedFromObjective must be a string, null or absent";
+  }
+  if (m.writeDomains !== undefined && !isStringList(m.writeDomains)) return "writeDomains is not a string list";
   if (typeof m.sensitivityClass !== "string") return "sensitivityClass is missing";
   if (!Array.isArray(m.allowedProviders)) return "allowedProviders is not a list";
   if (typeof m.spendCapUsd !== "number" || m.spendCapUsd < 0) return "spendCapUsd is not a non-negative number";

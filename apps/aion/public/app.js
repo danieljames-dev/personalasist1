@@ -219,6 +219,26 @@ ${(window.__aionSalesContent.plan.slots || []).map((sl) => `<p class="meta">· $
   ].join("");
 }
 
+/**
+ * What AION did with the last thing the Owner asked for.
+ *
+ * Shows the objective, the milestone it became, and whether AION can start — and nothing about
+ * envelopes, providers or store paths. "Owner decision required" is stated plainly rather than
+ * softened, because a goal that quietly sits gated looks identical to one that is running.
+ */
+function goalResultCard() {
+  const g = window.__aionLastGoal;
+  if (!g || !g.actionable || !g.milestoneId) return "";
+  const heading = g.created ? "Added to roadmap" : "Already on the roadmap";
+  const stance = g.canBeginAutomatically
+    ? `<p><b>AION can continue automatically.</b></p>`
+    : `<p><b>Owner decision required.</b> It is on the roadmap and will not run until you authorize it.</p>`;
+  return `<div class="card next"><h2>${heading}</h2>
+<p class="meta">${esc(g.milestoneId)}</p>
+${stance}
+<p><button type="button" data-area-jump="Roadmap">Open Roadmap</button></p></div>`;
+}
+
 function homeArea(s) {
   const brief = window.__aionLastBriefing;
   const ws = s.settings?.activeWorkspace ?? "personal";
@@ -245,9 +265,11 @@ ${brief ? `<pre class="msg assistant" style="white-space:pre-wrap;max-height:28v
 ${commits.length ? `<div class="card warnbox"><h2>Commitments</h2>${commits.map((c) => `<p class="meta"><b>${esc(c.status)}</b> ${esc(c.committedBy)}→${esc(c.committedTo)}: ${esc((c.statement || "").slice(0, 80))}</p>`).join("")}</div>` : ""}
 ${opps.length ? `<div class="card"><h2>Opportunities</h2>${opps.map((o) => `<p class="meta">${esc(o.title)}</p>`).join("")}</div>` : ""}
 <div class="card"><h2>Ask</h2>
-<form data-form="assistant-prompt" class="quick-form"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="What needs me?" rows="2" style="font-size:16px"></textarea></label>
+<p class="meta">Ask a question, or tell AION what you want. A goal becomes roadmap work; a question stays a question.</p>
+<form data-form="assistant-prompt" class="quick-form"><label>Prompt<textarea name="text" required maxlength="10000" placeholder="Ask, or say what you want done" rows="2" style="font-size:16px"></textarea></label>
 <div class="actions"><button type="submit">Ask</button>
 <button type="button" data-do="voice-prompt">Voice</button></div></form>
+${goalResultCard()}
 ${window.__aionLastAssistant ? `<div class="thread"><p class="msg assistant">${esc((window.__aionLastAssistant.reply || "").slice(0, 400))}</p></div>` : ""}
 </div>
 <p class="meta"><a href="/phone">Photo intake</a></p></div>`;
@@ -2263,6 +2285,34 @@ document.addEventListener("submit", async (event) => {
       const text = String(d.text || "").trim();
       const attachment = pendingAttachments[0] || null;
       if (!text && !pendingAttachments.length) { toast("Type a message, attach a photo, or record audio."); return; }
+
+      /*
+       * Goal intake runs first, on plain text only.
+       *
+       * The host classifies; this page does not. It sends the words and renders the answer, so a
+       * browser can never decide that something is work — which is the difference between a control
+       * plane and a command box. An attachment means a question about a document, so that path skips
+       * intake entirely.
+       */
+      if (text && !pendingAttachments.length) {
+        let intake = null;
+        try {
+          intake = await api("goal.submit", { text });
+        } catch {
+          // Intake being unavailable must never swallow the Owner's message; fall through to chat.
+          intake = null;
+        }
+        if (intake && intake.actionable && intake.milestoneId) {
+          window.__aionLastGoal = intake;
+          window.__aionLastAssistant = null;
+          form.reset();
+          await load();
+          render();
+          toast(intake.message || "Added to the roadmap.");
+          return;
+        }
+      }
+
       sendProgress = { stages: [] };
 
       // Audio path: private upload + local STT + same Chat pipeline (no cellular-call claim).

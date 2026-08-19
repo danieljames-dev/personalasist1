@@ -13,6 +13,26 @@ param(
   [int]$Port = 31415
 )
 $ErrorActionPreference = 'Stop'
+
+# Validate the root before anything else happens.
+#
+# This is the first executable statement on purpose. Every later line either derives a path from
+# $RepositoryRoot, stops a running service, or writes a Scheduled Task — and a malformed root that
+# gets past this point becomes durable Windows configuration that outlives the session. An invalid
+# root must cost nothing: no service stopped, no task registered, no file written.
+. (Join-Path $PSScriptRoot 'aion-repository-root.ps1')
+try {
+  $RepositoryRoot = Assert-AionRepositoryRoot -Path $RepositoryRoot
+} catch {
+  # Written straight to stderr rather than through Write-Error: with $ErrorActionPreference = 'Stop'
+  # a Write-Error terminates the script immediately and powershell.exe returns 1, which is
+  # indistinguishable from an ordinary failure. Exit 2 means specifically "the root was rejected and
+  # nothing was touched", and callers can act on that.
+  Write-Host "INVALID_REPOSITORY_ROOT $($_.Exception.Message)"
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 2
+}
+
 $pidFile = Join-Path $RepositoryRoot '.aion-local\production\aion.pid'
 $logDir = Join-Path $RepositoryRoot '.aion-local\production'
 $stdout = Join-Path $logDir 'aion.out.log'

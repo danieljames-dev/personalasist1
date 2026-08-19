@@ -80,6 +80,8 @@ export * from "./roadmap-contracts.js";
 export * from "./roadmap-dag.js";
 export * from "./roadmap-store.js";
 export * from "./roadmap-policy.js";
+export * from "./roadmap-authority-envelope.js";
+export * from "./owner-goal-intake.js";
 export * from "./roadmap-orchestrator.js";
 export * from "./roadmap-port.js";
 export * from "./mva-dispatch.js";

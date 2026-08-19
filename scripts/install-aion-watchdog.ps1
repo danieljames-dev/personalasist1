@@ -11,6 +11,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# Validate before registering anything: both task actions embed $RepositoryRoot, and this script also
+# runs `ensure` immediately, so a malformed root would arm a watchdog that permanently fails to start
+# production. -Remove is exempt — deletion is by task name and does not depend on the root.
+if (-not $Remove) {
+  . (Join-Path $PSScriptRoot 'aion-repository-root.ps1')
+  try { $RepositoryRoot = Assert-AionRepositoryRoot -Path $RepositoryRoot }
+  catch { Write-Host "INVALID_REPOSITORY_ROOT $($_.Exception.Message)"; [Console]::Error.WriteLine($_.Exception.Message); exit 2 }
+}
+
 if ($Remove) {
   schtasks /Delete /TN $StartTaskName /F 2>$null | Out-Null
   schtasks /Delete /TN $WatchTaskName /F 2>$null | Out-Null

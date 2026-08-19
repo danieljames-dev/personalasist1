@@ -35,6 +35,7 @@ import {
   createFileJobStore,
   createRoadmapPort,
 } from "../../packages/director/dist/index.js";
+import { createGoalIntake } from "./goal-intake.mjs";
 import { createProviderRegistry } from "./provider-registry.mjs";
 import { createVerificationRunner } from "./verification-runner.mjs";
 
@@ -169,6 +170,16 @@ function projectGate(gate, hint) {
  * dispatcher from it.
  */
 export function createRoadmapControl(options = {}) {
+  return { ...buildRoadmapSurface(options).control };
+}
+
+/**
+ * One place that builds a port, shared by the roadmap control and goal intake.
+ *
+ * Two constructions would be two chances to disagree about which store, which adapters and which
+ * authority records are in play — and the whole point of the port is that there is one answer.
+ */
+function buildRoadmapSurface(options = {}) {
   const repositoryRoot = options.repositoryRoot;
   if (typeof repositoryRoot !== "string" || repositoryRoot.trim() === "") {
     throw new Error("roadmap control needs a repositoryRoot");
@@ -284,7 +295,7 @@ export function createRoadmapControl(options = {}) {
     };
   }
 
-  return {
+  const control = {
     status,
     current() {
       const milestone = port().getCurrentMilestone();
@@ -349,6 +360,27 @@ export function createRoadmapControl(options = {}) {
       };
     },
   };
+
+  return { control, port };
+}
+
+/**
+ * Goal intake over the same port the Roadmap panel uses.
+ *
+ * A separate factory rather than extra methods on the roadmap control, so the control's surface —
+ * which tests pin key by key — stays exactly the reads and three verbs it was reviewed as. Goal
+ * intake is a different question with a different blast radius and deserves its own object.
+ */
+export function createGoalControl(options = {}) {
+  const surface = buildRoadmapSurface(options);
+  return createGoalIntake({
+    repositoryRoot: options.repositoryRoot,
+    port: surface.port(),
+    ...(options.goalStoreRoot !== undefined ? { goalStoreRoot: options.goalStoreRoot } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.writeDomains !== undefined ? { writeDomains: options.writeDomains } : {}),
+    ...(options.allowedProviders !== undefined ? { allowedProviders: options.allowedProviders } : {}),
+  });
 }
 
 /** The verbs the app server is allowed to route here. A closed list, checked before dispatch. */

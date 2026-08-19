@@ -7,6 +7,16 @@ param(
   [switch]$Remove
 )
 $ErrorActionPreference = 'Stop'
+
+# Validate before registering anything: this script bakes $RepositoryRoot into a Scheduled Task, so a
+# malformed root here becomes durable Windows configuration. -Remove is exempt — deleting a task by
+# name does not depend on the root, and refusing to clean up because a path is wrong would be worse.
+if (-not $Remove) {
+  . (Join-Path $PSScriptRoot 'aion-repository-root.ps1')
+  try { $RepositoryRoot = Assert-AionRepositoryRoot -Path $RepositoryRoot }
+  catch { Write-Host "INVALID_REPOSITORY_ROOT $($_.Exception.Message)"; [Console]::Error.WriteLine($_.Exception.Message); exit 2 }
+}
+
 if ($Remove) {
   schtasks /Delete /TN $TaskName /F 2>$null | Out-Null
   Write-Host "REMOVED $TaskName"

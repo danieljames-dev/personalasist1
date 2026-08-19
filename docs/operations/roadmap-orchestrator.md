@@ -177,6 +177,81 @@ real planned work, so it never touches `.aion-local/roadmap`.
 **After changing this code, restart the AION server.** A long-running process keeps serving the code
 it started with, so the Roadmap panel will not appear until it is restarted.
 
+## Telling AION what you want
+
+Type it into Ask, on Home or in Chat. AION classifies the text before anything else happens:
+
+| Class | What happens |
+| --- | --- |
+| `ACTIONABLE_OBJECTIVE` | becomes at most one `PLANNED` milestone |
+| `ROADMAP_CONTINUATION` | resumes the roadmap; adds nothing |
+| `QUESTION`, `CONTEXT_QUERY` | answered as a question; adds nothing |
+| `OWNER_DECISION` | pointed at the console; the page cannot authorize |
+
+Classification is rules in `packages/director/src/owner-goal-intake.ts`, not a model. A model asked
+"is this actionable?" answers yes too often and its answer cannot be tested. The tie-break runs the
+safe way: anything the rules cannot place confidently is treated as a question, because
+under-creating work is a conversation and silently creating it is a system doing things nobody asked
+for. "Should I add caching?" stays a question despite containing an instruction verb.
+
+Your exact words are stored byte-for-byte in `.aion-local/owner-goals/`. The normalized form exists
+for matching and is never shown as what you said. Success criteria, constraints and urgency are
+extracted **only** where you stated them — an invented acceptance criterion is how a milestone
+completes against a goal you never had.
+
+A goal's id is a hash of its normalized text and the milestone id derives from it, so the same
+sentence typed twice converges: second tab, page refresh and server restart all land on the same
+record with no deduplication pass to skip.
+
+**The chat layer executes nothing.** It classifies, records, and calls `port.addMilestone`. It
+cannot edit files, pick a provider, approve a gate, mutate authority or reach `advanceRoadmap`. The
+`goal.submit` verb accepts *only* text — no milestone id, provider, authority id or status can cross
+from a browser, asserted by test.
+
+## Authority envelopes: authorize once, cover the routine children
+
+`resolveMilestoneAuthority` used to bind a milestone to exactly one `ownerAuthorizationId` with no
+notion of lineage, so naming a routine technical child of already-approved work produced a fresh
+Owner gate. Safe, and the reason the same Founder phrase got typed five times for things nobody would
+call a decision.
+
+A milestone may now satisfy authority two ways:
+
+1. **Directly** — it names its own Owner authorization record. Unchanged.
+2. **By inheritance** — it names an `authorityEnvelopeId` and a `derivedFromObjective`, and
+   `resolveInheritedAuthority` proves it sits inside that envelope.
+
+**There is no envelope file and nothing can write one.** An envelope is *projected* read-only from
+the Owner authority record `authorize-current-directive.ps1` writes — same record, same trust
+boundary. `packages/director/src/roadmap-authority-envelope.ts` imports no filesystem module and
+exposes no `createEnvelope`, `saveEnvelope` or `widenEnvelope`; a test asserts both. The cheapest way
+to guarantee code cannot mint an envelope is to have no writer at all. Every ceiling is read out of
+Owner-written JSON on each evaluation, so nothing in the process can raise one.
+
+The envelope id is derived from the authorization id, so a milestone naming
+`ENVELOPE-anything-i-like` finds nothing and is **denied** — not gated. That distinction is
+deliberate: a claim of coverage that does not exist is not "we cannot prove it", and treating it as a
+question to ask would reward inventing ids.
+
+Inheritance requires **all** of: an ACTIVE, unexpired, unsuperseded, unrevoked envelope; lineage to
+an approved parent objective; write domains a subset; providers a subset; sensitivity within the
+ceiling; spend within the ceiling; a permitted external-effect class; reversibility satisfied; no
+always-gated boundary crossed; and an authority class below `HIGH_CONSEQUENCE`. A milestone that
+declares **no** write domains is gated rather than read as writing nothing.
+
+A failed envelope claim is never retried against the direct-record path. Falling through would let a
+refused inheritance be re-asked as a different question until one of them said yes.
+
+Always gated, whatever an envelope says: a materially new objective, spend beyond the ceiling, a new
+paid resource, production activation, destructive action, a new external send, an irreversible effect
+outside the envelope, new OAuth or credentials, sensitive-data expansion, a security configuration
+change, a financial or legal commitment, and envelope expansion itself.
+
+```bash
+node scripts/owner-control-loop-acceptance.mjs      # typed goal → completed work, in a scratch workspace
+node --test "test/aion/owner-goal-intake.test.mjs"
+```
+
 ## Reading a stalled roadmap
 
 1. `getRoadmapStatus()` — `byStatus` says where everything sits.
@@ -189,10 +264,17 @@ it started with, so the Roadmap panel will not appear until it is restarted.
 
 ## Known limitations of V1
 
-- **The app drives reads and three verbs, not everything.** `apps/aion/roadmap-control.mjs` wires the
-  port into the Command Center. Seeding a roadmap, editing milestones and approving gates are all
-  still host-side acts by design — including seeding, which is why nothing in the production roadmap
-  can be created from a browser.
+- **The app drives reads, three verbs and goal intake, not everything.**
+  `apps/aion/roadmap-control.mjs` wires the port into the Command Center, and goal intake can add one
+  `PLANNED` milestone. **Seeding a roadmap, editing an existing milestone and approving a gate remain
+  host-side acts** — a browser cannot create a roadmap or change work that already exists.
+- **Classification is rules, and rules have edges.** The classifier will misplace some sentences. It
+  is built so the misplacement costs a clarifying question rather than unwanted work, but a goal
+  phrased unusually may need rephrasing. Read `classificationReason` on the stored goal to see why it
+  landed where it did.
+- **An envelope covers routine engineering, not judgement.** Inheritance proves scope, not wisdom. A
+  milestone can be perfectly inside an envelope and still be the wrong thing to build; that is what
+  the roadmap and the Owner are for.
 - **Review is a policy and a hook, not a reviewer.** The orchestrator decides *whether* independent
   review is required and refuses to complete without a verdict; it does not itself summon a second
   model. Wiring a real reviewer is a later milestone. Until then, any milestone whose risk demands
