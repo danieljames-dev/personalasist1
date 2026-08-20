@@ -30,6 +30,7 @@ import { join } from "node:path";
 
 import {
   MVA_JOB_STORE_RELATIVE_PATH,
+  MVA_OWNER_AUTHORIZATION_ID,
   PROVIDER_IDS_V1,
   ROADMAP_STORE_RELATIVE_PATH,
   DIRECTOR_CAPABILITY_REGISTRY_V1,
@@ -174,6 +175,8 @@ function effectGateFrom(authorities, artifactRoot, nowUtc) {
     envelopes.set(id, projected);
   }
 
+  const pinned = envelopes.get(effectAuthorityEnvelopeId(MVA_OWNER_AUTHORIZATION_ID));
+
   const gate = {
     registry: DIRECTOR_CAPABILITY_REGISTRY_V1,
     /*
@@ -196,18 +199,18 @@ function effectGateFrom(authorities, artifactRoot, nowUtc) {
      * authority, the bounded executor's writes are refused, which is the correct outcome rather than
      * an inconvenience.
      */
-    authorityEnvelopeId: "",
-    parentMilestoneId: "",
     /*
-     * A job carries the id of the authorization it acts under. That is a reference, not a permission:
-     * everything the gate then reads -- approved parent, write domains, ceilings -- comes from the
-     * Owner record on disk. A job naming an authorization that does not exist resolves to nothing.
+     * The authorization this dispatch runs under is pinned here, by the control plane, from a constant
+     * it owns -- not read off whatever a job envelope happens to carry.
+     *
+     * V0.3 resolved the id the job named. A verification pass showed that Job A could then execute
+     * under Authority B, a child under a sibling's, and a persisted envelope edited on disk under
+     * anything valid, because the gate only checked that the citation matched the record cited. The
+     * job's own copy is now reconciled against this pin by the executor, and a mismatch refuses.
      */
-    resolveAuthorityReference: (ownerAuthorizationId) => {
-      const envelope = envelopes.get(effectAuthorityEnvelopeId(ownerAuthorizationId));
-      if (envelope === undefined) return null;
-      return { envelopeId: envelope.envelopeId, parentMilestoneId: envelope.approvedParentMilestoneIds[0] ?? "" };
-    },
+    pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    authorityEnvelopeId: pinned === undefined ? "" : pinned.envelopeId,
+    parentMilestoneId: pinned === undefined ? "" : (pinned.approvedParentMilestoneIds[0] ?? ""),
   };
 }
 

@@ -1,5 +1,5 @@
 import { lookup } from "node:dns/promises";
-import { assertOutwardEffectAllowed } from "./outward-effect-guard.mjs";
+import { assertOutwardEffectAllowed, outwardFetch } from "./outward-effect-guard.mjs";
 import { createHash } from "node:crypto";
 import { assertResearchUrl, evaluateResearchUrl, isPrivateIpv4, isPrivateIpv6 } from "../../packages/local-assistant/dist/index.js";
 
@@ -107,9 +107,16 @@ async function readBounded(response, maxBytes) {
  * not have gone.
  */
 export async function fetchPublicDocument(url, options = {}) {
+  /*
+   * Refuse before resolving anything.
+   *
+   * `outwardFetch` below is the enforcement, but it runs after the hostname has been resolved and
+   * checked -- and a DNS lookup for a URL AION is not permitted to visit is already a request leaving
+   * the machine. Checking here as well costs nothing and keeps "disabled" meaning inert.
+   */
+  assertOutwardEffectAllowed("research.fetch", { url: String(url) });
   // Reaching the open internet is an outward effect, however careful the rest of this file is about
   // where it lands. It runs only once this route is wired to the pre-action effect gate.
-  assertOutwardEffectAllowed("research.fetch", { url: String(url) });
   const maxBytes = options.maxBytes ?? 512 * 1024;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const resolver = options.resolver ?? lookup;
@@ -126,7 +133,7 @@ export async function fetchPublicDocument(url, options = {}) {
       await assertPublicHost(parsed.hostname, resolver);
       hops.push(current);
 
-      const response = await globalThis.fetch(current, {
+      const response = await outwardFetch("research.fetch", current, {
         method: "GET",
         redirect: "manual",
         signal: controller.signal,

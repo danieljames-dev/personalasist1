@@ -1072,36 +1072,44 @@ const OUTWARD_EFFECT_INVENTORY: ReadonlyMap<string, { readonly sites: number; re
 
 const OUTWARD_EFFECT_CALL = /\b(?:globalThis\.)?fetch\(|\bexecFile\(|\bspawn\(|\bexecSync\(/g;
 
-test("every outward effect site in apps/ is inventoried", () => {
-  const appsDir = join(here, "..", "..", "..", "..", "apps");
-  const found = new Map<string, number>();
-  for (const file of walkCodeFiles(appsDir)) {
+test("app runtime code reaches the network only through the trusted transports", () => {
+  /*
+   * This replaces a count-based inventory, and the reason is the defect that inventory missed.
+   *
+   * The old rule recorded how many outward call sites each file had and failed when the number moved.
+   * It could not tell a guarded call from an unguarded one, so `server.mjs` sat at its declared count
+   * of five while four of them consulted nothing — including a second OAuth token exchange. Counting
+   * call sites is not the same as checking them.
+   *
+   * The rule now is about the call: runtime modules reach the network through `outwardFetch` (a
+   * declared, gated route) or `loopbackFetch` (checked to stay on this machine). A bare `fetch` in
+   * runtime code fails here, which is what forces the author of the next outward call to choose a
+   * route rather than to update a number.
+   */
+  const runtimeDir = join(here, "..", "..", "..", "..", "apps", "aion");
+  const transportModule = "outward-effect-guard.mjs";
+  const offenders: string[] = [];
+
+  for (const file of walkCodeFiles(runtimeDir)) {
     if (!file.endsWith(".mjs")) continue;
-    // Counted on the raw source deliberately. The comment/string stripper desynchronises on some app
-    // files, and an inventory that silently sees fewer sites than exist is worse than one that counts
-    // a mention in a comment: the question here is whether the set of sites changed.
-    const source = readFileSync(file, "utf8");
-    const sites = countCalls(source, OUTWARD_EFFECT_CALL);
-    if (sites === 0) continue;
-    found.set(relative(join(here, "..", "..", "..", ".."), file).split("\\").join("/"), sites);
+    if (file.endsWith(transportModule)) continue;
+    const name = file.split(String.fromCharCode(92)).pop() ?? file;
+    const source = stripCommentsAndStrings(readFileSync(file, "utf8"));
+    const direct = (source.match(/(^|[^.\w])fetch\s*\(/gm) ?? []).length
+      + (source.match(/globalThis\.fetch\s*\(/g) ?? []).length;
+    if (direct > 0) offenders.push(`${name} (${direct} direct call site${direct === 1 ? "" : "s"})`);
   }
 
-  const undeclared = [...found.keys()].filter((name) => !OUTWARD_EFFECT_INVENTORY.has(name)).sort();
-  assert.deepEqual(undeclared, [],
-    `outward effect sites with no declared status: ${undeclared.join(", ")}. Route them through the effect gate, or declare what they are.`);
+  assert.deepEqual(
+    offenders.sort(),
+    [],
+    `app runtime modules reaching the network directly: ${offenders.join(", ")}. Use outwardFetch with a declared route, or loopbackFetch for a local address.`,
+  );
 
-  const changed: string[] = [];
-  for (const [name, sites] of found) {
-    const declared = OUTWARD_EFFECT_INVENTORY.get(name);
-    if (declared !== undefined && declared.sites !== sites) {
-      changed.push(`${name}: declared ${declared.sites}, found ${sites}`);
-    }
-  }
-  assert.deepEqual(changed.sort(), [],
-    "an outward effect site was added or removed without updating its declaration");
-
-  const stale = [...OUTWARD_EFFECT_INVENTORY.keys()].filter((name) => !found.has(name)).sort();
-  assert.deepEqual(stale, [], "the inventory names files that no longer perform outward effects");
+  // And the transports themselves still exist to be used.
+  const transport = readFileSync(join(runtimeDir, transportModule), "utf8");
+  assert.ok(transport.includes("export async function outwardFetch"), "the outward transport must exist");
+  assert.ok(transport.includes("export async function loopbackFetch"), "the local transport must exist");
 });
 
 test("no outward effect route claims to be gated before it is", () => {

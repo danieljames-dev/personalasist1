@@ -91,7 +91,7 @@ test("READY Gmail credentials alone produce no outward effect", async () => {
   const sync = source.slice(source.indexOf("async function runLiveGmailSync"));
   const guardAt = sync.indexOf("outwardEffectDecision(\"gmail.sync\"");
   const credentialsAt = sync.indexOf("gmailLiveCredentials()");
-  const fetchAt = sync.indexOf("fetch(");
+  const fetchAt = sync.indexOf("outwardFetch(");
   assert.ok(guardAt > 0, "the Gmail sync route must consult the outward guard");
   assert.ok(guardAt < credentialsAt, "authorisation must be checked before credentials are read");
   assert.ok(guardAt < fetchAt, "authorisation must be checked before any request is made");
@@ -147,26 +147,6 @@ test("neither wiring nor authority alone produces an effect", () => {
 /* No outward call site may skip the guard                                    */
 /* -------------------------------------------------------------------------- */
 
-test("every outward call site in the app runtime consults the guard", () => {
-  /*
-   * The check that survives someone adding a route later. A module in the app runtime that reaches
-   * the network must import the guard; if it does not, this fails and the author has to declare and
-   * gate the route rather than shipping a fourth un-gated path.
-   *
-   * Demo scripts are excluded by name and by not being reachable from the server.
-   */
-  const runtime = ["server.mjs", "research-fetch.mjs", "vast-ai.mjs", "brain-runtime.mjs"];
-  const outward = /\b(?:globalThis\.)?fetch\(/;
-  for (const name of runtime) {
-    const source = readFileSync(join(repositoryRoot, "apps", "aion", name), "utf8");
-    if (!outward.test(source)) continue;
-    const guarded = source.includes("outward-effect-guard.mjs");
-    assert.ok(
-      guarded,
-      `${name} reaches the network without consulting the outward guard; declare and gate the route`,
-    );
-  }
-});
 
 test("the route report names every declared route and its real status", () => {
   const report = outwardRouteReport();
@@ -174,5 +154,105 @@ test("the route report names every declared route and its real status", () => {
   for (const row of report) {
     assert.equal(row.status, "TECHNICALLY_DISABLED", `${row.routeId} is active`);
     assert.ok(row.detail.length > 20, `${row.routeId} needs a reason someone can act on`);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Call-site enforcement: importing a guard proves nothing                    */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * The V0.3 invariant asserted that a runtime file *imports* the guard. `server.mjs` did — for
+ * `gmail.sync` — while carrying four other `fetch` calls that consulted nothing, one of them a second
+ * OAuth token exchange. Every suite was green. A file-level fact cannot prove a call-site property.
+ *
+ * The rule is now about the call itself: runtime code reaches the network through `outwardFetch` (a
+ * declared, gated route) or `loopbackFetch` (checked to stay on this machine), and a bare `fetch` in
+ * runtime code fails here.
+ */
+
+const RUNTIME_MODULES = ["server.mjs", "research-fetch.mjs", "vast-ai.mjs", "brain-runtime.mjs", "outward-effect-guard.mjs"];
+const BARE_FETCH = /(?<!\bglobalThis\.)\bfetch\s*\(/g;
+
+function runtimeSource(name) {
+  return readFileSync(join(repositoryRoot, "apps", "aion", name), "utf8");
+}
+
+test("no runtime module reaches the network with a bare fetch", () => {
+  for (const name of RUNTIME_MODULES) {
+    const source = runtimeSource(name);
+    // `outward-effect-guard.mjs` is the one place the real transport is allowed to be named.
+    const allowed = name === "outward-effect-guard.mjs" ? 2 : 0;
+    const bare = (source.match(/globalThis\.fetch\s*\(/g) ?? []).length;
+    assert.equal(bare, allowed, `${name} calls globalThis.fetch directly; use outwardFetch or loopbackFetch`);
+    const unqualified = (source.match(/(^|[^.\w])fetch\s*\(/gm) ?? [])
+      .filter((hit) => !/outwardFetch|loopbackFetch/.test(hit));
+    assert.equal(unqualified.length, 0, `${name} calls fetch directly: ${unqualified.join(", ")}`);
+  }
+});
+
+test("importing the guard is not enough on its own", () => {
+  /*
+   * The exact V0.3 shape, reconstructed: a file that imports the guard, consults it once, and then
+   * makes an unrelated direct call. The old rule passed this. The new one must not.
+   */
+  const shapeThatUsedToPass = [
+    'import { outwardEffectDecision } from "./outward-effect-guard.mjs";',
+    'const ok = outwardEffectDecision("gmail.sync");',
+    'const res = await fetch("https://oauth2.googleapis.com/token", { method: "POST" });',
+  ].join("\n");
+
+  const importsGuard = shapeThatUsedToPass.includes("outward-effect-guard.mjs");
+  assert.equal(importsGuard, true, "the sample must import the guard, as server.mjs did");
+
+  const unqualified = (shapeThatUsedToPass.match(/(^|[^.\w])fetch\s*\(/gm) ?? [])
+    .filter((hit) => !/outwardFetch|loopbackFetch/.test(hit));
+  assert.equal(unqualified.length, 1, "the call-site rule must still see the direct fetch");
+});
+
+test("the OAuth token exchange is a declared route and is disabled", () => {
+  // The defect: this call ran whenever the OAuth redirect completed, with no authority anywhere.
+  assert.ok(Object.prototype.hasOwnProperty.call(OUTWARD_ROUTES_V1, "gmail.oauthExchange"));
+  assert.equal(outwardRouteStatus("gmail.oauthExchange"), "TECHNICALLY_DISABLED");
+  assert.equal(outwardEffectDecision("gmail.oauthExchange").allowed, false);
+
+  // And both token-exchange call sites in the server now go through the declared route.
+  const source = runtimeSource("server.mjs");
+  const exchanges = (source.match(/oauth2\.googleapis\.com\/token/g) ?? []).length;
+  const routed = (source.match(/outwardFetch\("gmail\.oauthExchange"/g) ?? []).length;
+  assert.equal(exchanges, routed, `${exchanges} token exchanges but ${routed} routed through the gate`);
+  assert.ok(exchanges >= 2, "both the sync refresh and the callback exchange should be present");
+});
+
+test("outwardFetch refuses without touching the network", async () => {
+  const { outwardFetch } = await import("../../apps/aion/outward-effect-guard.mjs");
+  const before = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = () => { called = true; throw new Error("network must not be reached"); };
+  try {
+    await assert.rejects(() => outwardFetch("gmail.oauthExchange", "https://oauth2.googleapis.com/token"), /outward effect refused/);
+    assert.equal(called, false, "a refused route still reached the transport");
+  } finally {
+    globalThis.fetch = before;
+  }
+});
+
+test("loopbackFetch stays local and refuses to leave", async () => {
+  const { loopbackFetch, isLoopbackUrl } = await import("../../apps/aion/outward-effect-guard.mjs");
+  assert.equal(isLoopbackUrl("http://127.0.0.1:11434/api/chat"), true);
+  assert.equal(isLoopbackUrl("http://localhost:1234/v1/models"), true);
+  assert.equal(isLoopbackUrl("https://api.example.com/v1/chat"), false);
+
+  const before = globalThis.fetch;
+  let reached = null;
+  globalThis.fetch = (url) => { reached = String(url); return Promise.resolve({ ok: true }); };
+  try {
+    await loopbackFetch("http://127.0.0.1:11434/api/chat");
+    assert.equal(reached, "http://127.0.0.1:11434/api/chat", "a local call must still work");
+    reached = null;
+    await assert.rejects(() => loopbackFetch("https://api.example.com/v1/chat"), /non-loopback/);
+    assert.equal(reached, null, "loopbackFetch let a remote address through");
+  } finally {
+    globalThis.fetch = before;
   }
 });

@@ -27,6 +27,10 @@ export const OUTWARD_ROUTES_V1 = Object.freeze({
     status: "REQUIRES_INTEGRATION",
     detail: "live Gmail OAuth token refresh and message reads; needs a registered semantic capability and Owner authority for account access before it may run",
   }),
+  "gmail.oauthExchange": Object.freeze({
+    status: "REQUIRES_INTEGRATION",
+    detail: "exchanges an OAuth code or refresh token with Google; contacts a third party and obtains credentials, so it needs a registered capability and Owner authority before it may run",
+  }),
   "research.fetch": Object.freeze({
     status: "REQUIRES_INTEGRATION",
     detail: "governed public-web fetch; read-only externally but still leaves the machine",
@@ -117,4 +121,58 @@ export function outwardRouteReport() {
     status: outwardRouteStatus(routeId),
     detail: OUTWARD_ROUTES_V1[routeId].detail,
   }));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Trusted transports                                                          */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Why wrappers rather than a rule about imports.
+ *
+ * The first version of this boundary asserted that a runtime file *imports* the guard. `server.mjs`
+ * did — for `gmail.sync` — and carried four other `fetch` calls that never consulted anything,
+ * including a second OAuth token exchange. A file-level fact cannot prove a call-site property, and a
+ * verification pass found exactly that gap.
+ *
+ * So the network is reached through one of two named transports and repository validation forbids a
+ * bare `fetch` in runtime code. Adding an outward call now means choosing a declared route, which is
+ * the decision the boundary exists to force.
+ */
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+/** True when a URL stays on this machine. */
+export function isLoopbackUrl(candidate) {
+  try {
+    return LOOPBACK_HOSTS.has(new URL(String(candidate)).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The only way runtime code may leave this machine.
+ *
+ * Refuses unless the named route is wired to the pre-action effect gate and its authorizer allows
+ * this call. Nothing is sent, and no name is resolved, when it refuses.
+ */
+export async function outwardFetch(routeId, input, init = undefined) {
+  assertOutwardEffectAllowed(routeId, { url: String(input), method: init?.method ?? "GET" });
+  return globalThis.fetch(input, init);
+}
+
+/**
+ * A request that provably stays on this machine.
+ *
+ * Local model runtimes and local servers are not outward effects, and requiring Owner authority for
+ * them would make the private-by-default path ask permission to talk to itself. The loopback claim is
+ * checked rather than trusted: a non-loopback URL here is a mistake, and it is refused rather than
+ * quietly sent.
+ */
+export async function loopbackFetch(input, init = undefined) {
+  if (!isLoopbackUrl(input)) {
+    throw new Error(`loopbackFetch refused a non-loopback address: ${String(input)}. Declare an outward route and use outwardFetch.`);
+  }
+  return globalThis.fetch(input, init);
 }

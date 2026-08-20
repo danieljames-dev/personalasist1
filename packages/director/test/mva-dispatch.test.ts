@@ -160,6 +160,7 @@ function effectDeps(gate: EffectGateDepsV1 = artifactGate()) {
     actorId: "aion.director.mva-dispatch",
     authorityEnvelopeId: EFFECT_ENVELOPE_ID,
     parentMilestoneId: MVA_MILESTONE_ID,
+    pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
     journal: memoryEffectJournal(),
     recordDecision: () => undefined,
   };

@@ -1498,6 +1498,7 @@ export function directorSubmitMvaJob(request: JobRequestV1, deps: MvaDispatchDep
     actorId: "aion.director.run-manager",
     authorityEnvelopeId: "",
     parentMilestoneId: "",
+    pinnedOwnerAuthorizationId: "",
     journal: memoryEffectJournal(),
     recordDecision: () => undefined,
   });

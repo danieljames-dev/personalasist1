@@ -133,6 +133,7 @@ function adapterWith(io: ReturnType<typeof recorder>, deps: Partial<{ effectGate
     actorId: "aion.director.mva-dispatch",
     authorityEnvelopeId: ENVELOPE_ID,
     parentMilestoneId: MVA_MILESTONE_ID,
+    pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
     journal: memoryEffectJournal(),
     recordDecision: io.recordDecision,
   });
@@ -228,6 +229,7 @@ test("the request this path builds cannot be swapped between authorisation and d
     envelope: envelopeFor(),
     providerId: "local",
     parentMilestoneId: MVA_MILESTONE_ID,
+    ownerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
     actorId: "aion.director.mva-dispatch",
     ownerId: "daniel",
     authorityEnvelopeId: ENVELOPE_ID,
@@ -258,6 +260,7 @@ test("the effect request carries the job's own authority, not the provider's wor
     envelope: envelopeFor(),
     providerId: "grok",
     parentMilestoneId: MVA_MILESTONE_ID,
+    ownerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
     actorId: "aion.director.mva-dispatch",
     ownerId: "daniel",
     authorityEnvelopeId: ENVELOPE_ID,
@@ -420,7 +423,8 @@ test("a job naming an authority that does not exist writes nothing", () => {
   const adapter = createRealBoundedExecutorAdapter("local", {
     artifactRoot: ROOT, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
     effectGate: gateWithRecords, actorId: "aion.director.mva-dispatch",
-    authorityEnvelopeId: "", parentMilestoneId: "", resolveAuthorityReference: resolveReference,
+    authorityEnvelopeId: effectAuthorityEnvelopeId(MVA_OWNER_AUTHORIZATION_ID),
+    parentMilestoneId: MVA_MILESTONE_ID, pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
     journal: memoryEffectJournal(), recordDecision: io.recordDecision,
   });
 
@@ -433,4 +437,136 @@ test("a job naming an authority that does not exist writes nothing", () => {
   const known = { ...envelopeFor(), ownerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID, milestoneId: MVA_MILESTONE_ID };
   assert.equal(adapter.execute(known).class, "SUCCESS");
   assert.equal(io.writes.length, 2);
+});
+
+/* -------------------------------------------------------------------------- */
+/* The control plane pins the authorization; the job does not choose it       */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * V0.3 resolved whatever authorization id the job envelope carried. A verification pass showed what
+ * that permits — every one of these executed and wrote two files:
+ *
+ *     Job A executing under Authority B
+ *     a child using a sibling's authority
+ *     a persisted envelope edited on disk to name another valid record
+ *
+ * The gate was not wrong about what it checked; it checked that the citation matched the record
+ * cited, and found them consistent. Nothing bound a job to *its own* authority.
+ *
+ *     THE CONTROL PLANE, NOT THE JOB, DETERMINES THE AUTHORIZATION FOR A DISPATCH.
+ *
+ * Each test below observes whether files were written, not whether a symbol exists — the defect these
+ * replace was invisible to a green suite, and a test that only checks structure would have stayed
+ * green through it.
+ */
+
+const AUTH_A = "AUTH-PINNING-A";
+const AUTH_B = "AUTH-PINNING-B";
+const AUTH_REVOKED = "AUTH-PINNING-REVOKED";
+
+function ownerRecord(id: string, milestone: string, state = "ACTIVE") {
+  return {
+    ownerAuthorizationId: id, milestoneId: milestone,
+    allowedWriteDomains: [".aion-local"], allowedProviders: ["local"],
+    state, createdAtUtc: NOW,
+  };
+}
+
+const PINNING_RECORDS = [
+  ownerRecord(AUTH_A, "MILESTONE-PINNING-A"),
+  ownerRecord(AUTH_B, "MILESTONE-PINNING-B"),
+  ownerRecord(AUTH_REVOKED, "MILESTONE-PINNING-R", "REVOKED"),
+];
+
+/** An adapter pinned to one authorization, exactly as the control plane builds it. */
+function pinnedAdapter(io: ReturnType<typeof recorder>, pinned: string, envelopeId?: string) {
+  const authorities = effectAuthoritiesFromOwnerRecords(PINNING_RECORDS);
+  const pinnedEnvelope = authorities.get(effectAuthorityEnvelopeId(pinned));
+  return createRealBoundedExecutorAdapter("local", {
+    artifactRoot: ROOT, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
+    effectGate: {
+      ...gate(),
+      envelopeFor: (id: string) => authorities.get(id) ?? null,
+      resolveTarget: (targetType: string, targetId: string) =>
+        targetType === "JobArtifact" ? { targetType, targetId, sensitivity: "INTERNAL" as const, writeDomain: ".aion-local" } : null,
+    },
+    actorId: "aion.director.mva-dispatch",
+    authorityEnvelopeId: envelopeId ?? pinnedEnvelope?.envelopeId ?? "",
+    parentMilestoneId: pinnedEnvelope?.approvedParentMilestoneIds[0] ?? "",
+    pinnedOwnerAuthorizationId: pinned,
+    journal: memoryEffectJournal(), recordDecision: io.recordDecision,
+  });
+}
+
+/** A job envelope claiming to act under some authorization. */
+function jobClaiming(ownerAuthorizationId: string, milestoneId = "MILESTONE-PINNING-A") {
+  return { ...envelopeFor(), ownerAuthorizationId, milestoneId };
+}
+
+test("a job whose authority matches the pin writes", () => {
+  const io = recorder();
+  const result = pinnedAdapter(io, AUTH_A).execute(jobClaiming(AUTH_A));
+  assert.equal(result.class, "SUCCESS");
+  assert.equal(io.writes.length, 2, "legitimate work must still happen");
+});
+
+test("a job claiming another valid authority writes nothing", () => {
+  // The headline defect: Authority B is real, active and would permit an artifact write for its own
+  // jobs. It is not this job's, and that is now the whole answer.
+  const io = recorder();
+  const result = pinnedAdapter(io, AUTH_A).execute(jobClaiming(AUTH_B));
+  assert.equal(result.class, "POLICY_DENIED");
+  assert.deepEqual(io.writes, [], "a substituted authority produced a write");
+  assert.equal(JSON.parse(io.decisions[0]!).reasonCode, "DENY_AUTHORIZATION_NOT_PINNED");
+});
+
+test("a child claiming a sibling's authority writes nothing", () => {
+  const io = recorder();
+  const child = { ...jobClaiming(AUTH_B, "MILESTONE-PINNING-A"), jobId: "child-of-a" };
+  assert.equal(pinnedAdapter(io, AUTH_A).execute(child).class, "POLICY_DENIED");
+  assert.deepEqual(io.writes, []);
+});
+
+test("a recovered job whose persisted envelope was altered writes nothing", () => {
+  /*
+   * The recovery path reloads `record.envelope` from disk. A self-consistent edit — both the
+   * authorization and the milestone swapped, so the citation matches the record it names — is exactly
+   * what V0.3 accepted. Reconciliation against the pin is what refuses it.
+   */
+  const io = recorder();
+  const persisted = JSON.stringify({ ...envelopeFor(), ownerAuthorizationId: AUTH_B, milestoneId: "MILESTONE-PINNING-B" });
+  const reloaded = JSON.parse(persisted) as ReturnType<typeof envelopeFor>;
+  assert.equal(pinnedAdapter(io, AUTH_A).execute(reloaded).class, "POLICY_DENIED");
+  assert.deepEqual(io.writes, [], "a tampered persisted envelope produced a write");
+});
+
+test("a revoked or unpinnable authority writes nothing", () => {
+  for (const [label, pinned] of [["revoked", AUTH_REVOKED], ["not a record", "AUTH-NOBODY-GRANTED"]] as const) {
+    const io = recorder();
+    const result = pinnedAdapter(io, pinned).execute(jobClaiming(pinned));
+    assert.equal(result.class, "POLICY_DENIED", label);
+    assert.deepEqual(io.writes, [], label);
+  }
+});
+
+test("a job request cannot influence the authorization at all", () => {
+  /*
+   * The other half: even before pinning, `buildJobEnvelope` stamps the authorization from a constant
+   * it owns. A request asking for another one is ignored rather than honoured.
+   */
+  const hostile = { ...jobRequest(), ownerAuthorizationId: AUTH_B, milestoneId: "MILESTONE-PINNING-B" } as never;
+  const built = buildJobEnvelope(hostile, NOW);
+  assert.notEqual(built.ownerAuthorizationId, AUTH_B, "a request chose its own authorization");
+  assert.equal(built.ownerAuthorizationId, MVA_OWNER_AUTHORIZATION_ID);
+  assert.equal(built.milestoneId, MVA_MILESTONE_ID);
+});
+
+test("the dispatch module has no way to select an authorization", () => {
+  // Behavioural checks above are the point; this pins that the removed seam has not returned under
+  // another name, which is how the previous version of this defect was reintroduced once already.
+  const source = readFileSync(join(repositoryRoot, "packages", "director", "src", "mva-dispatch.ts"), "utf8");
+  assert.equal(source.includes("resolveAuthorityReference"), false);
+  assert.equal(source.includes("publishFrozenAuthority"), false);
+  assert.equal(source.includes("OwnerRoadmapAuthorityEnvelopeV1"), false);
 });

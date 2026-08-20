@@ -244,6 +244,7 @@ export interface MvaDispatchDepsV1 {
   readonly effectActorId?: string;
   readonly authorityEnvelopeId?: string;
   readonly effectParentMilestoneId?: string;
+  readonly pinnedOwnerAuthorizationId?: string;
   readonly recordEffectDecision?: (line: string) => void;
 }
 
@@ -413,6 +414,8 @@ export function jobArtifactEffectRequest(input: {
   readonly providerId: ProviderIdV1;
   /** The approved parent this job descends from. Asserted by the caller, verified by the gate. */
   readonly parentMilestoneId: string;
+  /** Pinned by the control plane. The job's own copy is evidence to reconcile, never the selection. */
+  readonly ownerAuthorizationId: string;
   readonly actorId: string;
   readonly ownerId: string;
   readonly authorityEnvelopeId: string;
@@ -427,7 +430,7 @@ export function jobArtifactEffectRequest(input: {
     ownerId: input.ownerId,
     parentMilestoneId: input.parentMilestoneId,
     authorityEnvelopeId: input.authorityEnvelopeId,
-    ownerAuthorizationId: input.envelope.ownerAuthorizationId,
+    ownerAuthorizationId: input.ownerAuthorizationId,
     capabilityId: "Director.WriteJobArtifact",
     capabilityVersion: 1,
     targetType: "JobArtifact",
@@ -436,7 +439,7 @@ export function jobArtifactEffectRequest(input: {
     // would bind authority to the payload rather than to the effect.
     args: { jobId: input.envelope.jobId, expectedArtifact: input.envelope.expectedArtifact },
     declaredSensitivity: input.envelope.sensitiveDataClass,
-    provenance: [{ kind: "OWNER_DIRECTIVE", ref: input.envelope.ownerAuthorizationId, authorityBearing: true }],
+    provenance: [{ kind: "OWNER_DIRECTIVE", ref: input.ownerAuthorizationId, authorityBearing: true }],
     spend: null,
     idempotencyKey: input.envelope.idempotencyKey,
     requestedAtUtc: input.now,
@@ -469,14 +472,18 @@ export function createRealBoundedExecutorAdapter(
     readonly authorityEnvelopeId: string;
     readonly parentMilestoneId: string;
     /*
-     * Resolves the authority a job *references* into the envelope id and approved parent to cite.
+     * The authorization this dispatch runs under, pinned by the control plane.
      *
-     * Supplied by the control plane and backed by durable Owner records. Execution passes the
-     * reference the job already carries and receives what those records say; it cannot supply the
-     * contents, and a reference naming nothing resolves to nothing, which denies. Used only when the
-     * caller has not already pinned an envelope.
+     * V0.3 let the adapter resolve whatever id the job envelope happened to carry. A verification pass
+     * showed what that permits: Job A executing under Authority B, a child using a sibling's
+     * authority, and a persisted envelope edited on disk to name another valid record — all accepted,
+     * because the gate found the citation self-consistent with the record it named. Nothing bound a
+     * job to *its own* authority.
+     *
+     * The selection is no longer the job's to make. The job's copy is reconciled against this pin and
+     * a mismatch refuses, which is what closes the recovery path.
      */
-    readonly resolveAuthorityReference?: (ownerAuthorizationId: string) => { readonly envelopeId: string; readonly parentMilestoneId: string } | null;
+    readonly pinnedOwnerAuthorizationId: string;
     readonly journal: EffectJournalV1;
     readonly recordDecision: (line: string) => void;
   },
@@ -495,16 +502,38 @@ export function createRealBoundedExecutorAdapter(
       const bootstrapPath = join(deps.artifactRoot, `${envelope.jobId}.bootstrap.json`);
       const artifactPath = join(deps.artifactRoot, envelope.expectedArtifact);
 
-      const reference = deps.authorityEnvelopeId === "" && deps.resolveAuthorityReference !== undefined
-        ? deps.resolveAuthorityReference(envelope.ownerAuthorizationId)
-        : null;
+      /*
+       * Reconcile before authorising.
+       *
+       * The persisted envelope carries the authorization it was frozen with. If that no longer matches
+       * what the control plane pinned, the record has been altered or the job has been resumed under a
+       * different authority, and either way the honest answer is to refuse rather than to pick one.
+       */
+      if (envelope.ownerAuthorizationId !== deps.pinnedOwnerAuthorizationId) {
+        // Recorded like any other refusal. A gate whose refusals leave no trace is one nobody can
+        // audit, and this is the refusal most likely to matter after the fact.
+        deps.recordDecision(JSON.stringify({
+          schema: "aion.director.effectDecision.v1",
+          decision: "DENY",
+          reasonCode: "DENY_AUTHORIZATION_NOT_PINNED",
+          detail: "the job envelope names an authorization the control plane did not pin for this dispatch",
+          capabilityId: "Director.WriteJobArtifact",
+          actorId: deps.actorId,
+          jobId: envelope.jobId,
+          pinnedOwnerAuthorizationId: deps.pinnedOwnerAuthorizationId,
+          envelopeOwnerAuthorizationId: envelope.ownerAuthorizationId,
+          decidedAtUtc: deps.effectGate.now,
+        }));
+        return { class: "POLICY_DENIED", leaseOutcome: "RELEASED", writerLiveness: "STOPPED" };
+      }
       const effect = jobArtifactEffectRequest({
         envelope,
         providerId,
         actorId: deps.actorId,
-        parentMilestoneId: reference?.parentMilestoneId ?? deps.parentMilestoneId,
+        parentMilestoneId: deps.parentMilestoneId,
+        ownerAuthorizationId: deps.pinnedOwnerAuthorizationId,
         ownerId: deps.effectGate.ownerId,
-        authorityEnvelopeId: reference?.envelopeId ?? deps.authorityEnvelopeId,
+        authorityEnvelopeId: deps.authorityEnvelopeId,
         artifactPath,
         now: deps.effectGate.now,
       });
@@ -817,6 +846,7 @@ function adaptersFor(
       actorId: deps.effectActorId ?? "aion.director.mva-dispatch",
       authorityEnvelopeId: deps.authorityEnvelopeId ?? "",
       parentMilestoneId: deps.effectParentMilestoneId ?? "",
+      pinnedOwnerAuthorizationId: deps.pinnedOwnerAuthorizationId ?? "",
       journal,
       recordDecision: deps.recordEffectDecision ?? ((line: string) => appendDecisionLine(writeFile, root, line)),
     });

@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { outwardEffectDecision } from "./outward-effect-guard.mjs";
+import { loopbackFetch, outwardEffectDecision, outwardFetch } from "./outward-effect-guard.mjs";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
@@ -91,7 +91,7 @@ async function runLiveGmailSync(service, input = {}, dataRoot = null) {
       backupOk: false,
     };
   }
-  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+  const tokenRes = await outwardFetch("gmail.oauthExchange", "https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -124,7 +124,7 @@ async function runLiveGmailSync(service, input = {}, dataRoot = null) {
   listUrl.searchParams.set("maxResults", String(listMax));
   listUrl.searchParams.set("q", q);
   if (input.pageToken) listUrl.searchParams.set("pageToken", String(input.pageToken));
-  const listRes = await fetch(listUrl.toString(), { headers: { authorization: `Bearer ${access}` } });
+  const listRes = await outwardFetch("gmail.sync", listUrl.toString(), { headers: { authorization: `Bearer ${access}` } });
   const listJson = await listRes.json();
   if (!listRes.ok) {
     return {
@@ -181,7 +181,7 @@ async function runLiveGmailSync(service, input = {}, dataRoot = null) {
   };
   const messages = [];
   for (const id of ids) {
-    const fullRes = await fetch(
+    const fullRes = await outwardFetch("gmail.sync",
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
       { headers: { authorization: `Bearer ${access}` } },
     );
@@ -451,7 +451,7 @@ function createOllamaSynthesisPort(baseUrl = "http://127.0.0.1:11434") {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 12_000));
       try {
-        const response = await globalThis.fetch(new URL("/api/chat", baseUrl).toString(), {
+        const response = await loopbackFetch(new URL("/api/chat", baseUrl).toString(), {
           method: "POST",
           headers: { "content-type": "application/json" },
           signal: controller.signal,
@@ -2046,7 +2046,7 @@ export async function createAionServer(options = {}) {
 <p class="meta">Code was not exchanged. <a href="/">Back to AION</a></p>`;
           } else {
           try {
-            const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+            const tokenRes = await outwardFetch("gmail.oauthExchange", "https://oauth2.googleapis.com/token", {
               method: "POST",
               headers: { "content-type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({

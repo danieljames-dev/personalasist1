@@ -1,19 +1,17 @@
 import { runEvaluationSuite, validateEndpointUrl } from "../../packages/local-assistant/dist/index.js";
 
-import { assertOutwardEffectAllowed } from "./outward-effect-guard.mjs";
+import { isLoopbackUrl, loopbackFetch, outwardFetch } from "./outward-effect-guard.mjs";
 
 /**
- * Inference against a loopback runtime stays on this machine; against anything else it does not.
+ * The one transport this file uses, choosing local or outward from the address itself.
  *
- * validateEndpointUrl permits a third-party-service endpoint, so this file is not unconditionally
- * local. Only the non-loopback case is an outward effect, and only that case is gated -- gating a
- * local model would make the private-by-default path require Owner authority for nothing.
+ * validateEndpointUrl permits a third-party endpoint, so a brain call is not unconditionally local.
+ * A loopback runtime stays on this machine and needs no Owner authority — gating it would make the
+ * private-by-default path ask permission to talk to itself. Anything else leaves, and leaves only
+ * through the declared route.
  */
-function assertBrainTransportAllowed(url) {
-  const host = new URL(String(url)).hostname.toLowerCase();
-  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
-  if (loopback) return;
-  assertOutwardEffectAllowed("brain.remoteInference", { host });
+async function brainFetch(url, init) {
+  return isLoopbackUrl(url) ? loopbackFetch(url, init) : outwardFetch("brain.remoteInference", url, init);
 }
 
 /**
@@ -76,8 +74,7 @@ async function request(url, { method = "GET", body = null, headers = {}, timeout
   signal?.addEventListener("abort", onAbort, { once: true });
   const startedAt = Date.now();
   try {
-    assertBrainTransportAllowed(url);
-    const response = await globalThis.fetch(url, {
+    const response = await brainFetch(url, {
       method, signal: controller.signal, redirect: "error",
       headers: { accept: "application/json", ...(body ? { "content-type": "application/json" } : {}), ...headers },
       body: body ? JSON.stringify(body) : undefined,
@@ -202,8 +199,7 @@ export async function *streamOnce(endpoint, { prompt, context = [], signal }) {
   try {
     if (signal?.aborted) throw new Error("Inference cancelled.");
     if (endpoint.runtime === "ollama") {
-      assertBrainTransportAllowed(new URL("/api/chat", base).toString());
-      const response = await globalThis.fetch(new URL("/api/chat", base).toString(), {
+      const response = await brainFetch(new URL("/api/chat", base).toString(), {
         method: "POST",
         signal: controller.signal,
         redirect: "error",
@@ -215,8 +211,7 @@ export async function *streamOnce(endpoint, { prompt, context = [], signal }) {
       return;
     }
 
-    assertBrainTransportAllowed(new URL("/v1/chat/completions", base).toString());
-    const response = await globalThis.fetch(new URL("/v1/chat/completions", base).toString(), {
+    const response = await brainFetch(new URL("/v1/chat/completions", base).toString(), {
       method: "POST",
       signal: controller.signal,
       redirect: "error",
