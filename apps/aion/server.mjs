@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
+import { outwardEffectDecision } from "./outward-effect-guard.mjs";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
@@ -55,6 +56,27 @@ const SEARCH_VARIABLE = "AION_SEARCH_BASE_URL";
  * Used by connector.gmail.sync and post-OAuth initial sync (never invent service.syncGmailRecent).
  */
 async function runLiveGmailSync(service, input = {}, dataRoot = null) {
+  /*
+   * Authorisation before credentials, deliberately in that order.
+   *
+   * READY credentials say AION *could* reach Gmail; they say nothing about being permitted to. This
+   * route is not yet wired to a registered semantic capability and the pre-action effect gate, so it
+   * refuses here — in the code path, not in an inventory label a reader has to trust.
+   */
+  const activation = outwardEffectDecision("gmail.sync", { operation: "sync", requestedBy: "connector.gmail.sync" });
+  if (!activation.allowed) {
+    return {
+      ok: false,
+      mode: "not_authorized",
+      message: activation.reason,
+      scanned: 0,
+      classified: [],
+      commitmentsExtracted: 0,
+      contactsProposed: 0,
+      contactsCreated: 0,
+      backupOk: false,
+    };
+  }
   const creds = await service.gmailLiveCredentials();
   if (!creds.ready) {
     return {

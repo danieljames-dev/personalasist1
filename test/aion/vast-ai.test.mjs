@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_VAST_CREDENTIAL_VARIABLE, VastAiInfrastructureV1, buildVastQuery, normaliseVastOffer } from "../../apps/aion/vast-ai.mjs";
+import { registerOutwardRoute } from "../../apps/aion/outward-effect-guard.mjs";
+
+/*
+ * These tests drive the outbound machinery with a stubbed fetch, so they have to say that the
+ * route is active -- outward routes now refuse in code until wired to the pre-action effect gate,
+ * rather than relying on an inventory label. Registering an authorizer is the only way to activate
+ * one, which is what makes the disabled state real: there is no flag to set.
+ */
+registerOutwardRoute("vast.api", () => ({ allowed: true, reason: "test harness: stubbed transport, no real network" }));
 
 /**
  * The Vast.ai adapter, tested without an account, a key, or a network.

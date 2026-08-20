@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PublicUrlResearchProviderV1, assertPublicHost, extractText, extractTitle, fetchPublicDocument } from "../../apps/aion/research-fetch.mjs";
+import { registerOutwardRoute } from "../../apps/aion/outward-effect-guard.mjs";
+
+/*
+ * These tests drive the outbound machinery with a stubbed fetch, so they have to say that the
+ * route is active -- outward routes now refuse in code until wired to the pre-action effect gate,
+ * rather than relying on an inventory label. Registering an authorizer is the only way to activate
+ * one, which is what makes the disabled state real: there is no flag to set.
+ */
+registerOutwardRoute("research.fetch", () => ({ allowed: true, reason: "test harness: stubbed transport, no real network" }));
 
 /**
  * The live-fetch boundary, tested without touching the network.

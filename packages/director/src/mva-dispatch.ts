@@ -40,7 +40,6 @@ import {
   type WriterStateV1,
   PROVIDER_IDS_V1,
 } from "./provider-bridge.js";
-import { jobAuthorityEnvelopeId } from "./job-frozen-authority.js";
 import { isResolvedHostPath } from "./host-path.js";
 import { validatePathSegment } from "./store-contract.js";
 import {
@@ -470,14 +469,14 @@ export function createRealBoundedExecutorAdapter(
     readonly authorityEnvelopeId: string;
     readonly parentMilestoneId: string;
     /*
-     * Publishes the job's frozen authority to the gate when no roadmap envelope covers the write.
+     * Resolves the authority a job *references* into the envelope id and approved parent to cite.
      *
-     * Named rather than implicit because it is the weak spot: the authority being published comes
-     * from the job envelope itself, so it binds the effect without independently re-deciding whether
-     * the job was authorised. A roadmap envelope, once one exists, is resolved first and this is not
-     * consulted.
+     * Supplied by the control plane and backed by durable Owner records. Execution passes the
+     * reference the job already carries and receives what those records say; it cannot supply the
+     * contents, and a reference naming nothing resolves to nothing, which denies. Used only when the
+     * caller has not already pinned an envelope.
      */
-    readonly publishFrozenAuthority?: (envelope: JobEnvelopeV1) => void;
+    readonly resolveAuthorityReference?: (ownerAuthorizationId: string) => { readonly envelopeId: string; readonly parentMilestoneId: string } | null;
     readonly journal: EffectJournalV1;
     readonly recordDecision: (line: string) => void;
   },
@@ -496,16 +495,16 @@ export function createRealBoundedExecutorAdapter(
       const bootstrapPath = join(deps.artifactRoot, `${envelope.jobId}.bootstrap.json`);
       const artifactPath = join(deps.artifactRoot, envelope.expectedArtifact);
 
-      if (deps.authorityEnvelopeId === "" && deps.publishFrozenAuthority !== undefined) {
-        deps.publishFrozenAuthority(envelope);
-      }
+      const reference = deps.authorityEnvelopeId === "" && deps.resolveAuthorityReference !== undefined
+        ? deps.resolveAuthorityReference(envelope.ownerAuthorizationId)
+        : null;
       const effect = jobArtifactEffectRequest({
         envelope,
         providerId,
         actorId: deps.actorId,
-        parentMilestoneId: deps.parentMilestoneId === "" ? envelope.milestoneId : deps.parentMilestoneId,
+        parentMilestoneId: reference?.parentMilestoneId ?? deps.parentMilestoneId,
         ownerId: deps.effectGate.ownerId,
-        authorityEnvelopeId: deps.authorityEnvelopeId === "" ? jobAuthorityEnvelopeId(envelope.jobId) : deps.authorityEnvelopeId,
+        authorityEnvelopeId: reference?.envelopeId ?? deps.authorityEnvelopeId,
         artifactPath,
         now: deps.effectGate.now,
       });

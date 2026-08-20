@@ -36,7 +36,9 @@ import {
   createFileJobStore,
   createRoadmapPort,
   deriveEnvelopeFromOwnerAuthority,
-  jobFrozenAuthority,
+  effectAuthoritiesFromOwnerRecords,
+  authorityIsWithin,
+  effectAuthorityEnvelopeId,
 } from "../../packages/director/dist/index.js";
 import { createGoalIntake } from "./goal-intake.mjs";
 import { createProviderRegistry } from "./provider-registry.mjs";
@@ -137,41 +139,74 @@ const AION_OWNER_ID_V1 = "owner";
  * than from anything the job says about itself.
  */
 function effectGateFrom(authorities, artifactRoot, nowUtc) {
-  const envelopes = [];
+  /*
+   * Authority is projected from the Owner's durable records, before anything dispatches.
+   *
+   * V0.2 let the executing job publish the record that then authorised it. An independent review
+   * called that self-asserted authority, and it was right: the lineage closed on itself, because the
+   * approved parent was the job's own milestone id. Nothing about a job reaches this function now.
+   * The map is built from `.aion-local/owner-authority` when the port is constructed, so execution
+   * resolves a reference it cannot write to, and a restart rebuilds the same map from the same files.
+   *
+   * Two sources, strongest first: a roadmap authority envelope where the Owner granted one, and
+   * otherwise the narrowed artifact-write projection of an Owner record. The projection only ever
+   * describes a subset of what the record already allowed.
+   */
+  const envelopes = new Map();
   for (const record of authorities) {
-    const derived = deriveEnvelopeFromOwnerAuthority(record);
-    if (derived !== null) envelopes.push(derived);
+    const roadmap = deriveEnvelopeFromOwnerAuthority(record);
+    if (roadmap !== null) envelopes.set(roadmap.envelopeId, roadmap);
   }
-  const active = envelopes.find((candidate) => candidate.state === "ACTIVE") ?? null;
-  const frozenJobs = new Map();
+  const projections = effectAuthoritiesFromOwnerRecords(authorities);
+  for (const [id, projected] of projections) {
+    if (envelopes.has(id)) continue;
+    /*
+     * A projection may only ever describe a subset of the roadmap envelope for the same
+     * authorization. It is built to narrow, and this checks that it did rather than trusting it --
+     * child authority must stay inside parent authority, and "must" is worth an assertion at the one
+     * place where a wider one could enter the map.
+     */
+    const parent = [...envelopes.values()].find(
+      (candidate) => candidate.ownerAuthorizationId === projected.ownerAuthorizationId,
+    );
+    const staysWithinParent = parent === undefined ? true : authorityIsWithin(projected, parent);
+    if (!staysWithinParent) continue;
+    envelopes.set(id, projected);
+  }
+
   const gate = {
     registry: DIRECTOR_CAPABILITY_REGISTRY_V1,
+    /*
+     * Artifacts live under `.aion-local`, and that is what this reports — the domain the Owner record
+     * actually names. Reporting a domain the record does not list would be the target resolver
+     * arranging its own approval.
+     */
     resolveTarget: (targetType, targetId) =>
       targetType === "JobArtifact" && typeof targetId === "string" && targetId.startsWith(artifactRoot)
-        ? { targetType, targetId, sensitivity: "INTERNAL", writeDomain: "artifacts" }
+        ? { targetType, targetId, sensitivity: "INTERNAL", writeDomain: ".aion-local" }
         : null,
-    /*
-     * A roadmap authority envelope is the stronger source and is consulted first. None exists in this
-     * repository yet, so a job artifact falls back to the authority the job was already frozen with —
-     * see jobFrozenAuthority. That binds the write to this job's milestone, data class and write
-     * permission; it does not add an independent opinion about the job itself.
-     */
-    envelopeFor: (id) =>
-      envelopes.find((candidate) => candidate.envelopeId === id)
-      ?? frozenJobs.get(id)
-      ?? null,
+    envelopeFor: (id) => envelopes.get(id) ?? null,
     ownerId: AION_OWNER_ID_V1,
     now: nowUtc,
   };
   return {
     effectGate: gate,
-    // Empty means "use the job's own frozen authority", which the adapter resolves per execution.
-    authorityEnvelopeId: active === null ? "" : active.envelopeId,
-    parentMilestoneId: active === null ? "" : (active.approvedParentMilestoneIds[0] ?? ""),
-    registerFrozenJobAuthority: (jobEnvelope) => {
-      const projected = jobFrozenAuthority(jobEnvelope);
-      frozenJobs.set(projected.envelopeId, projected);
-      return projected;
+    /*
+     * Empty when no Owner record supports an artifact write. That is not a gap to paper over: with no
+     * authority, the bounded executor's writes are refused, which is the correct outcome rather than
+     * an inconvenience.
+     */
+    authorityEnvelopeId: "",
+    parentMilestoneId: "",
+    /*
+     * A job carries the id of the authorization it acts under. That is a reference, not a permission:
+     * everything the gate then reads -- approved parent, write domains, ceilings -- comes from the
+     * Owner record on disk. A job naming an authorization that does not exist resolves to nothing.
+     */
+    resolveAuthorityReference: (ownerAuthorizationId) => {
+      const envelope = envelopes.get(effectAuthorityEnvelopeId(ownerAuthorizationId));
+      if (envelope === undefined) return null;
+      return { envelopeId: envelope.envelopeId, parentMilestoneId: envelope.approvedParentMilestoneIds[0] ?? "" };
     },
   };
 }

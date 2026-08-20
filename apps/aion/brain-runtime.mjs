@@ -1,5 +1,21 @@
 import { runEvaluationSuite, validateEndpointUrl } from "../../packages/local-assistant/dist/index.js";
 
+import { assertOutwardEffectAllowed } from "./outward-effect-guard.mjs";
+
+/**
+ * Inference against a loopback runtime stays on this machine; against anything else it does not.
+ *
+ * validateEndpointUrl permits a third-party-service endpoint, so this file is not unconditionally
+ * local. Only the non-loopback case is an outward effect, and only that case is gated -- gating a
+ * local model would make the private-by-default path require Owner authority for nothing.
+ */
+function assertBrainTransportAllowed(url) {
+  const host = new URL(String(url)).hostname.toLowerCase();
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+  if (loopback) return;
+  assertOutwardEffectAllowed("brain.remoteInference", { host });
+}
+
 /**
  * The only place AION talks to an inference runtime.
  *
@@ -60,6 +76,7 @@ async function request(url, { method = "GET", body = null, headers = {}, timeout
   signal?.addEventListener("abort", onAbort, { once: true });
   const startedAt = Date.now();
   try {
+    assertBrainTransportAllowed(url);
     const response = await globalThis.fetch(url, {
       method, signal: controller.signal, redirect: "error",
       headers: { accept: "application/json", ...(body ? { "content-type": "application/json" } : {}), ...headers },
@@ -185,6 +202,7 @@ export async function *streamOnce(endpoint, { prompt, context = [], signal }) {
   try {
     if (signal?.aborted) throw new Error("Inference cancelled.");
     if (endpoint.runtime === "ollama") {
+      assertBrainTransportAllowed(new URL("/api/chat", base).toString());
       const response = await globalThis.fetch(new URL("/api/chat", base).toString(), {
         method: "POST",
         signal: controller.signal,
@@ -197,6 +215,7 @@ export async function *streamOnce(endpoint, { prompt, context = [], signal }) {
       return;
     }
 
+    assertBrainTransportAllowed(new URL("/v1/chat/completions", base).toString());
     const response = await globalThis.fetch(new URL("/v1/chat/completions", base).toString(), {
       method: "POST",
       signal: controller.signal,

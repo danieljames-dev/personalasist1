@@ -1,3 +1,4 @@
+import { assertOutwardEffectAllowed } from "./outward-effect-guard.mjs";
 import { normaliseOffer, redactCredentials } from "../../packages/local-assistant/dist/index.js";
 
 /**
@@ -117,6 +118,8 @@ export class VastAiInfrastructureV1 {
   }
 
   async #request(path, { method = "GET", body = null, signal } = {}) {
+    // A credential in the environment is not permission to spend against it.
+    assertOutwardEffectAllowed("vast.api", { path, method });
     const key = this.#key();
     if (!key) throw new Error(`${this.variableName} is not set in this shell, so AION cannot reach Vast.ai. Set it and restart AION; AION stores only the variable name.`);
     const controller = new AbortController();
