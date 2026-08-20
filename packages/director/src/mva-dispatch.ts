@@ -129,6 +129,18 @@ export interface JobRequestV1 {
   readonly maxProviderAttempts?: number;
   readonly retryLimit?: number;
   readonly writePermission?: boolean;
+  /*
+   * The milestone this job is really for, and the Owner authorization that milestone runs under.
+   *
+   * Supplied by the roadmap orchestrator from durable roadmap state, never by a model, a provider or
+   * a payload — the only non-test constructor of a `JobRequestV1` is `roadmap-orchestrator.ts`.
+   * Absent means the job belongs to the MVA milestone itself, which is the direct-dispatch case.
+   *
+   * These exist because dropping them caused a demonstrated over-grant: Campaign 01 showed a job whose
+   * own authority permitted no write domain writing two artifacts under a different valid record.
+   */
+  readonly originMilestoneId?: string;
+  readonly originOwnerAuthorizationId?: string;
 }
 
 export interface DispatchBootstrapV1 {
@@ -242,9 +254,12 @@ export interface MvaDispatchDepsV1 {
   readonly effectGate?: EffectGateDepsV1;
   readonly effectJournal?: EffectJournalV1;
   readonly effectActorId?: string;
-  readonly authorityEnvelopeId?: string;
-  readonly effectParentMilestoneId?: string;
-  readonly pinnedOwnerAuthorizationId?: string;
+  /** Resolves a milestone to its durable Owner authorization. Absent means nothing is authorised. */
+  readonly authorityForMilestone?: (milestoneId: string) => {
+    readonly ownerAuthorizationId: string;
+    readonly envelopeId: string;
+    readonly parentMilestoneId: string;
+  } | null;
   readonly recordEffectDecision?: (line: string) => void;
 }
 
@@ -293,10 +308,10 @@ export function validateJobRequest(request: JobRequestV1): string | null {
 export function buildJobEnvelope(request: JobRequestV1, now: string): JobEnvelopeV1 {
   return freezeJobEnvelope({
     jobId: request.jobId,
-    milestoneId: MVA_MILESTONE_ID,
+    milestoneId: request.originMilestoneId ?? MVA_MILESTONE_ID,
     objective: request.objective,
     authoritySource: "OWNER_STANDING_AUTHORITY_V1",
-    ownerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    ownerAuthorizationId: request.originOwnerAuthorizationId ?? MVA_OWNER_AUTHORIZATION_ID,
     repository: request.repository,
     worktree: request.worktree,
     allowedPaths: request.allowedPaths,
@@ -469,21 +484,23 @@ export function createRealBoundedExecutorAdapter(
     readonly branch?: string;
     readonly effectGate: EffectGateDepsV1;
     readonly actorId: string;
-    readonly authorityEnvelopeId: string;
-    readonly parentMilestoneId: string;
-    /*
-     * The authorization this dispatch runs under, pinned by the control plane.
+    /**
+     * The authority for a given milestone, from durable Owner records.
      *
-     * V0.3 let the adapter resolve whatever id the job envelope happened to carry. A verification pass
-     * showed what that permits: Job A executing under Authority B, a child using a sibling's
-     * authority, and a persisted envelope edited on disk to name another valid record — all accepted,
-     * because the gate found the citation self-consistent with the record it named. Nothing bound a
-     * job to *its own* authority.
+     * V0.4 pinned one authorization for the whole dispatch path. Campaign 01 showed what that costs:
+     * seven over-grants and fourteen writes, including a job whose own authority permitted *no* write
+     * domain writing two artifacts under a broader record — and the mirror, jobs refused writes their
+     * own authority allowed. The gate was never wrong; it was pointed at the wrong record.
      *
-     * The selection is no longer the job's to make. The job's copy is reconciled against this pin and
-     * a mismatch refuses, which is what closes the recovery path.
+     * Resolution is now per milestone and comes from trusted state. The job may *claim* a milestone
+     * and an authorization; whether that pairing is real is decided here, against records the job
+     * cannot write. A milestone with no authority resolves to nothing, and nothing is refusal.
      */
-    readonly pinnedOwnerAuthorizationId: string;
+    readonly authorityForMilestone: (milestoneId: string) => {
+      readonly ownerAuthorizationId: string;
+      readonly envelopeId: string;
+      readonly parentMilestoneId: string;
+    } | null;
     readonly journal: EffectJournalV1;
     readonly recordDecision: (line: string) => void;
   },
@@ -509,18 +526,43 @@ export function createRealBoundedExecutorAdapter(
        * what the control plane pinned, the record has been altered or the job has been resumed under a
        * different authority, and either way the honest answer is to refuse rather than to pick one.
        */
-      if (envelope.ownerAuthorizationId !== deps.pinnedOwnerAuthorizationId) {
+      /*
+       * Bind the milestone to its authority before anything else.
+       *
+       * Two things are checked and they are different questions: does this milestone have an
+       * authority at all, and is the one the envelope cites that authority? A job that answers the
+       * second correctly while belonging to a milestone with narrower scope is exactly the shape
+       * Campaign 01 demonstrated, so the first question is asked from trusted state rather than from
+       * the envelope.
+       */
+      const lineage = deps.authorityForMilestone(envelope.milestoneId);
+      if (lineage === null) {
+        deps.recordDecision(JSON.stringify({
+          schema: "aion.director.effectDecision.v1",
+          decision: "DENY",
+          reasonCode: "DENY_MILESTONE_HAS_NO_AUTHORITY",
+          detail: "no durable Owner authorization covers the milestone this job belongs to",
+          capabilityId: "Director.WriteJobArtifact",
+          actorId: deps.actorId,
+          jobId: envelope.jobId,
+          milestoneId: envelope.milestoneId,
+          decidedAtUtc: deps.effectGate.now,
+        }));
+        return { class: "POLICY_DENIED", leaseOutcome: "RELEASED", writerLiveness: "STOPPED" };
+      }
+      if (envelope.ownerAuthorizationId !== lineage.ownerAuthorizationId) {
         // Recorded like any other refusal. A gate whose refusals leave no trace is one nobody can
         // audit, and this is the refusal most likely to matter after the fact.
         deps.recordDecision(JSON.stringify({
           schema: "aion.director.effectDecision.v1",
           decision: "DENY",
           reasonCode: "DENY_AUTHORIZATION_NOT_PINNED",
-          detail: "the job envelope names an authorization the control plane did not pin for this dispatch",
+          detail: "the job envelope names an authorization that does not belong to its milestone",
           capabilityId: "Director.WriteJobArtifact",
           actorId: deps.actorId,
           jobId: envelope.jobId,
-          pinnedOwnerAuthorizationId: deps.pinnedOwnerAuthorizationId,
+          milestoneId: envelope.milestoneId,
+          authorizationForMilestone: lineage.ownerAuthorizationId,
           envelopeOwnerAuthorizationId: envelope.ownerAuthorizationId,
           decidedAtUtc: deps.effectGate.now,
         }));
@@ -530,10 +572,10 @@ export function createRealBoundedExecutorAdapter(
         envelope,
         providerId,
         actorId: deps.actorId,
-        parentMilestoneId: deps.parentMilestoneId,
-        ownerAuthorizationId: deps.pinnedOwnerAuthorizationId,
+        parentMilestoneId: lineage.parentMilestoneId,
+        ownerAuthorizationId: lineage.ownerAuthorizationId,
         ownerId: deps.effectGate.ownerId,
-        authorityEnvelopeId: deps.authorityEnvelopeId,
+        authorityEnvelopeId: lineage.envelopeId,
         artifactPath,
         now: deps.effectGate.now,
       });
@@ -659,11 +701,11 @@ function newRecord(request: JobRequestV1, now: string): JobRecordV1 {
   return {
     schema: MVA_DISPATCH_SCHEMA_V1,
     jobId: request.jobId,
-    milestoneId: MVA_MILESTONE_ID,
+    milestoneId: request.originMilestoneId ?? MVA_MILESTONE_ID,
     objective: request.objective,
     jobClass: request.jobClass,
     authoritySource: "OWNER_STANDING_AUTHORITY_V1",
-    ownerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    ownerAuthorizationId: request.originOwnerAuthorizationId ?? MVA_OWNER_AUTHORIZATION_ID,
     status: "CREATED",
     repository: request.repository,
     worktree: request.worktree,
@@ -844,9 +886,8 @@ function adaptersFor(
       ...(deps.branch !== undefined ? { branch: deps.branch } : {}),
       effectGate: gate,
       actorId: deps.effectActorId ?? "aion.director.mva-dispatch",
-      authorityEnvelopeId: deps.authorityEnvelopeId ?? "",
-      parentMilestoneId: deps.effectParentMilestoneId ?? "",
-      pinnedOwnerAuthorizationId: deps.pinnedOwnerAuthorizationId ?? "",
+      // No resolver means no authority for any milestone, which refuses rather than defaults.
+      authorityForMilestone: deps.authorityForMilestone ?? (() => null),
       journal,
       recordDecision: deps.recordEffectDecision ?? ((line: string) => appendDecisionLine(writeFile, root, line)),
     });

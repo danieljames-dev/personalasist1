@@ -20,6 +20,7 @@ import { createRealBoundedExecutorAdapter, memoryEffectJournal } from "../../src
 import type { JobEnvelopeV1 } from "../../src/provider-bridge.js";
 import type { EffectGateDepsV1 } from "../../src/pre-action-effect-contract.js";
 import type { OwnerRoadmapAuthorityEnvelopeV1 } from "../../src/roadmap-authority-envelope.js";
+import { effectAuthorityEnvelopeId } from "../../src/job-frozen-authority.js";
 import {
   HARNESS_ARTIFACT_ROOT_V1,
   HARNESS_SHA_V1,
@@ -101,6 +102,16 @@ export type PerturbationNameV1 = keyof typeof PERTURBATIONS_V1;
  * becomes one again, the campaign notices.
  */
 export const AUTHORITY_RELEVANT_PERTURBATIONS_V1: readonly PerturbationNameV1[] = [
+  /*
+   * `claimOtherMilestone` moved here from the ignored list, and the harness is why.
+   *
+   * It was ignored because the effect request took its parent milestone from a control-plane pin, so
+   * an envelope rewriting `milestoneId` reached no decision. The Finding 1 repair made the milestone
+   * the *selector* — authority is resolved from it — so the field became load-bearing, and the test
+   * pinning "this is ignored, and notice if that changes" failed on the next run. That is the harness
+   * doing its job rather than an inconvenience to route around.
+   */
+  "claimOtherMilestone",
   "citeOtherAuthority",
   "citeUnknownAuthority",
   "citeEmptyAuthority",
@@ -115,10 +126,6 @@ export const AUTHORITY_RELEVANT_PERTURBATIONS_V1: readonly PerturbationNameV1[] 
  * because the next reader's instinct will be that it should be checked.
  */
 export const NON_AUTHORITY_PERTURBATIONS_V1: readonly { readonly name: PerturbationNameV1; readonly because: string }[] = [
-  {
-    name: "claimOtherMilestone",
-    because: "the effect request takes its parent milestone from the control-plane pin, and the artifact's MILESTONE line from a module constant, so the envelope's copy reaches no authorisation decision",
-  },
   {
     name: "dropWritePermission",
     because: "writePermission was an input to the removed job-derived authority projection; authority now comes from the Owner record, and this field is no longer consulted",
@@ -184,9 +191,23 @@ export function runScenario(scenario: HarnessScenarioV1): HarnessRunV1 {
     startingSha: HARNESS_SHA_V1,
     effectGate: gate,
     actorId: "aion.harness.discovery",
-    authorityEnvelopeId: fixture.authorityEnvelopeId,
-    parentMilestoneId: fixture.parentMilestoneId,
-    pinnedOwnerAuthorizationId: scenario.pinnedOverride ?? fixture.pinnedOwnerAuthorizationId,
+    /*
+     * Authority per milestone, from the fixture's synthetic Owner records — the same shape the control
+     * plane uses. `pinnedOverride` deliberately forces the *wrong* record for a scenario that wants to
+     * reproduce the Campaign 01 over-grant, so the harness can still express that case.
+     */
+    authorityForMilestone: (milestoneId: string) => {
+      const forced = scenario.pinnedOverride;
+      const authorizationId = forced ?? fixture.records.find((r) => r.milestoneId === milestoneId)?.ownerAuthorizationId;
+      if (authorizationId === undefined) return null;
+      const projected = fixture.authorities.get(effectAuthorityEnvelopeId(authorizationId));
+      if (projected === undefined) return null;
+      return {
+        ownerAuthorizationId: projected.ownerAuthorizationId,
+        envelopeId: projected.envelopeId,
+        parentMilestoneId: projected.approvedParentMilestoneIds[0] ?? "",
+      };
+    },
     journal: memoryEffectJournal(),
     recordDecision: observer.recordDecision,
   });

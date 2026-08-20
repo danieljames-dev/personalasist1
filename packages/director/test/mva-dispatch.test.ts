@@ -153,14 +153,21 @@ function artifactGate(overrides: Partial<EffectGateDepsV1> = {}): EffectGateDeps
   };
 }
 
+/** The milestone -> authority resolution the control plane performs, in fixture form. */
+function authorityForMilestoneFixture() {
+  return {
+    ownerAuthorizationId: EFFECT_AUTHORITY_ID,
+    envelopeId: EFFECT_ENVELOPE_ID,
+    parentMilestoneId: MVA_MILESTONE_ID,
+  };
+}
+
 /** The four things the bounded executor needs before it may write anything. */
 function effectDeps(gate: EffectGateDepsV1 = artifactGate()) {
   return {
     effectGate: gate,
     actorId: "aion.director.mva-dispatch",
-    authorityEnvelopeId: EFFECT_ENVELOPE_ID,
-    parentMilestoneId: MVA_MILESTONE_ID,
-    pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    authorityForMilestone: () => authorityForMilestoneFixture(),
     journal: memoryEffectJournal(),
     recordDecision: () => undefined,
   };

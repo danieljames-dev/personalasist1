@@ -35,6 +35,7 @@ import {
   ROADMAP_STORE_RELATIVE_PATH,
   DIRECTOR_CAPABILITY_REGISTRY_V1,
   createFileJobStore,
+  createFileRoadmapStore,
   createRoadmapPort,
   deriveEnvelopeFromOwnerAuthority,
   effectAuthoritiesFromOwnerRecords,
@@ -139,7 +140,7 @@ const AION_OWNER_ID_V1 = "owner";
  * artifact root, and it fixes their data class and write domain from trusted local knowledge rather
  * than from anything the job says about itself.
  */
-function effectGateFrom(authorities, artifactRoot, nowUtc) {
+function effectGateFrom(authorities, artifactRoot, nowUtc, milestoneAuthorizationOf) {
   /*
    * Authority is projected from the Owner's durable records, before anything dispatches.
    *
@@ -175,8 +176,6 @@ function effectGateFrom(authorities, artifactRoot, nowUtc) {
     envelopes.set(id, projected);
   }
 
-  const pinned = envelopes.get(effectAuthorityEnvelopeId(MVA_OWNER_AUTHORIZATION_ID));
-
   const gate = {
     registry: DIRECTOR_CAPABILITY_REGISTRY_V1,
     /*
@@ -200,17 +199,52 @@ function effectGateFrom(authorities, artifactRoot, nowUtc) {
      * an inconvenience.
      */
     /*
-     * The authorization this dispatch runs under is pinned here, by the control plane, from a constant
-     * it owns -- not read off whatever a job envelope happens to carry.
+     * Authority is resolved per milestone, from the Owner records on disk.
      *
-     * V0.3 resolved the id the job named. A verification pass showed that Job A could then execute
-     * under Authority B, a child under a sibling's, and a persisted envelope edited on disk under
-     * anything valid, because the gate only checked that the citation matched the record cited. The
-     * job's own copy is now reconciled against this pin by the executor, and a mismatch refuses.
+     * V0.4 pinned one authorization for every dispatch. Campaign 01 measured what that cost: seven
+     * over-grants and fourteen writes, plus the mirror -- milestones refused writes their own record
+     * allowed. Both had the same cause, and it was not the gate. The gate enforced the record it was
+     * handed; the wrong record was handed to it.
+     *
+     * A milestone with no Owner record resolves to nothing, and nothing is a refusal rather than a
+     * fallback. Nothing here is read from a job, a payload or a provider.
      */
-    pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
-    authorityEnvelopeId: pinned === undefined ? "" : pinned.envelopeId,
-    parentMilestoneId: pinned === undefined ? "" : (pinned.approvedParentMilestoneIds[0] ?? ""),
+    authorityForMilestone: (milestoneId) => {
+      if (typeof milestoneId !== "string" || milestoneId === "") return null;
+      // Trusted chain, each step from durable state: roadmap milestone -> the authorization the Owner
+      // gave *that* milestone -> the record on disk -> its narrowed artifact-write projection.
+      const authorizationId = milestoneAuthorizationOf(milestoneId);
+      if (authorizationId === null) return null;
+      const envelope = envelopes.get(effectAuthorityEnvelopeId(authorizationId))
+        ?? [...envelopes.values()].find((row) => row.ownerAuthorizationId === authorizationId);
+      if (envelope === undefined) return null;
+      return {
+        ownerAuthorizationId: envelope.ownerAuthorizationId,
+        envelopeId: envelope.envelopeId,
+        parentMilestoneId: envelope.approvedParentMilestoneIds[0] ?? "",
+      };
+    },
+  };
+}
+
+/**
+ * Which Owner authorization a roadmap milestone runs under, from the roadmap store.
+ *
+ * Read here rather than taken from the job, because this is the link Campaign 01 showed missing: the
+ * milestone knows its authorization, and dropping that on the way to dispatch is what let one record
+ * govern every milestone's writes. A milestone with no authorization returns null, which refuses.
+ */
+function createMilestoneAuthorizationLookup(storeRoot) {
+  return (milestoneId) => {
+    let milestone = null;
+    try {
+      milestone = createFileRoadmapStore(storeRoot).loadMilestone(milestoneId);
+    } catch {
+      return null;
+    }
+    if (milestone === null) return null;
+    const id = milestone.ownerAuthorizationId;
+    return typeof id === "string" && id !== "" ? id : null;
   };
 }
 
@@ -292,6 +326,8 @@ function buildRoadmapSurface(options = {}) {
    * Authority is durable state that the Owner can change at a console while the server runs; a
    * registry frozen at boot would keep executing under an envelope that no longer exists.
    */
+  const milestoneAuthorizationOf = createMilestoneAuthorizationLookup(storeRoot);
+
   function registry(head, authorities) {
     const nowUtc = now();
     return createProviderRegistry({
@@ -299,7 +335,7 @@ function buildRoadmapSurface(options = {}) {
       startingSha: head,
       now: nowUtc,
       allowedProviders: allowedProvidersFrom(authorities),
-      ...effectGateFrom(authorities, artifactRoot, nowUtc),
+      ...effectGateFrom(authorities, artifactRoot, nowUtc, milestoneAuthorizationOf),
     });
   }
 

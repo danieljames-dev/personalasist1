@@ -137,9 +137,7 @@ export function createProviderRegistry(input) {
          */
         effectGate: input.effectGate ?? closedEffectGate(now),
         actorId: "aion.app.provider-registry",
-        authorityEnvelopeId: input.authorityEnvelopeId ?? "",
-        parentMilestoneId: input.parentMilestoneId ?? "",
-        pinnedOwnerAuthorizationId: input.pinnedOwnerAuthorizationId ?? "",
+        authorityForMilestone: input.authorityForMilestone ?? (() => null),
         journal: effectJournal,
         recordDecision: input.recordEffectDecision ?? (() => undefined),
       });

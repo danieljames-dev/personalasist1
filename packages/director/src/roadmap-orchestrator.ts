@@ -395,6 +395,16 @@ export function createMvaDispatcher(
   return (milestone, packet) => {
     const request: JobRequestV1 = {
       jobId: `roadmap-${milestone.milestoneId}`,
+      /*
+       * The milestone's own identity and authorization travel with the job.
+       *
+       * These were dropped here, and Campaign 01 measured the cost: every roadmap milestone dispatched
+       * under one module-level authorization, so a milestone whose Owner record allowed nothing still
+       * wrote, and one whose record allowed `docs` was refused a `docs` write. Read from the roadmap
+       * milestone -- durable control-plane state -- not from anything a model or provider supplied.
+       */
+      originMilestoneId: milestone.milestoneId,
+      ...(milestone.ownerAuthorizationId !== null ? { originOwnerAuthorizationId: milestone.ownerAuthorizationId } : {}),
       objective: milestone.objective,
       jobClass: "REPOSITORY_REVERSIBLE",
       repository: input.repository,

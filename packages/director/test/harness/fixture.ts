@@ -128,9 +128,20 @@ export function harnessFixture(input: HarnessFixtureInputV1 = {}): HarnessFixtur
     now,
   };
 
+  /*
+   * The job belongs to a milestone, and cites that milestone's authorization.
+   *
+   * Both halves are stamped here because the Finding 1 repair made lineage load-bearing: authority is
+   * resolved from the milestone, so a fixture that left the milestone as the MVA constant would be
+   * modelling a job nobody dispatches.
+   */
+  const pinnedRecord = records.find((row) => row.ownerAuthorizationId === pinned);
   const built = buildJobEnvelope(harnessJobRequest(input.jobRequest), now);
-  // The job cites the pinned authorization, which is what the control plane would have given it.
-  const jobEnvelope: JobEnvelopeV1 = { ...built, ownerAuthorizationId: pinned };
+  const jobEnvelope: JobEnvelopeV1 = {
+    ...built,
+    ownerAuthorizationId: pinned,
+    milestoneId: pinnedRecord?.milestoneId ?? built.milestoneId,
+  };
 
   return {
     records,

@@ -95,6 +95,20 @@ function gate(overrides: Partial<EffectGateDepsV1> = {}): EffectGateDepsV1 {
   };
 }
 
+/**
+ * The milestone -> authority resolution the control plane performs, in fixture form.
+ *
+ * Static in these suites because they exercise one milestone; Campaign 01 and the discovery harness
+ * are where the multi-milestone matrix lives.
+ */
+function authorityForMilestoneFixture() {
+  return {
+    ownerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    envelopeId: ENVELOPE_ID,
+    parentMilestoneId: MVA_MILESTONE_ID,
+  };
+}
+
 function jobRequest(): JobRequestV1 {
   return {
     jobId: "job-effect-wiring",
@@ -131,9 +145,7 @@ function adapterWith(io: ReturnType<typeof recorder>, deps: Partial<{ effectGate
     startingSha: SHA,
     effectGate: deps.effectGate ?? gate(),
     actorId: "aion.director.mva-dispatch",
-    authorityEnvelopeId: ENVELOPE_ID,
-    parentMilestoneId: MVA_MILESTONE_ID,
-    pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    authorityForMilestone: () => authorityForMilestoneFixture(),
     journal: memoryEffectJournal(),
     recordDecision: io.recordDecision,
   });
@@ -423,8 +435,17 @@ test("a job naming an authority that does not exist writes nothing", () => {
   const adapter = createRealBoundedExecutorAdapter("local", {
     artifactRoot: ROOT, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
     effectGate: gateWithRecords, actorId: "aion.director.mva-dispatch",
-    authorityEnvelopeId: effectAuthorityEnvelopeId(MVA_OWNER_AUTHORIZATION_ID),
-    parentMilestoneId: MVA_MILESTONE_ID, pinnedOwnerAuthorizationId: MVA_OWNER_AUTHORIZATION_ID,
+    // This test builds its own record set, so it resolves against that rather than the outer fixture.
+    authorityForMilestone: (milestoneId: string) => {
+      if (milestoneId !== MVA_MILESTONE_ID) return null;
+      const projected = authorities.get(effectAuthorityEnvelopeId(MVA_OWNER_AUTHORIZATION_ID));
+      if (projected === undefined) return null;
+      return {
+        ownerAuthorizationId: projected.ownerAuthorizationId,
+        envelopeId: projected.envelopeId,
+        parentMilestoneId: projected.approvedParentMilestoneIds[0] ?? "",
+      };
+    },
     journal: memoryEffectJournal(), recordDecision: io.recordDecision,
   });
 
@@ -492,9 +513,13 @@ function pinnedAdapter(io: ReturnType<typeof recorder>, pinned: string, envelope
         targetType === "JobArtifact" ? { targetType, targetId, sensitivity: "INTERNAL" as const, writeDomain: ".aion-local" } : null,
     },
     actorId: "aion.director.mva-dispatch",
-    authorityEnvelopeId: envelopeId ?? pinnedEnvelope?.envelopeId ?? "",
-    parentMilestoneId: pinnedEnvelope?.approvedParentMilestoneIds[0] ?? "",
-    pinnedOwnerAuthorizationId: pinned,
+    // These tests deliberately force one authority for the dispatch, which is how they reproduce the
+    // substitution attempts; resolution per milestone is covered by the Finding 1 tests below.
+    authorityForMilestone: () => pinnedEnvelope === undefined ? null : ({
+      ownerAuthorizationId: pinnedEnvelope.ownerAuthorizationId,
+      envelopeId: envelopeId ?? pinnedEnvelope.envelopeId,
+      parentMilestoneId: pinnedEnvelope.approvedParentMilestoneIds[0] ?? "",
+    }),
     journal: memoryEffectJournal(), recordDecision: io.recordDecision,
   });
 }
@@ -569,4 +594,166 @@ test("the dispatch module has no way to select an authorization", () => {
   assert.equal(source.includes("resolveAuthorityReference"), false);
   assert.equal(source.includes("publishFrozenAuthority"), false);
   assert.equal(source.includes("OwnerRoadmapAuthorityEnvelopeV1"), false);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Finding 1: authority belongs to the milestone, not to the dispatch path     */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Discovery Campaign 01 measured what the previous design cost: seven over-grants and fourteen
+ * writes, plus twenty-four mirror under-grants. The clearest case was a job whose own Owner authority
+ * permitted *no* write domain writing two artifacts under a broader record, with the gate recording
+ * ALLOW_ROUTINE_IN_SCOPE.
+ *
+ * The gate was never wrong. It enforced the record it was handed; the wrong record was handed to it,
+ * because one module-level authorization served every milestone. Authority is now resolved per
+ * milestone from durable Owner records, and a job that cites an authorization its milestone does not
+ * hold is refused.
+ *
+ * Every test below judges by observed writes.
+ */
+
+const LINEAGE_RECORDS = [
+  { id: "LIN-AUTH-LOCAL", milestone: "LIN-MILESTONE-LOCAL", domains: [".aion-local"] },
+  { id: "LIN-AUTH-BOTH", milestone: "LIN-MILESTONE-BOTH", domains: [".aion-local", "docs"] },
+  { id: "LIN-AUTH-DOCS", milestone: "LIN-MILESTONE-DOCS", domains: ["docs"] },
+  { id: "LIN-AUTH-NONE", milestone: "LIN-MILESTONE-NONE", domains: [] },
+];
+
+function lineageAuthorities() {
+  return effectAuthoritiesFromOwnerRecords(LINEAGE_RECORDS.map((r) => ({
+    ownerAuthorizationId: r.id, milestoneId: r.milestone, allowedWriteDomains: r.domains,
+    allowedProviders: ["local"], state: "ACTIVE", createdAtUtc: NOW,
+  })));
+}
+
+/** The control plane's resolution: milestone -> its own authorization -> the projected envelope. */
+function lineageResolver(authorities: ReturnType<typeof lineageAuthorities>, overrides: { revoked?: boolean } = {}) {
+  return (milestoneId: string) => {
+    const record = LINEAGE_RECORDS.find((r) => r.milestone === milestoneId);
+    if (record === undefined) return null;
+    const projected = authorities.get(effectAuthorityEnvelopeId(record.id));
+    if (projected === undefined) return null;
+    return { ownerAuthorizationId: projected.ownerAuthorizationId, envelopeId: projected.envelopeId, parentMilestoneId: projected.approvedParentMilestoneIds[0] ?? "" };
+  };
+}
+
+function lineageRun(input: { milestone: string; claims: string; revoked?: boolean }) {
+  const authorities = lineageAuthorities();
+  const io = recorder();
+  const adapter = createRealBoundedExecutorAdapter("local", {
+    artifactRoot: ROOT, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
+    effectGate: {
+      ...gate(),
+      envelopeFor: (id: string) => {
+        const found = authorities.get(id);
+        if (found === undefined) return null;
+        return input.revoked === true ? { ...found, state: "REVOKED" as const } : found;
+      },
+      resolveTarget: (targetType: string, targetId: string) =>
+        targetType === "JobArtifact" ? { targetType, targetId, sensitivity: "INTERNAL" as const, writeDomain: ".aion-local" } : null,
+    },
+    actorId: "aion.director.mva-dispatch",
+    authorityForMilestone: lineageResolver(authorities),
+    journal: memoryEffectJournal(),
+    recordDecision: io.recordDecision,
+  });
+  const envelope = { ...envelopeFor(), milestoneId: input.milestone, ownerAuthorizationId: input.claims };
+  const result = adapter.execute(envelope);
+  return { outcome: String(result.class), writes: io.writes.length, decisions: io.decisions };
+}
+
+test("a milestone writes under its own authority", () => {
+  const run = lineageRun({ milestone: "LIN-MILESTONE-LOCAL", claims: "LIN-AUTH-LOCAL" });
+  assert.equal(run.outcome, "SUCCESS");
+  assert.equal(run.writes, 2, "correct lineage must still do its work");
+});
+
+test("a milestone whose authority permits no write domain writes nothing", () => {
+  /*
+   * Campaign 01's smallest counterexample, verbatim. Before the repair this wrote two artifacts under
+   * a broader record and logged ALLOW_ROUTINE_IN_SCOPE.
+   */
+  const claiming = lineageRun({ milestone: "LIN-MILESTONE-NONE", claims: "LIN-AUTH-LOCAL" });
+  assert.equal(claiming.writes, 0, "a no-domain milestone obtained a write by citing a broader record");
+  assert.equal(claiming.outcome, "POLICY_DENIED");
+
+  const honest = lineageRun({ milestone: "LIN-MILESTONE-NONE", claims: "LIN-AUTH-NONE" });
+  assert.equal(honest.writes, 0, "a no-domain milestone wrote under its own record");
+});
+
+test("a job cannot borrow another milestone's authority, broader or narrower", () => {
+  for (const [milestone, claims] of [
+    ["LIN-MILESTONE-DOCS", "LIN-AUTH-LOCAL"],   // a docs-only milestone reaching for a local-write record
+    ["LIN-MILESTONE-LOCAL", "LIN-AUTH-BOTH"],   // claims a broader sibling
+    ["LIN-MILESTONE-LOCAL", "LIN-AUTH-DOCS"],   // claims an unrelated sibling
+    ["LIN-MILESTONE-BOTH", "LIN-AUTH-LOCAL"],   // claims a narrower sibling
+  ] as const) {
+    const run = lineageRun({ milestone, claims });
+    assert.equal(run.writes, 0, `${milestone} wrote while citing ${claims}`);
+    assert.equal(run.outcome, "POLICY_DENIED");
+  }
+});
+
+test("a milestone with no durable authority at all writes nothing", () => {
+  const run = lineageRun({ milestone: "LIN-MILESTONE-UNKNOWN", claims: "LIN-AUTH-LOCAL" });
+  assert.equal(run.writes, 0);
+  assert.equal(run.outcome, "POLICY_DENIED");
+  const reasons = run.decisions.map((line) => JSON.parse(line).reasonCode as string);
+  assert.ok(reasons.includes("DENY_MILESTONE_HAS_NO_AUTHORITY"), `observed [${reasons.join(", ")}]`);
+});
+
+test("a substituted authority is refused observably, naming both sides", () => {
+  // BOTH projects to a real artifact-write authority, so the refusal is about the substitution rather
+  // than about the milestone having no artifact authority at all — those are different refusals.
+  const run = lineageRun({ milestone: "LIN-MILESTONE-BOTH", claims: "LIN-AUTH-LOCAL" });
+  const decision = JSON.parse(run.decisions[0]!) as Record<string, unknown>;
+  assert.equal(decision.reasonCode, "DENY_AUTHORIZATION_NOT_PINNED");
+  assert.equal(decision.milestoneId, "LIN-MILESTONE-BOTH");
+  assert.equal(decision.envelopeOwnerAuthorizationId, "LIN-AUTH-LOCAL");
+  assert.equal(decision.authorizationForMilestone, "LIN-AUTH-BOTH");
+});
+
+test("a recovered envelope cannot substitute authority after a disk round trip", () => {
+  const authorities = lineageAuthorities();
+  const io = recorder();
+  const adapter = createRealBoundedExecutorAdapter("local", {
+    artifactRoot: ROOT, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
+    effectGate: {
+      ...gate(),
+      envelopeFor: (id: string) => authorities.get(id) ?? null,
+      resolveTarget: (targetType: string, targetId: string) =>
+        targetType === "JobArtifact" ? { targetType, targetId, sensitivity: "INTERNAL" as const, writeDomain: ".aion-local" } : null,
+    },
+    actorId: "aion.director.mva-dispatch",
+    authorityForMilestone: lineageResolver(authorities),
+    journal: memoryEffectJournal(),
+    recordDecision: io.recordDecision,
+  });
+  const tampered = JSON.parse(JSON.stringify({
+    ...envelopeFor(), milestoneId: "LIN-MILESTONE-NONE", ownerAuthorizationId: "LIN-AUTH-LOCAL",
+  })) as ReturnType<typeof envelopeFor>;
+  assert.equal(String(adapter.execute(tampered).class), "POLICY_DENIED");
+  assert.deepEqual(io.writes, [], "a tampered persisted envelope produced a write");
+});
+
+test("revoked current authority refuses even with correct lineage", () => {
+  const run = lineageRun({ milestone: "LIN-MILESTONE-LOCAL", claims: "LIN-AUTH-LOCAL", revoked: true });
+  assert.equal(run.writes, 0);
+  const reasons = run.decisions.map((line) => JSON.parse(line).reasonCode as string);
+  assert.ok(reasons.includes("DENY_REVOKED_AUTHORITY"), `observed [${reasons.join(", ")}]`);
+});
+
+test("no module constant selects authority for dispatch any more", () => {
+  /*
+   * The seam removed, asserted by name so it cannot return quietly. `MVA_OWNER_AUTHORIZATION_ID` still
+   * exists as the identity of the MVA milestone itself — that is metadata — but it no longer chooses
+   * whose authority governs a write.
+   */
+  const source = readFileSync(join(repositoryRoot, "packages", "director", "src", "mva-dispatch.ts"), "utf8");
+  assert.equal(source.includes("pinnedOwnerAuthorizationId"), false);
+  const orchestrator = readFileSync(join(repositoryRoot, "packages", "director", "src", "roadmap-orchestrator.ts"), "utf8");
+  assert.ok(orchestrator.includes("originMilestoneId: milestone.milestoneId"), "the orchestrator must carry milestone identity");
+  assert.ok(orchestrator.includes("originOwnerAuthorizationId"), "the orchestrator must carry the milestone's authorization");
 });

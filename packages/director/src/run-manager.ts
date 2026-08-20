@@ -1496,9 +1496,7 @@ export function directorSubmitMvaJob(request: JobRequestV1, deps: MvaDispatchDep
     startingSha: request.startingSha,
     effectGate: closedEffectGate(now),
     actorId: "aion.director.run-manager",
-    authorityEnvelopeId: "",
-    parentMilestoneId: "",
-    pinnedOwnerAuthorizationId: "",
+    authorityForMilestone: () => null,
     journal: memoryEffectJournal(),
     recordDecision: () => undefined,
   });
