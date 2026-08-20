@@ -161,13 +161,13 @@ const TARGET_CLASSES: readonly TargetClassV1[] = [
        * once class identity stopped excusing one. These name *objects*; they grant nothing about
        * what may be done to them, and an unrecognised verb aimed at any of them still gates.
        */
-      "regression", "integration", "cleanup", "error"],
+      "regression", "integration", "cleanup", "error", "bug", "bugs", "code"],
     implies: [],
     routine: true,
   },
   {
     target: "an internal technical object",
-    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "response", "payload", "socket", "buffer", "cache", "panel", "page", "button", "indicator", "ui", "view", "port", "process", "node", "nodes", "rendering", "status", "roadmap", "dashboard", "screen", "layout", "label", "state", "states", "form", "input", "output", "banner", "tooltip", "column", "row", "table", "chart", "log", "logs", "log line", "wording", "copy", "name", "names", "title", "heading"],
+    words: ["internal", "internally", "locally", "local", "endpoint", "queue", "adapter", "handler", "route", "api call", "request", "response", "payload", "socket", "buffer", "cache", "panel", "page", "button", "indicator", "ui", "view", "port", "process", "node", "nodes", "rendering", "status", "roadmap", "dashboard", "screen", "layout", "label", "state", "states", "form", "input", "output", "banner", "tooltip", "column", "row", "table", "chart", "log", "logs", "log line", "wording", "copy", "name", "names", "title", "heading", "phrase", "phrases"],
     implies: [],
     routine: true,
   },
@@ -720,36 +720,29 @@ function unaccountedOperativeWord(segment: string, targets: TargetEvidenceV1): s
     const readable = !run.some(opaque);
 
     /*
-     * A modifier run: unread words qualifying a noun the model did recognise, introduced by a
-     * determiner or the verb — "Add a *clearer waiting-on-owner* indicator.", "the *unit* test".
+     * The one excuse left, and the only one that has survived being attacked.
      *
-     * There used to be a second way through here: a run flanked by two target nouns of the same
-     * class was excused as a compound, on the reasoning that one object was being named. Class
-     * identity is not evidence about the word in between, and an independent review proved it:
+     * An unread run may qualify a noun the model recognised when grammar introduces it — a determiner
+     * or the predicate itself sits in front of it, and a recognised noun closes it: "the *unit* test",
+     * "Add a *clearer waiting-on-owner* indicator." That is the attributive slot, the one place
+     * English permits nothing but a noun phrase.
      *
-     *     "Update the parser leak tests."        ALLOW      "Update the parser leak logs."   GATE
-     *     "Update the parser exfiltrate tests."  ALLOW      "Fix the helper murk cache."     GATE
+     * Everything else that used to reach ALLOW here has been removed, because each one turned out to
+     * be a position rather than an understanding, and a position can be moved into:
      *
-     * The only difference is whether the flanking nouns happened to share a `TARGET_CLASSES` row, so
-     * an unread operational word inherited authority by standing between two relatives. Known verbs
-     * gated and unknown ones did not, which makes absence from a table the thing granting
-     * permission — the exact shape every previous repair here removed.
+     *   same class either side   "Update the parser leak tests."     — closed in 9c5056a
+     *   a modifier in front      "Update the broken zorp tests."     — the same hatch, one word left
+     *   trailing after a noun    "Update the parser exfiltrate."     — reported by review
+     *   trailing after a determiner "Update the parser for the zorp."
      *
-     * A compound is now permitted only where its middle is affirmatively recognised: a target word,
-     * a known modifier, or a nominal derived from a routine verb ("the request *validation* helper",
-     * "the parser error *handling* test"). Anything else keeps its own effect and gates.
+     * In every one of them a *known* verb gated and an unknown word inherited, which makes absence
+     * from a table the thing granting permission. `before` must therefore be grammar, not a
+     * neighbouring noun and not another unread word: a noun cannot vouch for the word beside it.
+     *
+     * The cost is that a trailing unread word now gates, so what legitimately trails a noun has to be
+     * recognised rather than assumed — which is why "bug", "code" and "phrase" are named below.
      */
-    if (readable && isNounPhraseWord(after) && !isTargetNoun(before)) { index = end - 1; continue; }
-
-    /*
-     * A single trailing word governing nothing: "the UI *bug*", "for the *phrase*".
-     *
-     * It ends the segment, so it has no object; qualified by a recognised noun or introduced by a
-     * determiner, it can only be naming something. A predicate that takes nothing away cannot be the
-     * mutation this check exists to catch — and unread verbs are excluded from `readable` anyway.
-     */
-    if (readable && run.length === 1 && end === words.length
-      && (isTargetNoun(before) || (before !== undefined && FUNCTION_WORDS.has(before)))) { index = end - 1; continue; }
+    if (readable && isNounPhraseWord(after) && DETERMINERS.has(before ?? "")) { index = end - 1; continue; }
 
     return run[0];
   }
@@ -789,20 +782,21 @@ const CLAUSE_BOUNDARIES: readonly string[] = [
   "so that", "in order to", "along with", "together with", "besides", "rather than", "instead of",
 ];
 
-/**
- * Suffixes that can only ever be adjectival.
+/*
+ * There is no longer an adjective-suffix rule, and that is the point.
  *
- * `-ed` and `-ing` used to be in this set, and that was a permission bypass. A participle is exactly
- * as much a verb as it is a modifier — "murking the log" and "duplicated CSS class" have the same
- * shape — so treating any unknown `-ing`/`-ed` word as a harmless modifier let an unread mutation
- * merge into the routine clause in front of it:
+ * `-ed` and `-ing` were removed from it once, because a participle is as much a verb as a modifier.
+ * The remainder — `al ive ous able ible less ful` — looked safely adjectival and was not. Attacking
+ * the rule rather than the reported sentences turned up operative words wearing every one of those
+ * endings:
  *
- *     "Refactor the parser, murking the log."   ->  one effect  ->  ALLOW_STANDING
+ *     "Update the parser removal."   "Update the parser disposal."   "Update the log retrieval."
+ *     "Update the helper erasable."  "Update the parser extractive."
  *
- * while standalone "Murking the log." gated. Morphology alone may no longer contribute affirmative
- * permission. The suffixes left here cannot form a predicate.
+ * all inheriting standing authority, because the shape of the last four letters was accepted as
+ * evidence about the meaning of the word. Morphology is not permission. A modifier is now recognised
+ * only by being one this model has actually read.
  */
-const ADJECTIVE_SUFFIX = /(al|ive|ous|able|ible|less|ful)$/;
 
 const KNOWN_MODIFIERS: readonly string[] = [
   "unused", "duplicate", "old", "new", "local", "internal", "stale", "legacy", "broken", "failing",
@@ -826,7 +820,7 @@ const KNOWN_MODIFIER_FORMS: ReadonlySet<string> = new Set(
 
 /** True when a word is a modifier this model actually recognises, rather than one merely shaped like one. */
 function isKnownModifier(word: string): boolean {
-  return KNOWN_MODIFIER_FORMS.has(word) || ROUTINE_NOMINALS.has(word) || ADJECTIVE_SUFFIX.test(word);
+  return KNOWN_MODIFIER_FORMS.has(word) || ROUTINE_NOMINALS.has(word);
 }
 
 /**
@@ -896,6 +890,21 @@ const FUNCTION_WORDS: ReadonlySet<string> = new Set([
   "most", "less", "least", "other", "others", "same", "such", "own", "one", "two", "three",
   // Verb particles. "Clean up the ..." is one predicate, and `up` names nothing on its own.
   "up", "down", "out", "off", "back", "again", "around", "through",
+]);
+
+/**
+ * The words that open a noun phrase.
+ *
+ * The attributive excuse needs the left boundary to be one of these specifically, not glue in
+ * general. With the predicate itself allowed to introduce a run, "Update glorp parser." and
+ * "Update the glorp test fixture." still inherited: the unread word had simply moved to a slot that
+ * happened to be excused. A determiner cannot attach to a verb, so "the *X* parser" has no reading
+ * in which `X` is a second instruction — which is the affirmative grammatical claim this excuse
+ * rests on, rather than an observation about where the word happens to sit.
+ */
+const DETERMINERS: ReadonlySet<string> = new Set([
+  "a", "an", "the", "this", "that", "these", "those", "its", "his", "her", "their", "our", "my",
+  "your", "any", "all", "both", "each", "every", "some", "no", "other", "same", "such",
 ]);
 
 function isNounPhraseContinuation(fragment: string): boolean {

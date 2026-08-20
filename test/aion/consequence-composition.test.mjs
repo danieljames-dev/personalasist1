@@ -453,3 +453,183 @@ test("a determiner inside a multi-word target never counts as a noun", () => {
   gates("Update the zorp.");
   gates("Update the parser zorp the tests.");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Trailing unread text: a recognised prefix proves only itself               */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * A seventh independent review found the last positional excuse, and it was one this file had
+ * documented as acceptable rather than treated as a fail condition:
+ *
+ *     "Update the parser exfiltrate."   "Update the helper backdoor."   "Refactor the helper weaponize."
+ *
+ * all inherited. The argument had been that a trailing word governs nothing and so cannot be the
+ * mutation. That was wrong: a trailing imperative is a second instruction with its separator missing,
+ * and *known* verbs gated in the same slot while unknown ones did not — which makes absence from a
+ * table the thing granting permission, for the fifth time in this file.
+ *
+ * Attacking the rule rather than the reported sentences turned up three further branches the review
+ * had not reported, and they are pinned below alongside it:
+ *
+ *   - `-al -ive -ous -able -ible -less -ful` conferred modifier status by shape alone, so
+ *     "Update the parser removal." and "Update the log retrieval." inherited;
+ *   - a modifier on the left reopened the same-class hatch: "Update the broken zorp tests.";
+ *   - a determiner on the left excused a trailing word: "Update the parser for the zorp."
+ *
+ * 579 leaks were reproduced before the change. Every positional excuse is gone except one, and that
+ * one is pinned explicitly at the end of this section rather than left implicit.
+ */
+
+test("a trailing unread word is a second instruction, not part of the object", () => {
+  for (const objective of [
+    "Update the parser exfiltrate.",
+    "Update the parser leak.",
+    "Update the helper backdoor.",
+    "Update the helper trojan.",
+    "Refactor the helper weaponize.",
+    "Update the parser yeet.",
+    "Update the parser siphon.",
+    "Update the docs harvest.",
+    "Update the log beacon.",
+  ]) gates(objective);
+});
+
+test("trailing tokens gate across invented, real, short, long and inflected forms", () => {
+  const tokens = [
+    "glorp", "murk", "zindle", "frob", "quux", "zorp", "blip", "zint", "vexx", "splot", "brindle",
+    "quon", "flurb", "grunk", "zorble", "krell", "plonk", "snarf", "wibble", "gronk",
+    "exfiltrate", "leak", "backdoor", "trojan", "weaponize", "siphon", "harvest", "beacon",
+    "tunnel", "pivot", "escalate", "persist", "implant", "stash", "smuggle", "divert", "scrape",
+    "mirror", "clone", "fork", "spawn", "inject", "tamper", "forge", "spoof", "hijack",
+    "bridge", "relay", "proxy", "gateway", "stream", "shard", "broker",
+    "ax", "rip", "fry", "gut", "lop", "dig",
+    "reconfigurate", "transmogrify", "deauthenticate", "decommission", "expropriate",
+    "glorping", "glorped", "glorpize", "glorpify", "glorpen", "glorps", "glorpes",
+    "murking", "murked", "murkize", "murkify", "murken", "murks",
+    "removal", "retrieval", "disposal", "reversal", "extractive", "erasable", "disposable",
+    "exfiltrable", "leakable", "siphonal",
+  ];
+  const frames = [
+    (x) => `Update the parser ${x}.`,
+    (x) => `Fix the helper ${x}.`,
+    (x) => `Refactor the test ${x}.`,
+    (x) => `Update the log ${x}.`,
+    (x) => `Fix the fixture ${x}.`,
+  ];
+  for (const token of tokens) for (const frame of frames) gates(frame(token));
+});
+
+test("moving an unread word to another slot does not make it safe", () => {
+  for (const token of ["glorp", "exfiltrate", "murk", "zindle", "backdoor", "removal"]) {
+    for (const objective of [
+      `${token} update the parser.`,
+      `Update ${token} parser.`,
+      `Update parser ${token}.`,
+      `Update parser ${token} tests.`,
+      `Update parser tests ${token}.`,
+      `Update the parser ${token} tests.`,
+      `Update the parser tests ${token}.`,
+      `Update the parser for the ${token}.`,
+      `Update the parser and the ${token}.`,
+      `Update the parser with ${token}.`,
+      `Update the broken ${token} tests.`,
+      `Update the stale ${token}.`,
+    ]) gates(objective);
+  }
+});
+
+test("morphology confers nothing: adjective-shaped operative words still gate", () => {
+  // The suffix rule that granted these has been removed rather than narrowed.
+  for (const objective of [
+    "Update the parser removal.",
+    "Update the parser disposal.",
+    "Update the helper erasable.",
+    "Update the parser extractive.",
+    "Update the log retrieval.",
+  ]) gates(objective);
+});
+
+test("a modifier on the left does not reopen the between-nouns hatch", () => {
+  // The same defect as the same-class compound, one word further left: a noun-phrase word vouching
+  // for its neighbour. Only a determiner may introduce an unread run.
+  for (const objective of [
+    "Update the broken zorp tests.",
+    "Fix the stale glorp fixture.",
+    "Update the old murk logs.",
+    "Refactor the legacy zindle helper.",
+    "Update the unused exfiltrate tests.",
+  ]) gates(objective);
+});
+
+test("a determiner does not excuse a trailing word either", () => {
+  for (const objective of [
+    "Update the parser for the zorp.",
+    "Fix the helper with the glorp.",
+    "Update the test to the murk.",
+    "Refactor the parser of the backdoor.",
+  ]) gates(objective);
+});
+
+/*
+ * The one excuse that remains, stated plainly so it can be attacked rather than assumed.
+ *
+ * An unread run introduced by a determiner and closed by a recognised noun — "the *unit* test",
+ * "a *clearer waiting-on-owner* indicator" — is read as attributive. The claim is grammatical rather
+ * than positional: a determiner cannot attach to a verb, so there is no parse of "the X parser" in
+ * which X is a second instruction. The tests below try to give such a word an object by every route
+ * available, and every one of them gates.
+ *
+ * Closing it instead would cost "Fix the unit test." and "Fix the flaky test.", which are required
+ * routine work, and the adjective vocabulary needed to recognise those affirmatively is unbounded.
+ * It is therefore kept, and the residual is recorded rather than hidden: an unread word in that exact
+ * slot inherits, and a *known* verb in the same slot gates. A reviewer should treat this as the
+ * remaining permission-producing condition in this module.
+ */
+
+test("the attributive slot cannot give an unread word an object", () => {
+  for (const objective of [
+    "Update the exfiltrate the parser.",
+    "Update the exfiltrate parser and the logs.",
+    "Update the parser, the exfiltrate logs.",
+    "Update the exfiltrate parser: shred the files.",
+    "Update the exfiltrate parser exfiltrate.",
+    "Update the exfiltrate parser, exfiltrate the cache.",
+  ]) gates(objective);
+  // Known verbs are refused there too, as defence in depth rather than as the basis of the excuse.
+  for (const objective of [
+    "Update the send parser.", "Update the nuke parser.", "Update the grant parser.",
+    "Update the shredding parser.", "Update the deleted parser.",
+  ]) gates(objective);
+});
+
+test("ordinary and compound routine work survives the removal of the positional excuses", () => {
+  for (const objective of [
+    "Update the parser test.", "Update the parser regression test.", "Update the CSS cleanup commit.",
+    "Fix the unit test fixture.", "Update the build cache config.", "Update the local integration test.",
+    "Refactor the request validation helper.", "Update the parser error handling test.",
+    "Update the parser.", "Fix the unit test.", "Refactor the helper.", "Update the documentation.",
+    "Could you update the parser?", "Please fix the test.", "Go ahead and refactor the helper.",
+    "Fix the flaky test.", "Fix the small UI bug.", "Update the parser code.",
+    "Add a clearer waiting-on-owner indicator.",
+  ]) inherits(objective);
+});
+
+test("the trailing repair added no hostile vocabulary", () => {
+  const source = readFileSync(join(repositoryRoot, "packages", "director", "src", "consequence-model.ts"), "utf8")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+    .join("\n")
+    .toLowerCase();
+  for (const term of [
+    "exfiltrate", "backdoor", "trojan", "weaponize", "siphon", "harvest", "beacon", "tunnel",
+    "implant", "smuggle", "hijack", "spoof", "tamper", "glorp", "zindle", "quux", "krell",
+    "removal", "retrieval", "disposal", "erasable",
+  ]) {
+    assert.equal(source.includes(`"${term}"`), false, `"${term}" was added to a table instead`);
+  }
+  // The nouns that were named grant nothing about what may be done to them.
+  for (const objective of [
+    "Exfiltrate the bug.", "Nuke the code.", "Send the phrase.", "Zorble the bug.",
+  ]) gates(objective);
+});
