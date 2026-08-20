@@ -17,7 +17,9 @@ import {
   createMemoryJobStore,
   createQuotaExhaustedAdapter,
   createRateLimitedAdapter,
+  MVA_MILESTONE_ID,
   createRealBoundedExecutorAdapter,
+  memoryEffectJournal,
   defaultMvaAuthority,
   jobRecordPath,
   legalJobTransition,
@@ -31,6 +33,14 @@ import {
   type JobRequestV1,
   type JobStateV1,
 } from "../src/mva-dispatch.js";
+import {
+  DIRECTOR_CAPABILITY_REGISTRY_V1,
+  type EffectGateDepsV1,
+} from "../src/pre-action-effect-contract.js";
+import {
+  ROADMAP_ENVELOPE_SCHEMA_V1,
+  type OwnerRoadmapAuthorityEnvelopeV1,
+} from "../src/roadmap-authority-envelope.js";
 import {
   defaultProviderCapabilities,
   defaultProviderHealth,
@@ -89,12 +99,79 @@ function unavailable(id: ProviderIdV1): ProviderAdapterV1 {
   };
 }
 
+/*
+ * Authority for the artifact writes the bounded executor performs.
+ *
+ * The adapter now routes those writes through the pre-action effect gate, so a dispatch test has to
+ * say what authorises them. This envelope is the shape the Owner's authority produces, scoped to
+ * exactly the capability and target the write uses — a fixture granting more than that would be
+ * proving the gate works against a lock nobody closed.
+ */
+const EFFECT_AUTHORITY_ID = MVA_OWNER_AUTHORIZATION_ID;
+const EFFECT_ENVELOPE_ID = `ENVELOPE-${EFFECT_AUTHORITY_ID}`;
+
+function artifactEnvelope(overrides: Partial<OwnerRoadmapAuthorityEnvelopeV1> = {}): OwnerRoadmapAuthorityEnvelopeV1 {
+  return {
+    schema: ROADMAP_ENVELOPE_SCHEMA_V1,
+    envelopeId: EFFECT_ENVELOPE_ID,
+    ownerAuthorizationId: EFFECT_AUTHORITY_ID,
+    approvedParentMilestoneIds: [MVA_MILESTONE_ID],
+    approvedObjectives: [],
+    allowedWriteDomains: ["artifacts"],
+    allowedProviders: ["local", "codex", "grok", "claude"],
+    sensitivityCeiling: "INTERNAL",
+    spendCeilingUsd: 0,
+    allowedExternalEffectClasses: ["REPOSITORY_REVERSIBLE"],
+    requiresReversible: true,
+    productionWriterPermission: "NO",
+    destructiveActionPermission: "NO",
+    securityChangePermission: "NO",
+    oauthConsentPermission: "NO",
+    sensitiveDataPermission: "NO",
+    state: "ACTIVE",
+    expiresAtUtc: "",
+    supersededBy: "",
+    alwaysGatedBoundaries: [],
+    provenance: "fixture",
+    version: 1,
+    createdAtUtc: NOW,
+    ...overrides,
+  };
+}
+
+function artifactGate(overrides: Partial<EffectGateDepsV1> = {}): EffectGateDepsV1 {
+  return {
+    registry: DIRECTOR_CAPABILITY_REGISTRY_V1,
+    resolveTarget: (targetType: string, targetId: string) =>
+      targetType === "JobArtifact"
+        ? { targetType, targetId, sensitivity: "INTERNAL" as const, writeDomain: "artifacts" }
+        : null,
+    envelopeFor: (id: string) => (id === EFFECT_ENVELOPE_ID ? artifactEnvelope() : null),
+    ownerId: "daniel",
+    now: NOW,
+    ...overrides,
+  };
+}
+
+/** The four things the bounded executor needs before it may write anything. */
+function effectDeps(gate: EffectGateDepsV1 = artifactGate()) {
+  return {
+    effectGate: gate,
+    actorId: "aion.director.mva-dispatch",
+    authorityEnvelopeId: EFFECT_ENVELOPE_ID,
+    parentMilestoneId: MVA_MILESTONE_ID,
+    journal: memoryEffectJournal(),
+    recordDecision: () => undefined,
+  };
+}
+
 function realAdapters(root: string, io: ReturnType<typeof files>, realId: ProviderIdV1 = "local") {
   const real = createRealBoundedExecutorAdapter(realId, {
     artifactRoot: root,
     writeFile: io.writeFile,
     readFile: io.readFile,
     startingSha: SHA,
+        ...effectDeps(),
   });
   return {
     codex: realId === "codex" ? real : unavailable("codex"),
@@ -301,6 +378,7 @@ test("21 quota exhaustion triggers safe failover", () => {
       codex: createQuotaExhaustedAdapter("codex"),
       grok: createRealBoundedExecutorAdapter("grok", {
         artifactRoot: root, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
+        ...effectDeps(),
       }),
       claude: unavailable("claude"),
       local: unavailable("local"),
@@ -334,6 +412,7 @@ test("22 rate limit triggers safe failover", () => {
       grok: createRateLimitedAdapter("grok"),
       claude: createRealBoundedExecutorAdapter("claude", {
         artifactRoot: root, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
+        ...effectDeps(),
       }),
       local: unavailable("local"),
     };
@@ -367,6 +446,7 @@ test("23-26 envelope, paths, sensitive data, and spend preserved", () => {
       codex: createQuotaExhaustedAdapter("codex"),
       grok: createRealBoundedExecutorAdapter("grok", {
         artifactRoot: root, writeFile: io.writeFile, readFile: io.readFile, startingSha: SHA,
+        ...effectDeps(),
       }),
       claude: unavailable("claude"),
       local: unavailable("local"),
@@ -582,6 +662,7 @@ test("35 restart after clean release resumes safely", () => {
         codex: createQuotaExhaustedAdapter("codex"),
         grok: createRealBoundedExecutorAdapter("grok", {
           artifactRoot: root, writeFile: io2.writeFile, readFile: io2.readFile, startingSha: SHA,
+        ...effectDeps(),
         }),
         claude: unavailable("claude"),
         local: unavailable("local"),
@@ -643,6 +724,7 @@ test("38 ambiguous external effect cannot auto-retry", () => {
         writeFile: () => undefined,
         readFile: () => "",
         startingSha: SHA,
+        ...effectDeps(),
       }),
       claude: unavailable("claude"),
       local: unavailable("local"),
@@ -737,6 +819,7 @@ test("e2e REAL_SINGLE_PROVIDER_JOB writes a real artifact", () => {
           },
           readFile: (path) => readFileSync(path, "utf8"),
           startingSha: SHA,
+        ...effectDeps(),
         }),
       },
     });
@@ -772,6 +855,7 @@ test("e2e REAL_FAILOVER_JOB second provider executes for real", () => {
           writeFile: (path, contents) => writeFileSync(path, contents, "utf8"),
           readFile: (path) => readFileSync(path, "utf8"),
           startingSha: SHA,
+        ...effectDeps(),
         }),
         claude: unavailable("claude"),
         local: unavailable("local"),
@@ -850,6 +934,7 @@ test("e2e RESTART_RECOVERY_JOB continues once", () => {
           writeFile: (path, contents) => writeFileSync(path, contents, "utf8"),
           readFile: (path) => readFileSync(path, "utf8"),
           startingSha: SHA,
+        ...effectDeps(),
         }),
       },
     });

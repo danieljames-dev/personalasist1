@@ -88,3 +88,4 @@ export * from "./roadmap-orchestrator.js";
 export * from "./roadmap-port.js";
 export * from "./mva-dispatch.js";
 export * from "./pre-action-effect-contract.js";
+export * from "./job-frozen-authority.js";

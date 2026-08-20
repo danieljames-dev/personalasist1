@@ -40,8 +40,19 @@ import {
   type WriterStateV1,
   PROVIDER_IDS_V1,
 } from "./provider-bridge.js";
+import { jobAuthorityEnvelopeId } from "./job-frozen-authority.js";
 import { isResolvedHostPath } from "./host-path.js";
 import { validatePathSegment } from "./store-contract.js";
+import {
+  DIRECTOR_CAPABILITY_REGISTRY_V1,
+  EFFECT_REQUEST_SCHEMA_V1,
+  type EffectGateDepsV1,
+  type EffectJournalV1,
+  type EffectRequestV1,
+  auditRecordFor,
+  executeAuthorizedEffect,
+  issueAuthorization,
+} from "./pre-action-effect-contract.js";
 
 export const MVA_DISPATCH_SCHEMA_V1 = "aion.director.mvaDispatch.v1" as const;
 export const MVA_JOB_STORE_RELATIVE_PATH = ".aion-local/mva-dispatch";
@@ -223,6 +234,18 @@ export interface MvaDispatchDepsV1 {
   readonly branch?: string;
   readonly currentDirectivePath?: string;
   readonly latestHandoffPath?: string;
+  /**
+   * Authority for the artifact writes this dispatch performs.
+   *
+   * Optional to supply, never optional to satisfy: omitting it yields `closedEffectGate`, which finds
+   * no envelope, so the bounded executor's writes are refused rather than quietly performed.
+   */
+  readonly effectGate?: EffectGateDepsV1;
+  readonly effectJournal?: EffectJournalV1;
+  readonly effectActorId?: string;
+  readonly authorityEnvelopeId?: string;
+  readonly effectParentMilestoneId?: string;
+  readonly recordEffectDecision?: (line: string) => void;
 }
 
 export interface DispatchOutcomeV1 {
@@ -379,6 +402,61 @@ export function validateJobArtifact(contents: string, envelope: JobEnvelopeV1, e
   return null;
 }
 
+/**
+ * The effect request a job-artifact write is, stated so the gate can decide about it.
+ *
+ * Everything here comes from the job envelope the Owner's authority produced — milestone, owner
+ * authorization, data class, idempotency — rather than from anything a provider said. The provider
+ * is recorded in `proposedByProvider`, which the gate reads for audit and never for its decision.
+ */
+export function jobArtifactEffectRequest(input: {
+  readonly envelope: JobEnvelopeV1;
+  readonly providerId: ProviderIdV1;
+  /** The approved parent this job descends from. Asserted by the caller, verified by the gate. */
+  readonly parentMilestoneId: string;
+  readonly actorId: string;
+  readonly ownerId: string;
+  readonly authorityEnvelopeId: string;
+  readonly artifactPath: string;
+  readonly now: string;
+}): EffectRequestV1 {
+  return {
+    schema: EFFECT_REQUEST_SCHEMA_V1,
+    requestId: `${input.envelope.jobId}:artifact`,
+    actorId: input.actorId,
+    proposedByProvider: input.providerId,
+    ownerId: input.ownerId,
+    parentMilestoneId: input.parentMilestoneId,
+    authorityEnvelopeId: input.authorityEnvelopeId,
+    ownerAuthorizationId: input.envelope.ownerAuthorizationId,
+    capabilityId: "Director.WriteJobArtifact",
+    capabilityVersion: 1,
+    targetType: "JobArtifact",
+    targetId: input.artifactPath,
+    // The artifact's identity, not its contents: a fingerprint that changed with every byte written
+    // would bind authority to the payload rather than to the effect.
+    args: { jobId: input.envelope.jobId, expectedArtifact: input.envelope.expectedArtifact },
+    declaredSensitivity: input.envelope.sensitiveDataClass,
+    provenance: [{ kind: "OWNER_DIRECTIVE", ref: input.envelope.ownerAuthorizationId, authorityBearing: true }],
+    spend: null,
+    idempotencyKey: input.envelope.idempotencyKey,
+    requestedAtUtc: input.now,
+  };
+}
+
+/**
+ * The bounded local executor — the first real dispatch path to cross the pre-action effect gate.
+ *
+ * Its two artifact writes used to be bare `writeFile` calls. They are now one authorised effect:
+ * `issueAuthorization` decides against the actual capability, target, arguments, data class and
+ * *current* authority, and `executeAuthorizedEffect` re-establishes all of that at dispatch before
+ * the writes happen. A refusal returns `POLICY_DENIED` rather than writing anyway.
+ *
+ * `effectGate` and `actorId` are required rather than optional on purpose. An optional gate is a gate
+ * that a caller can forget, and "forgot to authorise" would then look exactly like "was authorised".
+ * A caller with no authority to offer supplies a gate whose `envelopeFor` finds nothing, and the
+ * write fails closed — which is the correct outcome, not an inconvenience to design around.
+ */
 export function createRealBoundedExecutorAdapter(
   providerId: ProviderIdV1,
   deps: {
@@ -387,6 +465,21 @@ export function createRealBoundedExecutorAdapter(
     readonly readFile: (path: string) => string;
     readonly startingSha: string;
     readonly branch?: string;
+    readonly effectGate: EffectGateDepsV1;
+    readonly actorId: string;
+    readonly authorityEnvelopeId: string;
+    readonly parentMilestoneId: string;
+    /*
+     * Publishes the job's frozen authority to the gate when no roadmap envelope covers the write.
+     *
+     * Named rather than implicit because it is the weak spot: the authority being published comes
+     * from the job envelope itself, so it binds the effect without independently re-deciding whether
+     * the job was authorised. A roadmap envelope, once one exists, is resolved first and this is not
+     * consulted.
+     */
+    readonly publishFrozenAuthority?: (envelope: JobEnvelopeV1) => void;
+    readonly journal: EffectJournalV1;
+    readonly recordDecision: (line: string) => void;
   },
 ): ProviderAdapterV1 {
   return {
@@ -402,8 +495,37 @@ export function createRealBoundedExecutorAdapter(
       });
       const bootstrapPath = join(deps.artifactRoot, `${envelope.jobId}.bootstrap.json`);
       const artifactPath = join(deps.artifactRoot, envelope.expectedArtifact);
-      deps.writeFile(bootstrapPath, JSON.stringify(bootstrap, null, 2) + "\n");
-      deps.writeFile(artifactPath, artifactContents(envelope, providerId));
+
+      if (deps.authorityEnvelopeId === "" && deps.publishFrozenAuthority !== undefined) {
+        deps.publishFrozenAuthority(envelope);
+      }
+      const effect = jobArtifactEffectRequest({
+        envelope,
+        providerId,
+        actorId: deps.actorId,
+        parentMilestoneId: deps.parentMilestoneId === "" ? envelope.milestoneId : deps.parentMilestoneId,
+        ownerId: deps.effectGate.ownerId,
+        authorityEnvelopeId: deps.authorityEnvelopeId === "" ? jobAuthorityEnvelopeId(envelope.jobId) : deps.authorityEnvelopeId,
+        artifactPath,
+        now: deps.effectGate.now,
+      });
+      const { decision, receipt } = issueAuthorization(effect, deps.effectGate);
+      // Every decision is recorded, refusals included — a gate whose refusals leave no trace is one
+      // nobody can audit afterwards. `auditRecordFor` carries names, classes and the fingerprint, and
+      // deliberately not the arguments.
+      deps.recordDecision(auditRecordFor(decision, effect));
+      if (decision.outcome !== "ALLOW") {
+        return { class: "POLICY_DENIED", leaseOutcome: "RELEASED", writerLiveness: "STOPPED" };
+      }
+      const performed = executeAuthorizedEffect(effect, receipt, deps.effectGate, () => {
+        deps.writeFile(bootstrapPath, JSON.stringify(bootstrap, null, 2) + "\n");
+        deps.writeFile(artifactPath, artifactContents(envelope, providerId));
+        return artifactPath;
+      }, deps.journal);
+      if (!performed.executed) {
+        return { class: "POLICY_DENIED", leaseOutcome: "RELEASED", writerLiveness: "STOPPED" };
+      }
+
       const written = deps.readFile(artifactPath);
       const invalid = validateJobArtifact(written, envelope, providerId);
       if (invalid !== null) {
@@ -609,6 +731,54 @@ function outcome(record: JobRecordV1, leases: readonly LeaseV1[], extras: Partia
   return { record, result: resultOf(record, extras), leases };
 }
 
+/**
+ * The gate a caller gets when it offers no authority: one that finds none.
+ *
+ * The alternative would be to skip authorisation when no envelope was supplied, and that is the same
+ * mistake as an optional gate — "nobody passed authority" would become indistinguishable from
+ * "authority said yes". A dispatch with nothing behind it writes nothing.
+ */
+export function closedEffectGate(now: string): EffectGateDepsV1 {
+  return {
+    registry: DIRECTOR_CAPABILITY_REGISTRY_V1,
+    resolveTarget: () => null,
+    envelopeFor: () => null,
+    ownerId: "",
+    now,
+  };
+}
+
+/** An in-process replay journal. Durable journals are a later milestone's problem. */
+export function memoryEffectJournal(): EffectJournalV1 {
+  const rows = new Map<string, { idempotencyKey: string; requestId: string; argumentFingerprint: string; completedAtUtc: string }>();
+  return {
+    find: (key) => rows.get(key) ?? null,
+    record: (entry) => { rows.set(entry.idempotencyKey, entry); },
+  };
+}
+
+/**
+ * Append one decision line to the dispatch decision log.
+ *
+ * Read-then-write because the injected writer is atomic and offers no append seam. The log holds
+ * decisions, not payloads, so it stays small — and a refusal that left no trace would be a gate
+ * nobody can audit afterwards.
+ */
+function appendDecisionLine(
+  writeFile: (path: string, contents: string) => void,
+  root: string,
+  line: string,
+): void {
+  const path = join(root, "effect-decisions.log");
+  let existing = "";
+  try {
+    existing = readFileSync(path, "utf8");
+  } catch {
+    existing = "";
+  }
+  writeFile(path, existing + line + '\n');
+}
+
 function defaultWrite(path: string, contents: string): void {
   writeAtomic(path, contents);
 }
@@ -635,6 +805,8 @@ function adaptersFor(
   const writeFile = deps.writeFile ?? defaultWrite;
   const readFile = deps.readFile ?? defaultRead;
   mkdirSync(root, { recursive: true });
+  const gate = deps.effectGate ?? closedEffectGate(deps.now ?? new Date().toISOString());
+  const journal = deps.effectJournal ?? memoryEffectJournal();
   const real = (id: ProviderIdV1) =>
     createRealBoundedExecutorAdapter(id, {
       artifactRoot: root,
@@ -642,6 +814,12 @@ function adaptersFor(
       readFile,
       startingSha: request.startingSha,
       ...(deps.branch !== undefined ? { branch: deps.branch } : {}),
+      effectGate: gate,
+      actorId: deps.effectActorId ?? "aion.director.mva-dispatch",
+      authorityEnvelopeId: deps.authorityEnvelopeId ?? "",
+      parentMilestoneId: deps.effectParentMilestoneId ?? "",
+      journal,
+      recordDecision: deps.recordEffectDecision ?? ((line: string) => appendDecisionLine(writeFile, root, line)),
     });
   return {
     codex: supplied.codex ?? real("codex"),

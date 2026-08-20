@@ -52,7 +52,9 @@ import {
   createMemoryJobStore,
   createQuotaExhaustedAdapter,
   createRateLimitedAdapter,
+  closedEffectGate,
   createRealBoundedExecutorAdapter,
+  memoryEffectJournal,
   defaultMvaAuthority,
   jobRecordPath,
   legalJobTransition,
@@ -1485,11 +1487,19 @@ export function directorSubmitMvaJob(request: JobRequestV1, deps: MvaDispatchDep
   void defaultMvaAuthority({ actionKind: "SOURCE_EDIT", spendUsd: 0, productionWriter: "NO" });
   void createQuotaExhaustedAdapter("codex");
   void createRateLimitedAdapter("grok");
+  // Reference-only construction, so it is handed a gate that authorises nothing: this call must not
+  // become a way to obtain a writing adapter without supplying authority for what it writes.
   void createRealBoundedExecutorAdapter("local", {
     artifactRoot: deps.artifactRoot ?? jobRecordPath(request.worktree, "unused"),
     writeFile: deps.writeFile ?? (() => undefined),
     readFile: deps.readFile ?? (() => ""),
     startingSha: request.startingSha,
+    effectGate: closedEffectGate(now),
+    actorId: "aion.director.run-manager",
+    authorityEnvelopeId: "",
+    parentMilestoneId: "",
+    journal: memoryEffectJournal(),
+    recordDecision: () => undefined,
   });
   void createFileJobStore(request.worktree);
   const submitted = submitJob(request, { ...deps, store });

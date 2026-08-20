@@ -26,9 +26,11 @@ import { dirname } from "node:path";
 
 import {
   PROVIDER_IDS_V1,
+  closedEffectGate,
   createRealBoundedExecutorAdapter,
   defaultProviderCapabilities,
   defaultProviderHealth,
+  memoryEffectJournal,
 } from "../../packages/director/dist/index.js";
 
 /** Providers this process has a real executor for. */
@@ -112,6 +114,7 @@ export function createProviderRegistry(input) {
   // directory appears when something actually runs, so a read of provider state leaves no trace.
   const adapters = {};
   const health = {};
+  const effectJournal = memoryEffectJournal();
   const registered = [];
   const unregistered = {};
 
@@ -125,6 +128,20 @@ export function createProviderRegistry(input) {
         readFile: readFileUtf8,
         startingSha,
         ...(typeof input.branch === "string" && input.branch !== "" ? { branch: input.branch } : {}),
+        /*
+         * The artifact writes below now cross the pre-action effect gate.
+         *
+         * An adapter built without authority gets `closedEffectGate`, which resolves no envelope, so
+         * its writes are refused rather than performed. That is deliberate: "the caller forgot to
+         * pass authority" must not look like "authority said yes".
+         */
+        effectGate: input.effectGate ?? closedEffectGate(now),
+        actorId: "aion.app.provider-registry",
+        authorityEnvelopeId: input.authorityEnvelopeId ?? "",
+        parentMilestoneId: input.parentMilestoneId ?? "",
+        publishFrozenAuthority: input.registerFrozenJobAuthority,
+        journal: effectJournal,
+        recordDecision: input.recordEffectDecision ?? (() => undefined),
       });
       health[id] = { ...defaultProviderHealth(id, now), observedAt: now };
       registered.push(id);

@@ -184,29 +184,12 @@ test("every exported src function reachable from the run path has a non-test cal
     ["directorExecuteJobWithFailover", "OWNER_DECISION_PROVIDER_BRIDGE_V1: spawn path still uses launchRun; this is the V1 Director port"],
     ["directorSubmitMvaJob", "OWNER_DECISION_MVA_REAL_DISPATCH_V1: spawn path still uses launchRun; this is the V1 Director dispatch port"],
 
-    /*
-     * OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1.
-     *
-     * The V0.1 milestone builds the deterministic effect gate and explicitly forbids wiring it to a
-     * real capability, a real external service or a production envelope — the three demo capabilities
-     * exist to prove the shape. So these entry points have no production caller *yet*, for the same
-     * reason `directorExecuteJobWithFailover` does not: the port exists before the path moves on to
-     * it. `authorizeEffect` is absent because it already has one, from `executeAuthorizedEffect`.
-     *
-     * This exception is meant to be removed rather than renewed. The first real capability dispatched
-     * through the gate gives all three a caller; if it is still here then, the assertion has been
-     * silenced rather than satisfied.
-     */
-    ["issueAuthorization", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: gate built before any real capability is dispatched through it"],
-    ["executeAuthorizedEffect", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: gate built before any real capability is dispatched through it"],
-    ["auditRecordFor", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: durable audit line for decisions the gate has not yet been asked to make"],
 
   ]);
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
     ["src-reachability.ts", "OWNER_DECISION_TEST_HELPER: modulesReachableFrom is a test-only import-graph helper that lives in src/"],
     ["mission.ts", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: whether mission advance gates the CLI exit contract or remains run-root documentation. The CLI writes mission.json; nothing in the repo reads it."],
-    ["pre-action-effect-contract.ts", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: which real capability is dispatched through the effect gate first. V0.1 was authorised to build the gate and forbidden from wiring it to a real capability, external service or production envelope, so the module is deliberately ahead of the run path. The decision to make is what moves onto it, not whether."],
   ]);
 
   const orphans: string[] = [];
@@ -937,4 +920,207 @@ test("a live nonce-bearing grandchild leaves productionWriterLeaseReleasedByThis
     leases.some((item) => item.leaseId === "lease-pw-1"),
     "detectOrphan must be read: a live grandchild keeps the writer lease",
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/* The pre-action effect boundary is architectural, not a file name           */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * A gate nothing is required to use is documentation.
+ *
+ * V0.1 built the deterministic effect gate and left every execution path outside it, behind a
+ * temporary wiring exception. The exception is gone; this is what replaces it, and it has to keep
+ * holding for paths that do not exist yet.
+ *
+ * The line drawn here is between *capability dispatch* and *internal bookkeeping*, which is the
+ * distinction the contract cares about:
+ *
+ *   - `ProviderAdapterV1.execute` is where AION acts on a target on the Owner's behalf. That is a
+ *     capability effect, and it must cross the gate.
+ *   - Writing a lease file, a roadmap record or a run journal is AION's own durable state. It has no
+ *     target, no Owner-facing consequence, and gating it would make every internal function call an
+ *     authorisation question — the failure mode section 6 of the milestone warns against.
+ *
+ * So the rule is: a module that declares a provider adapter *and* writes through it must reach
+ * `executeAuthorizedEffect`. A new adapter that writes without doing so fails here, which is the
+ * property that could not be asserted while the exception existed.
+ */
+
+/** Modules that declare a `ProviderAdapterV1` whose `execute` performs a write. */
+function effectDispatchingModules(files: Map<string, string>): string[] {
+  const found: string[] = [];
+  for (const [name, source] of files) {
+    const code = stripCommentsAndStrings(source);
+    const declaresAdapter = /:\s*ProviderAdapterV1\s*[){]/.test(code) || /ProviderAdapterV1\s*=/.test(code);
+    if (!declaresAdapter) continue;
+    // A write reached from inside the adapter: the deps-injected writer, or a direct filesystem call.
+    const writes = /\bwriteFile\s*\(/.test(code)
+      || /\bwriteAtomic\s*\(/.test(code)
+      || /\bwriteFileSync\s*\(/.test(code);
+    if (writes) found.push(name);
+  }
+  return found.sort();
+}
+
+test("a provider adapter that writes must cross the pre-action effect gate", () => {
+  const files = sourceFiles();
+  const dispatching = effectDispatchingModules(files);
+
+  assert.ok(
+    dispatching.includes("mva-dispatch.ts"),
+    "the bounded executor writes artifacts; if this stops being detected the rule has gone blind",
+  );
+
+  const unwired = dispatching.filter((name) => !calledIn(files.get(name) ?? "", "executeAuthorizedEffect"));
+  assert.deepEqual(
+    unwired,
+    [],
+    `effect-dispatching modules that never reach the effect gate: ${unwired.join(", ")}`,
+  );
+});
+
+test("the rule detects a newly introduced unwired effect path", () => {
+  /*
+   * The assertion above passes both when the rule works and when it has quietly stopped matching
+   * anything. This introduces exactly the shape a future author would add — an adapter that writes,
+   * with no authorisation — and requires the rule to catch it.
+   */
+  const files = sourceFiles();
+  files.set("future-sms-adapter.ts", [
+    "import type { ProviderAdapterV1 } from './provider-bridge.js';",
+    "export function createSmsAdapter(deps: { writeFile: (p: string, c: string) => void }): ProviderAdapterV1 {",
+    "  return { providerId: 'local', family: 'x', capabilities: {} as never, execute(envelope) {",
+    "    deps.writeFile('/tmp/out.txt', envelope.objective);",
+    "    return { class: 'SUCCESS', leaseOutcome: 'RELEASED', writerLiveness: 'STOPPED' };",
+    "  } };",
+    "}",
+  ].join("\n"));
+
+  const dispatching = effectDispatchingModules(files);
+  assert.ok(dispatching.includes("future-sms-adapter.ts"), "an adapter that writes must be detected");
+  const unwired = dispatching.filter((name) => !calledIn(files.get(name) ?? "", "executeAuthorizedEffect"));
+  assert.deepEqual(unwired, ["future-sms-adapter.ts"], "an unwired writing adapter must fail the rule");
+});
+
+test("internal bookkeeping is not dragged into the effect gate", () => {
+  /*
+   * The other half of section 6: a rule that gated every write would make lease and roadmap
+   * persistence require Owner authority, which is both wrong and unusable. These modules write, and
+   * are correctly outside the boundary because they declare no capability dispatch.
+   */
+  const files = sourceFiles();
+  const dispatching = effectDispatchingModules(files);
+  for (const internal of ["lease-store.ts", "roadmap-store.ts", "run-intent.ts", "atomic-write.ts"]) {
+    assert.ok(files.has(internal), `${internal} should exist`);
+    assert.equal(dispatching.includes(internal), false, `${internal} is internal state, not capability dispatch`);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Outward effects in apps/ are inventoried, not discovered later             */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * The rule above covers provider adapters inside the Director package. It does not cover the app
+ * layer, and the app layer is where the real outward effects currently live: `server.mjs` refreshes
+ * an OAuth token and calls the Gmail API, guarded by whether credentials happen to be READY. A
+ * credential check is not an authority check — nothing there asks whether the Owner authorised *this
+ * effect on this target right now*.
+ *
+ * Wiring Gmail through the gate is not this milestone's to do; it is OAuth and real external effect,
+ * both explicitly out of scope. What is in scope is that it cannot stay invisible. Every outward
+ * effect site in `apps/` is counted and declared below with its status, so adding a new one — or
+ * growing an existing file's count — fails here until somebody classifies it.
+ *
+ * That is the difference between an inventory and an exception: an exception says "ignore this", the
+ * inventory says "this exists, here is what it is, and you cannot add another quietly".
+ */
+
+type EffectRouteStatusV1 =
+  /** Reaches the pre-action effect gate before acting. */
+  | "GATED"
+  /** Real outward effect, deliberately not yet wired; must be gated before it is relied upon. */
+  | "NOT_ACTIVATED_FOR_REAL_EFFECTS"
+  /** Talks only to the local machine or a local model; no Owner-facing consequence. */
+  | "LOCAL_ONLY"
+  /** Demonstration script, not a run path. */
+  | "DEMO";
+
+const OUTWARD_EFFECT_INVENTORY: ReadonlyMap<string, { readonly sites: number; readonly status: EffectRouteStatusV1; readonly note: string }> =
+  new Map([
+    ["apps/aion/server.mjs", { sites: 5, status: "NOT_ACTIVATED_FOR_REAL_EFFECTS" as const,
+      note: "Gmail OAuth refresh and message reads, reachable only with Owner-provisioned credentials. MUST be routed through the effect gate before it is treated as authorised; a credential check is not an authority check." }],
+    ["apps/aion/research-fetch.mjs", { sites: 1, status: "NOT_ACTIVATED_FOR_REAL_EFFECTS" as const,
+      note: "outbound research fetch; read-only externally but still leaves the machine" }],
+    ["apps/aion/vast-ai.mjs", { sites: 1, status: "NOT_ACTIVATED_FOR_REAL_EFFECTS" as const,
+      note: "paid GPU provider API; spend-capable, must be gated before use" }],
+    ["apps/aion/brain-runtime.mjs", { sites: 3, status: "LOCAL_ONLY" as const,
+      note: "local model runtime over localhost" }],
+    ["apps/aion/code-sandbox.mjs", { sites: 1, status: "LOCAL_ONLY" as const,
+      note: "bounded local child process for sandboxed code" }],
+    ["apps/aion/private-network.mjs", { sites: 1, status: "LOCAL_ONLY" as const,
+      note: "local network probe against the host machine only" }],
+    ["apps/aion/verification.mjs", { sites: 1, status: "LOCAL_ONLY" as const,
+      note: "spawns local verification commands" }],
+    ["apps/aion-demo.mjs", { sites: 3, status: "DEMO" as const, note: "demonstration script, not reachable from any run path" }],
+    ["apps/aion-sales-demo.mjs", { sites: 9, status: "DEMO" as const, note: "demonstration script, not reachable from any run path" }],
+    ["apps/aion-v12-demo.mjs", { sites: 3, status: "DEMO" as const, note: "demonstration script, not reachable from any run path" }],
+    ["apps/aion-v13-demo.mjs", { sites: 3, status: "DEMO" as const, note: "demonstration script, not reachable from any run path" }],
+    ["apps/aion-v13-r1-demo.mjs", { sites: 3, status: "DEMO" as const, note: "demonstration script, not reachable from any run path" }],
+  ]);
+
+const OUTWARD_EFFECT_CALL = /\b(?:globalThis\.)?fetch\(|\bexecFile\(|\bspawn\(|\bexecSync\(/g;
+
+test("every outward effect site in apps/ is inventoried", () => {
+  const appsDir = join(here, "..", "..", "..", "..", "apps");
+  const found = new Map<string, number>();
+  for (const file of walkCodeFiles(appsDir)) {
+    if (!file.endsWith(".mjs")) continue;
+    // Counted on the raw source deliberately. The comment/string stripper desynchronises on some app
+    // files, and an inventory that silently sees fewer sites than exist is worse than one that counts
+    // a mention in a comment: the question here is whether the set of sites changed.
+    const source = readFileSync(file, "utf8");
+    const sites = countCalls(source, OUTWARD_EFFECT_CALL);
+    if (sites === 0) continue;
+    found.set(relative(join(here, "..", "..", "..", ".."), file).split("\\").join("/"), sites);
+  }
+
+  const undeclared = [...found.keys()].filter((name) => !OUTWARD_EFFECT_INVENTORY.has(name)).sort();
+  assert.deepEqual(undeclared, [],
+    `outward effect sites with no declared status: ${undeclared.join(", ")}. Route them through the effect gate, or declare what they are.`);
+
+  const changed: string[] = [];
+  for (const [name, sites] of found) {
+    const declared = OUTWARD_EFFECT_INVENTORY.get(name);
+    if (declared !== undefined && declared.sites !== sites) {
+      changed.push(`${name}: declared ${declared.sites}, found ${sites}`);
+    }
+  }
+  assert.deepEqual(changed.sort(), [],
+    "an outward effect site was added or removed without updating its declaration");
+
+  const stale = [...OUTWARD_EFFECT_INVENTORY.keys()].filter((name) => !found.has(name)).sort();
+  assert.deepEqual(stale, [], "the inventory names files that no longer perform outward effects");
+});
+
+test("no outward effect route claims to be gated before it is", () => {
+  /*
+   * The inventory would be worth nothing if a future edit could mark a route `GATED` without wiring
+   * it. Anything claiming that status has to actually reach the gate.
+   */
+  const repoRoot = join(here, "..", "..", "..", "..");
+  for (const [name, entry] of OUTWARD_EFFECT_INVENTORY) {
+    if (entry.status !== "GATED") continue;
+    const source = readFileSync(join(repoRoot, name), "utf8");
+    assert.ok(
+      calledIn(source, "executeAuthorizedEffect"),
+      `${name} is declared GATED but never reaches executeAuthorizedEffect`,
+    );
+  }
+  // And the un-gated ones are recorded as such, with a reason someone can act on.
+  for (const [name, entry] of OUTWARD_EFFECT_INVENTORY) {
+    if (entry.status === "GATED") continue;
+    assert.ok(entry.note.trim().length > 20, `${name} needs a real note, not a placeholder`);
+  }
 });

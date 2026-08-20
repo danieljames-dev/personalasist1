@@ -202,6 +202,38 @@ export const DEMO_CAPABILITY_REGISTRY_V1: CapabilityRegistryV1 = Object.freeze({
   ]),
 });
 
+/**
+ * The capabilities real dispatch actually uses. Not a demo.
+ *
+ * `Director.WriteJobArtifact` is the first one: the bounded local executor writes a job's bootstrap
+ * and result artifacts, and that write is now an authorised effect rather than a bare `writeFile`.
+ * It is deliberately the smallest real thing in the repository that acts on a target — local,
+ * reversible, no spend, no external reach — because the point of wiring it is the *path*, not the
+ * consequence.
+ *
+ * Kept separate from the demo registry so that a test fixture can never widen what production
+ * dispatch is able to ask for.
+ */
+export const DIRECTOR_CAPABILITY_REGISTRY_V1: CapabilityRegistryV1 = Object.freeze({
+  policyVersion: EFFECT_POLICY_VERSION_V1,
+  capabilities: Object.freeze([
+    Object.freeze({
+      capabilityId: "Director.WriteJobArtifact",
+      version: 1,
+      kind: "SEMANTIC",
+      effects: Object.freeze(["LOCAL_WRITE"] as const),
+      externalEffectClass: "REPOSITORY_REVERSIBLE",
+      reversible: true,
+      allowedTargetTypes: Object.freeze(["JobArtifact"]),
+      sensitivityCeiling: "CONFIDENTIAL",
+      spend: "NONE",
+      requiredPermissions: Object.freeze([]),
+      requiresIdempotencyKey: false,
+      ownerGateType: null,
+    }),
+  ]),
+});
+
 export function capabilityPolicyFor(
   registry: CapabilityRegistryV1,
   capabilityId: string,

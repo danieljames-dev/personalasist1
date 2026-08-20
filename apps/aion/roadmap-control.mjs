@@ -32,8 +32,11 @@ import {
   MVA_JOB_STORE_RELATIVE_PATH,
   PROVIDER_IDS_V1,
   ROADMAP_STORE_RELATIVE_PATH,
+  DIRECTOR_CAPABILITY_REGISTRY_V1,
   createFileJobStore,
   createRoadmapPort,
+  deriveEnvelopeFromOwnerAuthority,
+  jobFrozenAuthority,
 } from "../../packages/director/dist/index.js";
 import { createGoalIntake } from "./goal-intake.mjs";
 import { createProviderRegistry } from "./provider-registry.mjs";
@@ -117,6 +120,62 @@ function authorizationHintFor(repositoryRoot, gate) {
  * process may register, never what it can actually run — that stays with the registry, which has an
  * executor for exactly one provider.
  */
+/** The principal every dispatch in this process acts for. */
+const AION_OWNER_ID_V1 = "owner";
+
+/**
+ * Authority for the artifact writes a dispatch performs.
+ *
+ * The bounded executor routes those writes through the pre-action effect gate, so something has to
+ * say what authorises them. That something is the Owner's own durable authority records — the same
+ * ones that decide which providers may run — projected into envelopes by the Director. Nothing here
+ * invents authority: a repository with no authority record produces a gate that resolves nothing, and
+ * the writes are refused.
+ *
+ * The target resolver is deliberately narrow. It answers only for artifacts beneath the dispatch
+ * artifact root, and it fixes their data class and write domain from trusted local knowledge rather
+ * than from anything the job says about itself.
+ */
+function effectGateFrom(authorities, artifactRoot, nowUtc) {
+  const envelopes = [];
+  for (const record of authorities) {
+    const derived = deriveEnvelopeFromOwnerAuthority(record);
+    if (derived !== null) envelopes.push(derived);
+  }
+  const active = envelopes.find((candidate) => candidate.state === "ACTIVE") ?? null;
+  const frozenJobs = new Map();
+  const gate = {
+    registry: DIRECTOR_CAPABILITY_REGISTRY_V1,
+    resolveTarget: (targetType, targetId) =>
+      targetType === "JobArtifact" && typeof targetId === "string" && targetId.startsWith(artifactRoot)
+        ? { targetType, targetId, sensitivity: "INTERNAL", writeDomain: "artifacts" }
+        : null,
+    /*
+     * A roadmap authority envelope is the stronger source and is consulted first. None exists in this
+     * repository yet, so a job artifact falls back to the authority the job was already frozen with —
+     * see jobFrozenAuthority. That binds the write to this job's milestone, data class and write
+     * permission; it does not add an independent opinion about the job itself.
+     */
+    envelopeFor: (id) =>
+      envelopes.find((candidate) => candidate.envelopeId === id)
+      ?? frozenJobs.get(id)
+      ?? null,
+    ownerId: AION_OWNER_ID_V1,
+    now: nowUtc,
+  };
+  return {
+    effectGate: gate,
+    // Empty means "use the job's own frozen authority", which the adapter resolves per execution.
+    authorityEnvelopeId: active === null ? "" : active.envelopeId,
+    parentMilestoneId: active === null ? "" : (active.approvedParentMilestoneIds[0] ?? ""),
+    registerFrozenJobAuthority: (jobEnvelope) => {
+      const projected = jobFrozenAuthority(jobEnvelope);
+      frozenJobs.set(projected.envelopeId, projected);
+      return projected;
+    },
+  };
+}
+
 function allowedProvidersFrom(authorities) {
   const allowed = new Set();
   for (const record of authorities) {
@@ -196,11 +255,13 @@ function buildRoadmapSurface(options = {}) {
    * registry frozen at boot would keep executing under an envelope that no longer exists.
    */
   function registry(head, authorities) {
+    const nowUtc = now();
     return createProviderRegistry({
       artifactRoot,
       startingSha: head,
-      now: now(),
+      now: nowUtc,
       allowedProviders: allowedProvidersFrom(authorities),
+      ...effectGateFrom(authorities, artifactRoot, nowUtc),
     });
   }
 
