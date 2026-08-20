@@ -1,6 +1,24 @@
 /**
  * What would this actually *do*? — asked target-first, so an unfamiliar verb cannot make it routine.
  *
+ * ## This module is not the security boundary
+ *
+ * Read this before treating anything below as a guarantee. Seven independent hostile reviews ended
+ * the same way: a word the tables had never seen reached `ALLOW_STANDING`, each repair closed that
+ * shape, and the next review found another. The last one is still open — an unread word between a
+ * determiner and a recognised noun ("Update the exfiltrate parser logs.") is read as attributive and
+ * inherits. It is recorded as a known limitation rather than chased, because the property being
+ * demanded of a parser here is that it understand every sentence anyone will ever write.
+ *
+ * What this module is good for, and is still used for: planning, routing, roadmap classification, and
+ * deciding when asking the Owner something would be useful. What it must never again be asked to be:
+ * sufficient authority for a real side effect. That decision belongs to
+ * `pre-action-effect-contract.ts`, which runs immediately before an effect executes and reasons about
+ * the effect itself — actor, registered capability, exact target, exact arguments, data class, spend
+ * and current authority — with no reference to how the request was worded.
+ *
+ *     LANGUAGE INTERPRETATION IS NOT AUTHORITY.
+ *
  * This module has now failed two independent hostile reviews, and the second failure is the reason it
  * looks the way it does. The first version was a phrase list. The second version produced a
  * structured result — and still consulted the verb first:

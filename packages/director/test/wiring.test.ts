@@ -184,11 +184,29 @@ test("every exported src function reachable from the run path has a non-test cal
     ["directorExecuteJobWithFailover", "OWNER_DECISION_PROVIDER_BRIDGE_V1: spawn path still uses launchRun; this is the V1 Director port"],
     ["directorSubmitMvaJob", "OWNER_DECISION_MVA_REAL_DISPATCH_V1: spawn path still uses launchRun; this is the V1 Director dispatch port"],
 
+    /*
+     * OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1.
+     *
+     * The V0.1 milestone builds the deterministic effect gate and explicitly forbids wiring it to a
+     * real capability, a real external service or a production envelope — the three demo capabilities
+     * exist to prove the shape. So these entry points have no production caller *yet*, for the same
+     * reason `directorExecuteJobWithFailover` does not: the port exists before the path moves on to
+     * it. `authorizeEffect` is absent because it already has one, from `executeAuthorizedEffect`.
+     *
+     * This exception is meant to be removed rather than renewed. The first real capability dispatched
+     * through the gate gives all three a caller; if it is still here then, the assertion has been
+     * silenced rather than satisfied.
+     */
+    ["issueAuthorization", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: gate built before any real capability is dispatched through it"],
+    ["executeAuthorizedEffect", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: gate built before any real capability is dispatched through it"],
+    ["auditRecordFor", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: durable audit line for decisions the gate has not yet been asked to make"],
+
   ]);
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
     ["src-reachability.ts", "OWNER_DECISION_TEST_HELPER: modulesReachableFrom is a test-only import-graph helper that lives in src/"],
     ["mission.ts", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: whether mission advance gates the CLI exit contract or remains run-root documentation. The CLI writes mission.json; nothing in the repo reads it."],
+    ["pre-action-effect-contract.ts", "OWNER_DECISION_PRE_ACTION_EFFECT_CONTRACT_V0_1: which real capability is dispatched through the effect gate first. V0.1 was authorised to build the gate and forbidden from wiring it to a real capability, external service or production envelope, so the module is deliberately ahead of the run path. The decision to make is what moves onto it, not whether."],
   ]);
 
   const orphans: string[] = [];
