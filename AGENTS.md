@@ -34,6 +34,15 @@ contain `Status: AUTHORIZED`. If missing or different, do not modify files or ru
 commands; report that no authorized directive exists and stop. Execute only its Authorized Scope.
 Do not begin later phases merely because they appear elsewhere.
 
+## Project Memory
+
+Read `docs/aion/CURRENT_STATE.md` at the start of a session, before the directive. It is the one
+canonical, tracked record of where the project is and where it is going — checkpoint SHA, findings
+status, the value-priority rule that governs what gets built next, the autonomy plan, and the
+standing objective families. It is prose and it can go stale: Git, `.aion-local/directives/CURRENT.md`,
+the Owner authority records and the roadmap store override it wherever they disagree. Update it when
+the plan changes; do not copy it anywhere else.
+
 ## Required Start Gate
 
 Before edits, confirm the repository root; inspect Git status, branch, and HEAD; confirm the
