@@ -42,6 +42,11 @@ import {
   authorityIsWithin,
   effectAuthorityEnvelopeId,
 } from "../../packages/director/dist/index.js";
+import {
+  AUTONOMY_STORE_RELATIVE_PATH,
+  autonomyStatus,
+  createFileAutonomyStore,
+} from "@aion/director";
 import { createGoalIntake } from "./goal-intake.mjs";
 import { createProviderRegistry } from "./provider-registry.mjs";
 import { createVerificationRunner } from "./verification-runner.mjs";
@@ -529,3 +534,35 @@ export const ROADMAP_VERBS_V1 = Object.freeze([
   "roadmap.pause",
   "roadmap.resume",
 ]);
+
+/**
+ * Autonomy status, over the same store the kernel writes.
+ *
+ * A separate factory rather than extra methods on the roadmap control, for the reason
+ * `createGoalControl` gives right above: the roadmap control's surface is pinned key by key by its
+ * tests, and this is a different question with a different blast radius.
+ *
+ * Read-only on purpose. Nothing here starts, stops or steers the kernel — the Command Center's job
+ * is to tell the Owner what is happening across the portfolio, and a status panel that can also
+ * dispatch work is a status panel that can dispatch work by accident.
+ */
+export function createAutonomyControl(options = {}) {
+  const repositoryRoot = options.repositoryRoot;
+  if (typeof repositoryRoot !== "string" || repositoryRoot.trim() === "") {
+    throw new Error("autonomy control needs a repositoryRoot");
+  }
+  const storeRoot = options.storeRoot
+    ?? join(repositoryRoot, ...AUTONOMY_STORE_RELATIVE_PATH.split("/"));
+
+  return {
+    status() {
+      const store = createFileAutonomyStore(storeRoot);
+      // Capabilities and outward authority are deliberately empty and false: this is a viewer, and
+      // a viewer that claims capabilities it has not checked would show work as eligible that is not.
+      return autonomyStatus(store, [], false);
+    },
+  };
+}
+
+/** The autonomy verbs the app server may route. Read-only, and a closed list like the one above. */
+export const AUTONOMY_VERBS_V1 = Object.freeze(["autonomy.status"]);

@@ -4,8 +4,8 @@
 person picking up Project AION. Read it before doing anything; it is meant to be read in one sitting.
 
 ```
-UPDATED_AT   2026-08-21T15:08:01Z
-BASE_SHA     07125a671dfdad4e1443b01fcb34a043068a482c
+UPDATED_AT   2026-08-21T16:39:24Z
+BASE_SHA     c4ab9c36b12c9e2ea9a514be287cf35bcf9b373c
 REPOSITORY   C:\AION-HQ-main-integrate   (linked git worktree of C:\AION-HQ)
 ORIGIN       https://github.com/danieljames-dev/personalasist1.git   branch main
 ```
@@ -99,17 +99,23 @@ The Owner should not have to supply every next prompt. AION should stop and ask 
 - production or external-effect authority,
 - a genuine unresolved blocker.
 
-### Next milestone: `AION-AUTONOMY-KERNEL-V1`
+### Next milestone: `AION-AUTONOMY-KERNEL-V3`
 
-Directive `AION-AUTONOMY-KERNEL-V1-20260821T145648Z` was **authorized and not started** at this
-checkpoint; it is archived at that status under `.aion-local/directives/archive/` and its Owner
-authority record remains `ACTIVE`, so it can be resumed through the repository's standing-authority
-path rather than a fresh phrase.
+Directive `AION-AUTONOMY-KERNEL-V3-20260821T163924Z`, `AUTHORIZED`. It supersedes V1 and V2, both of
+which were authorized and never started: V1 named a dealership sales acceptance objective the Owner
+withdrew, and V2 named three acceptance objectives that the portfolio model replaced. Each was
+superseded rather than edited, because editing the text of an authorized directive changes what the
+authorization was given for.
+
+Both superseded authority records are still `ACTIVE`. Retiring them is `Set-AionOwnerAuthorityState`,
+which refuses without `-OwnerOperation` — an Owner action, not an agent's. Nothing is widened by
+leaving them: both carry a zero spend ceiling and scopes that are subsets of V3's. The Owner can
+retire both in one pass.
 
 The smallest kernel that lets AION:
 
-1. hold multiple standing Owner objectives durably,
-2. rank the highest-value eligible bounded step,
+1. hold multiple standing Owner objectives durably, each belonging to a business in the portfolio,
+2. rank the highest-value eligible bounded step **across businesses**,
 3. dispatch it,
 4. verify the actual outcome,
 5. record the experience,
@@ -119,7 +125,9 @@ The smallest kernel that lets AION:
 9. continue other safe objectives when one branch is gated,
 10. stop only on genuine gates, blockers, bounds, or an explicit pause.
 
-Required concepts: durable standing objectives; an explicit, testable value scheduler; a self-continue
+Required concepts: a minimum generic business-workspace registry (id, canonical name, status,
+owner-controlled, category only when known, provenance, timestamps — and nothing speculative beyond
+that); durable standing objectives carrying their business; an explicit, testable value scheduler; a self-continue
 loop; bounded leases, retries, loop detection and circuit breakers; restart recovery; verification of
 real state rather than model self-report; Experience and Learning Ledger integration; non-parametric
 reversible learning; memory provenance, freshness, supersession, contradiction and expiry; empirical
@@ -136,76 +144,105 @@ capability.
 
 ---
 
-## The four standing objective families
+## AION is a multi-business portfolio operator
 
-### 1. Sales / relationship assistant
+AION is **not** being built around one employer, one dealership, or one business. Daniel owns and
+controls several businesses, brands and venture concepts, and AION's job is to help operate, compare,
+grow and prioritise across all of them.
 
-Dealership work is the **first proving ground, not AION's permanent identity**.
-
-```
-find -> check recent contact -> understand -> personalize -> text/email -> call
-     -> transcribe -> remember -> note CRM -> follow up
-```
-
-Non-negotiable: **check recent coworker, BDC, manager and service contact before any outreach.** No
-invented personal facts. Relationship context is grounded in CRM records, transcripts, messages,
-inventory and Owner input — nothing else.
-
-AION keeps its own richer portable relationship memory and is canonical. External CRMs receive
-concise professional notes. **Tekion must not become the AION core.**
+The conceptual model:
 
 ```
-AION Relationship CRM      -> CRMAdapter            -> Tekion, later VinSolutions, DealerSocket, Salesforce
-AION Communications Gateway -> CommunicationsAdapter -> Dialpad or approved dealership telephony
-
-conversation -> provider -> events/transcript -> AION relationship memory
-             -> canonical InteractionRecord -> CRM adapter
+AION Business Operator
+  -> Portfolio
+     -> Business / Brand Workspace
+        -> Objectives -> Tasks -> Opportunities -> Relationships
+        -> Products / Services -> Experiments -> Metrics -> Memory -> Outcomes
 ```
 
-Tekion APC/API is the preferred durable production integration where available. Browser automation
-is a shadow, prototype and fallback path only — DOM and accessibility first, vision as fallback.
+Nothing in the autonomy system may be hard-coded around any single brand. Each business is a
+distinct workspace under a generic portfolio model. **This is not an ERP and not a CRM** — for the
+Autonomy Kernel, build only the minimum structure prioritisation and durable context actually
+require. Detailed business operations belong to later capability layers.
 
-### 2. Resale / opportunity engine
+### Business fact discipline — the rule that matters most here
 
-A Florida resale-certificate-enabled resale business.
+The Owner has told us these businesses **exist** and are Owner-controlled. He has not told us what
+they do.
+
+**Do not invent** what any of them does, sells, or charges; who its customers are; its revenue,
+products already sold, legal structure, workflows, software, pricing, business model, employees or
+partners. Unknown business facts stay **UNKNOWN**, and the data model must let them stay unknown
+rather than presenting a field somebody feels obliged to fill.
+
+The correct first objective for a business AION knows nothing about is *discovery*:
+
+> "Understand this business and identify the highest-value next actions."
+
+AION must be able to hold and work that objective without filling in a single missing fact. Any
+financial projection is an estimate, never a fact.
+
+---
+
+## The portfolio
+
+### Owner-controlled businesses and brands
+
+| business | status | what we have recorded about what it does |
+|---|---|---|
+| **Compassionate Choice** | ACTIVE | nothing yet — discovery first |
+| **LocalFinds** | ACTIVE | nothing yet — discovery first |
+| **Talk to Caleb** | ACTIVE | nothing yet — discovery first |
+| **AIService Co** | ACTIVE | nothing yet — discovery first |
+
+**Compassionate Choice is our business.** It is not Daniel's employer, and must never be described
+as one.
+
+For AIService Co, "AI-assisted business services" is a plausible direction and **a hypothesis, not a
+description**. It does not become a fact until the Owner says so.
+
+The first objective for each is the same: understand the actual business model, current products or
+services, customers, workflows, revenue-generating work, repetitive work, bottlenecks, useful
+automation, opportunities to increase revenue or reduce workload, and any legal or operational
+prerequisites. Discover, then operate.
+
+### Active portfolio directions
+
+**Product development and sales.** Identify a problem or opportunity → research the market → define
+a product hypothesis → identify prerequisites → prototype → validate demand → estimate unit
+economics → launch a bounded test → collect actual outcomes → improve, stop or scale. Physical,
+digital, software, service or bundled — do not assume which until it is specified.
+
+**Resale / arbitrage / opportunity engine.**
 
 ```
-find product -> actual sold comps -> market demand -> fees -> shipping -> travel
-             -> tax and holding risk -> expected profit -> ROI -> expected days-to-sell
-             -> BUY / MAYBE / PASS -> inventory -> listing -> repricing -> sale
-             -> actual outcome -> learning
+find -> prerequisites, permits, compliance discovery -> sold comps -> demand
+     -> acquisition cost -> fees -> shipping and travel -> holding cost -> risk
+     -> expected profit -> ROI -> expected days-to-sell -> BUY / MAYBE / PASS
+     -> actual outcome -> learning
 ```
 
-Preferred early categories: tools; automotive parts and equipment; commercial equipment; item-level
-liquidation and overstock; local-to-national arbitrage; consignment; business liquidation brokerage.
-**Do not begin with random mystery pallets.**
+Candidate categories — **candidates, not policy**: tools; automotive parts and equipment;
+commercial equipment; item-level liquidation and overstock; local-to-national arbitrage;
+consignment; business liquidation brokerage. Previously discussed profit and ROI thresholds
+(roughly $100–$200 per item, roughly 25–35% ROI) are **hypotheses to be re-derived from actual
+results**, not constants to schedule against. Learning must be objective: purchase cost → expenses →
+sale price → days to sell → actual profit.
 
-Approximate thresholds **as discussed, not as validated policy** — a mature AION should re-derive
-these from real outcomes rather than treat them as given: prefer high-value individual items;
-expected profit roughly $100–$200 or more per item; ROI roughly 25–35% or better; evidence of real
-sold demand; avoid counterfeit-prone categories; avoid bad shipping economics; constrain capital
-exposure; prefer local pickup where it improves the economics.
+**Local-business operator services.** Customer reactivation; missed-call recovery; quote follow-up;
+appointment setting; lead follow-up; executive-assistant and virtual-employee workflows; business
+intelligence; opportunity research; government-contract and opportunity discovery.
 
-Learning must be objective: purchase cost → expenses → sale price → days to sell → actual profit.
-AION should learn which sources, categories, marketplaces, price ranges and strategies actually make
-money.
+Positioning: **do not sell "AI."** Sell measurable outcomes — recovered customers, booked
+appointments, recovered missed calls, estimates followed up, opportunities surfaced, hours saved.
 
-**Prerequisite discovery is part of autonomy.** Asked to launch a resale business in Florida, a
-mature AION surfaces current permit, tax, registration and resale-certificate prerequisites before
-sourcing product.
+**General business and income discovery.** AION may evaluate entirely new ventures, scored on
+expected profit or value, probability of success, capital required, Owner time required, time to
+first revenue, recurring revenue potential, automation potential, legal and compliance burden,
+market demand, competition, downside risk, reversibility, evidence quality, and strategic fit with
+existing assets and brands. **Estimated financial projections are not facts.**
 
-### 3. Other income / business operator
-
-Promising directions: customer reactivation and follow-up for local businesses; missed-call
-recovery; quote follow-up; appointment setting; AI executive assistant or virtual employee;
-local-business intelligence; government-contract and opportunity discovery; independent automotive
-concierge; business-opportunity research.
-
-Positioning: **do not sell "AI."** Sell measurable outcomes — recovered opportunities, booked
-appointments, better follow-up, missed-call recovery, customer reactivation, useful business
-intelligence, profitable resale opportunities.
-
-### 4. AION self-improvement
+### AION autonomy and self-improvement
 
 Evidence-driven only. Run the Unknown-Unknown Discovery Harness continuously; repair only
 demonstrated defects or real blockers.
@@ -219,6 +256,56 @@ experience -> verified external or observable outcome -> repeated evidence
 contradiction and expiry. Provider and model routing becomes empirical — verified success,
 consistency, latency, tokens, cost, retries, failure modes, task type — but not until enough real
 mission data exists to justify it.
+
+---
+
+## Cross-business prioritisation is a core requirement
+
+AION must eventually answer: **"What is the highest-value thing we can safely work on across all of
+our businesses right now?"**
+
+The scheduler weighs explicit Owner priority; urgency; expected business or user value;
+**confidence in that expected value**; time to useful outcome; dependency readiness; capital or
+spend required; Owner time required; capability availability; blockers; freshness; retry and failure
+history; experiment value and information gain; reversibility; and whether other work can continue
+while one branch is gated.
+
+The global rule still holds — real user or business value beats a proven capability blocker, which
+beats a measured reliability defect, which beats speculative infrastructure. **It does not mean
+"choose the largest dollar estimate."** Confidence and evidence quality are inputs; an unevidenced
+large number must not outrank an evidenced small one, or AION will chase fiction.
+
+---
+
+## Generic relationship memory
+
+AION keeps its own portable Relationship / Contact Memory. It is **not** a dealership CRM and not
+tied to any vendor:
+
+```
+AION Relationship Memory -> optional CRMAdapter -> whatever system a particular business uses
+```
+
+The abstraction is kept because it is good architecture. **No CRM integration gets built until a
+real business workflow needs one**, and none does today.
+
+---
+
+## DEFERRED / NOT CURRENTLY ACTIVE
+
+Daniel is no longer working in dealership sales. These are historical and deferred, not deleted, and
+return only if the Owner explicitly reactivates them:
+
+- dealership relationship assistant, and dealership texting and calling
+- Tekion adapter and Tekion APC/API integration
+- dealership inventory matching
+- BDC, coworker, manager and service recent-contact workflows
+
+The generic ideas they produced survive them: the Relationship Memory above, the `CRMAdapter` shape,
+the communications-gateway shape, and the "check recent contact before outreach" discipline, which is
+sound for any business that ever contacts a person.
+
+Prior handoffs and history describing this work are intact and are not to be rewritten.
 
 ---
 
@@ -253,9 +340,9 @@ status to `AUTHORIZED`; never hand-write an authority record. The gate requires 
 | stage | cumulative engineering hours |
 |---|---|
 | first meaningful self-continuing local/shadow AION | ~25–40 |
-| useful multi-objective shadow operator | ~45–70 |
-| sales relationship assistant, own CRM, transcription | ~70–105 |
-| supervised real communications and CRM writes (given provider/Tekion access) | ~100–160 |
+| useful multi-business shadow operator across the portfolio | ~45–70 |
+| relationship memory, own contact timeline, transcription | ~70–105 |
+| supervised real communications and external writes (given provider access) | ~100–160 |
 | first version reasonably called true bounded multi-domain autonomy | ~140–210 |
 | more mature production-grade multi-domain autonomy | ~210–300+ |
 
@@ -276,16 +363,19 @@ doing useful shadow business work.
 
 ### First capability sequence after the kernel
 
-1. real multi-objective shadow work
-2. AION Relationship CRM and customer timeline
-3. communications and transcription gateway
-4. CRM adapter — Tekion read-shadow integration
-5. recent-contact protection
-6. inventory matching
-7. supervised texting, email and calling
-8. CRM note writes
-9. real outcome measurement
-10. bounded autonomous promotion
+1. real multi-business shadow work across the portfolio
+2. business discovery for Compassionate Choice, LocalFinds, Talk to Caleb and AIService Co — what
+   they actually are, before anything is built for them
+3. whichever of **Resale Opportunity Engine V1** or **Business Opportunity / Research Operator V1**
+   gives the fastest real-world shadow feedback
+4. AION Relationship / Contact Memory and a customer timeline, generic and vendor-free
+5. communications and transcription gateway
+6. real outcome measurement against verified results
+7. supervised outward communication, once a real workflow needs it and the evidence supports it
+8. bounded autonomous promotion
+
+A CRM adapter appears in this list only when a real business workflow needs one, and it will be
+generic when it does. There is no Tekion step.
 
 **Production rule.** Shadow and local capability development continues while independent review
 remains outstanding. Production and live external authority stay gated until the evidence and the

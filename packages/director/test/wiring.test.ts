@@ -184,12 +184,35 @@ test("every exported src function reachable from the run path has a non-test cal
     ["directorExecuteJobWithFailover", "OWNER_DECISION_PROVIDER_BRIDGE_V1: spawn path still uses launchRun; this is the V1 Director port"],
     ["directorSubmitMvaJob", "OWNER_DECISION_MVA_REAL_DISPATCH_V1: spawn path still uses launchRun; this is the V1 Director dispatch port"],
 
+    /*
+     * AION-AUTONOMY-KERNEL-V3: the kernel is built, tested and exported, and nothing runs it yet.
+     *
+     * That is a true statement about the milestone rather than a gap in this rule, and it is the
+     * reason these entries exist instead of a contrived caller. The kernel's directive authorises a
+     * *read-only* app surface — "there is no start, stop or step verb", because a status panel that
+     * can dispatch autonomous work can dispatch it by accident — so `autonomy.status` calls
+     * `autonomyStatus` and `createFileAutonomyStore`, and nothing calls the loop.
+     *
+     * Giving the kernel a runtime entry point is the next milestone's work: registering the Owner's
+     * businesses, planning real steps, and deciding who is allowed to start a run. Until then this
+     * list is the honest record that it is wired to nothing.
+     */
+    ["runAutonomyKernel", "cannot have a production caller yet: AION-AUTONOMY-KERNEL-V3 ships the loop; the runtime entry point that starts a run is the next milestone"],
+    ["buildBusinessWorkspace", "cannot have a production caller yet: businesses are registered by the entry point that does not exist yet"],
+    ["buildStandingObjective", "cannot have a production caller yet: objectives are created by the same unbuilt entry point"],
+    ["assessBusinessKnowledge", "cannot have a production caller yet: read by the discovery planner, which is the next milestone"],
+    ["createDurableExperienceLedger", "cannot have a production caller yet: constructed by the kernel's runtime entry point"],
+    ["preferenceStrength", "cannot have a production caller yet: read by empirical routing, deliberately deferred until real mission data exists"],
+    ["createExperienceLedger", "cannot have a production caller: the in-memory ledger is the harness constructor, kept beside its durable sibling"],
+
 
   ]);
   const ownerDecisionDeadModules = new Map<string, string>([
     ["work-items.ts", "OWNER_DECISION_D2_WORK_ITEM_BOARD: whether schedule/selectRunnable belong on the D2 spawn path or a later mission board"],
     ["src-reachability.ts", "OWNER_DECISION_TEST_HELPER: modulesReachableFrom is a test-only import-graph helper that lives in src/"],
     ["mission.ts", "OWNER_DECISION_D2_MISSION_STATE_MACHINE: whether mission advance gates the CLI exit contract or remains run-root documentation. The CLI writes mission.json; nothing in the repo reads it."],
+    ["business-workspace.ts", "OWNER_DECISION_AUTONOMY_KERNEL_V3: the portfolio registry the kernel reads. Nothing registers the Owner's businesses yet — that is the runtime entry point the next milestone builds."],
+    ["experience-ledger.ts", "OWNER_DECISION_AUTONOMY_KERNEL_V3: the kernel constructs the durable ledger, and the kernel has no runtime entry point yet. The harness imports it through test/harness/ledger.ts, which is a test path."],
   ]);
 
   const orphans: string[] = [];

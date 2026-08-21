@@ -45,7 +45,7 @@ import { PublicUrlResearchProviderV1, SearxngSearchProviderV1 } from "./research
 import { resolveDeveloperAgentBridges } from "./developer-agent.mjs";
 import { AllowlistedVerificationRunnerV1 } from "./verification.mjs";
 import { remoteAccessStatus } from "./private-network.mjs";
-import { createGoalControl, createRoadmapControl } from "./roadmap-control.mjs";
+import { createAutonomyControl, createGoalControl, createRoadmapControl } from "./roadmap-control.mjs";
 
 /** Bump when shipping mobile UI fixes so phones load new CSS/JS without manual cache clear. */
 const ASSET_VERSION = "20260811g1";
@@ -659,6 +659,13 @@ export async function createAionServer(options = {}) {
    * production builds it over the durable store at `.aion-local/roadmap`.
    */
   let roadmapControlInstance = options.roadmapControl ?? null;
+  let autonomyControlInstance = options.autonomyControl ?? null;
+  function autonomyControl() {
+    if (autonomyControlInstance === null) {
+      autonomyControlInstance = createAutonomyControl({ repositoryRoot });
+    }
+    return autonomyControlInstance;
+  }
   function roadmapControl() {
     if (roadmapControlInstance === null) {
       roadmapControlInstance = createRoadmapControl({ repositoryRoot });
@@ -1911,6 +1918,14 @@ export async function createAionServer(options = {}) {
       case "roadmap.continue": return roadmapControl().continueRoadmap();
       case "roadmap.pause": return roadmapControl().pause();
       case "roadmap.resume": return roadmapControl().resume();
+      /*
+       * Autonomy status. One read, and only a read.
+       *
+       * What AION is working on, for which business, why it was selected, what is blocked and what
+       * is next. There is no start, stop or step verb: a panel that can dispatch autonomous work is
+       * a panel that can dispatch it by accident.
+       */
+      case "autonomy.status": return autonomyControl().status();
       /*
        * Owner goal intake. Two verbs: say a goal, and read back what was said.
        *
