@@ -1,0 +1,8 @@
+# The OCR language model is provisioned, not committed.
+#
+# It is 5.2 MB. `LARGE_TRACKED_FILE_BYTES` in packages/director/src/git-truth.ts is set at 1 MiB
+# from the experience of exactly this file reaching a commit through a broad `git add` and only
+# being caught when a fast-forward refused to overwrite an untracked copy of it.
+#
+# Provision it with: node packages/local-assistant/scripts/provision-ocr-model.mjs
+*.traineddata

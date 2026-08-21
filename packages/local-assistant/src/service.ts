@@ -143,6 +143,7 @@ import {
   looksLikeDecodableImage,
 } from "./image-region.js";
 import { orientImageBytesForVision, runEasyOcrOnImageBytes } from "./connectors/sticker-ocr.js";
+import { runLocalTesseractOcr, type LocalOcrEngineResultV1 } from "./ocr-engine.js";
 import {
   buildLotWalkCallList,
   buildLotWalkList,
@@ -6002,7 +6003,12 @@ export class AionAssistantV1 {
     offline?: boolean;
     /** Skip sticker crop / second-pass fallback (tests). */
     skipStickerFallback?: boolean;
-  }): Promise<VinOcrResultV1 & { documentHint: string; extractionPasses?: string[] }> {
+  }): Promise<VinOcrResultV1 & {
+    documentHint: string;
+    extractionPasses?: string[];
+    /** What the local OCR engine reported, when it ran. Absent when no local pass was needed. */
+    localOcrEngine?: LocalOcrEngineResultV1;
+  }> {
     let text = String(input.extractedText ?? "").trim();
     let provider = "text-input";
     let byteLength = 0;
@@ -6035,6 +6041,8 @@ export class AionAssistantV1 {
 
     /** Last raw vision string (may be detect-box garbage); used only for region hints. */
     let lastVisionRaw = "";
+    /** What the local OCR engine last reported, so a model problem is never reported as "no text". */
+    let localOcrEngine: LocalOcrEngineResultV1 | null = null;
 
     const runVision = async (img: Buffer, prompt: string, passName: string, mimeType: string) => {
       const vision = await extractImageWithLocalVision({
@@ -6078,31 +6086,21 @@ export class AionAssistantV1 {
       // Checking the signature first is cheap and removes the class of failure rather than the
       // symptom.
       if (!looksLikeDecodableImage(img)) return false;
-      try {
-        const tessPath = "tesseract.js";
-        const tess = await import(tessPath) as {
-          createWorker?: (lang?: string) => Promise<{
-            recognize: (img: Buffer) => Promise<{ data: { text: string } }>;
-            terminate: () => Promise<void>;
-          }>;
-        };
-        if (typeof tess.createWorker !== "function") return false;
-        const worker = await tess.createWorker("eng");
-        try {
-          const result = await worker.recognize(img);
-          const tessText = String(result?.data?.text ?? "").trim();
-          extractionPasses.push(passName);
-          if (!tessText || isNonOcrVisionText(tessText)) return false;
-          text = tessText;
-          provider = "tesseract.js";
-          extractionOk = true;
-          return true;
-        } finally {
-          await worker.terminate();
-        }
-      } catch {
-        return false;
-      }
+
+      // Everything else — the pinned local model, the integrity check, the bounded worker — lives
+      // in `runLocalTesseractOcr`. Before that existed, an absent model here meant a silent request
+      // to a public CDN, a promise that never settled, and a `return false` that made all of it
+      // look like "this pass found no text". V0.4 Finding 4, measured by Discovery Campaign 03.
+      const engine = await runLocalTesseractOcr(img);
+      localOcrEngine = engine;
+      extractionPasses.push(`${passName}:${engine.code}`);
+
+      if (engine.code !== "OCR_SUCCESS") return false;
+      if (isNonOcrVisionText(engine.text)) return false;
+      text = engine.text;
+      provider = "tesseract.js";
+      extractionOk = true;
+      return true;
     };
 
     /*
@@ -6317,9 +6315,26 @@ export class AionAssistantV1 {
       });
     }
 
+    /*
+     * A model problem is not a photography problem.
+     *
+     * `buildVinOcrResult` explains a failure in terms of the image, because until now every failure
+     * it saw was about the image. When the local OCR model is missing, truncated or not the model
+     * we expect, telling the Owner to try a closer crop is false: no crop will help, and the fix is
+     * to provision the model. Only override when identity actually failed — a photo that produced a
+     * VIN through vision is not made worse by a model that was never needed.
+     */
+    const engineFailed = localOcrEngine !== null
+      && localOcrEngine.code !== "OCR_SUCCESS"
+      && localOcrEngine.code !== "OCR_COMPLETED_NO_TEXT";
+    if (engineFailed && ocr.status === "VIN_OCR_FAILED") {
+      ocr = { ...ocr, message: localOcrEngine!.message, provider: `local-ocr:${localOcrEngine!.code}` };
+    }
+
     return {
       ...ocr,
       extractionPasses,
+      ...(localOcrEngine ? { localOcrEngine } : {}),
       documentHint: bytes
         ? `Image ${input.filename || "upload"} (${byteLength} bytes) preserved; OCR via ${provider}.`
         : `Text-only OCR via ${provider}.`,
