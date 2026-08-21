@@ -4,8 +4,8 @@
 person picking up Project AION. Read it before doing anything; it is meant to be read in one sitting.
 
 ```
-UPDATED_AT   2026-08-21T17:50:08Z
-BASE_SHA     bdb0944886cc331f77a3b6c0ef6b0c711e73a999
+UPDATED_AT   2026-08-21T19:15:14Z
+BASE_SHA     __NEW_SHA__
 REPOSITORY   C:\AION-HQ-main-integrate   (linked git worktree of C:\AION-HQ)
 ORIGIN       https://github.com/danieljames-dev/personalasist1.git   branch main
 ```
@@ -75,6 +75,20 @@ demonstrates a concrete defect, or a real capability is actually blocked by it. 
 is not a reason. This repository has spent a long arc proving it can repair itself; the open question
 is whether it can be useful.
 
+### And the rule for evidence
+
+**When authoritative evidence contradicts an earlier summary: stop, preserve both sources, mark the
+conflict, ask the smallest high-value question, and do not invent a resolution.**
+
+This is not caution for its own sake. A Business Evidence and Revenue Discovery build was specified
+on 2026-08-21 and **stopped before a line was written**, because source discovery contradicted the
+premise it had been specified on. Building it would have recorded a contradicted claim as a permanent
+`KnownFact` with provenance attached, and everything downstream would have inherited it as settled.
+Stopping was the system working.
+
+A corollary worth keeping: **an artifact is not knowledge.** Writing a file about a business does not
+mean anything is known about it, and `understandsBusiness` exists to refuse that confusion.
+
 ---
 
 ## Where the project is going
@@ -129,17 +143,21 @@ is the function that refuses to confuse them.
 
 ### What AION needs from the Owner
 
-The same four questions for each of Compassionate Choice, LocalFinds, Talk to Caleb and AIService Co:
+Three questions now, in order of decision value. The first two are worth more than any other
+information AION could gather.
 
-1. What does this business actually do — what does it sell or deliver, and to whom?
-2. Where does its revenue come from today, if any?
-3. Which recurring work takes the most of the Owner's time?
-4. What is currently blocking it from doing more of what works?
+1. **Has AHCA formally issued the §400.509 Certificate of Registration for Compassionate Choice
+   Home Services LLC — and if so, what is the effective date?** Every Compassionate Choice revenue
+   path that needs paying clients depends on this, and the evidence currently disagrees with itself.
+2. **Is LakelandFinds the same business as LocalFinds?** Assets exist under one name and the
+   portfolio lists the other. They have not been merged.
+3. **What is Daniel's relationship and authority with Compassionate Choice Home Services LLC?** The
+   documents name Kristina Leach as owner and founder. "Our business" is not enough to infer an
+   ownership share, a management role or any control right, and AION will not infer one.
 
-A fifth, non-blocking: are there legal, licensing or compliance prerequisites in play?
-
-Until these are answered no opportunity across the portfolio can be ranked honestly, because every
-value estimate would be built on an invented premise.
+Still open for LocalFinds, Talk to Caleb and AIService Co, once identity is settled: what each one
+sells and to whom, where revenue comes from today, which recurring work costs the most Owner time,
+and what is blocking more of what works.
 
 ### Governance state
 
@@ -203,23 +221,55 @@ financial projection is an estimate, never a fact.
 
 ### Owner-controlled businesses and brands
 
-| business | status | what we have recorded about what it does |
+A discovery pass on 2026-08-21 located real source material for some of these. What follows is what
+the **evidence** supports, with its date. Documented-as-of-a-date is not current truth.
+
+| business | status | evidence state |
 |---|---|---|
-| **Compassionate Choice** | ACTIVE | nothing yet — discovery first |
-| **LocalFinds** | ACTIVE | nothing yet — discovery first |
-| **Talk to Caleb** | ACTIVE | nothing yet — discovery first |
-| **AIService Co** | ACTIVE | nothing yet — discovery first |
+| **Compassionate Choice** | ACTIVE | substantial corpus located; **three unresolved conflicts** |
+| **Talk to Caleb** | ACTIVE | real content operation evidenced; business model UNKNOWN |
+| **AIService Co** | ACTIVE | project and tooling assets evidenced; business model UNKNOWN |
+| **LocalFinds** | ACTIVE | no corpus under that name; identity question open |
 
-**Compassionate Choice is our business.** It is not Daniel's employer, and must never be described
-as one.
+**Compassionate Choice — what the documents establish** (source dated 2026-05-17; corpus location
+recorded in the checkpoint handoff, on an offline drive, not in this repository):
 
-For AIService Co, "AI-assisted business services" is a plausible direction and **a hypothesis, not a
-description**. It does not become a fact until the Owner says so.
+Non-medical homemaker and companion care under Florida **§400.509 / FAC 59A-8.025**, Lakeland and
+Polk County. Documented allowed activity: companionship, housekeeping, meal preparation, laundry,
+shopping, errands, casual cosmetic assistance, steadying while walking. Documented **excluded**
+hands-on personal care: bathing, feeding, dressing, toileting, transferring, medication.
 
-The first objective for each is the same: understand the actual business model, current products or
-services, customers, workflows, revenue-generating work, repetitive work, bottlenecks, useful
-automation, opportunities to increase revenue or reduce workload, and any legal or operational
-prerequisites. Discover, then operate.
+**Legal scope and business policy are different things and are not merged here.** Transportation is
+documented as *legally allowed* under the scope **and** declined by an internal business decision on
+liability grounds. Also documented: the registration number must appear in advertising once
+applicable; Level 2 background screening; a W-2 rather than 1099 employment model; local business tax
+receipt context. All of it is subject to the source date and needs re-verification before being
+treated as current.
+
+**Three conflicts, held open rather than resolved:**
+
+1. **Registration status — CONFLICT.** The Owner's summary describes an AHCA-registered business
+   serving clients. The 2026-05-17 profile says the certificate must be issued before the LLC may
+   market or accept paying clients, lists prerequisites still pending, and describes the website
+   registration number as a placeholder. A 9 July machine-transcribed conversation says something
+   like "AHCA Reg number cleared" — conversational, ASR-derived, not a certificate. **Current status
+   is UNKNOWN.**
+2. **Ownership — UNRESOLVED.** Documents name **Kristina Leach** as owner and founder. The Owner
+   calls it "our business." No share, authority, partnership, employment or control right is inferred.
+3. **Legal name against brand name — UNRESOLVED.** Documents name **Compassionate Choice Home
+   Services LLC** and record an open DBA question about the shorter consumer-facing name.
+
+**Unknown for Compassionate Choice** and not to be invented: whether registration is issued, its
+effective date and number, insurance status, home-based or commercial office, client count, pricing,
+revenue, margins, staffing, capacity, acquisition channels, referral relationships, utilisation,
+retention, operating hours, payroll structure in practice.
+
+**LocalFinds and LakelandFinds have not been merged.** Assets exist under *LakelandFinds* — logo,
+covers, two lead files — sitting inside an AIService Co folder. Same brand, renamed brand,
+predecessor, AIService Co product or a separate project all remain possible. Merging them on a name
+resemblance would create a false identity that everything downstream would inherit.
+
+For AIService Co, "AI-assisted business services" remains **a hypothesis, not a description**.
 
 ### Active portfolio directions
 
@@ -348,26 +398,24 @@ status to `AUTHORIZED`; never hand-write an authority record. The gate requires 
 
 ---
 
-## Build-hour plan from `07125a67`
+## Build-hour plan
 
-**Total engineering hours, not elapsed time.** Estimates, not commitments.
+**Total engineering hours, not elapsed time. Estimates, not commitments.**
 
-| stage | cumulative engineering hours |
+From `f21035c`, to a first revenue-directed autonomous experiment:
+
+| condition | focused hours |
 |---|---|
-| first meaningful self-continuing local/shadow AION | ~25–40 |
-| useful multi-business shadow operator across the portfolio | ~45–70 |
-| relationship memory, own contact timeline, transcription | ~70–105 |
-| supervised real communications and external writes (given provider access) | ~100–160 |
-| first version reasonably called true bounded multi-domain autonomy | ~140–210 |
-| more mature production-grade multi-domain autonomy | ~210–300+ |
+| if the AHCA registration **is** already issued | ~20–30 |
+| if it is still **pending** — launch completion becomes prerequisite | ~35–50 |
 
-The first ~25–40 hours are largely a **critical path**. After the autonomy kernel exists, several
-tracks proceed in parallel: sales and CRM; communications and transcription; resale and opportunity;
-model and provider benchmarking; real shadow missions; evidence-driven repairs. Do not maximise
-worker count — elapsed productive time can be materially lower than total engineering effort without
-one.
+The spread is the whole argument for asking question 1 before building anything else: the answer
+changes what the next month of work *is*, not just how long it takes.
 
----
+Longer horizons, unchanged in shape: supervised outward actions ~60–90; true bounded multi-domain
+autonomy ~110–170. After the kernel, tracks proceed in parallel — business evidence, communications
+and transcription, resale and opportunity, provider benchmarking, real shadow missions. Do not
+maximise worker count; elapsed productive time can be materially lower than total effort without it.
 
 ## The transition this is all for
 
@@ -378,9 +426,12 @@ doing useful shadow business work.
 
 ### First capability sequence after the kernel
 
-1. real multi-business shadow work across the portfolio
-2. business discovery for Compassionate Choice, LocalFinds, Talk to Caleb and AIService Co — what
-   they actually are, before anything is built for them
+1. **Business Evidence + Owner Answer Intake** — `NOT_STARTED`. Dry-run before import, source
+   provenance and timestamp, conflict preservation, supersession, idempotent re-import, workspace
+   isolation, KNOWN / UNKNOWN / HYPOTHESIS separation, private-source handling, no silent overwrite,
+   and no permanent `KnownFact` from contradicted evidence. Architecture — generalise the
+   `career-evidence` primitives or build a sibling — is deliberately **not yet decided**.
+2. ingest the located Compassionate Choice corpus through it, recording the conflicts *as* conflicts
 3. whichever of **Resale Opportunity Engine V1** or **Business Opportunity / Research Operator V1**
    gives the fastest real-world shadow feedback
 4. AION Relationship / Contact Memory and a customer timeline, generic and vendor-free
