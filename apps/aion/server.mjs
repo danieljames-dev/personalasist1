@@ -1922,10 +1922,19 @@ export async function createAionServer(options = {}) {
        * Autonomy status. One read, and only a read.
        *
        * What AION is working on, for which business, why it was selected, what is blocked and what
-       * is next. There is no start, stop or step verb: a panel that can dispatch autonomous work is
-       * a panel that can dispatch it by accident.
+       * is next — plus start, pause and resume.
+       *
+       * None of these verbs lets the client describe the work. `start` takes no arguments at all:
+       * what runs comes from durable server-side state the Owner authorized, and the run is bounded
+       * before it reaches the kernel. `pause` takes a reason string and nothing else, which is
+       * recorded rather than acted on. There is no verb that names an objective, a provider, an
+       * authority, a step or a piece of evidence, because that is how work gets described into
+       * existence from outside the trust boundary.
        */
       case "autonomy.status": return autonomyControl().status();
+      case "autonomy.start": return autonomyControl().start();
+      case "autonomy.pause": return autonomyControl().pause(String(input.reason ?? ""));
+      case "autonomy.resume": return autonomyControl().resume();
       /*
        * Owner goal intake. Two verbs: say a goal, and read back what was said.
        *

@@ -24,7 +24,7 @@ import { AUTONOMY_VERBS_V1, createAutonomyControl } from "../../apps/aion/roadma
 
 const NOW = "2026-08-21T16:39:24Z";
 
-test("autonomy.status reports the portfolio, and is the only autonomy verb", () => {
+test("autonomy.status reports the portfolio, and the verb list stays closed", () => {
   const root = mkdtempSync(join(tmpdir(), "aion-autonomy-status-"));
   try {
     const storeRoot = join(root, ...AUTONOMY_STORE_RELATIVE_PATH.split("/"));
@@ -54,8 +54,9 @@ test("autonomy.status reports the portfolio, and is the only autonomy verb", () 
     // The viewer must never present a category nobody recorded.
     for (const business of store.businesses()) assert.equal(business.category, null);
 
-    assert.deepEqual([...AUTONOMY_VERBS_V1], ["autonomy.status"],
-      "a status panel that can also dispatch autonomous work can dispatch it by accident");
+    assert.deepEqual([...AUTONOMY_VERBS_V1],
+      ["autonomy.status", "autonomy.start", "autonomy.pause", "autonomy.resume"],
+      "a closed list: begin, stop, resume and look — and nothing that lets a client describe the work");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -44,8 +44,10 @@ import {
 } from "../../packages/director/dist/index.js";
 import {
   AUTONOMY_STORE_RELATIVE_PATH,
-  autonomyStatus,
-  createFileAutonomyStore,
+  pauseAutonomy,
+  resumeAutonomy,
+  runtimeStatus,
+  startAutonomy,
 } from "@aion/director";
 import { createGoalIntake } from "./goal-intake.mjs";
 import { createProviderRegistry } from "./provider-registry.mjs";
@@ -536,16 +538,23 @@ export const ROADMAP_VERBS_V1 = Object.freeze([
 ]);
 
 /**
- * Autonomy status, over the same store the kernel writes.
+ * Autonomy control: start, pause, resume, status.
  *
  * A separate factory rather than extra methods on the roadmap control, for the reason
- * `createGoalControl` gives right above: the roadmap control's surface is pinned key by key by its
- * tests, and this is a different question with a different blast radius.
+ * `createGoalControl` gives above: the roadmap control's surface is pinned key by key by its tests,
+ * and this is a different question with a different blast radius.
  *
- * Read-only on purpose. Nothing here starts, stops or steers the kernel — the Command Center's job
- * is to tell the Owner what is happening across the portfolio, and a status panel that can also
- * dispatch work is a status panel that can dispatch work by accident.
+ * **The client cannot describe the work.** No verb here takes an objective, a business, a provider,
+ * an authority id, a step, or a piece of evidence. `start` takes nothing at all: what runs comes
+ * from durable server-side state that the Owner's directives put there. A browser can ask AION to
+ * begin, to stop, and what it is doing — and that is the whole surface, because anything richer is a
+ * way to describe work into existence from outside the trust boundary.
+ *
+ * Runs are bounded here as well as in the kernel. A verb that starts an unbounded loop is a verb
+ * that hands a request handler an unbounded loop.
  */
+const AUTONOMY_MAX_STEPS_PER_CALL_V1 = 8;
+
 export function createAutonomyControl(options = {}) {
   const repositoryRoot = options.repositoryRoot;
   if (typeof repositoryRoot !== "string" || repositoryRoot.trim() === "") {
@@ -553,16 +562,52 @@ export function createAutonomyControl(options = {}) {
   }
   const storeRoot = options.storeRoot
     ?? join(repositoryRoot, ...AUTONOMY_STORE_RELATIVE_PATH.split("/"));
+  const artifactRoot = options.artifactRoot ?? join(storeRoot, "discovery");
+  const now = options.now ?? nowUtc;
+
+  /** Everything the runtime needs, assembled here and never accepted from a caller. */
+  const deps = () => ({
+    storeRoot,
+    artifactRoot,
+    now,
+    currentSha: headSha(repositoryRoot),
+    provenance: "Owner portfolio direction, recorded in docs/aion/CURRENT_STATE.md",
+    maxSteps: AUTONOMY_MAX_STEPS_PER_CALL_V1,
+  });
 
   return {
     status() {
-      const store = createFileAutonomyStore(storeRoot);
-      // Capabilities and outward authority are deliberately empty and false: this is a viewer, and
-      // a viewer that claims capabilities it has not checked would show work as eligible that is not.
-      return autonomyStatus(store, [], false);
+      return runtimeStatus(deps());
+    },
+    start() {
+      const result = startAutonomy(deps());
+      // The run itself is not returned wholesale: it carries step detail the panel has no need for.
+      return {
+        started: result.started,
+        reason: result.reason,
+        registered: result.registration?.created.length ?? 0,
+        recovered: result.registration?.recovered.length ?? 0,
+        completed: result.run?.completed ?? [],
+        blocked: result.run?.blocked ?? [],
+        parked: result.parked,
+        stopReason: result.run?.stopReason ?? "PAUSED",
+      };
+    },
+    pause(reason = "") {
+      const state = pauseAutonomy(deps(), String(reason ?? ""));
+      return { paused: state.paused, pausedReason: state.pausedReason };
+    },
+    resume() {
+      const state = resumeAutonomy(deps());
+      return { paused: state.paused };
     },
   };
 }
 
-/** The autonomy verbs the app server may route. Read-only, and a closed list like the one above. */
-export const AUTONOMY_VERBS_V1 = Object.freeze(["autonomy.status"]);
+/** The autonomy verbs the app server may route. A closed list, like the roadmap one above. */
+export const AUTONOMY_VERBS_V1 = Object.freeze([
+  "autonomy.status",
+  "autonomy.start",
+  "autonomy.pause",
+  "autonomy.resume",
+]);

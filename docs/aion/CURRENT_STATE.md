@@ -4,8 +4,8 @@
 person picking up Project AION. Read it before doing anything; it is meant to be read in one sitting.
 
 ```
-UPDATED_AT   2026-08-21T16:39:24Z
-BASE_SHA     c4ab9c36b12c9e2ea9a514be287cf35bcf9b373c
+UPDATED_AT   2026-08-21T17:50:08Z
+BASE_SHA     b5910353a7109e811bb88cbb926bd68bd3ba874f
 REPOSITORY   C:\AION-HQ-main-integrate   (linked git worktree of C:\AION-HQ)
 ORIGIN       https://github.com/danieljames-dev/personalasist1.git   branch main
 ```
@@ -99,43 +99,58 @@ The Owner should not have to supply every next prompt. AION should stop and ask 
 - production or external-effect authority,
 - a genuine unresolved blocker.
 
-### Next milestone: `AION-AUTONOMY-KERNEL-V3`
+### AION now starts itself
 
-Directive `AION-AUTONOMY-KERNEL-V3-20260821T163924Z`, `AUTHORIZED`. It supersedes V1 and V2, both of
-which were authorized and never started: V1 named a dealership sales acceptance objective the Owner
-withdrew, and V2 named three acceptance objectives that the portfolio model replaced. Each was
-superseded rather than edited, because editing the text of an authorized directive changes what the
-authorization was given for.
+**Autonomy Kernel V3 is delivered and runtime-wired.** `AION-BUSINESS-DISCOVERY-RUNTIME-V1` gave it
+an entry point, so the loop no longer waits for anyone to call it.
 
-Both superseded authority records are still `ACTIVE`. Retiring them is `Set-AionOwnerAuthorityState`,
-which refuses without `-OwnerOperation` — an Owner action, not an agent's. Nothing is widened by
-leaving them: both carry a zero spend ceiling and scopes that are subsets of V3's. The Owner can
-retire both in one pass.
+What runs today, without a prompt per step:
 
-The smallest kernel that lets AION:
+1. the Owner's four businesses register durably, with deterministic ids and no duplicates on restart;
+2. each business AION cannot describe gets a discovery objective in the Owner's own framing;
+3. the scheduler picks the highest-value eligible step across the whole portfolio;
+4. a discovery step reads what is recorded and writes an artifact — known facts with provenance,
+   unknowns marked blocking or not, hypotheses labelled as hypotheses, nothing invented;
+5. verification reads that artifact back off disk; a claim without a file is not a completion;
+6. the outcome and its business context go into the durable experience ledger and the telemetry rows;
+7. the loop moves to the next business;
+8. businesses that can only advance on something the Owner knows are **parked** with the exact
+   questions attached, and the rest of the portfolio keeps going;
+9. a restart resumes from disk without repeating completed work;
+10. `autonomy.status`, `autonomy.start`, `autonomy.pause` and `autonomy.resume` are the whole
+    client surface. None of them lets a caller name an objective, a provider, an authority or a piece
+    of evidence — what runs comes from durable state the Owner authorized.
 
-1. hold multiple standing Owner objectives durably, each belonging to a business in the portfolio,
-2. rank the highest-value eligible bounded step **across businesses**,
-3. dispatch it,
-4. verify the actual outcome,
-5. record the experience,
-6. update durable state,
-7. automatically choose the next step,
-8. recover after restart without duplicating completed work,
-9. continue other safe objectives when one branch is gated,
-10. stop only on genuine gates, blockers, bounds, or an explicit pause.
+**Business Discovery Operator V1 is running and has learned nothing yet, which is the correct
+result.** All four businesses returned `NEED_OWNER_INFORMATION`. AION recorded one fact about each —
+that it is an Owner-controlled business — and four blocking questions it cannot answer for itself.
+Writing an artifact is deliberately not the same as understanding a business, and `understandsBusiness`
+is the function that refuses to confuse them.
 
-Required concepts: a minimum generic business-workspace registry (id, canonical name, status,
-owner-controlled, category only when known, provenance, timestamps — and nothing speculative beyond
-that); durable standing objectives carrying their business; an explicit, testable value scheduler; a self-continue
-loop; bounded leases, retries, loop detection and circuit breakers; restart recovery; verification of
-real state rather than model self-report; Experience and Learning Ledger integration; non-parametric
-reversible learning; memory provenance, freshness, supersession, contradiction and expiry; empirical
-provider/model telemetry; blocked-branch isolation; local observability.
+### What AION needs from the Owner
 
-It is a **thin layer over primitives that already exist** — `owner-goal-intake.ts`,
+The same four questions for each of Compassionate Choice, LocalFinds, Talk to Caleb and AIService Co:
+
+1. What does this business actually do — what does it sell or deliver, and to whom?
+2. Where does its revenue come from today, if any?
+3. Which recurring work takes the most of the Owner's time?
+4. What is currently blocking it from doing more of what works?
+
+A fifth, non-blocking: are there legal, licensing or compliance prerequisites in play?
+
+Until these are answered no opportunity across the portfolio can be ranked honestly, because every
+value estimate would be built on an invented premise.
+
+### Governance state
+
+`AION-AUTONOMY-KERNEL-V1` and `V2` were authorized, never started, superseded, and their authority
+records are now `REVOKED` through `Set-AionOwnerAuthorityState` on the Owner's instruction. `V3`'s
+record stays `ACTIVE`. Note for the record: there is no `SUPERSEDED` authority state — the supported
+set is `ACTIVE | SUSPENDED | REVOKED | EXPIRED` — so `REVOKED` is what "withdrawn" means here.
+
+The kernel remains a **thin layer over primitives that already exist** — `owner-goal-intake.ts`,
 `roadmap-dag.ts`, `roadmap-orchestrator.ts`, `roadmap-policy.ts`, `pre-action-effect-contract.ts`,
-`provider-bridge.ts`, and the harness experience ledger — not a second framework beside them.
+`provider-bridge.ts` — not a second framework beside them.
 
 **Do not build**, unless a concrete blocker later demands it: a generic agent framework, a swarm,
 weight-changing RL, a large knowledge graph, an elaborate speculative router, another
