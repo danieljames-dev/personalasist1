@@ -7,6 +7,11 @@
  * Online listings are observations — never proof of physical on-lot presence.
  */
 import {
+  REFUSING_OUTWARD_TRANSPORT_V1,
+  isOutwardRefusalV1,
+  type OutwardTransportPortV1,
+} from "../outward-transport.js";
+import {
   listingFromPartial,
   type DealershipContextV1,
   type InventoryListingObservationV1,
@@ -440,7 +445,11 @@ export async function refreshDealershipPublicInventory(input: {
   dealership: DealershipContextV1;
   now: string;
   nextId: (kind: string) => string;
-  fetchImpl?: typeof fetch;
+  /**
+   * Approved outward transport for the public-web crawl. Absent means no page is fetched:
+   * crawling someone else's site is an outward effect whether or not the pages are public.
+   */
+  outward?: OutwardTransportPortV1;
   /** Force fixture path (tests). */
   useFixture?: boolean;
   fixtureVins?: string[];
@@ -457,7 +466,9 @@ export async function refreshDealershipPublicInventory(input: {
    */
   scope?: "new" | "used" | "all";
 }): Promise<DealershipInventoryRefreshResultV1> {
-  const fetchImpl = input.fetchImpl ?? fetch;
+  const outward = input.outward ?? REFUSING_OUTWARD_TRANSPORT_V1;
+  /** Set when the boundary refused, so the result can say that rather than blaming the site. */
+  let refusal: string | null = null;
   const maxBytes = input.maxBytesPerPage ?? 1_500_000;
   const scope = input.scope ?? "all";
   const profile = dealershipProfileFor(input.dealership.slug) ?? dealershipProfileFor(input.dealership.name);
@@ -511,7 +522,7 @@ export async function refreshDealershipPublicInventory(input: {
       if (visited.has(url)) break;
       visited.add(url);
       try {
-        const res = await fetchImpl(url, {
+        const res = await outward.request("dealership.inventoryCrawl", url, {
           method: "GET",
           headers: {
             accept: "text/html,application/xhtml+xml,application/json",
@@ -558,7 +569,9 @@ export async function refreshDealershipPublicInventory(input: {
         if (!next || visited.has(next)) break;
         url = next;
         if (pageDelayMs > 0) await new Promise((r) => setTimeout(r, pageDelayMs));
-      } catch {
+      } catch (err) {
+        // A refusal and an unreachable site both stop the crawl, and they mean opposite things.
+        if (isOutwardRefusalV1(err)) refusal = err instanceof Error ? err.message : String(err);
         break;
       }
     }
@@ -574,8 +587,9 @@ export async function refreshDealershipPublicInventory(input: {
       sourceUrls: uniqueUrls,
       listings: [],
       mode: "partial",
-      message:
-        "Could not parse live public inventory from dealer pages (blocked, empty, or JS-only). Use fixture seed for demos or retry; never invent vehicles.",
+      message: refusal !== null
+        ? `Public inventory crawl is not authorized to leave this machine, so no page was requested: ${refusal}`
+        : "Could not parse live public inventory from dealer pages (blocked, empty, or JS-only). Use fixture seed for demos or retry; never invent vehicles.",
       truncated,
       pagesFetched,
       uniqueVins: 0,

@@ -6,6 +6,10 @@
  * Never invent missing listing fields. Never overwrite price/status history.
  */
 import type { IsoTimestamp, OpaqueId, ProvenanceV1 } from "./contracts.js";
+import {
+  REFUSING_OUTWARD_TRANSPORT_V1,
+  type OutwardTransportPortV1,
+} from "./outward-transport.js";
 
 // ─── VIN ────────────────────────────────────────────────────────────────────
 
@@ -214,10 +218,18 @@ export function parseNhtsaDecodePayload(
   };
 }
 
+/**
+ * Decode a VIN against the public NHTSA vPIC service.
+ *
+ * The transport used to default to the global `fetch`, which meant one JSON field on
+ * `POST /api/action` reached a third party with nothing consulted. It now defaults to a refusal:
+ * without an approved outward transport this returns an empty decode carrying the reason, and
+ * nothing is sent.
+ */
 export async function decodeVinNhtsa(
   vin: string,
   now: IsoTimestamp,
-  fetchImpl: typeof fetch = fetch,
+  outward: OutwardTransportPortV1 = REFUSING_OUTWARD_TRANSPORT_V1,
 ): Promise<VinDecodeResultV1> {
   const v = validateVin(vin);
   if (!v.valid || !v.normalized) {
@@ -226,7 +238,7 @@ export async function decodeVinNhtsa(
     return empty;
   }
   const url = `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(v.normalized)}?format=json`;
-  const res = await fetchImpl(url, {
+  const res = await outward.request("vehicle.vinDecode", url, {
     method: "GET",
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(20_000),

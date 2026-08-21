@@ -81,8 +81,10 @@ test("vision call falls back without inventing OCR when fetch fails", async () =
       AION_OLLAMA_BASE_URL: "http://127.0.0.1:11434",
       AION_VISION_MODEL: "moondream",
     },
-    fetchImpl: async () => {
-      throw new Error("network down");
+    loopback: {
+      async request() {
+        throw new Error("network down");
+      },
     },
   });
   assert.ok(result.code === "VISION_CALL_FAILED" || result.code === "LOCAL_FALLBACK_METADATA_ONLY");

@@ -1,6 +1,26 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { loopbackFetch, outwardEffectDecision, outwardFetch } from "./outward-effect-guard.mjs";
+
+/**
+ * The one transport the assistant package is given.
+ *
+ * It is an object rather than a bare fetch function on purpose: the route id must be supplied at
+ * the call site, so a connector cannot borrow another's permission by passing its transport along.
+ */
+const OUTWARD_TRANSPORT_V1 = Object.freeze({
+  request(routeId, url, init) { return outwardFetch(routeId, url, init); },
+});
+
+/**
+ * The transport for calls that stay here — a local model runtime, and nothing else.
+ *
+ * `loopbackFetch` re-checks the address, so a connector that believes its endpoint is local and is
+ * wrong gets a refusal rather than a silent third-party request.
+ */
+const LOOPBACK_TRANSPORT_V1 = Object.freeze({
+  request(url, init) { return loopbackFetch(url, init); },
+});
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
@@ -591,6 +611,16 @@ export async function createAionServer(options = {}) {
     synthesis: options.synthesis ?? createOllamaSynthesisPort(),
     authority,
     codeSandbox,
+    /*
+     * The application's outward transport, handed to the assistant package.
+     *
+     * Every call names a declared route and is decided by the boundary in
+     * `outward-effect-guard.mjs`. All four routes are TECHNICALLY_DISABLED, so every call refuses
+     * today — the point is that the path exists and is the only one, rather than each connector
+     * quietly holding a default that reaches the network.
+     */
+    outward: OUTWARD_TRANSPORT_V1,
+    loopback: LOOPBACK_TRANSPORT_V1,
     /*
      * V1.3 activates real public-URL research, and the guards around it are unchanged.
      *

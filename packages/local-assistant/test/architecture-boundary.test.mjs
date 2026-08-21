@@ -3,16 +3,52 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 const root = new URL("../src/", import.meta.url);
-const files = (await readdir(root)).filter((name) => name.endsWith(".ts"));
+
+/*
+ * Recursive since the Findings 2+3 repair.
+ *
+ * `readdir` without `recursive` read only the top level, so every rule in this file stopped at
+ * `src/`. `src/connectors/image-understanding.ts` sat one directory down holding a live
+ * `globalThis.fetch`, and Discovery Campaign 02 found it reaching a host named by an environment
+ * variable. This is the same defect as V0.4 Finding 3 in a second place: a rule whose file set is
+ * narrower than the code it claims to govern.
+ */
+const files = (await readdir(root, { recursive: true }))
+  .map((name) => String(name).split("\\").join("/"))
+  .filter((name) => name.endsWith(".ts"));
 const sources = await Promise.all(files.map(async (name) => [name, await readFile(new URL(name, root), "utf8")]));
 const source = sources.map(([, text]) => text).join("\n");
+
+/*
+ * The process boundaries, named with the reason each one is allowed to exist.
+ *
+ * Two of these were invisible until this file started reading `src/` recursively: they sit one
+ * directory down, so the old scan never opened them. Both spawn a *local* helper and neither
+ * touches the network — they are disclosed here rather than repaired, because this milestone is
+ * about outward networking and consolidating process boundaries is a separate decision.
+ */
+const PROCESS_BOUNDARIES = {
+  "developer-bridge.ts": "the single repository-scoped developer agent boundary, asserted below",
+  "connectors/local-whisper.ts": "spawns a local Whisper transcription helper; audio never leaves the machine",
+  "connectors/sticker-ocr.ts": "spawns the bundled local EasyOCR worker; image bytes never leave the machine",
+};
+
 
 test("local-assistant production source has no network, browser, telemetry, database, or unrestricted shell implementation", () => {
   assert.doesNotMatch(source, /node:(?:http|https|net|tls|dgram)|\bfetch\s*\(|XMLHttpRequest|WebSocket|analytics|telemetry|sqlite|postgres|mongodb|vector\s*(?:db|store)/i);
   for (const [name, text] of sources) {
-    if (name === "developer-bridge.ts") continue;
+    if (Object.prototype.hasOwnProperty.call(PROCESS_BOUNDARIES, name)) {
+      assert.ok(PROCESS_BOUNDARIES[name].length > 25, `${name} needs a reason somebody can act on`);
+      continue;
+    }
     assert.doesNotMatch(text, /\bchild_process\b/u, `${name} must not reach a process API`);
     assert.doesNotMatch(text, /(?<![.\w])(?:exec|execFile|execSync|spawn|spawnSync|fork)\s*\(/u, `${name} must not execute a process`);
+  }
+  // An exemption for a file that no longer spawns anything is an exemption nobody is checking.
+  for (const [name, reason] of Object.entries(PROCESS_BOUNDARIES)) {
+    const text = sources.find(([file]) => file === name)?.[1];
+    assert.ok(text !== undefined, `${name} is exempted but no longer exists (${reason})`);
+    assert.match(text, /\bchild_process\b/u, `${name} is exempted but spawns nothing; remove the exemption`);
   }
 });
 
@@ -71,7 +107,8 @@ test("domain package has no node:vm, eval, or new Function execution for model c
 test("CodeSandboxPortV1 is a domain port only; no Docker client in domain sources", () => {
   assert.match(source, /interface CodeSandboxPortV1/u);
   for (const [name, text] of sources) {
-    if (name === "developer-bridge.ts") continue;
+    // Same named boundaries as above: one list, so the two rules cannot drift apart.
+    if (Object.prototype.hasOwnProperty.call(PROCESS_BOUNDARIES, name)) continue;
     assert.doesNotMatch(text, /\bchild_process\b/u, `${name} must not use child_process`);
     assert.doesNotMatch(text, /(?:^|[^.\w])docker\s+run\b/imu, `${name} must not invoke docker run`);
   }

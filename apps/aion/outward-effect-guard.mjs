@@ -43,6 +43,27 @@ export const OUTWARD_ROUTES_V1 = Object.freeze({
     status: "REQUIRES_INTEGRATION",
     detail: "paid GPU provider API; spend-capable, must carry spend authority before it may run",
   }),
+  /*
+   * The four routes Discovery Campaign 02 found already reaching the internet without declaring
+   * themselves. They were not new capabilities; they were undeclared ones, and declaring them is
+   * what makes their current unavailability a fact about the code rather than about the data.
+   */
+  "vehicle.vinDecode": Object.freeze({
+    status: "REQUIRES_INTEGRATION",
+    detail: "VIN decode against the public NHTSA vPIC service; read-only externally, but a VIN the Owner typed leaves the machine",
+  }),
+  "vehicle.recalls": Object.freeze({
+    status: "REQUIRES_INTEGRATION",
+    detail: "safety recall lookup against the public NHTSA recall API; read-only externally, and it discloses which vehicles AION is asked about",
+  }),
+  "dealership.inventoryCrawl": Object.freeze({
+    status: "REQUIRES_INTEGRATION",
+    detail: "paginated crawl of a dealer's public website; sustained outbound load on someone else's server, so it needs authority even though every page is public",
+  }),
+  "vision.remoteInference": Object.freeze({
+    status: "REQUIRES_INTEGRATION",
+    detail: "image description against a non-loopback vision endpoint; the submitted photo itself is the payload, so this is the most disclosing route declared here",
+  }),
 });
 
 /**

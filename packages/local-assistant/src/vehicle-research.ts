@@ -3,6 +3,11 @@
  * Prefer government/manufacturer-shaped public APIs. Never invent specs.
  */
 import type { IsoTimestamp, ProvenanceV1 } from "./contracts.js";
+import {
+  REFUSING_OUTWARD_TRANSPORT_V1,
+  isOutwardRefusalV1,
+  type OutwardTransportPortV1,
+} from "./outward-transport.js";
 import type { VehicleRecordV1, VinDecodeResultV1 } from "./vehicle-inventory.js";
 
 export type VehicleResearchSourceTypeV1 =
@@ -62,7 +67,8 @@ export async function lookupRecallsNhtsa(input: {
   model?: string | null;
   year?: number | null;
   now: IsoTimestamp;
-  fetchImpl?: typeof fetch;
+  /** Approved outward transport. Absent means the lookup refuses rather than reaching NHTSA. */
+  outward?: OutwardTransportPortV1;
 }): Promise<RecallLookupResultV1> {
   const make = (input.make || "").trim();
   const model = (input.model || "").trim();
@@ -86,9 +92,9 @@ export async function lookupRecallsNhtsa(input: {
   const url =
     `https://api.nhtsa.gov/recalls/recallsByVehicle?make=${encodeURIComponent(make)}` +
     `&model=${encodeURIComponent(model)}&modelYear=${encodeURIComponent(String(year))}`;
-  const fetchFn = input.fetchImpl ?? fetch;
+  const outward = input.outward ?? REFUSING_OUTWARD_TRANSPORT_V1;
   try {
-    const res = await fetchFn(url, {
+    const res = await outward.request("vehicle.recalls", url, {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(20_000),
     });
@@ -114,9 +120,16 @@ export async function lookupRecallsNhtsa(input: {
       mode: recalls.length ? "live" : "empty",
     };
   } catch (err) {
+    /*
+     * A refusal and a network failure both land here, and they mean opposite things: one is the
+     * boundary working, the other is NHTSA being unreachable. Say which, so an Owner reading the
+     * message is not told the government API is down when nothing was ever sent.
+     */
     return {
       ...empty,
-      message: err instanceof Error ? err.message : String(err),
+      message: isOutwardRefusalV1(err)
+        ? `NHTSA recall lookup is not authorized to leave this machine: ${err instanceof Error ? err.message : String(err)}`
+        : err instanceof Error ? err.message : String(err),
       mode: "error",
     };
   }

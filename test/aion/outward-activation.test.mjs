@@ -158,57 +158,283 @@ test("the route report names every declared route and its real status", () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Call-site enforcement: importing a guard proves nothing                    */
+/* Call-site enforcement over a derived runtime file set                       */
 /* -------------------------------------------------------------------------- */
 
 /*
- * The V0.3 invariant asserted that a runtime file *imports* the guard. `server.mjs` did — for
- * `gmail.sync` — while carrying four other `fetch` calls that consulted nothing, one of them a second
- * OAuth token exchange. Every suite was green. A file-level fact cannot prove a call-site property.
+ * Two rounds of this rule have now been defeated, each time by the axis it was not looking at.
  *
- * The rule is now about the call itself: runtime code reaches the network through `outwardFetch` (a
- * declared, gated route) or `loopbackFetch` (checked to stay on this machine), and a bare `fetch` in
- * runtime code fails here.
+ * V0.3 asserted that a runtime file *imports* the guard. `server.mjs` did — for `gmail.sync` — while
+ * carrying four other `fetch` calls that consulted nothing, one of them an OAuth token exchange. A
+ * file-level fact cannot prove a call-site property.
+ *
+ * V0.4 fixed that and asserted the call site, over a literal list of five files in `apps/aion/`.
+ * Discovery Campaign 02 then found four live HTTP actions reaching the public internet from
+ * `packages/local-assistant`, using the one mechanism the rule *did* model. Coverage has two axes,
+ * mechanism and file set, and only the first had been examined.
+ *
+ * So the file set is now derived from the repository and the mechanism list covers the primitives
+ * Campaign 02 enumerated. Every exemption below is named, reasoned, and closed: a file that is not
+ * classified and contains a primitive fails, which is the case that would have caught Campaign 02
+ * the day it was written.
  */
 
-const RUNTIME_MODULES = ["server.mjs", "research-fetch.mjs", "vast-ai.mjs", "brain-runtime.mjs", "outward-effect-guard.mjs"];
-const BARE_FETCH = /(?<!\bglobalThis\.)\bfetch\s*\(/g;
+import {
+  CLASSIFIED_V1, NETWORK_PRIMITIVES_V1, OUTWARD_POLICY_V1, blankNonCode, isRuntimeCandidate,
+  posixJoin, primitivesIn, repositoryFiles,
+} from "./outward-rule.mjs";
+
+
+const RUNTIME_FILES_V1 = repositoryFiles(repositoryRoot).filter(isRuntimeCandidate);
+
+function sourceOf(file) {
+  return readFileSync(join(repositoryRoot, file), "utf8");
+}
+
+test("the runtime file set is derived from the repository, not from a hand-kept list", () => {
+  /*
+   * The number is not the point; the shape is. The old rule read five files. Anything that made
+   * this set small again — a stale list, a wildcard exclusion, a scope that quietly means
+   * `apps/aion/` — would put the repository back where Campaign 02 found it.
+   */
+  assert.ok(RUNTIME_FILES_V1.length > 100, `only ${RUNTIME_FILES_V1.length} runtime files derived`);
+  for (const mustCover of [
+    "packages/local-assistant/src/vehicle-inventory.ts",      // Campaign 02's smallest counterexample
+    "packages/local-assistant/src/vehicle-research.ts",
+    "packages/local-assistant/src/connectors/dealership-inventory.ts",
+    "packages/local-assistant/src/connectors/image-understanding.ts",
+    "apps/aion/roadmap-control.mjs",                          // an apps/aion file the old list omitted
+    "apps/aion/server.mjs",
+  ]) {
+    assert.ok(RUNTIME_FILES_V1.includes(mustCover), `${mustCover} is runtime code and must be covered`);
+  }
+  for (const mustNotCover of [
+    "test/aion/outward-activation.test.mjs",
+    "packages/local-assistant/test/inventory-pagination.test.ts",
+  ]) {
+    assert.ok(!RUNTIME_FILES_V1.includes(mustNotCover), `${mustNotCover} is a test and must not be scanned`);
+  }
+});
+
+test("no runtime file names a network primitive outside an approved adapter", () => {
+  const violations = [];
+  for (const file of RUNTIME_FILES_V1) {
+    const hits = primitivesIn(sourceOf(file));
+    if (hits.length === 0) continue;
+    const classified = CLASSIFIED_V1.get(file);
+    if (classified === undefined) {
+      violations.push(`${file}: ${hits.map((h) => `${h.id}@${h.line}`).join(", ")} — unclassified`);
+      continue;
+    }
+    if (classified.klass === "APPROVED_ADAPTER") {
+      const counted = new Map();
+      for (const hit of hits) counted.set(hit.id, (counted.get(hit.id) ?? 0) + 1);
+      for (const [id, count] of counted) {
+        const allowed = classified.allow[id] ?? 0;
+        if (count !== allowed) violations.push(`${file}: ${count} × ${id}, policy allows exactly ${allowed}`);
+      }
+    }
+  }
+  assert.deepEqual(violations, [], `network primitives outside the boundary:\n${violations.join("\n")}`);
+});
+
+test("every classification carries a reason, and none is stale", () => {
+  for (const [file, detail] of CLASSIFIED_V1) {
+    assert.ok(RUNTIME_FILES_V1.includes(file), `${file} is classified but is not a runtime file any more`);
+    assert.ok(typeof detail.reason === "string" && detail.reason.length > 25,
+      `${file} needs a reason somebody can act on`);
+    assert.ok(primitivesIn(sourceOf(file)).length > 0,
+      `${file} names no network primitive; remove the exemption rather than leaving it to rot`);
+  }
+});
+
+test("an inbound-server exemption may not import a client binding", () => {
+  /*
+   * `node:http` is on the forbidden list because of `http.request`. Three files import it for
+   * `createServer`, which is the opposite direction. The exemption is for that clause, so it is
+   * checked rather than trusted — otherwise "we only listen" is a comment, and comments were the
+   * whole problem.
+   */
+  const CLIENT_BINDINGS = /\b(request|get|connect|createConnection|Agent|globalAgent)\b/u;
+  for (const [file, detail] of Object.entries(OUTWARD_POLICY_V1.INBOUND_SERVER)) {
+    const code = blankNonCode(sourceOf(file), { keepStrings: true });
+    const pattern = new RegExp(`import\\s*(?:type\\s*)?\\{([^}]*)\\}\\s*from\\s*["']${detail.module}["']`, "u");
+    const clause = code.match(pattern);
+    assert.ok(clause, `${file} must import ${detail.module} with a named clause so it can be checked`);
+    assert.ok(!CLIENT_BINDINGS.test(clause[1]),
+      `${file} imports a client binding from ${detail.module}: ${clause[1].trim()}`);
+  }
+});
+
+test("loopback-classified files never name an absolute non-loopback URL at a fetch call site", () => {
+  const LOOPBACK_LITERAL = /^(\/|https?:\/\/(127\.0\.0\.1|localhost|\[::1\]))/u;
+  const offenders = [];
+  for (const klass of ["BROWSER_SAME_ORIGIN", "DEMO_ONLY", "OPERATOR_LOOPBACK"]) {
+    for (const file of Object.keys(OUTWARD_POLICY_V1[klass])) {
+      const source = sourceOf(file);
+      const code = blankNonCode(source, { keepStrings: true });
+      const call = /(?<![.\w$])fetch\s*\(\s*(["'`])/gu;
+      let match;
+      while ((match = call.exec(code)) !== null) {
+        const quote = match[1];
+        const start = match.index + match[0].length;
+        const end = code.indexOf(quote, start);
+        const literal = end === -1 ? "" : code.slice(start, end);
+        // A template that opens with an interpolation is an expression, not a destination literal.
+        if (literal.startsWith("${")) continue;
+        if (!LOOPBACK_LITERAL.test(literal)) {
+          offenders.push(`${file}: fetch("${literal.slice(0, 60)}")`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `a loopback-classified file names a remote destination:\n${offenders.join("\n")}`);
+});
+
+test("no runtime module imports an exempted file", () => {
+  /*
+   * The exemptions rest on those files not being part of the application. This is what makes that
+   * a fact rather than an intention: importing one would make its unguarded `fetch` reachable from
+   * the server, which is precisely the shape Campaign 02 measured.
+   */
+  const exempt = new Set([
+    ...Object.keys(OUTWARD_POLICY_V1.BROWSER_SAME_ORIGIN),
+    ...Object.keys(OUTWARD_POLICY_V1.DEMO_ONLY),
+    ...Object.keys(OUTWARD_POLICY_V1.OPERATOR_LOOPBACK),
+    ...Object.keys(OUTWARD_POLICY_V1.OPERATOR_PUBLIC_WEB),
+  ]);
+  const runtimeOnly = RUNTIME_FILES_V1.filter((file) => !exempt.has(file));
+  const reached = [];
+  for (const file of runtimeOnly) {
+    const code = blankNonCode(sourceOf(file), { keepStrings: true });
+    const specifiers = /(?:from|import|require)\s*\(?\s*["']([^"']+)["']/gu;
+    let match;
+    while ((match = specifiers.exec(code)) !== null) {
+      const specifier = match[1];
+      if (!specifier.startsWith(".")) continue;
+      const resolved = posixJoin(dirname(file), specifier);
+      for (const candidate of exempt) {
+        if (candidate === resolved || candidate.replace(/\.(mjs|js|ts)$/u, "") === resolved.replace(/\.(mjs|js|ts)$/u, "")) {
+          reached.push(`${file} -> ${candidate}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(reached, [], `an exempted file is reachable from runtime code:\n${reached.join("\n")}`);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Synthetic fixtures: what the rule catches, and what it must not             */
+/* -------------------------------------------------------------------------- */
+
+/** Judge a synthetic source exactly as the rule judges a real unclassified runtime file. */
+function judgeFixture(source) {
+  return primitivesIn(source).length > 0 ? "REJECTED" : "ACCEPTED";
+}
+
+test("every network primitive Campaign 02 enumerated is rejected in an unclassified runtime file", () => {
+  const negatives = {
+    "direct fetch": 'const r = await fetch("https://api.example.invalid/v1");',
+    "globalThis.fetch": 'const r = await globalThis.fetch("https://api.example.invalid/v1");',
+    "aliased fetch": 'const send = globalThis.fetch;\nconst r = await send("https://api.example.invalid/v1");',
+    "aliased bare fetch": 'const send = fetch;\nconst r = await send("https://api.example.invalid/v1");',
+    "destructured fetch": 'const { fetch: go } = globalThis;\nconst r = await go("https://api.example.invalid/v1");',
+    "fetch passed as a callback": 'run(fetch);',
+    "http.request": 'import http from "node:http";\nhttp.request("http://example.invalid/");',
+    "https.request": 'import https from "node:https";\nhttps.request("https://example.invalid/");',
+    "http.get": 'import http from "node:http";\nhttp.get("http://example.invalid/", (r) => r.resume());',
+    "https.get": 'import https from "node:https";\nhttps.get("https://example.invalid/", (r) => r.resume());',
+    "WebSocket": 'const ws = new WebSocket("wss://example.invalid/socket");',
+    "EventSource": 'const es = new EventSource("https://example.invalid/stream");',
+    "XMLHttpRequest": 'const x = new XMLHttpRequest();',
+    "sendBeacon": 'navigator.sendBeacon("https://example.invalid/telemetry", "x");',
+    "same-file wrapper": 'async function send(u) { return fetch(u); }\nawait send("https://example.invalid/");',
+    "dynamic import of a network module": 'const m = await import("node:https");\nm.request("https://example.invalid/");',
+    "net.connect": 'import net from "node:net";\nnet.connect(443, "example.invalid");',
+    "tls.connect": 'import tls from "node:tls";\ntls.connect(443, "example.invalid");',
+  };
+  for (const [name, source] of Object.entries(negatives)) {
+    assert.equal(judgeFixture(source), "REJECTED", `${name} slipped through: ${source}`);
+  }
+});
+
+test("a re-exported network helper is rejected in the file that holds the primitive", () => {
+  /*
+   * Campaign 02 listed this as an unmodelled pattern, and under the old rule it was: the importer
+   * names nothing, the helper was never opened, so neither file failed.
+   *
+   * The rejection belongs in the helper, not the importer. Following a value across module
+   * boundaries is taint analysis, which §9 of this milestone rules out — and it is not needed,
+   * because the derived file set now opens the helper too. Both halves are asserted so that
+   * "the importer is clean" can never quietly become "the pattern is allowed".
+   */
+  const importer = 'import { send } from "./net-helper.mjs";\nconst r = await send(url);';
+  const helper = "export async function send(u) { return fetch(u); }";
+  assert.equal(judgeFixture(importer), "ACCEPTED", "the importer names no primitive, and should not be blamed for one");
+  assert.equal(judgeFixture(helper), "REJECTED", "the helper holds the primitive and must be rejected there");
+});
+
+test("approved paths and non-network code are accepted", () => {
+  const positives = {
+    "approved outwardFetch": 'import { outwardFetch } from "./outward-effect-guard.mjs";\nconst r = await outwardFetch("research.fetch", url);',
+    "approved loopbackFetch": 'import { loopbackFetch } from "./outward-effect-guard.mjs";\nconst r = await loopbackFetch("http://127.0.0.1:11434/api/chat");',
+    "the outward transport port": 'const r = await outward.request("vehicle.vinDecode", url, init);',
+    "an injected transport type": "interface Port { fetchImpl?: typeof fetch }",
+    "prose about fetch": '// A comment explaining why fetch is forbidden here, mentioning http.request and WebSocket.\nconst x = 1;',
+    "a string containing the word": 'const label = "fetch the inventory";',
+    "ordinary code": "export function add(a, b) { return a + b; }",
+  };
+  for (const [name, source] of Object.entries(positives)) {
+    assert.equal(judgeFixture(source), "ACCEPTED", `${name} was wrongly rejected: ${source}`);
+  }
+});
+
+test("a runtime file outside the old five-file list is judged the same as one inside it", () => {
+  /*
+   * Campaign 02, reduced to one assertion. The defect was never that the mechanism was exotic — it
+   * was `fetch` — but that the file was not read. Both of these must now be rejected identically.
+   */
+  const outwardCall = 'const res = await fetch("https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/X");';
+  assert.equal(judgeFixture(outwardCall), "REJECTED", "inside the old list");
+
+  const wasInvisible = "packages/local-assistant/src/vehicle-inventory.ts";
+  assert.ok(RUNTIME_FILES_V1.includes(wasInvisible), "the file the old rule never opened must now be scanned");
+  assert.equal(CLASSIFIED_V1.has(wasInvisible), false, "and it must hold no exemption");
+  assert.deepEqual(primitivesIn(sourceOf(wasInvisible)), [],
+    "the repaired connector must name no network primitive at all");
+});
+
+test("the rule the file declares is the rule the file runs", () => {
+  /*
+   * Campaign 02 found a declared-but-never-applied rule here — a constant that looked
+   * protective and did nothing. It is gone, and this asserts it stays gone rather than returning as
+   * a comfortable-looking constant nobody calls.
+   */
+  const self = readFileSync(join(repositoryRoot, "test", "aion", "outward-activation.test.mjs"), "utf8");
+  // Spelled in pieces: writing the name here would make this file its own counter-example.
+  const deadRule = ["BARE", "FETCH"].join("_");
+  assert.equal(self.includes(deadRule), false, `${deadRule} must not come back`);
+  // Each declared primitive must actually reject something, or it is decoration.
+  const proofs = {
+    "globalThis.fetch": "globalThis.fetch(u)",
+    fetch: "fetch(u)",
+    "node network module": 'import x from "node:https";',
+    WebSocket: "new WebSocket(u)",
+    EventSource: "new EventSource(u)",
+    XMLHttpRequest: "new XMLHttpRequest()",
+    sendBeacon: "navigator.sendBeacon(u, d)",
+  };
+  for (const rule of NETWORK_PRIMITIVES_V1) {
+    const proof = proofs[rule.id];
+    assert.ok(proof !== undefined, `${rule.id} has no proof that it rejects anything`);
+    assert.equal(judgeFixture(proof), "REJECTED", `${rule.id} is declared but rejects nothing`);
+  }
+});
 
 function runtimeSource(name) {
   return readFileSync(join(repositoryRoot, "apps", "aion", name), "utf8");
 }
 
-test("no runtime module reaches the network with a bare fetch", () => {
-  for (const name of RUNTIME_MODULES) {
-    const source = runtimeSource(name);
-    // `outward-effect-guard.mjs` is the one place the real transport is allowed to be named.
-    const allowed = name === "outward-effect-guard.mjs" ? 2 : 0;
-    const bare = (source.match(/globalThis\.fetch\s*\(/g) ?? []).length;
-    assert.equal(bare, allowed, `${name} calls globalThis.fetch directly; use outwardFetch or loopbackFetch`);
-    const unqualified = (source.match(/(^|[^.\w])fetch\s*\(/gm) ?? [])
-      .filter((hit) => !/outwardFetch|loopbackFetch/.test(hit));
-    assert.equal(unqualified.length, 0, `${name} calls fetch directly: ${unqualified.join(", ")}`);
-  }
-});
-
-test("importing the guard is not enough on its own", () => {
-  /*
-   * The exact V0.3 shape, reconstructed: a file that imports the guard, consults it once, and then
-   * makes an unrelated direct call. The old rule passed this. The new one must not.
-   */
-  const shapeThatUsedToPass = [
-    'import { outwardEffectDecision } from "./outward-effect-guard.mjs";',
-    'const ok = outwardEffectDecision("gmail.sync");',
-    'const res = await fetch("https://oauth2.googleapis.com/token", { method: "POST" });',
-  ].join("\n");
-
-  const importsGuard = shapeThatUsedToPass.includes("outward-effect-guard.mjs");
-  assert.equal(importsGuard, true, "the sample must import the guard, as server.mjs did");
-
-  const unqualified = (shapeThatUsedToPass.match(/(^|[^.\w])fetch\s*\(/gm) ?? [])
-    .filter((hit) => !/outwardFetch|loopbackFetch/.test(hit));
-  assert.equal(unqualified.length, 1, "the call-site rule must still see the direct fetch");
-});
 
 test("the OAuth token exchange is a declared route and is disabled", () => {
   // The defect: this call ran whenever the OAuth redirect completed, with no authority anywhere.

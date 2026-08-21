@@ -52,40 +52,52 @@ test("pagination accumulates across pages and stops at the page cap", async () =
     [`${BASE}?pt=3`, page([vinAt(5), vinAt(6)], `${BASE}?pt=4`)],
   ]);
   let calls = 0;
-  const fetchImpl = (async (url: string) => {
-    calls++;
-    const body = pages.get(String(url)) ?? page([], null);
-    return { ok: true, url: String(url), arrayBuffer: async () => new TextEncoder().encode(body).buffer } as unknown as Response;
-  }) as unknown as typeof fetch;
+  /*
+   * The connector now takes the approved outward transport rather than a bare fetch. The stub
+   * records the route id as well as the URL, so "which permission was this crawl made under" is
+   * part of what the test observes.
+   */
+  const routes: string[] = [];
+  const outward = {
+    async request(routeId: string, url: string) {
+      calls++;
+      routes.push(routeId);
+      const body = pages.get(String(url)) ?? page([], null);
+      return { ok: true, url: String(url), arrayBuffer: async () => new TextEncoder().encode(body).buffer } as unknown as Response;
+    },
+  } as never;
 
   let n = 0;
   const res = await refreshDealershipPublicInventory({
     dealership: { slug: "paging-test-dealer", name: "Paging Test Dealer", inventoryNewUrl: BASE, inventoryUsedUrl: BASE, publicWebsite: "https://www.lakelandtoyota.com" } as never,
     now: "2026-08-12T00:00:00.000Z",
     nextId: (k: string) => `${k}-${++n}`,
-    fetchImpl,
+    outward,
     maxPagesPerUrl: 2,
     pageDelayMs: 0,
   });
   assert.equal(calls, 2, "must not fetch beyond the page cap");
+  assert.deepEqual([...new Set(routes)], ["dealership.inventoryCrawl"], "the crawl must ask for its own route");
   assert.equal(res.listings.length, 4, "listings accumulate across paged requests");
 });
 
 test("pagination stops when a page contributes no new vehicles", async () => {
   const repeated = page([vinAt(1), vinAt(2)], `${BASE}?pt=2`);
   let calls = 0;
-  const fetchImpl = (async (url: string) => {
-    calls++;
-    // Every page returns the same VINs — a real site at the end of results.
-    return { ok: true, url: String(url), arrayBuffer: async () => new TextEncoder().encode(repeated).buffer } as unknown as Response;
-  }) as unknown as typeof fetch;
+  const outward = {
+    async request(_routeId: string, url: string) {
+      calls++;
+      // Every page returns the same VINs — a real site at the end of results.
+      return { ok: true, url: String(url), arrayBuffer: async () => new TextEncoder().encode(repeated).buffer } as unknown as Response;
+    },
+  } as never;
 
   let n = 0;
   const res = await refreshDealershipPublicInventory({
     dealership: { slug: "paging-test-dealer", name: "Paging Test Dealer", inventoryNewUrl: BASE, inventoryUsedUrl: BASE, publicWebsite: "https://www.lakelandtoyota.com" } as never,
     now: "2026-08-12T00:00:00.000Z",
     nextId: (k: string) => `${k}-${++n}`,
-    fetchImpl,
+    outward,
     maxPagesPerUrl: 10,
     pageDelayMs: 0,
   });

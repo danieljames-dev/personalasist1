@@ -109,6 +109,11 @@ import {
 import { discoverPrivateLanAddresses, buildPhoneUrl, type LanDiscoveryResultV1 } from "./lan-discovery.js";
 import { buildImportReadinessReport, type ImportReadinessReportV1 } from "./import-readiness.js";
 import { extractImageWithLocalVision, imageUnderstandingStatus } from "./connectors/image-understanding.js";
+import {
+  REFUSING_OUTWARD_TRANSPORT_V1,
+  type LoopbackTransportPortV1,
+  type OutwardTransportPortV1,
+} from "./outward-transport.js";
 import { refreshDealershipPublicInventory } from "./connectors/dealership-inventory.js";
 import {
   buildVinOcrResult,
@@ -448,6 +453,19 @@ type AssistantPorts = {
    * Absent means code cases grade structurally only.
    */
   codeSandbox?: CodeSandboxPortV1;
+  /**
+   * The approved outward transport, supplied by the application from its declared-route boundary.
+   *
+   * Optional, and absent means AION cannot reach any third party — which is the default and the
+   * current state. Discovery Campaign 02 found four routes here defaulting to the global `fetch`
+   * instead, so an absent port silently meant "go ahead". It now means refuse.
+   */
+  outward?: OutwardTransportPortV1;
+  /**
+   * The transport for calls that stay on this machine — a local model runtime, and nothing else.
+   * Absent means AION makes no local HTTP call either; the socket belongs to the application.
+   */
+  loopback?: LoopbackTransportPortV1;
 };
 
 /**
@@ -566,6 +584,8 @@ export class AionAssistantV1 {
    * does not block startup, since AION must open even when a provider is unreachable.
    */
   get startupReconciliation(): Promise<void> { return this.ready.then(() => this.reconciliation); }
+  /** The outward transport, or the refusing one. Never the global `fetch`. */
+  private get outward(): OutwardTransportPortV1 { return this.ports.outward ?? REFUSING_OUTWARD_TRANSPORT_V1; }
   constructor(private readonly ports: AssistantPorts) {
     if (!ports.providers.length) throw new Error("At least one model provider is required.");
     this.ready = this.initialize();
@@ -4961,7 +4981,7 @@ export class AionAssistantV1 {
         continue;
       }
       try {
-        const decode = await decodeVinNhtsa(validation.normalized, now);
+        const decode = await decodeVinNhtsa(validation.normalized, now, this.outward);
         const facts = buildGovVinFacts({
           decode,
           listingMake: vehicle.make,
@@ -5057,7 +5077,7 @@ export class AionAssistantV1 {
       const now = this.ports.clock.now();
       try {
         const res = await lookupRecallsNhtsa({
-          make: q.make, model: q.model, year: q.year ? Number(q.year) : null, now,
+          make: q.make, model: q.model, year: q.year ? Number(q.year) : null, now, outward: this.outward,
         });
         const assessment = buildRecallAssessment({
           ok: res.mode !== "error",
@@ -5112,7 +5132,7 @@ export class AionAssistantV1 {
       return { validation: v, decode: emptyVinDecode(v.normalized, now) };
     }
     try {
-      const decode = await decodeVinNhtsa(v.normalized, now);
+      const decode = await decodeVinNhtsa(v.normalized, now, this.outward);
       return { validation: v, decode };
     } catch (err) {
       const decode = emptyVinDecode(v.normalized, now);
@@ -5150,6 +5170,7 @@ export class AionAssistantV1 {
       dealership: dealer!,
       now,
       nextId,
+      outward: this.outward,
       useFixture: opts.useFixture === true,
       scope,
       ...(opts.fixtureVins ? { fixtureVins: opts.fixtureVins } : {}),
@@ -6023,6 +6044,8 @@ export class AionAssistantV1 {
         bytes: img,
         prompt,
         timeoutMs: 60_000,
+        ...(this.ports.outward !== undefined ? { outward: this.ports.outward } : {}),
+        ...(this.ports.loopback !== undefined ? { loopback: this.ports.loopback } : {}),
       });
       extractionPasses.push(passName);
       const raw = String(vision.extractedText ?? "").trim();
@@ -6781,6 +6804,7 @@ export class AionAssistantV1 {
       model,
       year,
       now: this.ports.clock.now(),
+      outward: this.outward,
     });
   }
 

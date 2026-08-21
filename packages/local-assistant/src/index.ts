@@ -32,6 +32,7 @@ export * from "./lan-discovery.js";
 export * from "./connectors/gmail-connector.js";
 export * from "./connectors/metricool-connector.js";
 export * from "./connectors/image-understanding.js";
+export * from "./outward-transport.js";
 export * from "./connectors/dealership-inventory.js";
 export * from "./vehicle-inventory.js";
 export * from "./vehicle-intelligence.js";
