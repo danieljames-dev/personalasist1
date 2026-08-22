@@ -4,8 +4,8 @@
 person picking up Project AION. Read it before doing anything; it is meant to be read in one sitting.
 
 ```
-UPDATED_AT   2026-08-21T19:15:14Z
-BASE_SHA     18da40182cae3d84e9028fb4771991a5a2794d44
+UPDATED_AT   2026-08-21T20:05:00Z
+BASE_SHA     __NEW_SHA__
 REPOSITORY   C:\AION-HQ-main-integrate   (linked git worktree of C:\AION-HQ)
 ORIGIN       https://github.com/danieljames-dev/personalasist1.git   branch main
 ```
@@ -143,21 +143,19 @@ is the function that refuses to confuse them.
 
 ### What AION needs from the Owner
 
-Three questions now, in order of decision value. The first two are worth more than any other
-information AION could gather.
+The registration question is **answered**: the certificate is issued, covering Hardee, Highlands,
+Hillsborough, Manatee and Polk. Two remain.
 
-1. **Has AHCA formally issued the §400.509 Certificate of Registration for Compassionate Choice
-   Home Services LLC — and if so, what is the effective date?** Every Compassionate Choice revenue
-   path that needs paying clients depends on this, and the evidence currently disagrees with itself.
-2. **Is LakelandFinds the same business as LocalFinds?** Assets exist under one name and the
-   portfolio lists the other. They have not been merged.
-3. **What is Daniel's relationship and authority with Compassionate Choice Home Services LLC?** The
+1. **Is LakelandFinds the same business as LocalFinds?** Assets exist under one name and the
+   portfolio lists the other. They have not been merged, and one sentence settles it.
+2. **What is Daniel's relationship and authority with Compassionate Choice Home Services LLC?** The
    documents name Kristina Leach as owner and founder. "Our business" is not enough to infer an
-   ownership share, a management role or any control right, and AION will not infer one.
+   ownership share, a management role or any control right, and AION will not infer one. This governs
+   what AION may do on the business's behalf, so it matters before any outward step.
 
-Still open for LocalFinds, Talk to Caleb and AIService Co, once identity is settled: what each one
-sells and to whom, where revenue comes from today, which recurring work costs the most Owner time,
-and what is blocking more of what works.
+Minor, and cheap to supply when convenient: the certificate's effective date, and the same
+what-does-it-sell / where-does-revenue-come-from questions for LocalFinds, Talk to Caleb and
+AIService Co once identity is settled.
 
 ### Governance state
 
@@ -226,7 +224,7 @@ the **evidence** supports, with its date. Documented-as-of-a-date is not current
 
 | business | status | evidence state |
 |---|---|---|
-| **Compassionate Choice** | ACTIVE | substantial corpus located; **three unresolved conflicts** |
+| **Compassionate Choice** | ACTIVE | **registered and revenue-ready in five counties**; two conflicts remain |
 | **Talk to Caleb** | ACTIVE | real content operation evidenced; business model UNKNOWN |
 | **AIService Co** | ACTIVE | project and tooling assets evidenced; business model UNKNOWN |
 | **LocalFinds** | ACTIVE | no corpus under that name; identity question open |
@@ -246,21 +244,65 @@ applicable; Level 2 background screening; a W-2 rather than 1099 employment mode
 receipt context. All of it is subject to the source date and needs re-verification before being
 treated as current.
 
-**Three conflicts, held open rather than resolved:**
+### Registration and geographic authority — KNOWN
 
-1. **Registration status — CONFLICT.** The Owner's summary describes an AHCA-registered business
-   serving clients. The 2026-05-17 profile says the certificate must be issued before the LLC may
-   market or accept paying clients, lists prerequisites still pending, and describes the website
-   registration number as a placeholder. A 9 July machine-transcribed conversation says something
-   like "AHCA Reg number cleared" — conversational, ASR-derived, not a certificate. **Current status
-   is UNKNOWN.**
-2. **Ownership — UNRESOLVED.** Documents name **Kristina Leach** as owner and founder. The Owner
+**The AHCA §400.509 Certificate of Registration has been issued.** Source: Owner clarification,
+2026-08-21. This resolves the conflict this document previously carried, and the superseded sources
+are kept in history rather than deleted.
+
+**Current service area — KNOWN, and it is a hard boundary:**
+
+| county | authority |
+|---|---|
+| Hardee, Highlands, Hillsborough, Manatee, **Polk** | named on the issued certificate |
+
+Anywhere else is **PENDING_FORMAL_APPROVAL**. Additional areas are being pursued, but that expansion
+is **not yet formalized in writing** and confers no authority today.
+
+AION **may**: research possible expansion markets in shadow, hold a pending-expansion objective,
+track the approval, and compare expansion opportunities as hypotheses.
+
+AION **may not**: represent Compassionate Choice as authorized statewide; advertise outside the five
+counties; accept a client, schedule a service, or model actionable revenue outside them; or convert
+the pending expansion into active authority without direct written evidence. When formal AHCA
+documentation arrives it is ingested as new official evidence and the five-county certificate is kept
+as historical evidence — the gate lifts only for areas actually approved.
+
+**Sources, ordered by weight.** The issued certificate and the Owner's current clarification govern
+present operating decisions. Two earlier sources are superseded for that purpose and preserved as
+history:
+
+- the **2026-05-17 regulatory profile**, which said the certificate must be issued before the LLC
+  could market or accept paying clients, and which anticipated designating a *single* health service
+  planning district. Both were true of the plan at the time; the issued certificate supersedes them.
+- any **July report of the registration being "cleared"**, which is secondary and not sufficient
+  current authority on its own.
+
+**One accuracy note, recorded rather than smoothed over.** The Owner referred to a 7 July
+regulatory-profile note saying registration was "cleared STATEWIDE". **AION could not locate such a
+note.** The corpus contains no statewide claim at all — its only use of the word concerns FDLE
+background-screening tiers. What AION did locate was a **9 July machine-transcribed conversation**
+containing approximately "AHCA Reg number cleared", with **no geographic claim in it**. Either way
+the conclusion is the same and is the Owner's: any statewide reading is historical, secondary, and
+superseded by the certificate. The discrepancy is recorded because a source AION never found should
+not be written down as though it had been.
+
+**Revenue readiness:** READY_FOR_REVENUE_DISCOVERY inside the five counties. Revenue work should
+prioritise those markets and is **not** blocked by the pending expansion. Anything outside them is
+FUTURE_EXPANSION / HYPOTHESIS / NOT CURRENTLY ACTIONABLE.
+
+Still unknown here: the certificate's effective date, and its number (which is not recorded in this
+document by policy).
+
+**Two conflicts remain open:**
+
+1. **Ownership — UNRESOLVED.** Documents name **Kristina Leach** as owner and founder. The Owner
    calls it "our business." No share, authority, partnership, employment or control right is inferred.
-3. **Legal name against brand name — UNRESOLVED.** Documents name **Compassionate Choice Home
+2. **Legal name against brand name — UNRESOLVED.** Documents name **Compassionate Choice Home
    Services LLC** and record an open DBA question about the shorter consumer-facing name.
 
-**Unknown for Compassionate Choice** and not to be invented: whether registration is issued, its
-effective date and number, insurance status, home-based or commercial office, client count, pricing,
+**Unknown for Compassionate Choice** and not to be invented: the certificate effective date,
+insurance status, home-based or commercial office, client count, pricing,
 revenue, margins, staffing, capacity, acquisition channels, referral relationships, utilisation,
 retention, operating hours, payroll structure in practice.
 
@@ -404,13 +446,9 @@ status to `AUTHORIZED`; never hand-write an authority record. The gate requires 
 
 From `f21035c`, to a first revenue-directed autonomous experiment:
 
-| condition | focused hours |
-|---|---|
-| if the AHCA registration **is** already issued | ~20–30 |
-| if it is still **pending** — launch completion becomes prerequisite | ~35–50 |
-
-The spread is the whole argument for asking question 1 before building anything else: the answer
-changes what the next month of work *is*, not just how long it takes.
+**~20–30 focused hours.** The registration is issued, so the launch-completion branch — which would
+have cost roughly 35–50 — does not apply. Asking before building was worth about fifteen hours and a
+different month of work.
 
 Longer horizons, unchanged in shape: supervised outward actions ~60–90; true bounded multi-domain
 autonomy ~110–170. After the kernel, tracks proceed in parallel — business evidence, communications
