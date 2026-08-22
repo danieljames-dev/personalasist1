@@ -4,8 +4,8 @@
 person picking up Project AION. Read it before doing anything; it is meant to be read in one sitting.
 
 ```
-UPDATED_AT   2026-08-22T01:11:31Z
-BASE_SHA     c519bad317bf5bab339ee8adddc482475d537f56
+UPDATED_AT   2026-08-22T05:10:00Z
+BASE_SHA     968e2b3dd018e98a28c41d62a53f15f68be1c525
 REPOSITORY   C:\AION-HQ-main-integrate   (linked git worktree of C:\AION-HQ)
 ORIGIN       https://github.com/danieljames-dev/personalasist1.git   branch main
 ```
