@@ -423,6 +423,7 @@ test("the report is honest: candidates, no ranking, named blockers, batched Owne
   assert.ok(report.candidates.length >= 3, "at least three candidate models are considered");
   assert.equal(report.marketEvidenceCount, 0, "no market evidence exists and none was invented");
   assert.equal(report.ranking.rankable, false);
+  /* Called with no port at all, the operator is genuinely unable to ask, and says so. */
   assert.ok(report.capabilityBlockers.length > 0);
   assert.match(report.capabilityBlockers[0]!, /no read-only public web research route/u);
   assert.ok(report.ownerQuestions.length > 0 && report.ownerQuestions.length <= 3,
@@ -528,7 +529,18 @@ test("the Director runs revenue discovery itself, across several steps, with no 
   const report = JSON.parse(readFileSync(reportPath, "utf8"));
   assert.equal(report.marketEvidenceCount, 0);
   assert.equal(report.ranking.rankable, false);
-  assert.ok(report.capabilityBlockers.length > 0);
+  /*
+   * This runtime wires no research port, so the blocker is still correct — and that is the fix.
+   *
+   * An earlier version of this milestone handed revenue discovery a store-backed port unconditionally,
+   * which made an empty store read as "we asked the market and found nothing" on a run that never
+   * touched the network. An independent review named it: the asked-versus-unable distinction, which
+   * the whole evidence design rests on, had been quietly erased. No port means no capability, and the
+   * operator says so.
+   */
+  assert.ok(report.capabilityBlockers.length > 0,
+    "a runtime with no research port must still report that it cannot ask");
+  assert.match(report.capabilityBlockers[0]!, /no read-only public web research route/u);
 
   // The Experience Ledger recorded it against the right business.
   const ledger = createDurableExperienceLedger(deps.storeRoot);

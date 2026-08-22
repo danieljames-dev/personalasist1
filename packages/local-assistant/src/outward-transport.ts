@@ -34,6 +34,8 @@ export const OUTWARD_ROUTE_IDS_V1 = [
   "vehicle.recalls",
   "dealership.inventoryCrawl",
   "vision.remoteInference",
+  "research.fetch",
+  "research.publicSearch",
 ] as const;
 
 export type OutwardRouteIdV1 = (typeof OUTWARD_ROUTE_IDS_V1)[number];

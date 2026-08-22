@@ -44,12 +44,18 @@ import {
 } from "../../packages/director/dist/index.js";
 import {
   AUTONOMY_STORE_RELATIVE_PATH,
+  RESEARCH_CAPABILITY_REGISTRY_V1,
   answerOwnerQuestion,
+  createGovernedResearchPortV1,
   pauseAutonomy,
   resumeAutonomy,
   runtimeStatus,
   startAutonomy,
+  startAutonomyWithResearch,
 } from "@aion/director";
+import { assertOutwardEffectAllowed } from "./outward-effect-guard.mjs";
+import { activateResearchRoutes } from "./research-activation.mjs";
+import { createResearchTransportV1 } from "./research-transport.mjs";
 import { createGoalIntake } from "./goal-intake.mjs";
 import { createProviderRegistry } from "./provider-registry.mjs";
 import { createVerificationRunner } from "./verification-runner.mjs";
@@ -566,6 +572,63 @@ export function createAutonomyControl(options = {}) {
   const artifactRoot = options.artifactRoot ?? join(storeRoot, "discovery");
   const now = options.now ?? nowUtc;
 
+  /*
+   * The research port, built here or not at all.
+   *
+   * This is the single place where the three things that make research legal are brought together:
+   * the transport that can reach the public web, the pre-action effect gate that decides whether it
+   * may, and the outward activation boundary that refuses a route nobody has wired. Assembling them
+   * in the application rather than in the Director is deliberate — the orchestrator should not be
+   * able to construct its own authority, and here the wiring is visible in one screen.
+   *
+   * `researchAuthority` is supplied by the caller because an envelope is Owner authority, not
+   * configuration. Without one there is no port, and without a port there is no research: the
+   * capability is unreachable by default rather than merely unused.
+   */
+  const buildResearchPort = () => {
+    const authority = options.researchAuthority;
+    const envelopeFor = options.researchEnvelopeFor;
+    if (authority == null || typeof envelopeFor !== "function") return null;
+    /*
+     * Activation first, then the port.
+     *
+     * The routes are refused in code until this runs, so building a port without activating would
+     * produce something that passes the effect gate and is then turned away by the boundary — a
+     * confusing failure that looks like a bug rather than like a missing permission.
+     */
+    activateResearchRoutes({ authority, envelopeFor, now });
+    return createGovernedResearchPortV1({
+      transport: createResearchTransportV1({ searxngBaseUrl: options.researchSearxngBaseUrl ?? "" }),
+      gate: {
+        registry: RESEARCH_CAPABILITY_REGISTRY_V1,
+        resolveTarget: (targetType, targetId) => ({
+          targetType,
+          targetId,
+          sensitivity: "INTERNAL",
+          writeDomain: "packages/director",
+        }),
+        envelopeFor,
+        ownerId: authority.ownerId,
+        now: now(),
+      },
+      authority,
+      /* The activation boundary itself, so an unwired route refuses in code. */
+      /*
+       * The boundary is told what is being authorized, not merely that something is.
+       *
+       * `{ reason: "…" }` gave the registered authorizer nothing to name, so it judged an unnamed
+       * target every time — one decision standing in for every page and every query.
+       */
+      assertRouteActivated: (routeId, target) => {
+        assertOutwardEffectAllowed(routeId, {
+          url: routeId === "research.publicSearch" ? "" : target,
+          query: routeId === "research.publicSearch" ? target : "",
+          reason: "governed public research",
+        });
+      },
+    });
+  };
+
   /** Everything the runtime needs, assembled here and never accepted from a caller. */
   const deps = () => ({
     storeRoot,
@@ -574,11 +637,50 @@ export function createAutonomyControl(options = {}) {
     currentSha: headSha(repositoryRoot),
     provenance: "Owner portfolio direction, recorded in docs/aion/CURRENT_STATE.md",
     maxSteps: AUTONOMY_MAX_STEPS_PER_CALL_V1,
+    researchPort: buildResearchPort(),
   });
 
   return {
     status() {
       return runtimeStatus(deps());
+    },
+    /**
+     * Research and then run, in one call and with no Owner prompt between them.
+     *
+     * Separate from `start` because it is asynchronous and because a caller should have to ask for
+     * the network. `start` remains exactly what it was for anyone who does not want it.
+     */
+    async startWithResearch() {
+      const { research, run } = await startAutonomyWithResearch(deps());
+      return {
+        started: run.started,
+        reason: run.reason,
+        research: {
+          ran: research.ran,
+          reason: research.reason,
+          /*
+           * Surfaced, not summarised away.
+           *
+           * A gate refusal means AION attempted something it is not authorized to do. Folding it into
+           * a count of transport errors would hide the one class of failure an Owner must see.
+           */
+          authorityRefusals: research.authorityRefusals,
+          missions: research.missions.map((entry) => ({
+            businessId: entry.businessId,
+            stopReason: entry.report.stopReason,
+            queries: entry.report.queriesRun,
+            fetches: entry.report.fetchesRun,
+            sources: entry.report.sourcesRecorded,
+            duplicates: entry.report.duplicatesSkipped,
+            refusals: entry.report.refusals.length,
+            gateRefusals: entry.report.gateRefusals.length,
+          })),
+        },
+        completed: run.run?.completed ?? [],
+        blocked: run.run?.blocked ?? [],
+        parked: run.parked,
+        stopReason: run.run?.stopReason ?? "PAUSED",
+      };
     },
     start() {
       const result = startAutonomy(deps());
@@ -636,6 +738,7 @@ export function createAutonomyControl(options = {}) {
 export const AUTONOMY_VERBS_V1 = Object.freeze([
   "autonomy.status",
   "autonomy.start",
+  "autonomy.startWithResearch",
   "autonomy.pause",
   "autonomy.resume",
   "autonomy.answer",

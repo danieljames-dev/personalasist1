@@ -662,7 +662,25 @@ export async function createAionServer(options = {}) {
   let autonomyControlInstance = options.autonomyControl ?? null;
   function autonomyControl() {
     if (autonomyControlInstance === null) {
-      autonomyControlInstance = createAutonomyControl({ repositoryRoot });
+      /*
+       * Research options are threaded through, and are absent by default.
+       *
+       * An independent review pointed out that `autonomy.startWithResearch` opened onto an unwired
+       * state: the verb existed and the server handed autonomy control nothing, so the pass always
+       * took its "no research port is wired" branch. Passing these through means the capability turns
+       * on the moment Owner authority exists, rather than needing a code change then.
+       *
+       * `researchEnvelopeFor` is deliberately not defaulted to anything permissive. There is no
+       * authority envelope for public research today — the directive that authorized this milestone
+       * set `Grants-Roadmap-Authority-Envelope: NO`, and envelope creation is Founder-script-only —
+       * so without one supplied here the routes stay refused, which is the correct state.
+       */
+      autonomyControlInstance = createAutonomyControl({
+        repositoryRoot,
+        researchAuthority: options.researchAuthority ?? null,
+        researchEnvelopeFor: options.researchEnvelopeFor ?? null,
+        researchSearxngBaseUrl: (process.env[SEARCH_VARIABLE] ?? "").trim(),
+      });
     }
     return autonomyControlInstance;
   }
@@ -1933,6 +1951,14 @@ export async function createAionServer(options = {}) {
        */
       case "autonomy.status": return autonomyControl().status();
       case "autonomy.start": return autonomyControl().start();
+      /*
+       * The researching entry point, reachable rather than merely exported.
+       *
+       * `autonomy.start` ranks against whatever has already been gathered and never retrieves. With
+       * only that verb wired, configuring the research capability changed nothing a caller could
+       * invoke — the capability existed and had no door.
+       */
+      case "autonomy.startWithResearch": return autonomyControl().startWithResearch();
       case "autonomy.pause": return autonomyControl().pause(String(input.reason ?? ""));
       case "autonomy.resume": return autonomyControl().resume();
       case "autonomy.answer": return autonomyControl().answer(input);

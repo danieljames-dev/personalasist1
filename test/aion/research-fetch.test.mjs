@@ -33,6 +33,17 @@ async function withFetch(handler, run) {
   globalThis.fetch = handler;
   try { return await run(); } finally { globalThis.fetch = original; }
 }
+
+/*
+ * The seam these tests use, and why they need one.
+ *
+ * Production pins the connection to the addresses `assertPublicHost` just validated, which is what
+ * closes the DNS rebinding window — and which means the pinned path never calls the global fetch, so
+ * stubbing it would silently test nothing. Passing a transport keeps every assertion below about the
+ * redirect walk, the byte ceiling and the content-type rule exactly as it was, while the thing they
+ * drive is the real `fetchPublicDocument`.
+ */
+const viaGlobalFetch = (_routeId, url, _addresses, init) => globalThis.fetch(url, init);
 const html = (body, title = "A page") => `<html><head><title>${title}</title></head><body>${body}</body></html>`;
 const ok = (body, headers = {}) => new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...headers } });
 
@@ -59,7 +70,7 @@ test("a name that resolves only to public addresses is allowed", async () => {
 test("a document is fetched with no credentials, no cookies, and no referrer", async () => {
   let seen = null;
   await withFetch(async (url, init) => { seen = { url, init }; return ok(html("<p>Handover practices lose detail.</p>")); }, async () => {
-    const document = await fetchPublicDocument("https://example.invalid/study", { resolver: PUBLIC, now: () => NOW });
+    const document = await fetchPublicDocument("https://example.invalid/study", { resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch });
     assert.equal(document.url, "https://example.invalid/study");
     assert.equal(document.title, "A page");
     assert.match(document.text, /Handover practices lose detail/u);
@@ -81,7 +92,7 @@ test("a redirect into private space is refused at the hop", async () => {
       : ok(html("should never be reached")),
     async () => {
       await assert.rejects(
-        () => fetchPublicDocument("https://example.invalid/start", { resolver: PUBLIC, now: () => NOW }),
+        () => fetchPublicDocument("https://example.invalid/start", { resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch }),
         /tried to redirect to somewhere AION will not follow.*private, loopback, or link-local/su,
       );
     },
@@ -94,7 +105,7 @@ test("a redirect to another public page is followed and recorded", async () => {
       ? new Response(null, { status: 301, headers: { location: "https://elsewhere.invalid/final" } })
       : ok(html("<p>The real content.</p>", "Final page")),
     async () => {
-      const document = await fetchPublicDocument("https://example.invalid/start", { resolver: PUBLIC, now: () => NOW });
+      const document = await fetchPublicDocument("https://example.invalid/start", { resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch });
       assert.equal(document.url, "https://elsewhere.invalid/final");
       assert.equal(document.title, "Final page");
       assert.deepEqual(document.redirects, ["https://example.invalid/start"], "the chain is kept as provenance");
@@ -107,7 +118,7 @@ test("an endless redirect chain stops rather than being followed", async () => {
   await withFetch(
     async () => { hop += 1; return new Response(null, { status: 302, headers: { location: `https://example.invalid/hop-${hop}` } }); },
     async () => {
-      await assert.rejects(() => fetchPublicDocument("https://example.invalid/start", { resolver: PUBLIC, now: () => NOW }), /redirected more than 4 times/u);
+      await assert.rejects(() => fetchPublicDocument("https://example.invalid/start", { resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch }), /redirected more than 4 times/u);
     },
   );
   assert.ok(hop <= 6, "AION gave up rather than chasing it");
@@ -116,7 +127,7 @@ test("an endless redirect chain stops rather than being followed", async () => {
 test("an oversized response is truncated at the byte ceiling rather than read whole", async () => {
   const huge = html(`<p>${"x".repeat(200_000)}</p>`);
   await withFetch(async () => ok(huge), async () => {
-    const document = await fetchPublicDocument("https://example.invalid/big", { resolver: PUBLIC, now: () => NOW, maxBytes: 4096 });
+    const document = await fetchPublicDocument("https://example.invalid/big", { resolver: PUBLIC, now: () => NOW, maxBytes: 4096, transport: viaGlobalFetch });
     assert.equal(document.truncated, true);
     assert.ok(document.bytes <= 4096);
   });
@@ -124,10 +135,10 @@ test("an oversized response is truncated at the byte ceiling rather than read wh
 
 test("a non-text response is refused", async () => {
   await withFetch(async () => new Response("binary", { status: 200, headers: { "content-type": "application/octet-stream" } }), async () => {
-    await assert.rejects(() => fetchPublicDocument("https://example.invalid/file", { resolver: PUBLIC, now: () => NOW }), /AION reads text documents only/u);
+    await assert.rejects(() => fetchPublicDocument("https://example.invalid/file", { resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch }), /AION reads text documents only/u);
   });
   await withFetch(async () => new Response("nope", { status: 404, headers: { "content-type": "text/html" } }), async () => {
-    await assert.rejects(() => fetchPublicDocument("https://example.invalid/gone", { resolver: PUBLIC, now: () => NOW }), /answered 404/u);
+    await assert.rejects(() => fetchPublicDocument("https://example.invalid/gone", { resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch }), /answered 404/u);
   });
 });
 
@@ -135,7 +146,7 @@ test("the name guard still runs before DNS is ever consulted", async () => {
   let resolved = false;
   const spy = async (...args) => { resolved = true; return PUBLIC(...args); };
   for (const url of ["http://localhost/x", "file:///C:/secrets.txt", "http://169.254.169.254/latest/meta-data/", "http://user:token@example.invalid/"]) {
-    await assert.rejects(() => fetchPublicDocument(url, { resolver: spy, now: () => NOW }));
+    await assert.rejects(() => fetchPublicDocument(url, { resolver: spy, now: () => NOW, transport: viaGlobalFetch }));
   }
   assert.equal(resolved, false, "nothing was resolved, because the URL never got that far");
 });
@@ -153,7 +164,7 @@ test("markup is stripped, and script content never reaches the extracted text", 
 
 test("the public-URL provider quotes what a page said and never calls it a fact", async () => {
   await withFetch(async () => ok(html("<p>A survey of handover practices found that detail is lost between shifts.</p>", "Handover study")), async () => {
-    const provider = new PublicUrlResearchProviderV1({ resolver: PUBLIC, now: () => NOW });
+    const provider = new PublicUrlResearchProviderV1({ resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch });
     const result = await provider.run({
       question: "handover practices", scope: "owner-supplied-sources",
       limits: { maxSources: 4, maxBytesPerSource: 512 * 1024, maxDurationMs: 10_000, maxCostCents: 0 },
@@ -182,7 +193,7 @@ test("a local-only job makes no request at all", async () => {
 
 test("a source that cannot be read is reported rather than silently dropped", async () => {
   await withFetch(async () => new Response("nope", { status: 500, headers: { "content-type": "text/html" } }), async () => {
-    const result = await new PublicUrlResearchProviderV1({ resolver: PUBLIC, now: () => NOW }).run({
+    const result = await new PublicUrlResearchProviderV1({ resolver: PUBLIC, now: () => NOW, transport: viaGlobalFetch }).run({
       question: "handover", scope: "public-web",
       limits: { maxSources: 4, maxBytesPerSource: 1024, maxDurationMs: 5000, maxCostCents: 0 },
       seedReferences: ["https://example.invalid/broken"], signal: new AbortController().signal,

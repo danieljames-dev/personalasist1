@@ -184,8 +184,8 @@ export const OUTWARD_POLICY_V1 = {
    */
   APPROVED_ADAPTER: {
     "apps/aion/outward-effect-guard.mjs": {
-      allow: { "globalThis.fetch": 2, fetch: 0 },
-      reason: "the application's outward boundary: outwardFetch and loopbackFetch are the two transports",
+      allow: { "globalThis.fetch": 2, fetch: 0, "node network module": 2 },
+      reason: "the application's outward boundary: outwardFetch, loopbackFetch and outwardFetchPinned are its three transports. The third exists because the global fetch resolves the hostname itself, so a caller that resolved and validated every address was checking one lookup and connecting on a second - DNS rebinding, and the one SSRF neither the name guard nor the address guard can see. node:http and node:https are named only to reach the lookup hook that pins the connection to the addresses already approved. Still one file: the point of this policy is that transports live in exactly one place, not that there are exactly two.",
     },
   },
   /** Inbound listeners. Enforced below: the import clause may not name a client binding. */

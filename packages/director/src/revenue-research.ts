@@ -161,6 +161,39 @@ export function buildResearchItem(input: Omit<ResearchItemV1, "schema" | "itemId
  * quietly manufacturing the confidence the milestone is supposed to lack.
  */
 /** The source classes that can carry a fact about the *market*. Everything else corroborates. */
+/**
+ * Scopes that contain any authorized area rather than naming a different one.
+ *
+ * "Out of area" hides two different facts. A rate card for Miami-Dade is about *somewhere else* and
+ * must never answer a question about Polk County. A federal wage table is about *everywhere,
+ * including here* — and it is the only wage evidence most local markets have. Refusing both would
+ * leave the operator permanently unable to cost anything, so the rule distinguishes them.
+ *
+ * This does not relabel anything: an admitted national source keeps `NATIONAL` on its geography, so
+ * nothing downstream can mistake it for a local observation.
+ */
+export const CONTAINING_SCOPES_V1: readonly string[] = Object.freeze(["NATIONAL"]);
+
+/**
+ * Whether a source's recorded area may answer a question asked about `authorized`.
+ *
+ * Applied in both places an area is judged — retrieval and consumption — because two copies of this
+ * rule is exactly one too many. A live run found them disagreeing: the bridge admitted a national
+ * table and `attemptResearch` silently dropped it again, so the evidence existed and never counted.
+ */
+export function isAdmissibleAreaV1(
+  recorded: readonly string[],
+  authorized: ReadonlySet<string>,
+): boolean {
+  if (recorded.length === 0) return false;
+  return recorded.every((area) => {
+    const normalised = area.trim().toLowerCase();
+    if (normalised === "") return false;
+    if (authorized.has(normalised)) return true;
+    return CONTAINING_SCOPES_V1.some((scope) => scope.toLowerCase() === normalised);
+  });
+}
+
 export const MARKET_SOURCE_TYPES_V1: readonly ResearchSourceTypeV1[] =
   ["PUBLIC_WEB", "PUBLIC_GOVERNMENT", "PUBLIC_MARKETPLACE"] as const;
 
@@ -311,8 +344,10 @@ export function attemptResearch(
    * national figure gets in wearing one approved county as a badge. An item that also describes
    * somewhere AION is not authorized for is not evidence about the five counties.
    */
-  const items = retrieved.filter((item) =>
-    item.geography.length > 0 && item.geography.every((area) => authorized.has(area.toLowerCase())));
+  const items = retrieved.filter((item) => {
+    const admissible = isAdmissibleAreaV1(item.geography, authorized);
+    return admissible;
+  });
   const rejected = retrieved.length - items.length;
   const malformed = rawCount - retrieved.length;
 

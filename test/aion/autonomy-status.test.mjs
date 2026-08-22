@@ -55,9 +55,13 @@ test("autonomy.status reports the portfolio, and the verb list stays closed", ()
     for (const business of store.businesses()) assert.equal(business.category, null);
 
     assert.deepEqual([...AUTONOMY_VERBS_V1],
-      ["autonomy.status", "autonomy.start", "autonomy.pause", "autonomy.resume", "autonomy.answer"],
+      ["autonomy.status", "autonomy.start", "autonomy.startWithResearch",
+        "autonomy.pause", "autonomy.resume", "autonomy.answer"],
       "a closed list. `answer` carries the Owner's words and nothing that grades them: no state, no "
-      + "confidence, no source class, no supersession target, no authority id.");
+      + "confidence, no source class, no supersession target, no authority id. "
+      + "`startWithResearch` is `start` preceded by a bounded public-research pass; it is separate "
+      + "because a caller should have to ask for the network, and it exposes no research parameters "
+      + "of its own — bounds, seeds and destinations are all decided server-side.");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

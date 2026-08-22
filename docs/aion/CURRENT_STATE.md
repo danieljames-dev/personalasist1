@@ -443,14 +443,74 @@ Four design decisions carry that behaviour, and they are worth knowing before ch
   demand does. The operator now emits those assumptions alongside every number that depends on them,
   because a reader who cannot see them cannot tell an assumption from an observation.
 
-**The capability blocker, stated rather than worked around.** There is no read-only public web
-research route: `apps/aion/outward-effect-guard.mjs` declares six outward routes, every one
-`REQUIRES_INTEGRATION` with an empty authorizer map. So `ResearchPortV1` is an interface with **no
-implementation**, and the three highest-value research tasks — comparable hourly rates, caregiver
-wages, whether Care.com sells an agency product — sit at `BLOCKED_BY_CAPABILITY` with their questions
-intact. The operator distinguishes *asked and learned nothing* from *never able to ask*; conflating
-those would hide the blocker. Captured fixtures never count as market evidence, so the test suite
-cannot manufacture the confidence this milestone is supposed to lack.
+**The capability blocker is closed in code, and waits on authority.** `apps/aion/outward-effect-guard.mjs` had declared
+`research.fetch` since Findings 2 and 3 — "governed public-web fetch; read-only externally but still
+leaves the machine" — and left it `REQUIRES_INTEGRATION` with no authorizer, while
+`apps/aion/research-fetch.mjs` carried a careful implementation that had never run. What was missing
+was the join. `research-activation.mjs` supplies it, and `research.fetch` moves from
+`TECHNICALLY_DISABLED` to `GATED` only when an authorizer that consults the real effect gate is
+registered. A runtime given no Owner authority still has routes that refuse.
+
+**Read-only is structural, not promised.** The Director's port has exactly two verbs — `search` and
+`fetchPublic` — and no method, header, cookie, credential, body or socket target is expressible
+anywhere on that surface. A POST cannot be written down. Both capabilities are registered as
+`EXTERNAL_SEND` with `spend: NONE` and no permission that could change anything on the far side, and
+`authorizeEffect` runs immediately before every call, so a revoked envelope stops the next fetch
+rather than the next restart.
+
+**What it can reach, proven live:** Florida Statutes §400.509, BLS occupational wage tables, and
+public Care.com pages — all without an account. What it refuses, proven against a listening local
+server: loopback, RFC1918, link-local, cloud metadata, unique-local, IPv4-mapped IPv6 in both
+spellings, single-label hosts, URL credentials, and every scheme but http(s). Redirects are
+revalidated at each hop and the connection is pinned to the addresses that were validated, which is
+what closes DNS rebinding.
+
+**Search is the half that does not work, and it says so.** There is no zero-cost search provider
+available here: `SearxngSearchProviderV1` needs an instance the Owner runs, and the free
+DuckDuckGo HTML endpoint serves an anti-bot challenge after a few automated queries. So `search`
+refuses with a named dependency rather than returning an empty list — reporting "the market has no
+data" when nobody was asked is the failure this milestone is least allowed to commit. Research
+proceeds by **seeded fetch** instead, which is what `PublicUrlResearchProviderV1` was written for:
+"a search API being unavailable must not mean research is unavailable." A seed is a location, never
+a fact. A seed that has moved or 404s produces no record at all — the fetch refuses a non-OK status —
+so the mission reports it as a refusal rather than storing an error page as evidence.
+
+**What is reachable today, stated exactly.** The capability is built, gated and proven — but the
+Command Center cannot currently turn it on, and that is deliberate rather than an oversight. Every
+research call needs an Owner authority envelope, this milestone's directive set
+`Grants-Roadmap-Authority-Envelope: NO`, and envelope creation is Founder-script-only. So the
+routes stay `TECHNICALLY_DISABLED` on the default path and ranking correctly reports the capability
+blocker. The live retrieval below was performed through a harness supplying an explicit envelope, and
+the server now threads the same options through, so granting one is the only remaining step. An
+independent review caught this being overstated as "the blocker is closed" full stop; it is closed in
+code and waiting on authority.
+
+**Compassionate Choice: market evidence 0 → 4.** Three of the five research tasks are now
+`SATISFIED` by real retrieved sources. `rankable` is still **false**, and that is correct rather than
+disappointing: market evidence existing in the store is not the same as a candidate carrying an
+evidenced *price*, and the twenty-two rounds of scoring hardening are untouched. The next step is
+extracting priced claims from those sources, not loosening the ranker.
+
+**Area honesty.** Each source declares the area it is actually about. The Florida statute is scoped
+to the five counties because it governs the state; the BLS tables and Care.com pages are scoped
+`NATIONAL`. One rule distinguishes *somewhere else* (a Miami-Dade rate card — refused) from
+*everywhere including here* (a federal wage table — admitted, and never relabelled as local). A page
+found by searching is `UNKNOWN_AREA` and is evidence about nowhere.
+
+**Independent review found ten defects, three of them pre-existing security gaps.** DNS rebinding in
+the fetch that had been there since Findings 2/3; a JSON-LD date pattern whose backslashes had been
+lost, so publication dates were silently never read; and an injected search-provider object that
+could have carried any HTTP method past a port whose whole claim is that it cannot. It also caught
+the milestone erasing the *asked* versus *unable* distinction by handing ranking a research port even
+when nothing was wired — the exact substitution the evidence design exists to prevent.
+
+**One correction worth recording.** The first implementation built a parallel networking stack — a
+second SSRF guard, bounded reader and redirect walker — in `packages/local-assistant`, before
+noticing `apps/aion/research-fetch.mjs` already had all of it. That package's own architecture test
+forbids network code in it, and the existing guard was better: it refuses `::ffff:7f00:1`, which the
+replacement got wrong until a live probe caught it. The parallel stack was deleted and what remains
+is a thin adapter. **Inspect `apps/aion/` directly before building anything that reaches the
+network** — a grep for `https.request` misses everything that correctly goes through `outwardFetch`.
 
 **Independent review.** The staged change went through **twenty-two adversarial review rounds** with
 an external reviewer, which returned FAIL sixty-eight times before PASS. Most of those findings were

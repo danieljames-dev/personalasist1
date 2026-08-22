@@ -21,7 +21,7 @@
  * before they are ever selected, and this runtime never sets `outwardAuthorized`.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeAtomic } from "./atomic-write.js";
@@ -55,6 +55,14 @@ import { createFileBusinessEvidenceStore } from "./business-evidence-store.js";
 import { CLAIM_V1, LOCALFINDS_WORKSPACE_V1, corpusFor } from "./business-corpus.js";
 import { portfolioSummary, assessRevenueReadiness, type PortfolioSummaryEntryV1 } from "./business-readiness.js";
 import { hasCandidateModels, runRevenueDiscovery } from "./revenue-discovery.js";
+import {
+  researchWasAttemptedV1,
+  runResearchPassV1,
+  type ResearchPassReportV1,
+} from "./research-pass.js";
+import type { GovernedResearchPortV1 } from "./public-research-port.js";
+import { createFileResearchStoreV1 } from "./research-store.js";
+import { createStoreBackedResearchPortV1 } from "./research-evidence-bridge.js";
 import { money, quantity } from "./revenue-opportunity.js";
 import {
   closeOwnerQuestion,
@@ -135,6 +143,15 @@ export interface RuntimeDepsV1 {
   /** Where discovery artifacts are written. Read back by verification, never trusted from a claim. */
   readonly artifactRoot: string;
   readonly maxSteps?: number;
+  /**
+   * The governed research port, when this runtime has been authorized to reach the public web.
+   *
+   * Absent by default, and absence is a decision rather than an oversight: a runtime that has not
+   * been given a port schedules no research step at all, so the capability cannot be reached by
+   * forgetting to configure something. The app supplies one only after wiring the outward activation
+   * boundary and the effect gate.
+   */
+  readonly researchPort?: GovernedResearchPortV1 | null;
 }
 
 export interface RegistrationV1 {
@@ -489,12 +506,48 @@ export function createDiscoveryDispatcher(deps: RuntimeDepsV1) {
        * the step completes on the report having been written.
        */
       const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+      /*
+       * Ranking reads the research store, not the network.
+       *
+       * Separating retrieval from consumption is what lets a restart rank against everything gathered
+       * so far without fetching anything again, and what keeps this step deterministic.
+       */
+      const now = deps.now();
+      /*
+       * A store-backed port only when something has actually been retrieved.
+       *
+       * Two wrong answers were tried before this one. Handing a port over unconditionally made an
+       * empty store report "the research ran and returned nothing usable" — a claim to have asked the
+       * market when nobody had. Gating on `deps.researchPort != null` fixed that only for a runtime
+       * with no capability at all: configure the capability, call `autonomy.start` (which runs no
+       * research pass), and the same false claim came back.
+       *
+       * The honest test is whether the research store holds anything for this workspace. Records
+       * exist only because a mission retrieved them, so their presence is evidence that the question
+       * was asked, and their absence is evidence that it was not — whatever is configured.
+       */
+      /*
+       * Three states, not two.
+       *
+       * "Never asked" must report a capability blocker. "Asked and learned nothing" must not — that
+       * is a fact about the market. "Asked and learned something" serves the evidence. Gating on
+       * whether the store holds records collapsed the middle case into the first: a research pass
+       * that ran and came back empty was reported as though no research route existed, which is the
+       * same asked-versus-unable substitution inverted.
+       *
+       * The mission writes its report before ranking runs, so the presence of that artifact is the
+       * record that the question was actually put — independent of what came back.
+       */
+      const researchStore = createFileResearchStoreV1(join(deps.storeRoot, "research"));
+      const asked = researchWasAttemptedV1(deps.artifactRoot, step.businessId);
       const report = runRevenueDiscovery({
         workspaceId: step.businessId,
         objectiveId: objective.objectiveId,
         store: evidenceStore,
-        now: deps.now(),
-        researchPort: null,
+        now,
+        researchPort: asked
+          ? createStoreBackedResearchPortV1({ store: researchStore, workspaceId: step.businessId, now })
+          : null,
       });
       writeAtomic(
         join(deps.artifactRoot, `${step.businessId}-revenue-discovery.json`),
@@ -745,6 +798,21 @@ export interface RuntimeRunV1 {
  * Registration happens first and every time, because it is idempotent and because a run that
  * assumed the portfolio was already there would fail confusingly on a fresh machine.
  */
+/**
+ * Research, then rank — the whole autonomous cycle in one call.
+ *
+ * Exists so the order cannot be got wrong by a caller. Ranking before retrieving would produce a
+ * report that is correct about a world one pass out of date, which is the sort of bug that looks like
+ * the operator being conservative.
+ */
+export async function startAutonomyWithResearch(deps: RuntimeDepsV1): Promise<{
+  research: ResearchPassReportV1;
+  run: RuntimeRunV1;
+}> {
+  const research = await runResearchPassV1(deps, deps.researchPort);
+  return { research, run: startAutonomy(deps) };
+}
+
 export function startAutonomy(deps: RuntimeDepsV1): RuntimeRunV1 {
   const state = readRuntimeState(deps.storeRoot);
   if (state.paused) {

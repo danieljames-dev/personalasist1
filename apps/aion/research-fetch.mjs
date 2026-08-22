@@ -1,5 +1,5 @@
 import { lookup } from "node:dns/promises";
-import { assertOutwardEffectAllowed, outwardFetch } from "./outward-effect-guard.mjs";
+import { assertOutwardEffectAllowed, outwardFetchPinned } from "./outward-effect-guard.mjs";
 import { createHash } from "node:crypto";
 import { assertResearchUrl, evaluateResearchUrl, isPrivateIpv4, isPrivateIpv6 } from "../../packages/local-assistant/dist/index.js";
 
@@ -57,6 +57,30 @@ export async function assertPublicHost(hostname, resolver = lookup) {
     }
   }
   return addresses.map((entry) => String(entry.address));
+}
+
+/**
+ * The publication date a page states about itself, or an empty string.
+ *
+ * Read from the raw markup, because `extractText` removes the `<meta>` and `<time>` elements that
+ * carry it — a document extracted first and dated afterwards is always undated. Nothing is inferred
+ * from the URL or from when the fetch happened: a page fetched today is not therefore current, and a
+ * freshness that was guessed is worse than one that is absent.
+ */
+export function extractPublishedAt(html) {
+  const patterns = [
+    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/iu,
+    /<meta[^>]+name=["'](?:date|pubdate|publish-date|DC\.date)["'][^>]+content=["']([^"']+)["']/iu,
+    /"datePublished"\s*:\s*"([^"]+)"/iu,
+    /<time[^>]+datetime=["']([^"']+)["']/iu,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(String(html ?? ""));
+    if (match?.[1] === undefined) continue;
+    const parsed = new Date(match[1]);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return "";
 }
 
 /** Strips markup and script content, leaving readable text with its whitespace collapsed. */
@@ -120,6 +144,16 @@ export async function fetchPublicDocument(url, options = {}) {
   const maxBytes = options.maxBytes ?? 512 * 1024;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const resolver = options.resolver ?? lookup;
+  /*
+   * The transport is injectable for the same reason the resolver is.
+   *
+   * Production pins the connection to the addresses that were just validated, which is what closes
+   * the rebinding window - and which also means a test cannot reach it by stubbing the global fetch,
+   * because the pinned path never calls it. A test that has to drive redirects, oversized bodies and
+   * refused content types needs a seam, and inventing a second kind of seam when the resolver already
+   * demonstrates the pattern would be the worse choice.
+   */
+  const transport = options.transport ?? outwardFetchPinned;
   const now = options.now ?? (() => new Date().toISOString());
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -130,10 +164,18 @@ export async function fetchPublicDocument(url, options = {}) {
     let current = assertResearchUrl(url);
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
       const parsed = new URL(current);
-      await assertPublicHost(parsed.hostname, resolver);
+      /*
+       * The addresses are kept, not discarded.
+       *
+       * They were resolved and judged public a line ago; handing the *name* to the fetch would let it
+       * resolve again and connect to whatever the second answer said. An independent review caught
+       * that: checking one lookup and connecting on another is textbook DNS rebinding, and it is the
+       * one SSRF neither the hostname guard nor the address guard sees.
+       */
+      const validated = await assertPublicHost(parsed.hostname, resolver);
       hops.push(current);
 
-      const response = await outwardFetch("research.fetch", current, {
+      const response = await transport("research.fetch", current, validated, {
         method: "GET",
         redirect: "manual",
         signal: controller.signal,
@@ -144,6 +186,8 @@ export async function fetchPublicDocument(url, options = {}) {
       });
 
       if (response.status >= 300 && response.status < 400) {
+        /* Read for its destination and then abandoned, so the socket is closed rather than left. */
+        response.destroy?.();
         const location = response.headers.get("location");
         if (!location) throw new Error(`${current} answered ${response.status} with no destination.`);
         const next = new URL(location, current).toString();
@@ -154,9 +198,11 @@ export async function fetchPublicDocument(url, options = {}) {
         continue;
       }
 
-      if (!response.ok) throw new Error(`${current} answered ${response.status}.`);
+      if (!response.ok) { response.destroy?.(); throw new Error(`${current} answered ${response.status}.`); }
       const contentType = response.headers.get("content-type") ?? "";
       if (!ALLOWED_CONTENT.some((pattern) => pattern.test(contentType))) {
+        /* Refused before the body is read, and the connection ended rather than left hanging. */
+        response.destroy?.();
         throw new Error(`${current} returned ${contentType || "an unstated content type"}. AION reads text documents only.`);
       }
       const { text, bytes, truncated } = await readBounded(response, maxBytes);
@@ -168,6 +214,7 @@ export async function fetchPublicDocument(url, options = {}) {
         bytes,
         truncated,
         contentType: contentType.split(";")[0]?.trim() ?? "",
+        publishedAt: extractPublishedAt(text),
         retrievedAt: now(),
         digest: createHash("sha256").update(text).digest("hex"),
       };
