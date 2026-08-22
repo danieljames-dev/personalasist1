@@ -53,7 +53,9 @@ import {
 import { createDurableExperienceLedger, type DurableExperienceLedgerV1 } from "./experience-ledger.js";
 import { createFileBusinessEvidenceStore } from "./business-evidence-store.js";
 import { CLAIM_V1, LOCALFINDS_WORKSPACE_V1, corpusFor } from "./business-corpus.js";
-import { portfolioSummary, type PortfolioSummaryEntryV1 } from "./business-readiness.js";
+import { portfolioSummary, assessRevenueReadiness, type PortfolioSummaryEntryV1 } from "./business-readiness.js";
+import { hasCandidateModels, runRevenueDiscovery } from "./revenue-discovery.js";
+import { money, quantity } from "./revenue-opportunity.js";
 import {
   closeOwnerQuestion,
   ensureOwnerQuestion,
@@ -346,6 +348,62 @@ export function registerPortfolio(deps: RuntimeDepsV1): RegistrationV1 {
      * runtime that recreated it every boot would ask the Owner the same thing forever.
      */
     /*
+     * A revenue-discovery step for a business the evidence says is ready.
+     *
+     * Created here rather than in the discovery module so the Director owns the decision: readiness
+     * is a fact about evidence, and turning a fact into work is scheduling. The step's fingerprint
+     * is the business, so it runs once per business and a restart does not repeat it.
+     */
+    const readiness = assessRevenueReadiness(
+      business.businessId,
+      evidenceStore.evidence(business.businessId),
+      evidenceStore.questions(business.businessId),
+    );
+    /*
+     * Readiness is not enough on its own: AION also has to have models for this business.
+     *
+     * `assessRevenueReadiness` is workspace-agnostic, so any business with a legal status and a
+     * service area reads as ready. The candidate models are a §400.509 companion service and belong
+     * to one workspace, so scheduling revenue discovery for a second ready business would have
+     * failed the step rather than reporting that there is nothing to discover with yet.
+     */
+    if (readiness.readiness === "READY_FOR_REVENUE_DISCOVERY" && hasCandidateModels(business.businessId)) {
+      const revenueObjective = ensureObjective(
+        business,
+        `Find the highest-value, evidence-grounded way to generate sustainable revenue for ${business.canonicalName} within its currently approved service area, without inventing facts, contacting anyone, or spending money.`,
+      );
+      objectives.push(revenueObjective);
+      const stepId = `revenue-discovery-${business.businessId}`;
+      if (existingSteps.has(stepId)) recovered.push(`step:${stepId}`);
+      else {
+        store.saveStep({
+          schema: "aion.director.autonomyStep.v1",
+          stepId,
+          objectiveId: revenueObjective.objectiveId,
+          businessId: business.businessId,
+          title: `Revenue discovery for ${business.canonicalName}`,
+          valueClass: "REAL_USER_OR_BUSINESS_VALUE",
+          evidenceRefs: [],
+          effectScope: "LOCAL_SHADOW",
+          status: "READY",
+          dependsOn: [],
+          // Higher than a discovery step: this business is the one that can actually be worked.
+          expectedValue: 500,
+          confidence: 0.7,
+          ownerTimeMinutes: 0,
+          requiredCapabilities: [],
+          attempts: 0,
+          maxAttempts: 2,
+          blockedReason: null,
+          effectFingerprint: `revenue-discovery:${business.businessId}`,
+          createdAt: now,
+          updatedAt: now,
+        });
+        created.push(`step:${stepId}`);
+      }
+    }
+
+    /*
      * The LocalFinds identity question, recorded as asked and answered.
      *
      * It was a real blocking question — two workspaces for one business would have corrupted every
@@ -423,6 +481,56 @@ export function createDiscoveryDispatcher(deps: RuntimeDepsV1) {
       };
     }
 
+    if (step.stepId.startsWith("revenue-discovery-")) {
+      /*
+       * Revenue discovery is a pure read over evidence, so it needs no capability and can always
+       * run. What it *cannot* do is gather market evidence — that needs a research route AION does
+       * not have — so the report comes back with named blockers rather than invented figures, and
+       * the step completes on the report having been written.
+       */
+      const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+      const report = runRevenueDiscovery({
+        workspaceId: step.businessId,
+        objectiveId: objective.objectiveId,
+        store: evidenceStore,
+        now: deps.now(),
+        researchPort: null,
+      });
+      writeAtomic(
+        join(deps.artifactRoot, `${step.businessId}-revenue-discovery.json`),
+        `${JSON.stringify(report, null, 2)}\n`,
+      );
+
+      /*
+       * The Owner's questions have to exist somewhere he can answer them.
+       *
+       * The report said "the next decision is the Owner's" and listed two questions, and they lived
+       * only inside a JSON artifact — `autonomy.answer` had no question id to accept, so the decision
+       * the operator asked for could not actually be made. Registering them through
+       * `ensureOwnerQuestion` puts them on the same plane as every other Owner question, and it is
+       * idempotent, so a re-run does not duplicate them.
+       */
+      let registered = 0;
+      for (const question of report.ownerQuestions) {
+        const { created } = ensureOwnerQuestion(evidenceStore, {
+          workspaceId: step.businessId,
+          missingFact: question,
+          whyItMatters: "revenue discovery cannot proceed on this point without it",
+          blocking: false,
+          evidenceNeeded: "an Owner statement",
+        }, deps.now());
+        if (created) registered += 1;
+      }
+      return {
+        provider: "local",
+        claim: `revenue discovery: ${report.candidates.length} candidates, `
+          + `${report.ranking.rankable ? "ranked" : "not rankable"}, `
+          + `${report.capabilityBlockers.length} capability blocker(s), `
+          + `${registered} new Owner question(s) registered`,
+        ownerGate: null, blocked: null, failure: null, latencyMs: null, tokens: null, costUsd: 0,
+      };
+    }
+
     if (!step.stepId.startsWith("discover-")) {
       // Objectives exist that this runtime has no step model for yet — the portfolio directions.
       // Saying so is better than inventing an activity to look busy.
@@ -460,6 +568,96 @@ export function createDiscoveryDispatcher(deps: RuntimeDepsV1) {
 /** Verification reads the file back and checks it is the artifact it claims to be. */
 export function createDiscoveryVerifier(deps: RuntimeDepsV1) {
   return (step: AutonomyStepV1): readonly StepEvidenceV1[] => {
+    if (step.stepId.startsWith("revenue-discovery-")) {
+      const path = join(deps.artifactRoot, `${step.businessId}-revenue-discovery.json`);
+      try {
+        const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+          schema?: string; workspaceId?: string; candidates?: unknown[];
+        };
+        /*
+         * An empty candidate list is not a report.
+         *
+         * `Array.isArray` alone let `{schema, workspaceId, candidates: []}` verify as a successful
+         * revenue-discovery step, so a run that produced nothing would have been recorded as one
+         * that produced something. Refusing to rank is a valid outcome; having nothing to refuse to
+         * rank is not.
+         */
+        /*
+         * Every candidate must look like a candidate. `length > 0` was satisfied by `[{}]`, so a
+         * dispatcher that wrote structurally empty rows still verified as having produced work.
+         */
+        const candidates = Array.isArray(parsed.candidates) ? parsed.candidates : [];
+        const sound = parsed.schema === "aion.director.revenueDiscoveryReport.v1"
+          && parsed.workspaceId === step.businessId
+          && candidates.length > 0
+          && candidates.every((row) => {
+            /*
+             * A candidate has to carry the things that make it arguable: an identity, a title, the
+             * price figure everything is gated on, and the falsifiable experiment. Checking only id
+             * and title closed `[{}]` and nothing beyond it.
+             */
+            const candidate = row as {
+              opportunityId?: unknown; title?: unknown;
+              estimatedPrice?: unknown;
+              nextValidationStep?: { falsifiedBy?: unknown };
+            };
+            const text = (value: unknown) => typeof value === "string" && value.trim() !== "";
+            if (!text(candidate.opportunityId) || !text(candidate.title)
+              || !text(candidate.nextValidationStep?.falsifiedBy)) return false;
+            /*
+             * The price is re-validated through `money()`, not inspected as strings.
+             *
+             * Serialising to JSON and reading it back is a construction path that skips every rule
+             * `money()` enforces — an empty basis, an UNKNOWN carrying a value, a half-open range, a
+             * state that is not a state. Checking that two fields are non-empty strings would have
+             * verified `{ state: "KNOWN", basis: "because I said so" }` with no bounds at all. There
+             * is one validator, so the verifier calls it rather than re-implementing a weaker one.
+             */
+            /*
+             * Every figure, not only the price.
+             *
+             * The price was re-validated and the other six were taken on trust, which left the same
+             * JSON construction path open for capital, owner time and the rest. `money` and
+             * `quantity` differ only in carrying a unit, so the row picks the right validator.
+             */
+            try {
+              const figures = candidate as Record<string, unknown>;
+              const names = [
+                "estimatedPrice", "estimatedDirectCost", "estimatedGrossMarginPct",
+                "estimatedOwnerTime", "estimatedWorkerHours", "estimatedCapitalRequired",
+                "estimatedTimeToFirstRevenue",
+              ];
+              const checked = names.map((name) => {
+                const figure = figures[name] as { unit?: unknown } | undefined;
+                if (figure === undefined) throw new Error(`${name} is missing`);
+                return typeof figure.unit === "string"
+                  ? quantity(figure as Parameters<typeof quantity>[0]).unit !== ""
+                  : money(figure as Parameters<typeof money>[0]).currency === "USD";
+              });
+              return checked.every((ok) => ok);
+            } catch {
+              return false;
+            }
+          });
+        return [{
+          kind: "REVENUE_DISCOVERY_REPORT",
+          detail: sound ? `${path} (${parsed.candidates!.length} candidates)` : `${path} is not a sound report`,
+          observed: sound,
+        }];
+      } catch (error) {
+        /*
+         * "Not found" and "unreadable" are different failures and were reported as the same one.
+         * A corrupt or truncated report is a defect in the step that wrote it; a missing one means
+         * the step did not run. Collapsing them hides the first behind the second.
+         */
+        const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+        return [{
+          kind: "REVENUE_DISCOVERY_REPORT",
+          detail: missing ? `${path} not found` : `${path} could not be read: ${(error as Error).message}`,
+          observed: false,
+        }];
+      }
+    }
     const path = artifactPath(deps.artifactRoot, step.businessId);
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as BusinessDiscoveryArtifactV1;
@@ -491,8 +689,20 @@ export function createDiscoveryVerifier(deps: RuntimeDepsV1) {
 export function parkBranchesNeedingOwner(deps: RuntimeDepsV1): readonly string[] {
   const store = createFileAutonomyStore(deps.storeRoot);
   const parked: string[] = [];
+  const steps = store.steps();
   for (const objective of store.objectives()) {
     if (objective.status !== "ACTIVE") continue;
+
+    /*
+     * A missing fact blocks the work that needs it, not everything the business owns.
+     *
+     * Parking was keyed on the business, so Compassionate Choice's *revenue* objective was being
+     * parked by the discovery artifact's open questions — even though revenue discovery has the
+     * evidence it needs and is explicitly ready. A question about what a business does does not
+     * block work that already knows.
+     */
+    const objectiveSteps = steps.filter((step) => step.objectiveId === objective.objectiveId);
+    if (objectiveSteps.some((step) => step.stepId.startsWith("revenue-discovery-"))) continue;
     let artifact: BusinessDiscoveryArtifactV1;
     try {
       artifact = JSON.parse(
@@ -604,6 +814,16 @@ export interface RuntimeStatusV1 extends AutonomyStatusV1 {
    * carries nothing that could be read back as a fact about one of them.
    */
   readonly evidenceReadiness: readonly PortfolioSummaryEntryV1[];
+
+  /**
+   * Businesses whose evidence says go, and for which AION has no revenue models to go with.
+   *
+   * Gating step creation on `hasCandidateModels` was a silent skip: a ready business simply did not
+   * get scheduled, and nothing anywhere said why. A skip nobody can see is indistinguishable from
+   * the scheduler being broken, and this is the honest version — "ready, and nothing to discover
+   * with yet" is a result, and results get reported.
+   */
+  readonly readyWithoutRevenueModels: readonly string[];
 }
 
 export function runtimeStatus(deps: RuntimeDepsV1): RuntimeStatusV1 {
@@ -611,23 +831,43 @@ export function runtimeStatus(deps: RuntimeDepsV1): RuntimeStatusV1 {
   const state = readRuntimeState(deps.storeRoot);
   const base = autonomyStatus(store, [], false);
 
+  const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+
+  /*
+   * Status reads the Owner-question plane, not only the discovery artifact.
+   *
+   * Revenue discovery registers its questions through `ensureOwnerQuestion`, and status went on
+   * reporting the discovery artifact alone — so the two questions this milestone calls the Owner's
+   * next decision never appeared in the thing the Owner actually looks at. Open questions in the
+   * store are the source of truth; the artifact is one contributor to it.
+   */
   const needsOwnerInformation = store.businesses().flatMap((business) => {
+    const open = evidenceStore.questions(business.businessId)
+      .filter((question) => question.resolvedAtUtc === "")
+      .map((question) => question.missingFact);
+
+    let fromArtifact: readonly string[] = [];
     try {
       const parsed = JSON.parse(
         readFileSync(artifactPath(deps.artifactRoot, business.businessId), "utf8"),
       ) as BusinessDiscoveryArtifactV1;
-      if (parsed.ownerInformationRequest.length === 0) return [];
-      return [{ businessId: business.businessId, questions: parsed.ownerInformationRequest }];
+      fromArtifact = parsed.ownerInformationRequest;
     } catch {
-      return [];
+      fromArtifact = [];
     }
-  });
 
-  const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+    const questions = [...new Set([...open, ...fromArtifact])];
+    if (questions.length === 0) return [];
+    return [{ businessId: business.businessId, questions }];
+  });
   const evidenceReadiness = portfolioSummary(
     evidenceStore,
     store.businesses().map((business) => business.businessId),
   );
+
+  const readyWithoutRevenueModels = evidenceReadiness
+    .filter((entry) => entry.readiness === "READY_FOR_REVENUE_DISCOVERY" && !hasCandidateModels(entry.workspaceId))
+    .map((entry) => entry.workspaceId);
 
   return {
     ...base,
@@ -637,6 +877,7 @@ export function runtimeStatus(deps: RuntimeDepsV1): RuntimeStatusV1 {
     lastRunAtUtc: state.lastRunAtUtc,
     needsOwnerInformation,
     evidenceReadiness,
+    readyWithoutRevenueModels,
   };
 }
 

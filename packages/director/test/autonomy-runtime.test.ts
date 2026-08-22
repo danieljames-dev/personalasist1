@@ -235,7 +235,15 @@ test("the ledger and telemetry record which business each outcome came from", ()
 
   for (const name of OWNER_PORTFOLIO_V1) {
     const id = businessIdFor(name);
-    assert.equal(ledger.forBusiness(id).length, 1, `${name} produced no ledger entry`);
+    /*
+     * One entry per committed step, exactly — not "at least one". Compassionate Choice runs two
+     * steps now (discovery and revenue discovery), so the expected count is read from the committed
+     * outcomes rather than weakened to a lower bound that a duplicate write would still satisfy.
+     */
+    const committed = store.outcomes().filter((outcome) => outcome.businessId === id).length;
+    assert.ok(committed >= 1, `${name} committed no step`);
+    assert.equal(ledger.forBusiness(id).length, committed,
+      `${name} recorded ${ledger.forBusiness(id).length} ledger entries for ${committed} committed step(s)`);
     assert.ok(store.telemetry().some((row) => row.businessId === id), `${name} produced no telemetry`);
   }
   // Telemetry carries classes and ids, not the artifact.
@@ -298,8 +306,12 @@ test("starting repeatedly never duplicates a business, objective, step or ledger
   assert.equal(new Set(stepIds).size, stepIds.length, "duplicate step");
 
   for (const name of OWNER_PORTFOLIO_V1) {
-    const entries = createDurableExperienceLedger(d.storeRoot).forBusiness(businessIdFor(name));
-    assert.equal(entries.length, 1, `${name} recorded ${entries.length} entries for one committed step`);
+    const id = businessIdFor(name);
+    const entries = createDurableExperienceLedger(d.storeRoot).forBusiness(id);
+    // One entry per committed step, and no more however many times start is called.
+    const committed = store.outcomes().filter((outcome) => outcome.businessId === id).length;
+    assert.equal(entries.length, committed,
+      `${name} recorded ${entries.length} entries for ${committed} committed step(s)`);
   }
 });
 
@@ -330,10 +342,12 @@ test("status tells the Owner what is running, what is stuck, and what only he ca
   assert.equal(status.paused, false);
   assert.equal(status.runs, 1);
   assert.equal(status.businesses.length, OWNER_PORTFOLIO_V1.length + 1);
-  assert.equal(status.needsOwnerInformation.length, OWNER_PORTFOLIO_V1.length);
+  assert.equal(status.needsOwnerInformation.length, OWNER_PORTFOLIO_V1.length + 1,
+    "status now reads open Owner questions as well as the discovery artifact");
   const compassionate = status.needsOwnerInformation.find((n) => n.businessId === "compassionate-choice")!;
   assert.ok(compassionate.questions.length > 0);
-  assert.match(compassionate.questions[0]!, /What does this business actually do/u);
+  assert.ok(compassionate.questions.some((q) => /What does this business actually do/u.test(q)),
+    "the discovery artifact's question must still be there");
   assert.ok(status.blocked.length > 0);
 
   pauseAutonomy(d, "Owner stopped it");

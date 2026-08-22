@@ -159,6 +159,18 @@ Home Services LLC. Kristina Leach is the official owner of record; Daniel has au
 the business locally and in shadow, and that is sufficient for everything currently in scope. It
 becomes a question only if a real external action needs proof of authority.
 
+For **Compassionate Choice**, revenue discovery has surfaced two more, and these are the ones that
+unblock the most:
+
+1. Is the business currently accepting new clients, and is there any companion capacity today?
+   This decides whether the first experiment is demand-side or supply-side — it changes the whole plan.
+2. Does the business currently carry general liability insurance? This decides whether any
+   client-facing validation can proceed at all.
+
+Alongside them sits a capability decision rather than a fact: whether to authorize a **read-only
+public web research route**. Without one, the three highest-value revenue questions cannot be asked
+by AION at all, and no candidate can be priced or ranked.
+
 Minor, whenever convenient: a machine-readable copy of the AHCA certificate, which would upgrade the
 registration facts from an Owner relay to the document itself.
 
@@ -363,27 +375,101 @@ not be written down as though it had been.
 prioritise those markets and is **not** blocked by the pending expansion. Anything outside them is
 FUTURE_EXPANSION / HYPOTHESIS / NOT CURRENTLY ACTIONABLE.
 
-Still unknown here: the certificate's effective date, and its number (which is not recorded in this
-document by policy).
+The certificate's effective and expiry dates are now **KNOWN** — 2026-06-26 to 2028-06-25. Its
+registration number is deliberately **not** recorded in this document; it lives in the evidence store,
+which is gitignored.
 
-**Two conflicts remain open:**
+**Two questions this document once carried as open conflicts are settled**, and settled in the
+evidence store rather than here:
 
-1. **Ownership — UNRESOLVED.** Documents name **Kristina Leach** as owner and founder. The Owner
-   calls it "our business." No share, authority, partnership, employment or control right is inferred.
-2. **Legal name against brand name — UNRESOLVED.** Documents name **Compassionate Choice Home
-   Services LLC** and record an open DBA question about the shorter consumer-facing name.
+1. **Ownership.** **Kristina Diane Leach** is the official owner and administrator of record. Daniel
+   has authorized AION's local and shadow work on the business, which is a separate thing and is
+   sufficient for everything in scope. No share, partnership, employment or control right is inferred
+   for anyone, and Daniel's exact legal title is not asked and does not gate this work.
+2. **Legal name against brand name.** **Compassionate Choice LLC** is the current official name; the
+   longer earlier form is held as **SUPERSEDED**, not deleted, so the change is explainable.
 
-**Unknown for Compassionate Choice** and not to be invented: the certificate effective date,
-insurance status, home-based or commercial office, client count, pricing,
-revenue, margins, staffing, capacity, acquisition channels, referral relationships, utilisation,
-retention, operating hours, payroll structure in practice.
+**Unknown for Compassionate Choice** and not to be invented: insurance status, home-based or
+commercial office, client count, pricing, revenue, margins, staffing, capacity, acquisition channels,
+referral relationships, utilisation, retention, operating hours, payroll structure in practice.
 
-**LocalFinds and LakelandFinds have not been merged.** Assets exist under *LakelandFinds* — logo,
-covers, two lead files — sitting inside an AIService Co folder. Same brand, renamed brand,
-predecessor, AIService Co product or a separate project all remain possible. Merging them on a name
-resemblance would create a false identity that everything downstream would inherit.
+**LocalFinds and LakelandFinds are one business** — the Owner closed this, and it stays closed.
+LakelandFinds is a legacy alias. The assets found under that name — logo, covers, two lead files,
+sitting inside an AIService Co folder — belong to the single LocalFinds workspace.
 
 For AIService Co, "AI-assisted business services" remains **a hypothesis, not a description**.
+
+### Revenue discovery is an operator, and it currently refuses to rank
+
+**Revenue Discovery Operator V1 is built**, and the most important thing about it is what it does
+when it does not know: it says so. Run today against everything AION holds on Compassionate Choice,
+it produces four candidate revenue models, scores every one of them at **0**, and reports
+`rankable: false` — *"no candidate carries any evidence, so any ordering would come from whoever
+wrote the hypotheses rather than from the world."* That is the correct output, not a gap in it.
+
+Four design decisions carry that behaviour, and they are worth knowing before changing anything here:
+
+- **A bare number is unrepresentable.** Every money and quantity figure carries a state and a written
+  basis, and the constructor throws without them. An `UNKNOWN` figure that also carries a value is
+  rejected, as is a half-open or backwards range, a bound that is absent rather than null, and a
+  state outside the declared set. There is one construction path, and the Director's verifier
+  re-runs it on every figure it reads back from disk — because serialising to JSON and reading it
+  again is otherwise a way around the whole contract.
+- **Evidence quality is derived, and a claim can only lower it.** A candidate's own
+  `evidenceQuality` adjective is a ceiling, never an input: the quality actually used comes from what
+  the candidate *cites*. It is applied as a multiplier **after** the weighted score, so no strength
+  elsewhere compensates for having no evidence, and `NONE` is 0.
+- **A citation has to resolve, and to the right kind of thing.** References are checked against the
+  ids the evidence and research stores really hold — a candidate citing its own invented id is
+  unevidenced, because self-consistency is not traceability. Each reference carries what it is
+  evidence *of* (`CAPABILITY`, `DEMAND`, `PRICE`, `COST`, `CAPITAL`, `OWNER_TIME`,
+  `WORKER_HOURS`, `TIME_TO_REVENUE`), and each figure names the kinds that could support it. A
+  registration certificate cannot evidence a price, a caregiver wage cannot evidence what a business
+  costs to start, and a gross margin needs both sides because it is one divided by the other.
+- **Magnitude is not a lever.** A figure scores for being traceable, not for being flattering.
+  Nothing verifies a number against the source it names, so an invented $0 capital requirement citing
+  a real quote scores exactly what an honest $500–$900 reading of that same quote scores. Rewarding
+  the smaller number would only reward whoever was willing to write it.
+- **Unit economics return `null` and name what is missing** rather than defaulting. Today the four
+  missing inputs are bill rate, caregiver wage, payroll burden and cancellation rate. Ranges pair
+  worst-with-worst, so the pessimistic end is genuinely pessimistic.
+- **Structure is modelled where data is absent — with its assumptions named.** The same billable
+  hours arranged as five scattered one-hour visits versus one five-hour block move utilisation from
+  **65.9% to 90.6%**, and ten clients on that shape need about **1.8 caregivers**. Those percentages
+  are *not* findings about this business: they rest on an assumed 25 minutes of travel and 6 minutes
+  of admin per visit, travel treated as paid, and an assumed 30-hour caregiver week — none of which
+  anyone has measured. Only the **direction** survives any plausible substitution, and that direction
+  is the useful part: fragmenting a week costs utilisation, and hiring becomes the constraint before
+  demand does. The operator now emits those assumptions alongside every number that depends on them,
+  because a reader who cannot see them cannot tell an assumption from an observation.
+
+**The capability blocker, stated rather than worked around.** There is no read-only public web
+research route: `apps/aion/outward-effect-guard.mjs` declares six outward routes, every one
+`REQUIRES_INTEGRATION` with an empty authorizer map. So `ResearchPortV1` is an interface with **no
+implementation**, and the three highest-value research tasks — comparable hourly rates, caregiver
+wages, whether Care.com sells an agency product — sit at `BLOCKED_BY_CAPABILITY` with their questions
+intact. The operator distinguishes *asked and learned nothing* from *never able to ask*; conflating
+those would hide the blocker. Captured fixtures never count as market evidence, so the test suite
+cannot manufacture the confidence this milestone is supposed to lack.
+
+**Independent review.** The staged change went through **twenty-two adversarial review rounds** with
+an external reviewer, which returned FAIL sixty-eight times before PASS. Most of those findings were
+one substitution wearing a new coat: a label standing in for evidence, a reference standing in for
+the right *kind* of reference, a test asserting the hole was the rule. Several were defects in the
+tests rather than the code — assertions that could not fail, and two cases where a test of mine
+pinned a hole open. Every fix from the last several rounds was mutation-tested in isolation: the fix
+was reverted on its own and the corresponding test had to fail.
+
+**The next decision is the Owner's**, and it is a real fork: answer the two questions that need no
+web at all (is the business accepting new clients and is there companion capacity today; is there
+general liability insurance), or authorize a read-only public research capability. Nothing else moves
+first.
+
+The Director creates and runs revenue discovery on its own once a business reads
+`READY_FOR_REVENUE_DISCOVERY`, without a fresh Owner prompt between steps. One correction worth
+recording: branch parking is keyed on the **objective**, not the business, because a missing fact
+should block the work that needs it and nothing else. Compassionate Choice's revenue objective was
+being parked by an unrelated discovery question.
 
 ### Active portfolio directions
 

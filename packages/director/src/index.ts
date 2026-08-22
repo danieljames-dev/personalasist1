@@ -102,3 +102,8 @@ export * from "./business-evidence-store.js";
 export * from "./business-intake.js";
 export * from "./business-readiness.js";
 export * from "./business-corpus.js";
+export * from "./revenue-opportunity.js";
+export * from "./revenue-economics.js";
+export * from "./revenue-scoring.js";
+export * from "./revenue-research.js";
+export * from "./revenue-discovery.js";
