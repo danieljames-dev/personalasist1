@@ -44,6 +44,7 @@ import {
 } from "../../packages/director/dist/index.js";
 import {
   AUTONOMY_STORE_RELATIVE_PATH,
+  answerOwnerQuestion,
   pauseAutonomy,
   resumeAutonomy,
   runtimeStatus,
@@ -601,6 +602,33 @@ export function createAutonomyControl(options = {}) {
       const state = resumeAutonomy(deps());
       return { paused: state.paused };
     },
+    /*
+     * The Owner answers a question in plain words.
+     *
+     * Exactly four things cross the boundary: which business, what was asked, what the Owner said,
+     * and the claims being asserted as subject/category/value triples. No state, no confidence, no
+     * source class, no supersession target, no authority id — the trusted side decides all of it,
+     * and `recordOwnerAnswer` reports anything else the caller tried to send.
+     */
+    answer(input = {}) {
+      const result = answerOwnerQuestion(deps(), {
+        workspaceId: String(input.workspaceId ?? ""),
+        question: String(input.question ?? ""),
+        answer: String(input.answer ?? ""),
+        claims: Array.isArray(input.claims)
+          ? input.claims.map((claim) => ({
+            subject: String(claim?.subject ?? ""),
+            claim: String(claim?.claim ?? ""),
+            value: String(claim?.value ?? ""),
+          }))
+          : [],
+      });
+      return {
+        recorded: result.plan.entries.length,
+        resolvedQuestions: result.resolvedQuestionIds.length,
+        ignoredFields: result.ignoredFields,
+      };
+    },
   };
 }
 
@@ -610,4 +638,5 @@ export const AUTONOMY_VERBS_V1 = Object.freeze([
   "autonomy.start",
   "autonomy.pause",
   "autonomy.resume",
+  "autonomy.answer",
 ]);

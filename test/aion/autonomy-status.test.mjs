@@ -55,8 +55,9 @@ test("autonomy.status reports the portfolio, and the verb list stays closed", ()
     for (const business of store.businesses()) assert.equal(business.category, null);
 
     assert.deepEqual([...AUTONOMY_VERBS_V1],
-      ["autonomy.status", "autonomy.start", "autonomy.pause", "autonomy.resume"],
-      "a closed list: begin, stop, resume and look — and nothing that lets a client describe the work");
+      ["autonomy.status", "autonomy.start", "autonomy.pause", "autonomy.resume", "autonomy.answer"],
+      "a closed list. `answer` carries the Owner's words and nothing that grades them: no state, no "
+      + "confidence, no source class, no supersession target, no authority id.");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

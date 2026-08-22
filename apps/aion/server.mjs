@@ -1935,6 +1935,7 @@ export async function createAionServer(options = {}) {
       case "autonomy.start": return autonomyControl().start();
       case "autonomy.pause": return autonomyControl().pause(String(input.reason ?? ""));
       case "autonomy.resume": return autonomyControl().resume();
+      case "autonomy.answer": return autonomyControl().answer(input);
       /*
        * Owner goal intake. Two verbs: say a goal, and read back what was said.
        *

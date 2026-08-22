@@ -4,8 +4,8 @@
 person picking up Project AION. Read it before doing anything; it is meant to be read in one sitting.
 
 ```
-UPDATED_AT   2026-08-21T20:05:00Z
-BASE_SHA     1cc054446e9a963209c12e1a209deaf5c657842f
+UPDATED_AT   2026-08-22T01:11:31Z
+BASE_SHA     __NEW_SHA__
 REPOSITORY   C:\AION-HQ-main-integrate   (linked git worktree of C:\AION-HQ)
 ORIGIN       https://github.com/danieljames-dev/personalasist1.git   branch main
 ```
@@ -143,19 +143,24 @@ is the function that refuses to confuse them.
 
 ### What AION needs from the Owner
 
-The registration question is **answered**: the certificate is issued, covering Hardee, Highlands,
-Hillsborough, Manatee and Polk. Two remain.
+Both earlier questions are **closed**: the certificate is issued, and LakelandFinds is LocalFinds.
+What is open now is the same shape for three businesses, and AION has recorded the questions durably
+rather than asking repeatedly.
 
-1. **Is LakelandFinds the same business as LocalFinds?** Assets exist under one name and the
-   portfolio lists the other. They have not been merged, and one sentence settles it.
-2. **What is Daniel's relationship and authority with Compassionate Choice Home Services LLC?** The
-   documents name Kristina Leach as owner and founder. "Our business" is not enough to infer an
-   ownership share, a management role or any control right, and AION will not infer one. This governs
-   what AION may do on the business's behalf, so it matters before any outward step.
+For **LocalFinds**, **Talk to Caleb** and **AIService Co**, four questions each:
 
-Minor, and cheap to supply when convenient: the certificate's effective date, and the same
-what-does-it-sell / where-does-revenue-come-from questions for LocalFinds, Talk to Caleb and
-AIService Co once identity is settled.
+1. What does it actually do — what does it sell or deliver, and to whom?
+2. Where does its revenue come from today, if any?
+3. Which recurring work takes the most of your time?
+4. What is currently blocking it from doing more of what works?
+
+**Not asked, and deliberately not gated on:** Daniel's exact legal title with Compassionate Choice
+Home Services LLC. Kristina Leach is the official owner of record; Daniel has authorized AION to work
+the business locally and in shadow, and that is sufficient for everything currently in scope. It
+becomes a question only if a real external action needs proof of authority.
+
+Minor, whenever convenient: a machine-readable copy of the AHCA certificate, which would upgrade the
+registration facts from an Owner relay to the document itself.
 
 ### Governance state
 
@@ -243,6 +248,73 @@ liability grounds. Also documented: the registration number must appear in adver
 applicable; Level 2 background screening; a W-2 rather than 1099 employment model; local business tax
 receipt context. All of it is subject to the source date and needs re-verification before being
 treated as current.
+
+### Business evidence is a layer now, not prose
+
+**Business Evidence and Owner Intake V1 is built.** Business facts live in a durable per-workspace
+store with source, date and state instead of in sentences here. Two rules are the model:
+
+> **An artifact is not knowledge.** **A summary is never stronger than its source.**
+
+**Epistemic states:** `KNOWN`, `UNKNOWN`, `HYPOTHESIS`, `CONFLICTED`, `SUPERSEDED`, `UNREAD_SOURCE`.
+**Source classes, ranked and never flattened:** official regulatory, official local-government, Owner
+statement, business document, website, transcript, ASR transcript, research, derived summary. Only
+the first four can carry a fact alone; the rest corroborate. A certificate outranks a machine
+transcript *structurally*, which is why the July "reg number cleared" recording can be kept without
+it ever governing anything.
+
+Supersession is a state, not a deletion. The May "registration pending" record is still there, marked
+superseded by the certificate — which is how AION can explain how its picture changed rather than
+just asserting the current version.
+
+**Owner Answer Intake** works, with a real trust boundary: the Owner sends a workspace, a question,
+an answer and subject/category/value claims. Nothing else is honoured. State, confidence, source
+class, supersession target and authority id are all decided server-side, and anything else a caller
+sends is reported back as ignored. App verbs: `autonomy.status`, `.start`, `.pause`, `.resume`,
+`.answer` — a closed list.
+
+### What AION knows about Compassionate Choice
+
+Recorded with provenance and dates, from the Owner's reading of the issued certificate and the
+May regulatory profile:
+
+- **Compassionate Choice LLC** — current official name. The longer earlier form is superseded.
+- **REGISTERED**, AHCA §400.509, effective **2026-06-26**, expiring **2028-06-25**.
+- Provider type **Homemaker and Companion Services**; hands-on personal care prohibited.
+- Service area **Hardee, Highlands, Hillsborough, Manatee, Polk** — a hard boundary.
+- **Kristina Diane Leach** is the official owner and administrator of record. Separate from AION's
+  operational authorization, which Daniel has given for local and shadow work.
+- Legal scope and business policy stay separate records: transportation is *legally permitted* and
+  *declined by business decision*.
+- W-2 rather than 1099; Level 2 background screening; the registration number must appear in
+  advertising.
+
+**`READY_FOR_REVENUE_DISCOVERY`** inside those five counties. Expansion elsewhere is a `HYPOTHESIS`
+and confers nothing.
+
+**One gap recorded honestly.** The certificate PDFs are located on an offline drive and AION **cannot
+read them** — no PDF text extraction is available here. They are registered as `UNREAD_SOURCE`, so
+what AION holds is the Owner relaying an official document, which is strong but is not the document.
+A readable copy would outrank the relay automatically.
+
+### The other three
+
+| business | state |
+|---|---|
+| **LocalFinds** | identity resolved — **LakelandFinds is a legacy alias**, one workspace, question closed and it stays closed |
+| **Talk to Caleb** | a real content operation exists; monetisation `UNKNOWN` |
+| **AIService Co** | project and tooling assets exist; offers `UNKNOWN` |
+
+All three are `NEEDS_OWNER_INFORMATION` — not blocked, just waiting on answers AION cannot invent.
+Assets prove a name was used and a thing was made. They prove nothing about a business model.
+
+### Isolation
+
+Evidence is stored per workspace and read per workspace, so one business's records cannot be read as
+another's and an unknown workspace returns nothing. What crosses between businesses is a **minimized
+summary** — readiness, counts, information-gain value — with no claim text, value or source reference
+in it. Tests pin the field list, so a leak cannot be added quietly.
+
 
 ### Registration and geographic authority — KNOWN
 

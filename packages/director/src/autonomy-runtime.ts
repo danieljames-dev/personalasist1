@@ -51,6 +51,17 @@ import {
   type BusinessWorkspaceV1,
 } from "./business-workspace.js";
 import { createDurableExperienceLedger, type DurableExperienceLedgerV1 } from "./experience-ledger.js";
+import { createFileBusinessEvidenceStore } from "./business-evidence-store.js";
+import { CLAIM_V1, LOCALFINDS_WORKSPACE_V1, corpusFor } from "./business-corpus.js";
+import { portfolioSummary, type PortfolioSummaryEntryV1 } from "./business-readiness.js";
+import {
+  closeOwnerQuestion,
+  ensureOwnerQuestion,
+  recordOwnerAnswer,
+  type OwnerAnswerInputV1,
+  type OwnerAnswerResultV1,
+} from "./business-intake.js";
+import { BLOCKING_DISCOVERY_QUESTIONS_V1 } from "./business-discovery.js";
 import { buildOwnerGoalIntent } from "./owner-goal-intake.js";
 
 export const AUTONOMY_RUNTIME_STATE_SCHEMA_V1 = "aion.director.autonomyRuntimeState.v1" as const;
@@ -131,6 +142,12 @@ export interface RegistrationV1 {
   readonly recovered: readonly string[];
   /** Why each business does or does not need discovery, in words a person can read back. */
   readonly discoveryReasons: readonly { businessId: string; reason: string }[];
+  /** How many evidence sources were loaded per business. */
+  readonly evidenceLoaded: readonly { businessId: string; sources: number }[];
+  /** Blocking questions opened this pass. Empty on every start after the first. */
+  readonly questionsOpened: readonly string[];
+  /** Questions closed this pass because evidence now answers them. */
+  readonly questionsClosed: readonly string[];
 }
 
 function statePath(root: string): string {
@@ -198,6 +215,9 @@ export function registerPortfolio(deps: RuntimeDepsV1): RegistrationV1 {
   const created: string[] = [];
   const recovered: string[] = [];
   const discoveryReasons: { businessId: string; reason: string }[] = [];
+  const evidenceLoaded: { businessId: string; sources: number }[] = [];
+  const questionsOpened: string[] = [];
+  const questionsClosed: string[] = [];
 
   const existingBusinesses = new Map(store.businesses().map((b) => [b.businessId, b]));
   const existingObjectives = new Map(store.objectives().map((o) => [o.objectiveId, o]));
@@ -306,13 +326,71 @@ export function registerPortfolio(deps: RuntimeDepsV1): RegistrationV1 {
     }
   }
 
+  /*
+   * Load whatever evidence AION has for each business.
+   *
+   * Idempotent by the store's own identity rule, so this runs on every registration without
+   * duplicating anything — which matters because registration runs on every start.
+   */
+  const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+  for (const business of businesses) {
+    const sources = corpusFor(business.businessId, now);
+    for (const source of sources) evidenceStore.commitImport(business.businessId, source, now);
+    evidenceLoaded.push({ businessId: business.businessId, sources: sources.length });
+
+    /*
+     * Open the blocking questions for a business AION still cannot describe.
+     *
+     * `ensureOwnerQuestion` is the reason a restart does not re-ask: an existing question, open or
+     * resolved, is returned untouched. The LocalFinds identity question is already answered, and a
+     * runtime that recreated it every boot would ask the Owner the same thing forever.
+     */
+    /*
+     * The LocalFinds identity question, recorded as asked and answered.
+     *
+     * It was a real blocking question — two workspaces for one business would have corrupted every
+     * comparison downstream — and the Owner closed it. Writing it down resolved, rather than not
+     * writing it down at all, is what proves the "a resolved question stays resolved" property in
+     * the running system instead of only in a test. The alias evidence is its resolution.
+     */
+    if (business.businessId === LOCALFINDS_WORKSPACE_V1) {
+      const identityQuestion = "Is LakelandFinds the same business as LocalFinds?";
+      ensureOwnerQuestion(evidenceStore, {
+        workspaceId: business.businessId,
+        missingFact: identityQuestion,
+        whyItMatters: "two workspaces for one business would corrupt every cross-business comparison",
+        blocking: true,
+        evidenceNeeded: "an Owner statement of brand identity",
+      }, now);
+      const alias = evidenceStore.evidence(business.businessId)
+        .find((row) => row.claim === CLAIM_V1.brandAlias && row.state === "KNOWN");
+      if (alias !== undefined) {
+        const closed = closeOwnerQuestion(evidenceStore, business.businessId, identityQuestion, alias.evidenceId, now);
+        // False on every start after the first, which is the property worth reporting.
+        if (closed) questionsClosed.push(`${business.businessId}:identity`);
+      }
+    }
+
+    if (assessBusinessKnowledge(business).knowsWhatItDoes) continue;
+    for (const question of BLOCKING_DISCOVERY_QUESTIONS_V1.filter((q) => q.blocking)) {
+      const opened = ensureOwnerQuestion(evidenceStore, {
+        workspaceId: business.businessId,
+        missingFact: question.question,
+        whyItMatters: question.whyItMatters,
+        blocking: true,
+        evidenceNeeded: "an Owner statement, or an authoritative business document",
+      }, now);
+      if (opened.created) questionsOpened.push(`${business.businessId}:${opened.question.questionId}`);
+    }
+  }
+
   const state = readRuntimeState(deps.storeRoot);
   writeRuntimeState(deps.storeRoot, {
     ...state,
     registeredAtUtc: state.registeredAtUtc === "" ? now : state.registeredAtUtc,
   });
 
-  return { businesses, objectives, created, recovered, discoveryReasons };
+  return { businesses, objectives, created, recovered, discoveryReasons, evidenceLoaded, questionsOpened, questionsClosed };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -519,6 +597,13 @@ export interface RuntimeStatusV1 extends AutonomyStatusV1 {
   readonly lastRunAtUtc: string;
   /** Which businesses are waiting on the Owner, and for what. */
   readonly needsOwnerInformation: readonly { businessId: string; questions: readonly string[] }[];
+  /**
+   * Evidence readiness per business, minimized.
+   *
+   * Counts and enum states only — the summary is what crosses the wall between businesses, and it
+   * carries nothing that could be read back as a fact about one of them.
+   */
+  readonly evidenceReadiness: readonly PortfolioSummaryEntryV1[];
 }
 
 export function runtimeStatus(deps: RuntimeDepsV1): RuntimeStatusV1 {
@@ -538,6 +623,12 @@ export function runtimeStatus(deps: RuntimeDepsV1): RuntimeStatusV1 {
     }
   });
 
+  const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+  const evidenceReadiness = portfolioSummary(
+    evidenceStore,
+    store.businesses().map((business) => business.businessId),
+  );
+
   return {
     ...base,
     paused: state.paused,
@@ -545,5 +636,18 @@ export function runtimeStatus(deps: RuntimeDepsV1): RuntimeStatusV1 {
     runs: state.runs,
     lastRunAtUtc: state.lastRunAtUtc,
     needsOwnerInformation,
+    evidenceReadiness,
   };
+}
+
+/**
+ * Record an Owner answer against the evidence store this runtime owns.
+ *
+ * The runtime supplies the store; the caller supplies words. Everything consequential — source
+ * class, epistemic state, conflict, supersession, which question this closes — is decided inside
+ * `recordOwnerAnswer`, where the client cannot reach it.
+ */
+export function answerOwnerQuestion(deps: RuntimeDepsV1, input: OwnerAnswerInputV1): OwnerAnswerResultV1 {
+  const evidenceStore = createFileBusinessEvidenceStore(join(deps.storeRoot, "business-evidence"));
+  return recordOwnerAnswer(evidenceStore, input, deps.now());
 }
